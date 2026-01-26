@@ -64,3 +64,18 @@ They are designed to be triggered from **Home Assistant automations** using the
 
 ---
 
+## 📡 RSS Feed Watcher (Built-in)
+
+This system runs in the background and posts summarized RSS feed updates.
+
+| Plugin Name        | Description                                           | Type            | Platform            |
+|--------------------|-------------------------------------------------------|------------------|---------------------|
+| `discord_notifier` | Posts RSS updates directly to a Discord channel       | RSS Notifier     | plugin-triggered    |
+| `telegram_notifier`| Sends RSS updates to Telegram                         | RSS Notifier     | plugin-triggered    |
+| `wordpress_poster` | Posts RSS updates to WordPress                        | RSS Notifier     | plugin-triggered    |
+| `ntfy_notifier`    | Sends RSS updates to an ntfy topic                    | RSS Notifier     | plugin-triggered    |
+| `list_feeds`       | Lists all watched RSS feeds                           | RSS Management   | discord, webui, irc |
+| `watch_feed`       | Adds a feed to the RSS watcher                        | RSS Management   | discord, webui, irc |
+| `unwatch_feed`     | Removes a feed from the RSS watcher                   | RSS Management   | discord, webui, irc |
+
+---
