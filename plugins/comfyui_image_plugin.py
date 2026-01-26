@@ -32,9 +32,6 @@ class ComfyUIImagePlugin(ToolPlugin):
         '  "function": "comfyui_image_plugin",\n'
         '  "arguments": {\n'
         '    "prompt": "<Text prompt for the image>",\n'
-        '    "negative_prompt": "<Optional negative prompt>",\n'
-        '    "width": 1024,\n'
-        '    "height": 1024\n'
         "  }\n"
         "}\n"
     )
