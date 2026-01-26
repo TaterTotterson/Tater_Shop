@@ -1,7 +1,6 @@
 # plugins/comfyui_video_plugin.py
 import os
 import asyncio
-import base64
 import uuid
 import subprocess
 import json
@@ -609,7 +608,7 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 {
                     "type": "video",
                     "name": "generated_video.mp4",
-                    "data": base64.b64encode(final_bytes).decode(),
+                    "data": final_bytes,
                     "mimetype": "video/mp4"
                 },
                 (msg["message"]["content"].strip() if msg and msg.get("message") else "") or "🎬 Here’s your video!"
