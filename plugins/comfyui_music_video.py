@@ -841,7 +841,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             {
                 "type": "video",
                 "name": "music_video.mp4",
-                "data": base64.b64encode(final_bytes).decode(),
+                "data": final_bytes,
                 "mimetype": "video/mp4"
             },
             msg["message"]["content"]

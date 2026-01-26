@@ -716,11 +716,10 @@ class UniFiProtectPlugin(ToolPlugin):
 
             text = await self._answer_with_facts(query, facts, llm_client)
 
-            # WebUI can render base64 images. Others: return text only (spoken-friendly).
+            # WebUI can render image bytes. Others: return text only (spoken-friendly).
             if platform == "webui":
-                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
                 return [
-                    {"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_b64},
+                    {"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_bytes},
                     text,
                 ]
 
@@ -776,8 +775,7 @@ class UniFiProtectPlugin(ToolPlugin):
                     })
 
                     if platform == "webui":
-                        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-                        images_out.append({"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_b64})
+                        images_out.append({"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_bytes})
 
                 except Exception as e:
                     logger.info(f"[unifi_protect] snapshot/vision failed for {cam_name}: {e}")

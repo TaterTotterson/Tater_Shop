@@ -3,7 +3,6 @@ import os
 import json
 import time
 import asyncio
-import base64
 import secrets
 import copy
 import requests
@@ -275,7 +274,7 @@ class ComfyUIImagePlugin(ToolPlugin):
                     {
                         "type": "image",
                         "name": f"generated_comfyui.{ext}",
-                        "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        "data": image_bytes,
                         "mimetype": mime
                     },
                     message_text
@@ -302,7 +301,7 @@ class ComfyUIImagePlugin(ToolPlugin):
             image_data = {
                 "type": "image",
                 "name": f"generated_comfyui.{ext}",
-                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "data": image_bytes,
                 "mimetype": mime
             }
 
@@ -324,7 +323,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         """
-        Return an image payload (base64) plus a short message.
+        Return an image payload (bytes) plus a short message.
         The Matrix platform will upload/send the media and persist history.
         """
         user_prompt = (args or {}).get("prompt")
@@ -345,7 +344,7 @@ class ComfyUIImagePlugin(ToolPlugin):
             image_payload = {
                 "type": "image",
                 "name": f"generated_comfyui.{ext}",
-                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "data": image_bytes,
                 "mimetype": mime,
             }
 

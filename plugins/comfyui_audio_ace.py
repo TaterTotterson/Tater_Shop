@@ -1,7 +1,6 @@
 # plugins/comfyui_audio_ace.py
 import json
 import asyncio
-import base64
 import re
 import yaml
 import random
@@ -296,7 +295,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             audio_data = {
                 "type": "audio",
                 "name": "ace_song.mp3",
-                "data": base64.b64encode(audio_bytes).decode("utf-8"),
+                "data": audio_bytes,
                 "mimetype": "audio/mpeg"
             }
 
