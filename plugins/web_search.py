@@ -20,6 +20,8 @@ logger.setLevel(logging.INFO)
 class WebSearchPlugin(ToolPlugin):
     name = "web_search"
     plugin_name = "Web Search"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "web_search",\n'

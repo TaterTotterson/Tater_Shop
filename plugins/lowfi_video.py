@@ -20,6 +20,8 @@ CLIENT_ID = str(uuid.uuid4())
 class LowfiVideoPlugin(ToolPlugin):
     name = "lowfi_video"
     plugin_name = "Lofi Video"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "lowfi_video",\n'

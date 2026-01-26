@@ -31,6 +31,8 @@ class DoorbellAlertPlugin(ToolPlugin):
     """
     name = "doorbell_alert"
     plugin_name = "Doorbell Alert"
+    version = "1.0.0"
+    min_tater_version = "50"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
     usage = (

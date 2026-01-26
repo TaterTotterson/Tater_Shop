@@ -15,6 +15,8 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolPlugin):
     name = "overseerr_trending"
     plugin_name = "Overseerr Trending"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
 
