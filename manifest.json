@@ -15,7 +15,7 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "b054968cbd7589d9fd3d56a2307f90e6f16ec2915d2e092ea06348b6b00a2b1c"
+      "sha256": "b7876cf81bfa1761fe352af398d8e3c2d19ee11bfbb200592991f3da1c663e95"
     },
     {
       "id": "broadcast",
@@ -66,7 +66,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "7d857ca2f7288c1d2d2c920508615322a393ddbde9651bcdce912ca91d7cbadf"
+      "sha256": "428bdcdec7cf1ef8fb2e9cba36fd3b96bd8e678764117528d72317f63c9a7315"
     },
     {
       "id": "comfyui_image_plugin",
@@ -83,7 +83,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "41f83ad46f4b47cb14b8d853dd38a963feb61ee56b3c64f40f96b303b4e21c3a"
+      "sha256": "2bf6d2b43449202d7a25950cd9475868e7273fca99e08a018949cecb165a1f2d"
     },
     {
       "id": "comfyui_image_video",
@@ -98,7 +98,7 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "plugins/comfyui_image_video.py",
-      "sha256": "eac2889db026b9a97cc0ef68a8ce9b6ca9956c5e811079a76755db926e5c4c98"
+      "sha256": "3c3c390a3929349ba82b33675940dd4862041c7db9f3209167b2443780c76d86"
     },
     {
       "id": "comfyui_music_video",
@@ -113,7 +113,7 @@
       "settings_category": "ComfyUI Music Video",
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "0f09da0015ee8c7a318a923ba88e5092031fd1d32a6a974b2456100762e53d15"
+      "sha256": "93aa2e76ac5ed8f6aaa9166e92a16003e061a3eeb1e6590ee0ea5430cfc95985"
     },
     {
       "id": "comfyui_video_plugin",
@@ -128,7 +128,7 @@
       "settings_category": "ComfyUI Video",
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "ec8bab66e34bf2b44b542baf9d5716c191070bb44931618ef83fc5269250093e"
+      "sha256": "da1d617ba82ab1ddeff2d1912f0b1fd7231e1a5afecfb002097529a4e4d754da"
     },
     {
       "id": "device_compare",
@@ -145,7 +145,7 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "plugins/device_compare.py",
-      "sha256": "e0860610825a1dc1424a8e2ad1f2003dec335384ff7938da28c4620ee1ac2b8e"
+      "sha256": "5c1e5a52c4c008005b39c39f6d7245a295265b7ab6b47afd1c3db0742a02da81"
     },
     {
       "id": "discord_notifier",
@@ -320,7 +320,7 @@
       "settings_category": "Lofi Video",
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "93cf5d025e0ed8b4cb307f1895783809e1b4fb5eaf55c6e220b76375704b9a69"
+      "sha256": "ec098705ff964c9d609b71ebae3ddc178626e8efd13ba168032f6e67aa9012df"
     },
     {
       "id": "mister_remote",
@@ -340,7 +340,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "bd66ba68879c5556b23f140e1086d9f3e8557edbf1eee113427e03d9b68db938"
+      "sha256": "aa0fc9e9ae5de516aa47913a18b3f1f84b27903e356207e948215c2a4b84f23e"
     },
     {
       "id": "ntfy_notifier",
@@ -592,7 +592,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "49b600f5f603e2216c1dbf894b385820c532550369a46dcb0d3ec5ecd15973b6"
+      "sha256": "89d909480ac104d855ad94eea711aa6aab8ea9d3d3ff5777d56c0b3d64fa2392"
     },
     {
       "id": "unwatch_feed",
