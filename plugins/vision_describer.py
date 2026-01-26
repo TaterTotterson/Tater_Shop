@@ -10,7 +10,7 @@ from plugin_settings import get_plugin_settings
 from helpers import redis_client, get_latest_image_from_history
 
 def decode_base64(data: str) -> bytes:
-    """Safely decode base64 or data: URL strings (kept for parity/utility)."""
+    """Safely decode base64 or data: URL strings (legacy support)."""
     data = data.strip()
     if data.startswith("data:"):
         _, data = data.split(",", 1)
@@ -33,21 +33,25 @@ def _to_data_url(image_bytes: bytes, filename: str = "image.png") -> str:
 class VisionDescriberPlugin(ToolPlugin):
     name = "vision_describer"
     plugin_name = "Vision Describer"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
+
     usage = (
         '{\n'
         '  "function": "vision_describer",\n'
         '  "arguments": {}\n'
         '}'
     )
+
     description = (
         "Uses an OpenAI-compatible *vision* model to describe the most recent image. "
         "No input needed — it automatically finds the latest uploaded or generated image."
     )
+
     plugin_dec = "Describe the most recent image using a vision-capable model."
     pretty_name = "Describing Your Image"
     settings_category = "Vision"
+
     required_settings = {
         "api_base": {
             "label": "API Base URL",
@@ -62,20 +66,27 @@ class VisionDescriberPlugin(ToolPlugin):
             "default": "gemma3-27b-abliterated-dpo"
         }
     }
-    waiting_prompt_template = "Write a playful message telling {mention} you’re using your magnifying glass to inspect their image now! Only output that message."
+
+    waiting_prompt_template = (
+        "Write a playful message telling {mention} you’re using your magnifying glass "
+        "to inspect their image now! Only output that message."
+    )
+
     platforms = ["discord", "webui", "matrix", "irc"]
 
+    # ---------------- Settings ----------------
     def get_vision_settings(self):
         s = get_plugin_settings(self.settings_category)
         api_base = s.get("api_base", self.required_settings["api_base"]["default"]).rstrip("/")
         model = s.get("model", self.required_settings["model"]["default"])
-        # Optional API key from env for servers that require it
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         return api_base, model, api_key
 
+    # ---------------- Vision Call ----------------
     def _call_openai_vision(self, api_base: str, model: str, image_bytes: bytes, prompt: str, filename: str = "image.png") -> str:
         url = f"{api_base}/v1/chat/completions"
         data_url = _to_data_url(image_bytes, filename)
+
         payload = {
             "model": model,
             "messages": [
@@ -89,8 +100,8 @@ class VisionDescriberPlugin(ToolPlugin):
             ],
             "temperature": 0.2,
         }
+
         headers = {"Content-Type": "application/json"}
-        # Add Authorization header if OPENAI_API_KEY is present
         _, _, api_key = self.get_vision_settings()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -98,25 +109,28 @@ class VisionDescriberPlugin(ToolPlugin):
         resp = requests.post(url, json=payload, headers=headers, timeout=90)
         if resp.status_code != 200:
             return f"Error: Vision service returned status {resp.status_code}.\nResponse: {resp.text}"
+
         j = resp.json()
         try:
             return j["choices"][0]["message"]["content"].strip()
         except Exception:
             return f"Error: Unexpected response shape: {j}"
 
+    # ---------------- Core ----------------
     async def process_image_web(self, file_content: bytes, filename: str):
         prompt = (
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
         )
         api_base, model, _ = self.get_vision_settings()
-        description = await asyncio.to_thread(
+        return await asyncio.to_thread(
             self._call_openai_vision,
             api_base, model, file_content, prompt, filename
         )
-        return description
 
     async def _describe_latest_image(self, redis_key: str):
+        # NOTE: This now relies on the UPDATED helpers.get_latest_image_from_history()
+        # which supports bytes, blob_key, and legacy base64.
         image_bytes, filename = get_latest_image_from_history(
             redis_key,
             allowed_mimetypes=["image/png", "image/jpeg"]
@@ -140,7 +154,7 @@ class VisionDescriberPlugin(ToolPlugin):
         except Exception as e:
             return [f"❌ Error: {e}"]
 
-    # --- Discord Handler ---
+    # ---------------- Platform Handlers ----------------
     async def handle_discord(self, message, args, llm_client):
         key = f"tater:channel:{message.channel.id}:history"
         try:
@@ -150,7 +164,6 @@ class VisionDescriberPlugin(ToolPlugin):
             result = asyncio.run(self._describe_latest_image(key))
         return result[0] if result else f"{message.author.mention}: ❌ No image found or failed to process."
 
-    # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
         try:
             asyncio.get_running_loop()
@@ -158,21 +171,15 @@ class VisionDescriberPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(self._describe_latest_image("webui:chat_history"))
 
-    # --- Matrix Handler ---
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        """
-        Look up the most recent image from this Matrix room's stored history and describe it.
-        """
         key = f"tater:matrix:{room.room_id}:history"
         try:
             asyncio.get_running_loop()
             result = await self._describe_latest_image(key)
         except RuntimeError:
             result = asyncio.run(self._describe_latest_image(key))
-        # Matrix platform will post strings directly (and chunk if needed)
         return result
 
-    # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return f"{user}: This plugin only works via Discord, WebUI, and Matrix. IRC support is not available yet."
 
