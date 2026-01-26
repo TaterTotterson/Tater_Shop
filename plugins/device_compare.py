@@ -7,7 +7,6 @@ import logging
 from typing import List, Dict, Any
 import requests
 import discord
-import uuid
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from plugin_base import ToolPlugin
@@ -17,27 +16,15 @@ from helpers import (
     get_tater_name,
 )
 
-_BLOB_TTL_SECONDS = 60 * 60 * 24
-
-
-def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
-        raise TypeError("store_blob expects bytes")
-    safe = (prefix or "blob").strip().lower() or "blob"
-    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
-    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
-    redis_client.set(key, bytes(binary), ex=ttl_seconds)
-    return key
-
-
-def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
-    blob_key = _store_blob(binary, prefix=prefix)
+        raise TypeError("binary must be bytes")
     return {
         "type": media_type,
         "name": name,
         "mimetype": mimetype,
-        "blob_key": blob_key,
         "size": len(binary),
+        "data": bytes(binary),
     }
 
 logger = logging.getLogger("device_compare")
@@ -703,7 +690,6 @@ class DeviceComparePlugin(ToolPlugin):
             media_type="image",
             name=name,
             mimetype="image/png",
-            prefix="device-compare",
         )
 
     # ---------- platform handlers ----------
@@ -780,7 +766,7 @@ class DeviceComparePlugin(ToolPlugin):
     # ---------- Matrix ----------
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         """
-        Returns image metadata with blob keys so the Matrix platform can upload them
+        Returns image metadata with binary data so the Matrix platform can upload them
         (and auto-encrypt via 'file' when the room is E2EE).
         """
         if llm_client is None:

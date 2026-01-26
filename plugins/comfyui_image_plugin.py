@@ -7,34 +7,21 @@ import secrets
 import copy
 import requests
 import imghdr
-import uuid
 from io import BytesIO
 
 import discord
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
-_BLOB_TTL_SECONDS = 60 * 60 * 24
-
-
-def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
-        raise TypeError("store_blob expects bytes")
-    safe = (prefix or "blob").strip().lower() or "blob"
-    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
-    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
-    redis_client.set(key, bytes(binary), ex=ttl_seconds)
-    return key
-
-
-def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
-    blob_key = _store_blob(binary, prefix=prefix)
+        raise TypeError("binary must be bytes")
     return {
         "type": media_type,
         "name": name,
         "mimetype": mimetype,
-        "blob_key": blob_key,
         "size": len(binary),
+        "data": bytes(binary),
     }
 
 
@@ -304,7 +291,6 @@ class ComfyUIImagePlugin(ToolPlugin):
                     media_type="image",
                     name=file_name,
                     mimetype=mime,
-                    prefix="comfyui-image",
                 )
                 return [
                     image_data,
@@ -335,7 +321,6 @@ class ComfyUIImagePlugin(ToolPlugin):
                 media_type="image",
                 name=file_name,
                 mimetype=mime,
-                prefix="comfyui-image",
             )
 
             safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
@@ -356,7 +341,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         """
-        Return image metadata (blob key) plus a short message.
+        Return image metadata (binary data) plus a short message.
         The Matrix platform will upload/send the media and persist history.
         """
         user_prompt = (args or {}).get("prompt")
@@ -380,7 +365,6 @@ class ComfyUIImagePlugin(ToolPlugin):
                 media_type="image",
                 name=file_name,
                 mimetype=mime,
-                prefix="comfyui-image",
             )
 
             # Optional short celebratory text via the LLM
