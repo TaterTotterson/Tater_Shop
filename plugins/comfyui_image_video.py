@@ -1,4 +1,4 @@
-# plugins/comfyui_image_video_plugin.py
+# plugins/comfyui_image_video.py
 import os
 import json
 import uuid
