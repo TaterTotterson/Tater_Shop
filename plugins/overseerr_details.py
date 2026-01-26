@@ -18,6 +18,8 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolPlugin):
     name = "overseerr_details"
     plugin_name = "Overseerr Details"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
 

@@ -29,6 +29,8 @@ SYN = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
         "Control MiSTer via the MiSTer Remote API.\n"

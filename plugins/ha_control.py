@@ -55,6 +55,8 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Home Assistant Control"
 
     settings_category = "Home Assistant Control"

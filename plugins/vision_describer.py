@@ -33,6 +33,8 @@ def _to_data_url(image_bytes: bytes, filename: str = "image.png") -> str:
 class VisionDescriberPlugin(ToolPlugin):
     name = "vision_describer"
     plugin_name = "Vision Describer"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "vision_describer",\n'

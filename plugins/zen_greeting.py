@@ -27,6 +27,8 @@ class ZenGreetingPlugin(ToolPlugin):
     """
     name = "zen_greeting"
     plugin_name = "Zen Greeting"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Zen Greeting"
 
     description = (

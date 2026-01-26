@@ -32,6 +32,8 @@ class UnifiNetworkPlugin(ToolPlugin):
 
     name = "unifi_network"
     plugin_name = "UniFi Network"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "UniFi Network"
     description = "Answer questions about your UniFi Network (clients, devices, site status) using the official UniFi Integration API."
     plugin_dec = "Fetch UniFi Network sites/clients/devices via the official API and let the LLM answer questions from computed facts + compact lists."

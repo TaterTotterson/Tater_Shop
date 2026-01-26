@@ -30,6 +30,8 @@ class CameraEventPlugin(ToolPlugin):
     """
     name = "camera_event"
     plugin_name = "Camera Event"
+    version = "1.0.0"
+    min_tater_version = "50"
     description = "Camera event tool for when the user requests or says to run camera event."
     plugin_dec = "Capture a Home Assistant camera snapshot, describe it with vision AI, and log the event."
     usage = (

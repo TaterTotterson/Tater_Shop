@@ -17,6 +17,8 @@ load_dotenv()
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
     plugin_name = "Automatic1111 Image"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "automatic_plugin",\n'

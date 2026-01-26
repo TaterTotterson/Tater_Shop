@@ -15,6 +15,8 @@ logger.setLevel(logging.INFO)
 class WebSummaryPlugin(ToolPlugin):
     name = "web_summary"
     plugin_name = "Web Summary"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "web_summary",\n'
