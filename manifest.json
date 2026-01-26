@@ -113,7 +113,7 @@
       "settings_category": "ComfyUI Music Video",
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "526997850d52270b5ec1b41702dd4e6c6b7b65a34ba0a93d7c584121d32f41ec"
+      "sha256": "32a04606a7bc23857b8baeada06f7642ca8ac8a36f620b8a0752ab716aa53bea"
     },
     {
       "id": "comfyui_video_plugin",
