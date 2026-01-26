@@ -1,4 +1,4 @@
-# plugins/comfyui_music_video_plugin.py
+# plugins/comfyui_music_video.py
 import os
 import asyncio
 import base64
