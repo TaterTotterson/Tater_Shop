@@ -1,6 +1,4 @@
 import os, json, asyncio, logging, re, time, difflib, requests, mimetypes
-from io import BytesIO
-import discord
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor
@@ -13,7 +11,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 load_dotenv()
@@ -492,9 +490,6 @@ class MisterRemotePlugin(ToolPlugin):
         if _strip(args.get("command", "")) == "screenshot_take":
             content, filename, core = self._capture_screenshot()
             if content and filename:
-                await message.channel.send(
-                    file=discord.File(BytesIO(content), filename=filename)
-                )
                 return self._build_screenshot_payload(content, filename)
             if filename and core is not None:
                 url = self._screenshot_url(core, filename)
