@@ -7,9 +7,6 @@ import secrets
 import copy
 import requests
 import imghdr
-from io import BytesIO
-
-import discord
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
@@ -21,7 +18,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 
@@ -271,9 +268,6 @@ class ComfyUIImagePlugin(ToolPlugin):
 
                 mime, ext = self._infer_mime_and_ext(image_bytes)
                 file_name = f"generated_comfyui.{ext}"
-                await message.channel.send(
-                    file=discord.File(BytesIO(image_bytes), filename=file_name)
-                )
 
                 # Keep only printable slice of the prompt
                 safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()

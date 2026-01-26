@@ -6,7 +6,6 @@ import asyncio
 import logging
 from typing import List, Dict, Any
 import requests
-import discord
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from plugin_base import ToolPlugin
@@ -24,7 +23,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 logger = logging.getLogger("device_compare")
@@ -710,9 +709,6 @@ class DeviceComparePlugin(ToolPlugin):
             rows=data["spec_rows"],
             title=data["title"]
         )
-        await message.channel.send(
-            file=discord.File(io.BytesIO(spec_png), filename="comparison.png")
-        )
         out.append(self._img_payload(spec_png, "comparison.png"))
 
         if data.get("fps_rows"):
@@ -720,9 +716,6 @@ class DeviceComparePlugin(ToolPlugin):
                 headers=data["fps_headers"],
                 rows=data["fps_rows"],
                 title="Per-Game FPS"
-            )
-            await message.channel.send(
-                file=discord.File(io.BytesIO(fps_png), filename="fps.png")
             )
             out.append(self._img_payload(fps_png, "fps.png"))
 

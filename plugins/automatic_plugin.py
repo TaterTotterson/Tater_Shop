@@ -3,10 +3,8 @@ import os
 import requests
 import base64
 import asyncio
-from io import BytesIO
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-import discord
 from helpers import redis_client
 
 load_dotenv()
@@ -19,7 +17,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 class AutomaticPlugin(ToolPlugin):
@@ -137,8 +135,6 @@ class AutomaticPlugin(ToolPlugin):
         try:
             async with message.channel.typing():
                 image_bytes = await asyncio.to_thread(self._generate_image, prompt_text)
-                image_file = discord.File(BytesIO(image_bytes), filename="generated_image.png")
-                await message.channel.send(file=image_file)
 
                 reply = await self._respond_to_image(prompt_text, image_bytes, llm_client)
 
@@ -155,7 +151,6 @@ class AutomaticPlugin(ToolPlugin):
                 ]
         except Exception as e:
             error_msg = f"❌ Failed to generate image: {e}"
-            await message.channel.send(error_msg)
             return error_msg
 
     # --- WebUI Handler ---
