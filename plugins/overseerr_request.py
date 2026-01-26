@@ -27,6 +27,8 @@ class OverseerrRequestPlugin(ToolPlugin):
     """
     name = "overseerr_request"
     plugin_name = "Overseerr Request"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "overseerr_request",\n'

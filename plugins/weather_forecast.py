@@ -35,6 +35,8 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
+    version = "1.0.0"
+    min_tater_version = "50"
     description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com."
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
     pretty_name = "Checking the Weather"

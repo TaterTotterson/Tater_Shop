@@ -23,6 +23,8 @@ class ObsidianNotePlugin(ToolPlugin):
 
     name = "obsidian_note"
     plugin_name = "Obsidian Note"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Add to Obsidian"
     description = "Always creates a new note with an AI-generated title at the vault root."
     plugin_dec = "Create a new Obsidian note with an AI-generated title and content."

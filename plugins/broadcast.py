@@ -20,6 +20,8 @@ class BroadcastPlugin(ToolPlugin):
     """
     name = "broadcast"
     plugin_name = "Broadcast"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "broadcast",\n'

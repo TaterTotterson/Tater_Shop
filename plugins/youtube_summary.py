@@ -21,6 +21,8 @@ DEFAULT_MAX_TOKENS = 2048
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
     plugin_name = "YouTube Summary"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "youtube_summary",\n'

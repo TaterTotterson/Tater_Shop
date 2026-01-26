@@ -13,6 +13,8 @@ logger = logging.getLogger("telegram_notifier")
 class TelegramNotifierPlugin(ToolPlugin):
     name = "telegram_notifier"
     plugin_name = "Telegram Notifier"
+    version = "1.0.0"
+    min_tater_version = "50"
     description = "Provides Telegram bot token and chat ID settings for RSS announcements."
     plugin_dec = "Send RSS summaries to a Telegram chat via bot token and chat ID."
     usage = ""

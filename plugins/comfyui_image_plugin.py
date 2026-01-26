@@ -17,6 +17,8 @@ from helpers import redis_client, run_comfy_prompt
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "comfyui_image_plugin",\n'

@@ -20,6 +20,8 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "comfyui_audio_ace",\n'

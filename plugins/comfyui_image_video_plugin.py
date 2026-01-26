@@ -15,6 +15,8 @@ from helpers import redis_client, get_latest_image_from_history, run_comfy_promp
 class ComfyUIImageVideoPlugin(ToolPlugin):
     name = "comfyui_image_video"
     plugin_name = "ComfyUI Animate Image"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "comfyui_image_video",\n'

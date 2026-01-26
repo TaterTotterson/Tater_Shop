@@ -28,6 +28,8 @@ class FindMyPhonePlugin(ToolPlugin):
 
     name = "find_my_phone"
     plugin_name = "Find My Phone"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "find_my_phone",\n'
