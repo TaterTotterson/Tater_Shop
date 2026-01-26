@@ -7,10 +7,36 @@ import random
 import copy
 import logging
 import requests
+import uuid
 from urllib.parse import quote
+from io import BytesIO
 
+import discord
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+
+_BLOB_TTL_SECONDS = 60 * 60 * 24
+
+
+def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+    if not isinstance(binary, (bytes, bytearray)):
+        raise TypeError("store_blob expects bytes")
+    safe = (prefix or "blob").strip().lower() or "blob"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
+    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
+    redis_client.set(key, bytes(binary), ex=ttl_seconds)
+    return key
+
+
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
+    blob_key = _store_blob(binary, prefix=prefix)
+    return {
+        "type": media_type,
+        "name": name,
+        "mimetype": mimetype,
+        "blob_key": blob_key,
+        "size": len(binary),
+    }
 
 logger = logging.getLogger("comfyui_audio_ace")
 logger.setLevel(logging.INFO)
@@ -290,14 +316,15 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
         media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
 
-        audio_data = None
+        audio_meta = None
         if audio_bytes:
-            audio_data = {
-                "type": "audio",
-                "name": "ace_song.mp3",
-                "data": audio_bytes,
-                "mimetype": "audio/mpeg"
-            }
+            audio_meta = _build_media_metadata(
+                audio_bytes,
+                media_type="audio",
+                name="ace_song.mp3",
+                mimetype="audio/mpeg",
+                prefix="comfyui-audio-ace",
+            )
 
         system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
         response = await llm_client.chat(
@@ -308,10 +335,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         )
         message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
 
-        if audio_data:
-            return [audio_data, message_text]
-        else:
-            return [f"Your song is ready: {media_url}", message_text]
+        return audio_meta, message_text, media_url, audio_bytes
 
     # ---------------------------------------
     # Discord
@@ -321,7 +345,13 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         if not user_prompt:
             return "No prompt provided."
         try:
-            return await self._generate(user_prompt, llm_client)
+            audio_meta, message_text, media_url, audio_bytes = await self._generate(user_prompt, llm_client)
+            if audio_bytes:
+                await message.channel.send(
+                    file=discord.File(BytesIO(audio_bytes), filename=audio_meta.get("name", "ace_song.mp3"))
+                )
+                return [audio_meta, message_text]
+            return [f"Your song is ready: {media_url}", message_text]
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin Discord error: %s", e)
             return f"Failed to create song: {e}"
@@ -335,12 +365,15 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             return ["No prompt provided."]
         try:
             asyncio.get_running_loop()
-            return await self._generate(prompt, llm_client)
+            audio_meta, message_text, media_url, _audio_bytes = await self._generate(prompt, llm_client)
         except RuntimeError:
-            return asyncio.run(self._generate(prompt, llm_client))
+            audio_meta, message_text, media_url, _audio_bytes = asyncio.run(self._generate(prompt, llm_client))
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin WebUI error: %s", e)
             return [f"Failed to create song: {e}"]
+        if audio_meta:
+            return [audio_meta, message_text]
+        return [f"Your song is ready: {media_url}", message_text]
 
     # ---------------------------------------
     # Matrix
@@ -350,7 +383,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         if not prompt:
             return "No prompt provided."
         try:
-            return await self._generate(prompt, llm_client)
+            audio_meta, message_text, media_url, _audio_bytes = await self._generate(prompt, llm_client)
+            if audio_meta:
+                return [audio_meta, message_text]
+            return [f"Your song is ready: {media_url}", message_text]
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin Matrix error: %s", e)
             return f"Failed to create song: {e}"

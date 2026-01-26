@@ -1,7 +1,33 @@
 import os, json, asyncio, logging, re, time, difflib, requests, mimetypes
+import uuid
+from io import BytesIO
+import discord
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor
+
+_BLOB_TTL_SECONDS = 60 * 60 * 24
+
+
+def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+    if not isinstance(binary, (bytes, bytearray)):
+        raise TypeError("store_blob expects bytes")
+    safe = (prefix or "blob").strip().lower() or "blob"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
+    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
+    redis_client.set(key, bytes(binary), ex=ttl_seconds)
+    return key
+
+
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
+    blob_key = _store_blob(binary, prefix=prefix)
+    return {
+        "type": media_type,
+        "name": name,
+        "mimetype": mimetype,
+        "blob_key": blob_key,
+        "size": len(binary),
+    }
 
 load_dotenv()
 logger = logging.getLogger("mister_remote")
@@ -362,7 +388,7 @@ class MisterRemotePlugin(ToolPlugin):
             msg = f"{msg}\n{follow}"
         return msg
 
-    def _do_screenshot_and_payload(self):
+    def _capture_screenshot(self):
         self._shot()
 
         # Poll up to ~2.5s total (5 * 0.5s) for the file bytes to be available.
@@ -381,17 +407,26 @@ class MisterRemotePlugin(ToolPlugin):
             if content:
                 break
 
+        return content, filename, core
+
+    def _build_screenshot_payload(self, content, filename):
+        mimetype = self._mime_for(filename)
+        image_payload = _build_media_metadata(
+            content,
+            media_type="image",
+            name=filename,
+            mimetype=mimetype,
+            prefix="mister-remote",
+        )
+        caption = f"Screenshot captured: `{filename}`"
+        return [image_payload, caption]
+
+    def _do_screenshot_and_payload(self):
+        content, filename, core = self._capture_screenshot()
+
         # If we got the bytes: return image payload + a short caption (no markdown image, no URL)
         if content and filename:
-            mimetype = self._mime_for(filename)
-            image_payload = {
-                "type": "image",
-                "name": filename,
-                "data": content,
-                "mimetype": mimetype,
-            }
-            caption = f"Screenshot captured: `{filename}`"
-            return [image_payload, caption]
+            return self._build_screenshot_payload(content, filename)
 
         # Fallback: still no bytes—return a single, simple line with the absolute URL.
         # Keep it as a LIST so Matrix/WebUI treat it like a normal tool response.
@@ -468,6 +503,17 @@ class MisterRemotePlugin(ToolPlugin):
         args = args or {}
         if not _strip(args.get("utterance","")):
             args["utterance"] = (getattr(message, "content", "") or "").strip()
+        if _strip(args.get("command", "")) == "screenshot_take":
+            content, filename, core = self._capture_screenshot()
+            if content and filename:
+                await message.channel.send(
+                    file=discord.File(BytesIO(content), filename=filename)
+                )
+                return self._build_screenshot_payload(content, filename)
+            if filename and core is not None:
+                url = self._screenshot_url(core, filename)
+                return [f"Screenshot captured: `{filename}` — {url}"]
+            return ["Screenshot requested, but I couldn’t find the new file yet."]
         return await self._handle_async(args, llm_client)
 
     async def handle_webui(self, args, llm_client):

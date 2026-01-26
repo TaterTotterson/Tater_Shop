@@ -7,10 +7,35 @@ import secrets
 import copy
 import requests
 import imghdr
+import uuid
 from io import BytesIO
 
+import discord
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+
+_BLOB_TTL_SECONDS = 60 * 60 * 24
+
+
+def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+    if not isinstance(binary, (bytes, bytearray)):
+        raise TypeError("store_blob expects bytes")
+    safe = (prefix or "blob").strip().lower() or "blob"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
+    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
+    redis_client.set(key, bytes(binary), ex=ttl_seconds)
+    return key
+
+
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
+    blob_key = _store_blob(binary, prefix=prefix)
+    return {
+        "type": media_type,
+        "name": name,
+        "mimetype": mimetype,
+        "blob_key": blob_key,
+        "size": len(binary),
+    }
 
 
 class ComfyUIImagePlugin(ToolPlugin):
@@ -258,6 +283,10 @@ class ComfyUIImagePlugin(ToolPlugin):
                 )
 
                 mime, ext = self._infer_mime_and_ext(image_bytes)
+                file_name = f"generated_comfyui.{ext}"
+                await message.channel.send(
+                    file=discord.File(BytesIO(image_bytes), filename=file_name)
+                )
 
                 # Keep only printable slice of the prompt
                 safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
@@ -270,13 +299,15 @@ class ComfyUIImagePlugin(ToolPlugin):
                 )
 
                 message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
+                image_data = _build_media_metadata(
+                    image_bytes,
+                    media_type="image",
+                    name=file_name,
+                    mimetype=mime,
+                    prefix="comfyui-image",
+                )
                 return [
-                    {
-                        "type": "image",
-                        "name": f"generated_comfyui.{ext}",
-                        "data": image_bytes,
-                        "mimetype": mime
-                    },
+                    image_data,
                     message_text
                 ]
         except Exception as e:
@@ -297,13 +328,15 @@ class ComfyUIImagePlugin(ToolPlugin):
                 ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
             )
             mime, ext = self._infer_mime_and_ext(image_bytes)
+            file_name = f"generated_comfyui.{ext}"
 
-            image_data = {
-                "type": "image",
-                "name": f"generated_comfyui.{ext}",
-                "data": image_bytes,
-                "mimetype": mime
-            }
+            image_data = _build_media_metadata(
+                image_bytes,
+                media_type="image",
+                name=file_name,
+                mimetype=mime,
+                prefix="comfyui-image",
+            )
 
             safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
             system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
@@ -323,7 +356,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         """
-        Return an image payload (bytes) plus a short message.
+        Return image metadata (blob key) plus a short message.
         The Matrix platform will upload/send the media and persist history.
         """
         user_prompt = (args or {}).get("prompt")
@@ -340,13 +373,15 @@ class ComfyUIImagePlugin(ToolPlugin):
                 ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
             )
             mime, ext = self._infer_mime_and_ext(image_bytes)
+            file_name = f"generated_comfyui.{ext}"
 
-            image_payload = {
-                "type": "image",
-                "name": f"generated_comfyui.{ext}",
-                "data": image_bytes,
-                "mimetype": mime,
-            }
+            image_payload = _build_media_metadata(
+                image_bytes,
+                media_type="image",
+                name=file_name,
+                mimetype=mime,
+                prefix="comfyui-image",
+            )
 
             # Optional short celebratory text via the LLM
             message_text = "Here’s your generated image!"
