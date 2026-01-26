@@ -25,6 +25,8 @@ class ObsidianSearchPlugin(ToolPlugin):
 
     name = "obsidian_search"
     plugin_name = "Obsidian Search"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Search Obsidian"
     description = "Searches all notes in your vault. Extracts relevant info from each file and combines into one answer."
     plugin_dec = "Search your Obsidian vault and summarize matching notes."

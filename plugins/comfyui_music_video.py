@@ -17,6 +17,8 @@ from plugins.vision_describer import VisionDescriberPlugin
 class ComfyUIMusicVideoPlugin(ToolPlugin):
     name = "comfyui_music_video"
     plugin_name = "ComfyUI Music Video"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "comfyui_music_video",\n'

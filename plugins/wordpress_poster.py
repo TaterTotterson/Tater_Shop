@@ -11,6 +11,8 @@ from plugin_settings import get_plugin_enabled, get_plugin_settings
 class WordPressPosterPlugin(ToolPlugin):
     name = "wordpress_poster"
     plugin_name = "WordPress Poster"
+    version = "1.0.0"
+    min_tater_version = "50"
     platforms = []
     usage = ""
     description = "Posts RSS summaries to WordPress using its REST API."

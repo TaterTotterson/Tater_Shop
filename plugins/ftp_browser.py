@@ -18,6 +18,8 @@ async def safe_send(channel, content: str, **kwargs):
 class FtpBrowserPlugin(ToolPlugin):
     name = "ftp_browser"
     plugin_name = "FTP Browser"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "ftp_browser",\n'

@@ -14,6 +14,8 @@ logger.setLevel(logging.DEBUG)
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "premiumize_download",\n'

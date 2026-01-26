@@ -38,6 +38,8 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
     name = "phone_events_alert"
     plugin_name = "Phone Events Alert"
+    version = "1.0.0"
+    min_tater_version = "50"
     plugin_dec = "Capture a camera snapshot, describe it with vision AI, and send it to your phone (with cooldown + priority)."
     pretty_name = "Phone Events Alert"
     settings_category = "Phone Events Alert"

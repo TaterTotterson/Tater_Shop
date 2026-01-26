@@ -26,6 +26,8 @@ class WeatherBriefPlugin(ToolPlugin):
     """
     name = "weather_brief"
     plugin_name = "Weather Brief"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Weather Brief"
 
     description = (

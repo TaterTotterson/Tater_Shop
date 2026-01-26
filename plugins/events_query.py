@@ -32,6 +32,8 @@ class EventsQueryPlugin(ToolPlugin):
     """
     name = "events_query"
     plugin_name = "Events Query"
+    version = "1.0.0"
+    min_tater_version = "50"
     pretty_name = "Events Query"
     description = (
         "Answer questions about stored household events (all sources) by area and timeframe. "

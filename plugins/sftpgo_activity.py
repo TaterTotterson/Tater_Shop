@@ -9,6 +9,8 @@ from plugin_base import ToolPlugin
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
     plugin_name = "SFTPGo Activity"
+    version = "1.0.0"
+    min_tater_version = "50"
     usage = (
         '{\n'
         '  "function": "sftpgo_activity",\n'
