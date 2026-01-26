@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +15,29 @@ import urllib3
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name, get_tater_personality
+
+_BLOB_TTL_SECONDS = 60 * 60 * 24
+
+
+def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+    if not isinstance(binary, (bytes, bytearray)):
+        raise TypeError("store_blob expects bytes")
+    safe = (prefix or "blob").strip().lower() or "blob"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
+    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
+    redis_client.set(key, bytes(binary), ex=ttl_seconds)
+    return key
+
+
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
+    blob_key = _store_blob(binary, prefix=prefix)
+    return {
+        "type": media_type,
+        "name": name,
+        "mimetype": mimetype,
+        "blob_key": blob_key,
+        "size": len(binary),
+    }
 
 logger = logging.getLogger("unifi_protect")
 logger.setLevel(logging.INFO)
@@ -716,10 +740,16 @@ class UniFiProtectPlugin(ToolPlugin):
 
             text = await self._answer_with_facts(query, facts, llm_client)
 
-            # WebUI can render image bytes. Others: return text only (spoken-friendly).
+            # WebUI can render image blobs. Others: return text only (spoken-friendly).
             if platform == "webui":
                 return [
-                    {"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_bytes},
+                    _build_media_metadata(
+                        img_bytes,
+                        media_type="image",
+                        name=f"{cam_name}.jpg",
+                        mimetype=mimetype,
+                        prefix="unifi-protect",
+                    ),
                     text,
                 ]
 
@@ -775,7 +805,15 @@ class UniFiProtectPlugin(ToolPlugin):
                     })
 
                     if platform == "webui":
-                        images_out.append({"type": "image", "mimetype": mimetype, "name": f"{cam_name}.jpg", "data": img_bytes})
+                        images_out.append(
+                            _build_media_metadata(
+                                img_bytes,
+                                media_type="image",
+                                name=f"{cam_name}.jpg",
+                                mimetype=mimetype,
+                                prefix="unifi-protect",
+                            )
+                        )
 
                 except Exception as e:
                     logger.info(f"[unifi_protect] snapshot/vision failed for {cam_name}: {e}")

@@ -1,18 +1,39 @@
 # plugins/draw_picture.py
 import os
-import json
 import requests
 import base64
 import asyncio
+import uuid
 from io import BytesIO
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-import streamlit as st
-from PIL import Image
 import discord
 from helpers import redis_client
 
 load_dotenv()
+
+_BLOB_TTL_SECONDS = 60 * 60 * 24
+
+
+def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+    if not isinstance(binary, (bytes, bytearray)):
+        raise TypeError("store_blob expects bytes")
+    safe = (prefix or "blob").strip().lower() or "blob"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
+    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
+    redis_client.set(key, bytes(binary), ex=ttl_seconds)
+    return key
+
+
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
+    blob_key = _store_blob(binary, prefix=prefix)
+    return {
+        "type": media_type,
+        "name": name,
+        "mimetype": mimetype,
+        "blob_key": blob_key,
+        "size": len(binary),
+    }
 
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
@@ -134,13 +155,16 @@ class AutomaticPlugin(ToolPlugin):
 
                 reply = await self._respond_to_image(prompt_text, image_bytes, llm_client)
 
+                image_data = _build_media_metadata(
+                    image_bytes,
+                    media_type="image",
+                    name="generated_image.png",
+                    mimetype="image/png",
+                    prefix="automatic",
+                )
+
                 return [
-                    {
-                        "type": "image",
-                        "name": "generated_image.png",
-                        "data": image_bytes,
-                        "mimetype": "image/png"
-                    },
+                    image_data,
                     reply
                 ]
         except Exception as e:
@@ -157,12 +181,13 @@ class AutomaticPlugin(ToolPlugin):
         async def inner():
             try:
                 image_bytes = await asyncio.to_thread(self._generate_image, prompt_text)
-                image_data = {
-                    "type": "image",
-                    "name": "generated_image.png",
-                    "data": image_bytes,
-                    "mimetype": "image/png"
-                }
+                image_data = _build_media_metadata(
+                    image_bytes,
+                    media_type="image",
+                    name="generated_image.png",
+                    mimetype="image/png",
+                    prefix="automatic",
+                )
                 message_text = await self._respond_to_image(prompt_text, image_bytes, llm_client)
                 return [image_data, message_text]
             except Exception as e:
