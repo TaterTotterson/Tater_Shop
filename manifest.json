@@ -113,7 +113,7 @@
       "settings_category": "ComfyUI Music Video",
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "32a04606a7bc23857b8baeada06f7642ca8ac8a36f620b8a0752ab716aa53bea"
+      "sha256": "d7ea3f2cd3b5148197177bb5bbfaa9ba045f82886b75d946e7b9372e9f88e859"
     },
     {
       "id": "comfyui_video_plugin",
@@ -128,7 +128,7 @@
       "settings_category": "ComfyUI Video",
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "06f46f71800a8d2a7d9273ce3fc71ec3ba69d4d8fd0fbee68bdc51f55d5ae4a4"
+      "sha256": "62a6242fa1f7720198d90fbf16797420cff47e5a6c2f5759ad769ed4eeaeeed5"
     },
     {
       "id": "device_compare",
@@ -320,7 +320,7 @@
       "settings_category": "Lofi Video",
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "98945f9a7aed108d137b2b9c92c9b6a676aef0c38f4f35cb2cae64cf5a613024"
+      "sha256": "58e36a41e827ffef902a3c76c6c719ff0eaf07a63d6d9b2b56e59afa443d4e48"
     },
     {
       "id": "mister_remote",
