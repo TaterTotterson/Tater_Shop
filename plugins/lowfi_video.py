@@ -22,7 +22,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 CLIENT_ID = str(uuid.uuid4())

@@ -8,9 +8,6 @@ import copy
 import logging
 import requests
 from urllib.parse import quote
-from io import BytesIO
-
-import discord
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
@@ -22,7 +19,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "name": name,
         "mimetype": mimetype,
         "size": len(binary),
-        "data": bytes(binary),
+        "bytes": bytes(binary),
     }
 
 logger = logging.getLogger("comfyui_audio_ace")
@@ -333,9 +330,6 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         try:
             audio_meta, message_text, media_url, audio_bytes = await self._generate(user_prompt, llm_client)
             if audio_bytes:
-                await message.channel.send(
-                    file=discord.File(BytesIO(audio_bytes), filename=audio_meta.get("name", "ace_song.mp3"))
-                )
                 return [audio_meta, message_text]
             return [f"Your song is ready: {media_url}", message_text]
         except Exception as e:
