@@ -14,27 +14,15 @@ from math import ceil
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
-_BLOB_TTL_SECONDS = 60 * 60 * 24
-
-
-def _store_blob(binary: bytes, prefix: str, ttl_seconds: int = _BLOB_TTL_SECONDS) -> str:
+def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
-        raise TypeError("store_blob expects bytes")
-    safe = (prefix or "blob").strip().lower() or "blob"
-    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in safe)
-    key = f"tater:blob:{safe}:{uuid.uuid4().hex}"
-    redis_client.set(key, bytes(binary), ex=ttl_seconds)
-    return key
-
-
-def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str, prefix: str) -> dict:
-    blob_key = _store_blob(binary, prefix=prefix)
+        raise TypeError("binary must be bytes")
     return {
         "type": media_type,
         "name": name,
         "mimetype": mimetype,
-        "blob_key": blob_key,
         "size": len(binary),
+        "data": bytes(binary),
     }
 
 CLIENT_ID = str(uuid.uuid4())
@@ -827,7 +815,6 @@ class LowfiVideoPlugin(ToolPlugin):
                         media_type="video",
                         name="lofi_video.mp4",
                         mimetype="video/mp4",
-                        prefix="lowfi-video",
                     ),
                     followup_text
                 ]
