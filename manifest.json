@@ -83,7 +83,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "b173612b9ab6d99c91e3fb3c21a89ec3c2af3e3bb4344c7e2bd2b82e2b0c330e"
+      "sha256": "f52ef03311024bdb3782313b8768f86c6d82f364e8cc1be729a365f00e429255"
     },
     {
       "id": "comfyui_image_video",
