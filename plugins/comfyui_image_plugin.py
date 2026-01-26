@@ -7,8 +7,10 @@ import secrets
 import copy
 import requests
 import imghdr
+
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -44,23 +46,25 @@ class ComfyUIImagePlugin(ToolPlugin):
             "label": "ComfyUI URL",
             "type": "string",
             "default": "http://localhost:8188",
-            "description": "The base URL for the ComfyUI API (do not include endpoint paths)."
+            "description": "The base URL for the ComfyUI API (do not include endpoint paths).",
         },
         "IMAGE_RESOLUTION": {
             "label": "Image Resolution",
             "type": "select",
             "default": "720p",
             "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
-            "description": "Resolution for generated images."
+            "description": "Resolution for generated images.",
         },
         "COMFYUI_WORKFLOW": {
             "label": "Workflow Template (JSON)",
             "type": "file",
             "default": "",
-            "description": "Upload your JSON workflow template file. This field is required."
-        }
+            "description": "Upload your JSON workflow template file. This field is required.",
+        },
     }
-    waiting_prompt_template = "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
+    waiting_prompt_template = (
+        "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
+    )
     platforms = ["discord", "webui", "matrix"]  # matrix supported
 
     # ---------------------------
@@ -68,7 +72,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     # ---------------------------
     @staticmethod
     def get_base_http():
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}") or {}
         raw = settings.get("COMFYUI_URL", b"")
         url = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
         if not url:
@@ -84,17 +88,42 @@ class ComfyUIImagePlugin(ToolPlugin):
         return base_http.replace("http", scheme, 1)
 
     # ---------------------------
-    # Template / I/O helpers
+    # Template / settings helpers
     # ---------------------------
     @staticmethod
     def get_workflow_template():
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}") or {}
         workflow_raw = settings.get("COMFYUI_WORKFLOW", b"")
-        workflow_str = workflow_raw.decode("utf-8").strip() if isinstance(workflow_raw, (bytes, bytearray)) else (workflow_raw or "").strip()
+        workflow_str = (
+            workflow_raw.decode("utf-8").strip()
+            if isinstance(workflow_raw, (bytes, bytearray))
+            else (workflow_raw or "").strip()
+        )
         if not workflow_str:
             raise Exception("No workflow template set in COMFYUI_WORKFLOW. Please provide a valid JSON template.")
         return json.loads(workflow_str)
 
+    @staticmethod
+    def _get_resolution_from_settings() -> tuple[int, int]:
+        """
+        Always use the resolution selected in WebUI (Redis plugin setting).
+        """
+        res_map = {
+            "144p": (256, 144),
+            "240p": (426, 240),
+            "360p": (480, 360),
+            "480p": (640, 480),
+            "720p": (1280, 720),
+            "1080p": (1920, 1080),
+        }
+        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}") or {}
+        raw_res = settings.get("IMAGE_RESOLUTION", b"720p")
+        resolution = raw_res.decode("utf-8").strip() if isinstance(raw_res, (bytes, bytearray)) else str(raw_res or "720p").strip()
+        return res_map.get(resolution, (1280, 720))
+
+    # ---------------------------
+    # Comfy I/O helpers
+    # ---------------------------
     @staticmethod
     def get_history(base_http: str, prompt_id: str):
         r = requests.get(f"{base_http}/history/{prompt_id}", timeout=30)
@@ -195,9 +224,13 @@ class ComfyUIImagePlugin(ToolPlugin):
     # Core generation (sync)
     # ---------------------------
     @staticmethod
-    def process_prompt(user_prompt: str, negative_prompt: str = "", width: int = None, height: int = None) -> bytes:
+    def process_prompt(user_prompt: str, negative_prompt: str = "") -> bytes:
+        """
+        Always uses IMAGE_RESOLUTION from WebUI plugin settings.
+        (No width/height overrides from args.)
+        """
         base_http = ComfyUIImagePlugin.get_base_http()
-        base_ws   = ComfyUIImagePlugin.get_base_ws(base_http)
+        base_ws = ComfyUIImagePlugin.get_base_ws(base_http)
 
         # Load template and clone per job
         workflow = copy.deepcopy(ComfyUIImagePlugin.get_workflow_template())
@@ -218,28 +251,19 @@ class ComfyUIImagePlugin(ToolPlugin):
             if "noise_seed" in inputs:
                 inputs["noise_seed"] = int(random_seed)
 
-        # Resolution override from settings (unless explicit width/height provided)
-        res_map = {
-            "144p": (256, 144),
-            "240p": (426, 240),
-            "360p": (480, 360),
-            "480p": (640, 480),
-            "720p": (1280, 720),
-            "1080p": (1920, 1080),
-        }
-        settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}")
-        raw_res = settings.get("IMAGE_RESOLUTION", b"720p")
-        resolution = raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else (raw_res or "720p")
-        default_w, default_h = res_map.get(resolution, (1280, 720))
+        # Always use the WebUI-selected resolution
+        w, h = ComfyUIImagePlugin._get_resolution_from_settings()
 
-        w = int(width) if width else default_w
-        h = int(height) if height else default_h
-
+        # Inject width/height into common latent nodes
         for node in workflow.values():
-            if isinstance(node, dict) and node.get("class_type") in ("EmptyLatentImage", "EmptySD3LatentImage", "ModelSamplingFlux"):
+            if isinstance(node, dict) and node.get("class_type") in (
+                "EmptyLatentImage",
+                "EmptySD3LatentImage",
+                "ModelSamplingFlux",
+            ):
                 node.setdefault("inputs", {})
-                node["inputs"]["width"] = w
-                node["inputs"]["height"] = h
+                node["inputs"]["width"] = int(w)
+                node["inputs"]["height"] = int(h)
 
         # Run Comfy with per-job client_id & WS
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
@@ -248,45 +272,51 @@ class ComfyUIImagePlugin(ToolPlugin):
         return ComfyUIImagePlugin._fetch_first_image(base_http, prompt_id)
 
     # ---------------------------------------
+    # Shared LLM follow-up helper
+    # ---------------------------------------
+    @staticmethod
+    async def _celebrate(llm_client, user_prompt: str) -> str:
+        if llm_client is None:
+            return "Here’s your generated image!"
+        safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
+        system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
+        final_response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message.",
+                },
+            ]
+        )
+        return (final_response.get("message", {}) or {}).get("content", "").strip() or "Here's your generated image!"
+
+    # ---------------------------------------
     # Discord
     # ---------------------------------------
     async def handle_discord(self, message, args, llm_client):
-        user_prompt = args.get("prompt")
+        user_prompt = (args or {}).get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
         try:
-            neg = args.get("negative_prompt", "") or ""
-            w = args.get("width"); h = args.get("height")
+            # Keep negative_prompt optional, but do NOT accept width/height overrides
+            neg = (args or {}).get("negative_prompt", "") or ""
 
             async with message.channel.typing():
-                image_bytes = await asyncio.to_thread(
-                    ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
-                )
+                image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
 
                 mime, ext = self._infer_mime_and_ext(image_bytes)
                 file_name = f"generated_comfyui.{ext}"
 
-                # Keep only printable slice of the prompt
-                safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
-                system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
-                final_response = await llm_client.chat(
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                    ]
-                )
+                message_text = await self._celebrate(llm_client, user_prompt)
 
-                message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
                 image_data = _build_media_metadata(
                     image_bytes,
                     media_type="image",
                     name=file_name,
                     mimetype=mime,
                 )
-                return [
-                    image_data,
-                    message_text
-                ]
+                return [image_data, message_text]
         except Exception as e:
             return f"Failed to queue prompt: {type(e).__name__}: {e}"
 
@@ -294,16 +324,14 @@ class ComfyUIImagePlugin(ToolPlugin):
     # WebUI
     # ---------------------------------------
     async def handle_webui(self, args, llm_client):
-        user_prompt = args.get("prompt")
+        user_prompt = (args or {}).get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
         try:
-            neg = args.get("negative_prompt", "") or ""
-            w = args.get("width"); h = args.get("height")
+            neg = (args or {}).get("negative_prompt", "") or ""
 
-            image_bytes = await asyncio.to_thread(
-                ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
-            )
+            image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
+
             mime, ext = self._infer_mime_and_ext(image_bytes)
             file_name = f"generated_comfyui.{ext}"
 
@@ -314,15 +342,7 @@ class ComfyUIImagePlugin(ToolPlugin):
                 mimetype=mime,
             )
 
-            safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
-            system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
-            final_response = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                ]
-            )
-            message_text = final_response["message"].get("content", "").strip() or "Here's your generated image!"
+            message_text = await self._celebrate(llm_client, user_prompt)
             return [image_data, message_text]
         except Exception as e:
             return f"Failed to queue prompt: {type(e).__name__}: {e}"
@@ -341,13 +361,9 @@ class ComfyUIImagePlugin(ToolPlugin):
 
         try:
             neg = (args or {}).get("negative_prompt", "") or ""
-            w = (args or {}).get("width")
-            h = (args or {}).get("height")
 
-            # Generate the image via your ComfyUI helper
-            image_bytes = await asyncio.to_thread(
-                ComfyUIImagePlugin.process_prompt, user_prompt, neg, w, h
-            )
+            image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
+
             mime, ext = self._infer_mime_and_ext(image_bytes)
             file_name = f"generated_comfyui.{ext}"
 
@@ -358,21 +374,7 @@ class ComfyUIImagePlugin(ToolPlugin):
                 mimetype=mime,
             )
 
-            # Optional short celebratory text via the LLM
-            message_text = "Here’s your generated image!"
-            if llm_client is not None:
-                safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
-                system_msg = (
-                    f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
-                )
-                final_response = await llm_client.chat(
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": "Respond with a short, fun message celebrating the image. Do not include any lead-in phrases or instructions — just the message."}
-                    ]
-                )
-                message_text = (final_response["message"].get("content", "") or "").strip() or message_text
-
+            message_text = await self._celebrate(llm_client, user_prompt)
             return [image_payload, message_text]
 
         except Exception as e:
