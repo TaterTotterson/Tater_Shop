@@ -4,7 +4,6 @@ import json
 import uuid
 import requests
 import asyncio
-import base64
 import secrets
 import copy
 from PIL import Image
@@ -334,7 +333,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                 {
                     "type": "video",
                     "name": file_name,
-                    "data": base64.b64encode(animated_bytes).decode("utf-8"),
+                    "data": animated_bytes,
                     "mimetype": mime
                 },
                 followup_text

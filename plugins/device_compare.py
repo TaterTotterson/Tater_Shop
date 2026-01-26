@@ -6,7 +6,6 @@ import asyncio
 import logging
 from typing import List, Dict, Any
 import requests
-import base64
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from plugin_base import ToolPlugin
@@ -678,7 +677,7 @@ class DeviceComparePlugin(ToolPlugin):
             "type": "image",
             "mimetype": "image/png",
             "name": name,
-            "data": base64.b64encode(png_bytes).decode("ascii"),
+            "data": png_bytes,
         }
 
     # ---------- platform handlers ----------
@@ -749,7 +748,7 @@ class DeviceComparePlugin(ToolPlugin):
     # ---------- Matrix ----------
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         """
-        Returns image payloads with base64 'data' so the Matrix platform can upload them
+        Returns image payloads with raw bytes so the Matrix platform can upload them
         (and auto-encrypt via 'file' when the room is E2EE).
         """
         if llm_client is None:
