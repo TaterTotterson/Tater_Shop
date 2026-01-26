@@ -615,7 +615,7 @@
     {
       "id": "vision_describer",
       "name": "Vision Describer",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Describe the most recent image using a vision-capable model.",
       "platforms": [
@@ -628,7 +628,7 @@
       "settings_category": "Vision",
       "tags": [],
       "entry": "plugins/vision_describer.py",
-      "sha256": "d5f94a134c452d91438eb1e0cc3ca93ec1d7d4ec039be8167d2d66d3e230e3c2"
+      "sha256": "4734b709628cfdd32a3a6ee8476772a8234277605a7f72469f1ff37e08d19c31"
     },
     {
       "id": "voicepe_remote_timer",
