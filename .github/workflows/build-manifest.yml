@@ -1,0 +1,40 @@
+# .github/workflows/build-manifest.yml
+name: Build manifest
+
+on:
+  push:
+    paths:
+      - "plugins/**.py"
+      - "tools/generate_manifest.py"
+      - ".github/workflows/build-manifest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate manifest
+        run: python tools/generate_manifest.py
+
+      - name: Commit manifest if changed
+        run: |
+          if git diff --quiet manifest.json; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "chore: update manifest"
+          git push
