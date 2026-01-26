@@ -97,8 +97,8 @@
       "notifier": false,
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
-      "entry": "plugins/comfyui_image_video_plugin.py",
-      "sha256": "4f5686bb8e5b1d56ecace25403a419cc2579e108b7bb55d1ad2f5a2bc6746533"
+      "entry": "plugins/comfyui_image_video.py",
+      "sha256": "e0bd19a4e4e2f9b375d1af4993e2dc163b39b31bc537a98a38969ecfe6364e3f"
     },
     {
       "id": "comfyui_music_video",
