@@ -7,10 +7,15 @@
   />
 </p>
 
-## 🧩 Tater Plugin Overview
+## 🧩 Tater Plugin Store (Tater Shop)
 
-The following plugins can be triggered simply by **asking Tater** (after enabling them), for example:  
-Tater summarize this YouTube video https://youtube.com/watch?v=000000
+Welcome to the **Tater Shop** — the live plugin distribution system for Tater.
+
+Plugins are no longer bundled with Tater itself.  
+This repository is the **release channel** for all Tater plugins.
+
+👉 Main Tater repository:  
+https://github.com/TaterTotterson/Tater
 
 ### 💬 Interactive / Conversational Plugins
 
