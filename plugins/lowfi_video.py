@@ -3,7 +3,6 @@ import os
 import json
 import uuid
 import asyncio
-import base64
 import requests
 import subprocess
 import websocket
@@ -789,7 +788,7 @@ class LowfiVideoPlugin(ToolPlugin):
                 # 3) Mux to final MP4 (with crossfaded audio)
                 final_path = await self._mux(loop_clip_path, audio_path, video_seconds=video_minutes * 60)
 
-                # 4) Read & return (inline base64)
+                # 4) Read & return (raw bytes)
                 final_bytes = await asyncio.to_thread(lambda: open(final_path, "rb").read())
 
                 # 5) Follow-up message
@@ -803,7 +802,7 @@ class LowfiVideoPlugin(ToolPlugin):
                     {
                         "type": "video",
                         "name": "lofi_video.mp4",
-                        "data": base64.b64encode(final_bytes).decode("utf-8"),
+                        "data": final_bytes,
                         "mimetype": "video/mp4"
                     },
                     followup_text

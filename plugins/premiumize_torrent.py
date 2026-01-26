@@ -156,6 +156,22 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         return header + (body or "_No files returned by Premiumize._")
 
     # ------------------- Core worker (bytes-based) -------------------
+    @staticmethod
+    def _file_bytes_from_payload(file_data: dict) -> bytes:
+        data = file_data.get("data")
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if data is None:
+            data = file_data.get("bytes")
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+        if isinstance(data, str) and data:
+            try:
+                return base64.b64decode(data)
+            except Exception:
+                return b""
+        return b""
+
     @classmethod
     async def process_torrent_bytes(cls, filename: str, torrent_bytes: bytes, max_response_length=2000) -> str:
         """
@@ -192,9 +208,8 @@ class PremiumizeTorrentPlugin(ToolPlugin):
             return ""
 
         filename = file_data.get("name") or "file.torrent"
-        try:
-            torrent_bytes = base64.b64decode(file_data.get("data") or "")
-        except Exception:
+        torrent_bytes = self._file_bytes_from_payload(file_data)
+        if not torrent_bytes:
             await channel.send(content="Could not read the torrent data.")
             return ""
 
@@ -285,9 +300,8 @@ class PremiumizeTorrentPlugin(ToolPlugin):
                 return f"{prefix}Please upload a `.torrent` file before using this tool."
 
             filename = file_data.get("name") or "file.torrent"
-            try:
-                torrent_bytes = base64.b64decode(file_data.get("data") or "")
-            except Exception:
+            torrent_bytes = self._file_bytes_from_payload(file_data)
+            if not torrent_bytes:
                 return f"{prefix}Could not read the torrent data."
 
             result = await self.process_torrent_bytes(filename, torrent_bytes, max_response_length=3800)

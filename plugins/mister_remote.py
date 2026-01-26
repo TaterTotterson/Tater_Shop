@@ -1,5 +1,4 @@
 import os, json, asyncio, logging, re, time, difflib, requests, mimetypes
-import base64
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor
@@ -388,7 +387,7 @@ class MisterRemotePlugin(ToolPlugin):
             image_payload = {
                 "type": "image",
                 "name": filename,
-                "data": base64.b64encode(content).decode("utf-8"),
+                "data": content,
                 "mimetype": mimetype,
             }
             caption = f"Screenshot captured: `{filename}`"

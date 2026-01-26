@@ -138,7 +138,7 @@ class AutomaticPlugin(ToolPlugin):
                     {
                         "type": "image",
                         "name": "generated_image.png",
-                        "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        "data": image_bytes,
                         "mimetype": "image/png"
                     },
                     reply
@@ -160,7 +160,7 @@ class AutomaticPlugin(ToolPlugin):
                 image_data = {
                     "type": "image",
                     "name": "generated_image.png",
-                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                    "data": image_bytes,
                     "mimetype": "image/png"
                 }
                 message_text = await self._respond_to_image(prompt_text, image_bytes, llm_client)
