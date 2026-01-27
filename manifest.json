@@ -110,10 +110,10 @@
         "webui"
       ],
       "notifier": false,
-      "settings_category": "ComfyUI Music Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "41c613fdb4c926db435fbb92ba31629f5929d8a3597ad2caf80816db515dd0cb"
+      "sha256": "fc8ae7d6809f0a6cb7b344653583024a680c87fd053c1064ee969bcc71df5e94"
     },
     {
       "id": "comfyui_video_plugin",
@@ -125,10 +125,10 @@
         "webui"
       ],
       "notifier": false,
-      "settings_category": "ComfyUI Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "ffbb09db0c33adefc36691e7ad7b650aee55414f750c923c77bca85399356e50"
+      "sha256": "4a62af4236b4a631fc085458a76ef0b13c800ef1e4157948f8a7e41210247884"
     },
     {
       "id": "device_compare",
@@ -317,10 +317,10 @@
         "webui"
       ],
       "notifier": false,
-      "settings_category": "Lofi Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "829a62327f07ba70ce21379918d9254d804ddf9ca2d37ace15fb5a678dc80763"
+      "sha256": "3636ba0b23ccbb830bfc1ca95f7840865b94b2906a2bdf0b6bcbc63a78bcc8f4"
     },
     {
       "id": "mister_remote",
