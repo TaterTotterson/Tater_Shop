@@ -12,6 +12,8 @@ from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
+SETTINGS_CATEGORY = "ComfyUI Video"
+
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
         raise TypeError("binary must be bytes")
@@ -25,7 +27,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 
 
 class _ComfyUIImageHelper:
-    settings_category = "ComfyUI Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http():
@@ -164,7 +166,7 @@ class _ComfyUIImageHelper:
 
 
 class _ComfyUIImageVideoHelper:
-    settings_category = "ComfyUI Animate Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http() -> str:
@@ -336,7 +338,7 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolPlugin):
     name = "comfyui_video_plugin"
     plugin_name = "ComfyUI Video"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -348,8 +350,45 @@ class ComfyUIVideoPlugin(ToolPlugin):
     plugin_dec = "Create a short video from a text prompt by stitching ComfyUI-generated clips."
     pretty_name = "Your Video"
     platforms = ["webui"]
-    settings_category = "ComfyUI Video"
+    settings_category = SETTINGS_CATEGORY
     required_settings = {
+        "COMFYUI_URL": {
+            "label": "ComfyUI URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "The base URL for the ComfyUI API (do not include endpoint paths)."
+        },
+        "COMFYUI_WORKFLOW": {
+            "label": "Image Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for image generation."
+        },
+        "IMAGE_RESOLUTION": {
+            "label": "Image Resolution",
+            "type": "select",
+            "default": "720p",
+            "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
+            "description": "Resolution for the base image used in the animation."
+        },
+        "COMFYUI_VIDEO_URL": {
+            "label": "ComfyUI Video URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "ComfyUI endpoint for image-to-video workflows."
+        },
+        "COMFYUI_VIDEO_WORKFLOW": {
+            "label": "Video Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for animation."
+        },
+        "LENGTH": {
+            "label": "Animation Length (seconds)",
+            "type": "number",
+            "default": 10,
+            "description": "Length in seconds for each animated clip."
+        },
         "VIDEO_RESOLUTION": {
             "label": "Video Resolution",
             "type": "select",
