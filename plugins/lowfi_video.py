@@ -14,6 +14,8 @@ from math import ceil
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
 
+SETTINGS_CATEGORY = "Lofi Video"
+
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
         raise TypeError("binary must be bytes")
@@ -29,7 +31,7 @@ CLIENT_ID = str(uuid.uuid4())
 
 
 class _ComfyUIImageHelper:
-    settings_category = "ComfyUI Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http():
@@ -168,7 +170,7 @@ class _ComfyUIImageHelper:
 
 
 class _ComfyUIImageVideoHelper:
-    settings_category = "ComfyUI Animate Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http() -> str:
@@ -355,10 +357,47 @@ class LowfiVideoPlugin(ToolPlugin):
     plugin_dec = "Create a cozy lofi video by generating music and looping a matching animation."
     pretty_name = "Your Lofi Video"
     waiting_prompt_template = "Generate a fun, cozy message telling the user you're creating their lofi music video right now. Only output that message."
-    settings_category = "Lofi Video"
+    settings_category = SETTINGS_CATEGORY
     platforms = ["webui"]
 
     required_settings = {
+        "COMFYUI_URL": {
+            "label": "ComfyUI URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "The base URL for the ComfyUI API (do not include endpoint paths)."
+        },
+        "COMFYUI_WORKFLOW": {
+            "label": "Image Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for image generation."
+        },
+        "IMAGE_RESOLUTION": {
+            "label": "Image Resolution",
+            "type": "select",
+            "default": "720p",
+            "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
+            "description": "Resolution for the base image used in the animation."
+        },
+        "COMFYUI_VIDEO_URL": {
+            "label": "ComfyUI Video URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "ComfyUI endpoint for image-to-video workflows."
+        },
+        "COMFYUI_VIDEO_WORKFLOW": {
+            "label": "Video Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for image animation."
+        },
+        "LENGTH": {
+            "label": "Animation Length (seconds)",
+            "type": "number",
+            "default": 10,
+            "description": "Length in seconds for the generated loop clip."
+        },
         "COMFYUI_AUDIO_URL": {
             "label": "ComfyUI Audio URL",
             "type": "string",
