@@ -19,6 +19,8 @@ from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 from helpers import redis_client, run_comfy_prompt
 
+SETTINGS_CATEGORY = "ComfyUI Music Video"
+
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
         raise TypeError("binary must be bytes")
@@ -35,7 +37,7 @@ logger.setLevel(logging.INFO)
 
 
 class _ComfyUIImageHelper:
-    settings_category = "ComfyUI Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http():
@@ -174,7 +176,7 @@ class _ComfyUIImageHelper:
 
 
 class _ComfyUIImageVideoHelper:
-    settings_category = "ComfyUI Animate Image"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_base_http() -> str:
@@ -345,7 +347,7 @@ class _ComfyUIImageVideoHelper:
 
 
 class _ComfyUIAudioAceHelper:
-    settings_category = "ComfyUI Audio Ace"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def _settings():
@@ -354,7 +356,9 @@ class _ComfyUIAudioAceHelper:
     @staticmethod
     def get_base_http():
         settings = _ComfyUIAudioAceHelper._settings()
-        url = (settings.get("COMFYUI_AUDIO_ACE_URL") or "").strip() or "http://localhost:8188"
+        raw = settings.get("COMFYUI_AUDIO_ACE_URL", b"")
+        url = raw.decode("utf-8").strip() if isinstance(raw, (bytes, bytearray)) else (raw or "").strip()
+        url = url or "http://localhost:8188"
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "http://" + url
         return url.rstrip("/")
@@ -543,7 +547,7 @@ class _ComfyUIAudioAceHelper:
 
 
 class _VisionHelper:
-    settings_category = "Vision"
+    settings_category = SETTINGS_CATEGORY
 
     @staticmethod
     def get_vision_settings():
@@ -609,7 +613,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolPlugin):
     name = "comfyui_music_video"
     plugin_name = "ComfyUI Music Video"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -622,8 +626,63 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
     pretty_name = "Your Music Video"
     platforms = ["webui"]
     waiting_prompt_template = "Generate a fun, upbeat message saying you're composing the full music video now! Only output that message."
-    settings_category = "ComfyUI Music Video"
+    settings_category = SETTINGS_CATEGORY
     required_settings = {
+        "COMFYUI_URL": {
+            "label": "ComfyUI URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "The base URL for the ComfyUI API (do not include endpoint paths)."
+        },
+        "COMFYUI_WORKFLOW": {
+            "label": "Image Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for image generation."
+        },
+        "IMAGE_RESOLUTION": {
+            "label": "Image Resolution",
+            "type": "select",
+            "default": "720p",
+            "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
+            "description": "Resolution for the base image used in animations."
+        },
+        "COMFYUI_VIDEO_URL": {
+            "label": "ComfyUI Video URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "ComfyUI endpoint for image-to-video workflows."
+        },
+        "COMFYUI_VIDEO_WORKFLOW": {
+            "label": "Video Workflow Template (JSON)",
+            "type": "file",
+            "default": "",
+            "description": "Upload your ComfyUI JSON workflow template for animation."
+        },
+        "LENGTH": {
+            "label": "Animation Length (seconds)",
+            "type": "number",
+            "default": 10,
+            "description": "Length in seconds for each animation clip."
+        },
+        "COMFYUI_AUDIO_ACE_URL": {
+            "label": "ComfyUI Audio Ace URL",
+            "type": "string",
+            "default": "http://localhost:8188",
+            "description": "ComfyUI endpoint for AceStep audio generation."
+        },
+        "api_base": {
+            "label": "Vision API Base URL",
+            "description": "OpenAI-compatible base URL (e.g., http://127.0.0.1:1234).",
+            "type": "text",
+            "default": "http://127.0.0.1:1234"
+        },
+        "model": {
+            "label": "Vision Model",
+            "description": "OpenAI-compatible model name (e.g., qwen2.5-vl-7b-instruct, gemma-3-12b-it, etc.).",
+            "type": "text",
+            "default": "gemma3-27b-abliterated-dpo"
+        },
         "MUSIC_VIDEO_RESOLUTION": {
             "label": "ComfyUI Animation Resolution",
             "type": "select",
