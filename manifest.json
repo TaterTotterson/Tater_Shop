@@ -103,32 +103,32 @@
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "platforms": [
         "webui"
       ],
       "notifier": false,
-      "settings_category": "ComfyUI Music Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "41c613fdb4c926db435fbb92ba31629f5929d8a3597ad2caf80816db515dd0cb"
+      "sha256": "17ca6bdb9cb585e56d8d49185146fc85053633e9adad32a0e810998c392ea9d9"
     },
     {
       "id": "comfyui_video_plugin",
       "name": "ComfyUI Video",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
       "platforms": [
         "webui"
       ],
       "notifier": false,
-      "settings_category": "ComfyUI Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "ffbb09db0c33adefc36691e7ad7b650aee55414f750c923c77bca85399356e50"
+      "sha256": "b9258806db2780365a61fa569432116446b4ebe0ae067e027546e092fb1bc3da"
     },
     {
       "id": "device_compare",
@@ -310,17 +310,17 @@
     {
       "id": "lowfi_video",
       "name": "Lofi Video",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Create a cozy lofi video by generating music and looping a matching animation.",
       "platforms": [
         "webui"
       ],
       "notifier": false,
-      "settings_category": "Lofi Video",
+      "settings_category": null,
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "829a62327f07ba70ce21379918d9254d804ddf9ca2d37ace15fb5a678dc80763"
+      "sha256": "c236e55c7a6cfc853fd4e4cb708e6b338f5762a5ddfc9280a4e324e9be7e3407"
     },
     {
       "id": "mister_remote",
