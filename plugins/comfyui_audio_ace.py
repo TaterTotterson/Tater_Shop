@@ -29,7 +29,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         '{\n'
@@ -546,13 +546,14 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
 
     class _HA:
         def __init__(self):
-            s = redis_client.hgetall("plugin_settings: Home Assistant") or redis_client.hgetall("plugin_settings:Home Assistant")
-            if not s:
-                s = {}
-            self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-            token = s.get("HA_TOKEN")
+            s = redis_client.hgetall("homeassistant_settings") or {}
+            self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+            token = (s.get("HA_TOKEN") or "").strip()
             if not token:
-                raise ValueError("HA_TOKEN missing in plugin settings.")
+                raise ValueError(
+                    "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                )
             self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
         def _req(self, method: str, path: str, json=None, timeout=120):

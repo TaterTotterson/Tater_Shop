@@ -17,12 +17,15 @@ class HAClient:
     """Simple Home Assistant REST API helper (settings from Redis)."""
 
     def __init__(self):
-        settings = redis_client.hgetall("plugin_settings:Home Assistant Control") or {}
+        settings = redis_client.hgetall("homeassistant_settings") or {}
 
-        self.base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        self.token = settings.get("HA_TOKEN")
+        self.base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        self.token = (settings.get("HA_TOKEN") or "").strip()
         if not self.token:
-            raise ValueError("Home Assistant token (HA_TOKEN) not set in plugin settings.")
+            raise ValueError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         self.headers = {
             "Authorization": f"Bearer {self.token}",
@@ -55,7 +58,7 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     pretty_name = "Home Assistant Control"
 
@@ -85,18 +88,6 @@ class HAControlPlugin(ToolPlugin):
     )
 
     required_settings = {
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance."
-        },
-        "HA_TOKEN": {
-            "label": "Long-Lived Access Token",
-            "type": "string",
-            "default": "",
-            "description": "A Home Assistant long-lived token for API access."
-        },
         "HA_CATALOG_CACHE_SECONDS": {
             "label": "Catalog Cache Seconds",
             "type": "string",
@@ -960,7 +951,10 @@ class HAControlPlugin(ToolPlugin):
     async def _handle(self, args, llm_client):
         client = self._get_client()
         if not client:
-            return "Home Assistant is not configured. Please set HA_BASE_URL and HA_TOKEN in the plugin settings."
+            return (
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         query = (args.get("query") or "").strip()
         if not query:

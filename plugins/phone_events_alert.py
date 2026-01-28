@@ -38,7 +38,7 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
     name = "phone_events_alert"
     plugin_name = "Phone Events Alert"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     plugin_dec = "Capture a camera snapshot, describe it with vision AI, and send it to your phone (with cooldown + priority)."
     pretty_name = "Phone Events Alert"
@@ -67,20 +67,6 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     platforms = ["automation"]
 
     required_settings = {
-        # ---- Home Assistant ----
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance.",
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Access Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in HA: Profile → Long-Lived Access Tokens.",
-        },
-
         # Primary + additional notify services (up to 5)
         "MOBILE_NOTIFY_SERVICE": {
             "label": "Notify service #1 (ex: notify.mobile_app_taters_iphone)",
@@ -390,8 +376,14 @@ class PhoneEventsAlertPlugin(ToolPlugin):
         message: str,
         priority: str,
     ) -> Dict[str, Any]:
-        if not ha_base or not ha_token:
-            return {"ok": False, "error": "HA_BASE_URL / HA_TOKEN not configured."}
+        if not ha_token:
+            return {
+                "ok": False,
+                "error": (
+                    "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                ),
+            }
         if not notify_service:
             return {"ok": False, "error": "No notify service configured."}
 
@@ -463,8 +455,9 @@ class PhoneEventsAlertPlugin(ToolPlugin):
     async def _run(self, args: Dict[str, Any]) -> Dict[str, Any]:
         s = self._s()
 
-        ha_base = (s.get("HA_BASE_URL") or "").strip()
-        ha_token = (s.get("HA_TOKEN") or "").strip()
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        ha_token = (ha_settings.get("HA_TOKEN") or "").strip()
         notify_services = self._get_notify_services(s)
 
         vis_base = (s.get("VISION_API_BASE") or "http://127.0.0.1:1234").strip()
@@ -479,6 +472,14 @@ class PhoneEventsAlertPlugin(ToolPlugin):
 
         if not camera:
             raise ValueError("Missing 'camera' (example: camera.front_door_high).")
+        if not ha_token:
+            return {
+                "ok": False,
+                "error": (
+                    "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                ),
+            }
 
         # Cooldown FIRST
         try:

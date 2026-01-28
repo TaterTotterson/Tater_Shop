@@ -31,7 +31,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     """
     name = "doorbell_alert"
     plugin_name = "Doorbell Alert"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
@@ -53,19 +53,6 @@ class DoorbellAlertPlugin(ToolPlugin):
 
     settings_category = "Doorbell Alert"
     required_settings = {
-        # ---- Home Assistant ----
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance."
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in HA: Profile → Long-Lived Access Tokens."
-        },
         "TTS_ENTITY": {
             "label": "TTS Entity",
             "type": "string",
@@ -147,10 +134,14 @@ class DoorbellAlertPlugin(ToolPlugin):
         return s or {}
 
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
-        base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = s.get("HA_TOKEN") or ""
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
         if not token:
-            raise ValueError("HA_TOKEN is missing in Doorbell Alert settings.")
+            raise ValueError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
         time_entity = (s.get("TIME_SENSOR_ENTITY") or s.get("HA_TIME_ENTITY") or "sensor.date_time_iso").strip()
         return {"base": base, "token": token, "tts_entity": tts_entity, "time_entity": time_entity}
