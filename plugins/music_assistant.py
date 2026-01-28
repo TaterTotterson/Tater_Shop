@@ -39,7 +39,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "50"
 
     usage = (
