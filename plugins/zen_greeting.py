@@ -27,7 +27,7 @@ class ZenGreetingPlugin(ToolPlugin):
     """
     name = "zen_greeting"
     plugin_name = "Zen Greeting"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     pretty_name = "Zen Greeting"
 
@@ -54,18 +54,6 @@ class ZenGreetingPlugin(ToolPlugin):
     settings_category = "Zen Greeting"
 
     required_settings = {
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance."
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in HA: Profile → Long-Lived Access Tokens."
-        },
         "TIME_SENSOR_ENTITY": {
             "label": "Time Sensor (ISO)",
             "type": "string",
@@ -97,10 +85,14 @@ class ZenGreetingPlugin(ToolPlugin):
         return s or {}
 
     def _ha(self, s: Dict[str, str]) -> Dict[str, str]:
-        base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
         if not token:
-            raise ValueError("HA_TOKEN is missing in Zen Greeting settings.")
+            raise ValueError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
         time_sensor = (s.get("TIME_SENSOR_ENTITY") or "sensor.date_time_iso").strip()
         return {"base": base, "token": token, "time_sensor": time_sensor}
 
