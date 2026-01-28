@@ -25,6 +25,7 @@ FIELDS = {
     "tags",
 }
 
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -32,11 +33,51 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
 def literal(node):
     try:
         return ast.literal_eval(node)
     except Exception:
         return None
+
+
+def normalize_platforms(plats) -> list[str]:
+    """
+    Normalize platforms into a lowercased list[str] with stable unique ordering.
+    Accepts:
+      - None
+      - "discord"
+      - ["Discord", "webui", ...]
+    """
+    if not plats:
+        return []
+    if isinstance(plats, str):
+        plats = [plats]
+    if not isinstance(plats, list):
+        return []
+    out: list[str] = []
+    for p in plats:
+        if not p:
+            continue
+        out.append(str(p).strip().lower())
+    # unique, stable order
+    seen = set()
+    uniq: list[str] = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def ensure_tag(plats: list[str], tag: str) -> list[str]:
+    tag = str(tag).strip().lower()
+    if not tag:
+        return plats
+    if tag not in plats:
+        plats.append(tag)
+    return plats
+
 
 def extract_plugin_meta(py_file: Path) -> dict:
     tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
@@ -44,7 +85,7 @@ def extract_plugin_meta(py_file: Path) -> dict:
     class_assigns = {}
     for n in tree.body:
         if isinstance(n, ast.ClassDef):
-            # We’ll just take the first class that looks like a plugin (inherits ToolPlugin or has fields)
+            # Take the first class that looks like a plugin (inherits ToolPlugin or has fields)
             base_names = []
             for b in n.bases:
                 if isinstance(b, ast.Name):
@@ -53,7 +94,7 @@ def extract_plugin_meta(py_file: Path) -> dict:
                     base_names.append(b.attr)
 
             looks_like_plugin = ("ToolPlugin" in base_names)
-            # Grab class-level Assign nodes
+
             assigns = {}
             for stmt in n.body:
                 if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
@@ -73,17 +114,27 @@ def extract_plugin_meta(py_file: Path) -> dict:
     display = class_assigns.get("plugin_name") or class_assigns.get("pretty_name") or pid
     desc = class_assigns.get("plugin_dec") or class_assigns.get("description") or ""
 
+    plats = normalize_platforms(class_assigns.get("platforms") or [])
+    is_notifier = bool(class_assigns.get("notifier", False))
+
+    # Backward compatible:
+    # - keep notifier boolean field
+    # - ALSO add "notifier" into platforms so the Shop can filter by platform
+    if is_notifier:
+        plats = ensure_tag(plats, "notifier")
+
     return {
         "id": pid,
         "name": display,
         "version": class_assigns.get("version", "0.0.0"),
         "min_tater_version": class_assigns.get("min_tater_version", "0.0.0"),
         "description": desc,
-        "platforms": list(class_assigns.get("platforms") or []),
-        "notifier": bool(class_assigns.get("notifier", False)),
+        "platforms": plats,
+        "notifier": is_notifier,
         "settings_category": class_assigns.get("settings_category", None),
         "tags": list(class_assigns.get("tags") or []),
     }
+
 
 def main():
     if not PLUGINS_DIR.exists():
@@ -106,7 +157,10 @@ def main():
             errors.append({"file": py_file.name, "error": str(e)})
 
     manifest = {"schema": SCHEMA_VERSION, "plugins": plugins}
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    MANIFEST_PATH.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8"
+    )
 
     if errors:
         print("Manifest build errors:")
@@ -115,6 +169,7 @@ def main():
         raise SystemExit(1)
 
     print(f"Wrote {MANIFEST_PATH} with {len(plugins)} plugins")
+
 
 if __name__ == "__main__":
     main()
