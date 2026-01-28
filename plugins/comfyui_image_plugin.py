@@ -7,6 +7,7 @@ import secrets
 import copy
 import requests
 import imghdr
+from typing import Optional, Tuple
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
@@ -27,17 +28,20 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
         '  "function": "comfyui_image_plugin",\n'
         '  "arguments": {\n'
         '    "prompt": "<Text prompt for the image>",\n'
+        '    "negative_prompt": "<Optional negative prompt>",\n'
+        '    "width": 1024,\n'
+        '    "height": 1024\n'
         "  }\n"
         "}\n"
     )
-    description = "Draws a picture using a prompt provided by the user using ComfyUI."
+    description = "Draws a picture from a text prompt using your ComfyUI workflow."
     plugin_dec = "Generate a still image from a text prompt using your ComfyUI workflow."
     pretty_name = "Your Image"
     settings_category = "ComfyUI Image"
@@ -53,7 +57,7 @@ class ComfyUIImagePlugin(ToolPlugin):
             "type": "select",
             "default": "720p",
             "options": ["144p", "240p", "360p", "480p", "720p", "1080p"],
-            "description": "Resolution for generated images.",
+            "description": "Default resolution for generated images (used when width/height are not provided).",
         },
         "COMFYUI_WORKFLOW": {
             "label": "Workflow Template (JSON)",
@@ -83,7 +87,6 @@ class ComfyUIImagePlugin(ToolPlugin):
 
     @staticmethod
     def get_base_ws(base_http: str) -> str:
-        # http://host:8188 -> ws://host:8188 ; https -> wss
         scheme = "wss" if base_http.startswith("https://") else "ws"
         return base_http.replace("http", scheme, 1)
 
@@ -105,9 +108,6 @@ class ComfyUIImagePlugin(ToolPlugin):
 
     @staticmethod
     def _get_resolution_from_settings() -> tuple[int, int]:
-        """
-        Always use the resolution selected in WebUI (Redis plugin setting).
-        """
         res_map = {
             "144p": (256, 144),
             "240p": (426, 240),
@@ -118,8 +118,44 @@ class ComfyUIImagePlugin(ToolPlugin):
         }
         settings = redis_client.hgetall(f"plugin_settings:{ComfyUIImagePlugin.settings_category}") or {}
         raw_res = settings.get("IMAGE_RESOLUTION", b"720p")
-        resolution = raw_res.decode("utf-8").strip() if isinstance(raw_res, (bytes, bytearray)) else str(raw_res or "720p").strip()
+        resolution = (
+            raw_res.decode("utf-8").strip()
+            if isinstance(raw_res, (bytes, bytearray))
+            else str(raw_res or "720p").strip()
+        )
         return res_map.get(resolution, (1280, 720))
+
+    @staticmethod
+    def _safe_int(x, fallback: int) -> int:
+        try:
+            v = int(str(x).strip())
+            return v
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _get_job_dimensions(args: dict | None) -> tuple[int, int]:
+        """
+        Priority:
+        1) width/height args (if provided)
+        2) IMAGE_RESOLUTION setting
+        """
+        args = args or {}
+        w0, h0 = ComfyUIImagePlugin._get_resolution_from_settings()
+
+        w = args.get("width", None)
+        h = args.get("height", None)
+
+        if w is None and h is None:
+            return w0, h0
+
+        w = ComfyUIImagePlugin._safe_int(w, w0)
+        h = ComfyUIImagePlugin._safe_int(h, h0)
+
+        # guardrails (Comfy can crash hard on silly dims)
+        w = max(64, min(w, 4096))
+        h = max(64, min(h, 4096))
+        return w, h
 
     # ---------------------------
     # Comfy I/O helpers
@@ -138,39 +174,168 @@ class ComfyUIImagePlugin(ToolPlugin):
         return r.content
 
     # ---------------------------
-    # Prompt injection
+    # Prompt injection (supports linked Primitive nodes)
     # ---------------------------
     @staticmethod
-    def _insert_prompts(workflow: dict, user_prompt: str, negative_prompt: str = ""):
-        positive_found = False
-        negative_found = False
-        encode_nodes = []
+    def _node_title(node: dict) -> str:
+        return ((node.get("_meta", {}) or {}).get("title", "") or "").strip().lower()
+
+    @staticmethod
+    def _set_primitive_string_nodes(workflow: dict, user_prompt: str, negative_prompt: str) -> tuple[bool, bool]:
+        """
+        Supports templates where CLIPTextEncode.text is a link to:
+          - PrimitiveStringMultiline.inputs.value
+          - PrimitiveString.inputs.value
+        Uses _meta.title to distinguish Prompt vs Negative Prompt when possible.
+        """
+        pos_set = False
+        neg_set = False
 
         for node in workflow.values():
             if not isinstance(node, dict):
                 continue
-            if node.get("class_type") == "CLIPTextEncode":
-                encode_nodes.append(node)
-                title = (node.get("_meta", {}).get("title", "") or "").lower()
-                if "positive" in title:
-                    node.setdefault("inputs", {})
-                    node["inputs"]["text"] = user_prompt
-                    node["widgets_values"] = [user_prompt]
-                    positive_found = True
-                elif "negative" in title:
-                    node.setdefault("inputs", {})
-                    node["inputs"]["text"] = negative_prompt
-                    node["widgets_values"] = [negative_prompt]
-                    negative_found = True
 
-        if not positive_found and encode_nodes:
-            encode_nodes[0].setdefault("inputs", {})
-            encode_nodes[0]["inputs"]["text"] = user_prompt
-            encode_nodes[0]["widgets_values"] = [user_prompt]
-        if not negative_found and len(encode_nodes) > 1:
-            encode_nodes[1].setdefault("inputs", {})
-            encode_nodes[1]["inputs"]["text"] = negative_prompt
-            encode_nodes[1]["widgets_values"] = [negative_prompt]
+            ctype = (node.get("class_type") or "").strip()
+            if ctype not in ("PrimitiveStringMultiline", "PrimitiveString"):
+                continue
+
+            title = ComfyUIImagePlugin._node_title(node)
+            node.setdefault("inputs", {})
+
+            # If the template has one "Prompt" and optionally one "Negative" title, respect it.
+            if "negative" in title:
+                node["inputs"]["value"] = negative_prompt or ""
+                neg_set = True
+            elif "prompt" in title or title == "":
+                node["inputs"]["value"] = user_prompt
+                pos_set = True
+
+        return pos_set, neg_set
+
+    @staticmethod
+    def _set_cliptextencode_when_direct(workflow: dict, user_prompt: str, negative_prompt: str) -> None:
+        """
+        Back-compat: if CLIPTextEncode.inputs.text is a literal string (not a link),
+        set it directly. If it's already a link/list, do NOT overwrite it.
+        """
+        encode_nodes = []
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") != "CLIPTextEncode":
+                continue
+            encode_nodes.append(node)
+
+        positive_found = False
+        negative_found = False
+
+        for node in encode_nodes:
+            title = ComfyUIImagePlugin._node_title(node)
+            node.setdefault("inputs", {})
+            cur = node["inputs"].get("text")
+
+            # If cur is a link (list like ["76",0]), don't overwrite.
+            if isinstance(cur, list):
+                continue
+
+            if "negative" in title:
+                node["inputs"]["text"] = negative_prompt or ""
+                node["widgets_values"] = [negative_prompt or ""]
+                negative_found = True
+            elif "positive" in title:
+                node["inputs"]["text"] = user_prompt
+                node["widgets_values"] = [user_prompt]
+                positive_found = True
+
+        # If titles aren't present, fall back to first/second direct text nodes only
+        if not positive_found:
+            for n in encode_nodes:
+                cur = (n.get("inputs") or {}).get("text")
+                if isinstance(cur, list):
+                    continue
+                n.setdefault("inputs", {})
+                n["inputs"]["text"] = user_prompt
+                n["widgets_values"] = [user_prompt]
+                positive_found = True
+                break
+
+        if not negative_found:
+            # pick the next direct one (if any)
+            picked = 0
+            for n in encode_nodes:
+                cur = (n.get("inputs") or {}).get("text")
+                if isinstance(cur, list):
+                    continue
+                if picked == 0:
+                    picked = 1
+                    continue
+                n.setdefault("inputs", {})
+                n["inputs"]["text"] = negative_prompt or ""
+                n["widgets_values"] = [negative_prompt or ""]
+                negative_found = True
+                break
+
+    @staticmethod
+    def _insert_prompts(workflow: dict, user_prompt: str, negative_prompt: str = ""):
+        # 1) Prefer setting Primitive* nodes (keeps links intact)
+        pos_set, neg_set = ComfyUIImagePlugin._set_primitive_string_nodes(workflow, user_prompt, negative_prompt)
+
+        # 2) Back-compat: also set CLIPTextEncode only when it is direct text (not linked)
+        # If primitives were not found, CLIPTextEncode direct injection will still work.
+        ComfyUIImagePlugin._set_cliptextencode_when_direct(workflow, user_prompt, negative_prompt)
+
+        # If we only found a single primitive node and it wasn't clearly titled,
+        # that's still fine — the prompt will flow through via links.
+
+    # ---------------------------
+    # Width/Height injection (supports linked PrimitiveInt nodes)
+    # ---------------------------
+    @staticmethod
+    def _set_dimensions(workflow: dict, w: int, h: int) -> None:
+        """
+        Supports:
+        - PrimitiveInt nodes titled "Width"/"Height" (your Flux2 template)
+        - direct width/height on common latent nodes (older templates)
+        """
+        # 1) Preferred: PrimitiveInt nodes with meta titles
+        width_set = False
+        height_set = False
+
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") != "PrimitiveInt":
+                continue
+            title = ComfyUIImagePlugin._node_title(node)
+            node.setdefault("inputs", {})
+            if "width" in title:
+                node["inputs"]["value"] = int(w)
+                width_set = True
+            elif "height" in title:
+                node["inputs"]["value"] = int(h)
+                height_set = True
+
+        # 2) Back-compat: set direct width/height on common latent nodes (only if fields are direct ints)
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            ctype = node.get("class_type")
+            if ctype not in (
+                "EmptyLatentImage",
+                "EmptySD3LatentImage",
+                "ModelSamplingFlux",
+                "EmptyFlux2LatentImage",
+            ):
+                continue
+
+            node.setdefault("inputs", {})
+            # Only overwrite if these aren't links already
+            if not isinstance(node["inputs"].get("width"), list):
+                node["inputs"]["width"] = int(w)
+            if not isinstance(node["inputs"].get("height"), list):
+                node["inputs"]["height"] = int(h)
+
+        # If titles weren't present, the back-compat path still helps older templates.
 
     # ---------------------------
     # Utils
@@ -197,11 +362,7 @@ class ComfyUIImagePlugin(ToolPlugin):
         return mime, ext
 
     @staticmethod
-    def _fetch_first_image(base_http: str, prompt_id: str, tries: int = 6, delay: float = 0.5) -> bytes:
-        """
-        ComfyUI sometimes writes history a moment after finishing.
-        Poll briefly for the first available image.
-        """
+    def _fetch_first_image(base_http: str, prompt_id: str, tries: int = 10, delay: float = 0.5) -> bytes:
         for _ in range(max(1, tries)):
             hist_all = ComfyUIImagePlugin.get_history(base_http, prompt_id)
             history = hist_all.get(prompt_id, {}) if isinstance(hist_all, dict) else {}
@@ -224,18 +385,13 @@ class ComfyUIImagePlugin(ToolPlugin):
     # Core generation (sync)
     # ---------------------------
     @staticmethod
-    def process_prompt(user_prompt: str, negative_prompt: str = "") -> bytes:
-        """
-        Always uses IMAGE_RESOLUTION from WebUI plugin settings.
-        (No width/height overrides from args.)
-        """
+    def process_prompt(user_prompt: str, negative_prompt: str = "", *, args: Optional[dict] = None) -> bytes:
         base_http = ComfyUIImagePlugin.get_base_http()
         base_ws = ComfyUIImagePlugin.get_base_ws(base_http)
 
-        # Load template and clone per job
         workflow = copy.deepcopy(ComfyUIImagePlugin.get_workflow_template())
 
-        # Inject prompts
+        # Inject prompts (supports linked Primitive nodes and legacy direct text)
         ComfyUIImagePlugin._insert_prompts(workflow, user_prompt, negative_prompt)
 
         # Randomize seed every run
@@ -251,24 +407,14 @@ class ComfyUIImagePlugin(ToolPlugin):
             if "noise_seed" in inputs:
                 inputs["noise_seed"] = int(random_seed)
 
-        # Always use the WebUI-selected resolution
-        w, h = ComfyUIImagePlugin._get_resolution_from_settings()
+        # Set dimensions (supports your Flux2 PrimitiveInt nodes)
+        w, h = ComfyUIImagePlugin._get_job_dimensions(args)
+        ComfyUIImagePlugin._set_dimensions(workflow, w, h)
 
-        # Inject width/height into common latent nodes
-        for node in workflow.values():
-            if isinstance(node, dict) and node.get("class_type") in (
-                "EmptyLatentImage",
-                "EmptySD3LatentImage",
-                "ModelSamplingFlux",
-            ):
-                node.setdefault("inputs", {})
-                node["inputs"]["width"] = int(w)
-                node["inputs"]["height"] = int(h)
-
-        # Run Comfy with per-job client_id & WS
+        # Run ComfyUI job
         prompt_id, _ = run_comfy_prompt(base_http, base_ws, workflow)
 
-        # Robustly fetch the first image
+        # Fetch first image
         return ComfyUIImagePlugin._fetch_first_image(base_http, prompt_id)
 
     # ---------------------------------------
@@ -299,11 +445,15 @@ class ComfyUIImagePlugin(ToolPlugin):
         if not user_prompt:
             return "No prompt provided for ComfyUI."
         try:
-            # Keep negative_prompt optional, but do NOT accept width/height overrides
             neg = (args or {}).get("negative_prompt", "") or ""
 
             async with message.channel.typing():
-                image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
+                image_bytes = await asyncio.to_thread(
+                    ComfyUIImagePlugin.process_prompt,
+                    user_prompt,
+                    neg,
+                    args=args,
+                )
 
                 mime, ext = self._infer_mime_and_ext(image_bytes)
                 file_name = f"generated_comfyui.{ext}"
@@ -330,7 +480,12 @@ class ComfyUIImagePlugin(ToolPlugin):
         try:
             neg = (args or {}).get("negative_prompt", "") or ""
 
-            image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
+            image_bytes = await asyncio.to_thread(
+                ComfyUIImagePlugin.process_prompt,
+                user_prompt,
+                neg,
+                args=args,
+            )
 
             mime, ext = self._infer_mime_and_ext(image_bytes)
             file_name = f"generated_comfyui.{ext}"
@@ -351,10 +506,6 @@ class ComfyUIImagePlugin(ToolPlugin):
     # Matrix
     # ---------------------------------------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        """
-        Return image metadata (binary data) plus a short message.
-        The Matrix platform will upload/send the media and persist history.
-        """
         user_prompt = (args or {}).get("prompt")
         if not user_prompt:
             return "No prompt provided for ComfyUI."
@@ -362,7 +513,12 @@ class ComfyUIImagePlugin(ToolPlugin):
         try:
             neg = (args or {}).get("negative_prompt", "") or ""
 
-            image_bytes = await asyncio.to_thread(ComfyUIImagePlugin.process_prompt, user_prompt, neg)
+            image_bytes = await asyncio.to_thread(
+                ComfyUIImagePlugin.process_prompt,
+                user_prompt,
+                neg,
+                args=args,
+            )
 
             mime, ext = self._infer_mime_and_ext(image_bytes)
             file_name = f"generated_comfyui.{ext}"
