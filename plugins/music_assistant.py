@@ -15,7 +15,6 @@ load_dotenv()
 logger = logging.getLogger("music_assistant")
 logger.setLevel(logging.INFO)
 
-
 def _decode_redis_map(m: Dict[Any, Any]) -> Dict[str, str]:
     """redis hgetall often returns bytes; normalize to plain str."""
     out: Dict[str, str] = {}
@@ -33,11 +32,9 @@ def _decode_redis_map(m: Dict[Any, Any]) -> Dict[str, str]:
         out[k] = v
     return out
 
-
 class RoomPlayerNotFound(RuntimeError):
     """Raised when a requested room cannot be mapped to a media_player entity."""
     pass
-
 
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
@@ -49,17 +46,17 @@ class MusicAssistantPlugin(ToolPlugin):
         "{\n"
         '  "function": "music_assistant",\n'
         '  "arguments": {\n'
-        '    "request": "<what you want to do, e.g. play reggae, play stick figure, stop, next, volume 40>",\n'
-        '    "room": "<optional room name like Kitchen>"\n'
+        '    "request": "<what the user wants to do, e.g. play reggae, play stick figure, stop, next, volume 40>",\n'
+        '    "room": "<room name like Kitchen>"\n'
         "  }\n"
         "}\n"
     )
 
     # Keep short, but acknowledge that room can be inferred from system prompt on some devices
     description = (
-        "Control Music Assistant in Home Assistant using request + optional room. "
+        "Play music and control playback via Music Assistant in Home Assistant."
         "Supports play/queue/pause/resume/stop/next/previous/volume. "
-        "Room is optional; some devices provide room context in the system prompt. "
+        "Some devices provide room context in the system prompt, use it for room unless the user has specified a room"
         "If room is truly unknown, ask the user where to play."
     )
 
@@ -72,6 +69,16 @@ class MusicAssistantPlugin(ToolPlugin):
             "label": "Music Assistant config_entry_id",
             "type": "string",
             "default": "",
+        },
+        "ROOM_MAP": {
+            "label": "Room → Media Player Map (optional)",
+            "type": "string",
+            "default": "",
+            "description": (
+                "Optional. One per line. Example:\n"
+                "\"Kitchen\": \"media_player.sonos_kitchen\"\n"
+                "\"Family Room\": \"media_player.sonos_family_room\""
+            ),
         },
     }
 
@@ -143,6 +150,40 @@ class MusicAssistantPlugin(ToolPlugin):
             return r.json()
 
         return await asyncio.to_thread(_get)
+
+    # -------------------- Room map parsing --------------------
+    def _parse_room_map(self, raw: str) -> Dict[str, str]:
+        """
+        User-friendly input:
+          "Kitchen": "media_player.sonos_kitchen"
+          "Family Room": "media_player.sonos_family_room"
+
+        We auto-wrap in {} and safely remove trailing commas.
+        Returns a dict with lowercase keys for matching.
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return {}
+
+        lines = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.endswith(","):
+                line = line[:-1]
+            lines.append(line)
+
+        text = "{\n" + ",\n".join(lines) + "\n}"
+
+        try:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                return {}
+            return {str(k).strip().lower(): str(v).strip() for k, v in data.items() if k and v}
+        except Exception as e:
+            logger.error(f"[music_assistant] Invalid ROOM_MAP format: {e}")
+            return {}
 
     # -------------------- text helpers --------------------
     def _siri_flatten(self, text: Optional[str]) -> str:
@@ -440,6 +481,20 @@ class MusicAssistantPlugin(ToolPlugin):
         explicit = (args or {}).get("media_player")
         if explicit:
             return explicit
+
+        # NEW: optional ROOM_MAP override (user-friendly lines wrapped into JSON)
+        room_map: Dict[str, str] = {}
+        try:
+            raw = redis_client.hgetall("plugin_settings:Music Assistant") or {}
+            settings = _decode_redis_map(raw)
+            room_map = self._parse_room_map(settings.get("ROOM_MAP", ""))
+        except Exception:
+            room_map = {}
+
+        if room:
+            mapped = room_map.get(room.strip().lower())
+            if mapped:
+                return mapped
 
         states = await self._ha_states()
         players = []
