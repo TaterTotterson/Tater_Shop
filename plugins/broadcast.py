@@ -20,7 +20,7 @@ class BroadcastPlugin(ToolPlugin):
     """
     name = "broadcast"
     plugin_name = "Broadcast"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -40,19 +40,6 @@ class BroadcastPlugin(ToolPlugin):
     settings_category = "Broadcast"
 
     required_settings = {
-        # ---- Home Assistant ----
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance."
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in HA: Profile → Long-Lived Access Tokens."
-        },
         "TTS_ENTITY": {
             "label": "TTS Entity",
             "type": "string",
@@ -176,10 +163,14 @@ class BroadcastPlugin(ToolPlugin):
     async def _broadcast(self, raw_text: str, llm_client) -> str:
         s = self._get_settings()
 
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
         if not token:
-            return "Broadcast plugin is missing HA_TOKEN in settings."
+            return (
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
         players = self._targets(s)
