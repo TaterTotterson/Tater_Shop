@@ -1,4 +1,3 @@
-# .github/workflows/build-manifest.yml
 name: Build manifest
 
 on:
@@ -6,6 +5,7 @@ on:
     paths:
       - "plugins/**.py"
       - "tools/generate_manifest.py"
+      - "tools/generate_readme.py"
       - ".github/workflows/build-manifest.yml"
   workflow_dispatch:
 
@@ -27,14 +27,17 @@ jobs:
       - name: Generate manifest
         run: python tools/generate_manifest.py
 
-      - name: Commit manifest if changed
+      - name: Generate README
+        run: python tools/generate_readme.py
+
+      - name: Commit manifest + README if changed
         run: |
-          if git diff --quiet manifest.json; then
+          if git diff --quiet manifest.json README.md; then
             echo "No changes."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add manifest.json
-          git commit -m "chore: update manifest"
+          git add manifest.json README.md
+          git commit -m "chore: update manifest and README"
           git push
