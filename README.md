@@ -7,18 +7,8 @@
   />
 </p>
 
-## 🧩 Tater Plugin Store (Tater Shop)
-
-Welcome to the **Tater Shop** — the live plugin distribution system for Tater.
-
-Plugins are no longer bundled with Tater itself.  
-This repository is the **release channel** for all Tater plugins.
-
 👉 Main Tater repository:  
 https://github.com/TaterTotterson/Tater
-
-### Plugins
----
 
 <!-- AUTO:PLUGIN_TABLES:BEGIN -->
 ## 🧩 Tater Plugin Store (Tater Shop)
