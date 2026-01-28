@@ -5,6 +5,7 @@
     width="300"
   />
 </p>
+
 <!-- AUTO:PLUGIN_TABLES:BEGIN -->
 ## 🧩 Tater Plugin Store (Tater Shop)
 
