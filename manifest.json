@@ -360,7 +360,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "plugins/music_assistant.py",
-      "sha256": "8be56a5fcf93d28a02549bed3befdfde864d7ead649e8ea2797791bc1d8d10c2"
+      "sha256": "d0436d3439f8679bbbf59db8ea154c06783985a480c0188029f647a95d73f7fe"
     },
     {
       "id": "ntfy_notifier",
