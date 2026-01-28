@@ -29,7 +29,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     name = "voicepe_remote_timer"
     plugin_name = "Voice PE Remote Timer"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -53,18 +53,6 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     plugin_dec = "Start, cancel, or check a Voice PE (ESPHome) timer device."
 
     required_settings = {
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-            "description": "Base URL of your Home Assistant instance.",
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Token",
-            "type": "string",
-            "default": "",
-            "description": "Create in HA: Profile → Long-Lived Access Tokens.",
-        },
         "MAX_SECONDS": {
             "label": "Max Seconds",
             "type": "number",
@@ -101,6 +89,12 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
             or redis_client.hgetall(f"plugin_settings: {self.settings_category}")
             or {}
         )
+
+    def _ha_settings(self) -> dict:
+        settings = redis_client.hgetall("homeassistant_settings") or {}
+        base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (settings.get("HA_TOKEN") or "").strip()
+        return {"base_url": base_url, "token": token}
 
     def _ha_headers(self, token: str) -> dict:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -150,8 +144,9 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
           seconds_entity, start_entity, cancel_entity, remaining_entity, running_entity
         """
         s = self._get_settings()
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
         if not token:
             return None
 
@@ -409,9 +404,9 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     async def _is_timer_running(self, context: dict | None = None) -> bool | None:
         s = self._get_settings()
-
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
 
         ents = self._resolve_entities(context=context)
         if not token or not ents:
@@ -438,9 +433,9 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     async def _get_remaining_seconds(self, context: dict | None = None) -> int | None:
         s = self._get_settings()
-
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
 
         ents = self._resolve_entities(context=context)
         if not token or not ents:
@@ -470,11 +465,14 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     async def _start_timer(self, duration_text: str, llm_client, context: dict | None = None) -> str:
         s = self._get_settings()
-
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
         if not token:
-            return "Voice PE Remote Timer is missing HA_TOKEN in settings."
+            return (
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         ents = self._resolve_entities(context=context)
         if not ents:
@@ -533,6 +531,12 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         return (await self._llm_started_message(new_seconds, llm_client)).strip()
 
     async def _status(self, llm_client, context: dict | None = None) -> str:
+        ha = self._ha_settings()
+        if not ha["token"]:
+            return (
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
         running = await self._is_timer_running(context=context)
         if running is None:
             return "I couldn't read the Voice PE running sensor (check plugin settings)."
@@ -569,11 +573,14 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     async def _cancel(self, llm_client, context: dict | None = None) -> str:
         s = self._get_settings()
-
-        ha_base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-        token = (s.get("HA_TOKEN") or "").strip()
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
         if not token:
-            return "Voice PE Remote Timer is missing HA_TOKEN in settings."
+            return (
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         ents = self._resolve_entities(context=context)
         if not ents:

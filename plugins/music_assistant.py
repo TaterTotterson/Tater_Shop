@@ -42,7 +42,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
 
     usage = (
@@ -68,16 +68,6 @@ class MusicAssistantPlugin(ToolPlugin):
     settings_category = "Music Assistant"
 
     required_settings = {
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Access Token",
-            "type": "string",
-            "default": "",
-        },
         "MA_CONFIG_ENTRY_ID": {
             "label": "Music Assistant config_entry_id",
             "type": "string",
@@ -96,8 +86,9 @@ class MusicAssistantPlugin(ToolPlugin):
     def _ha_settings(self) -> Dict[str, str]:
         raw = redis_client.hgetall("plugin_settings:Music Assistant") or {}
         settings = _decode_redis_map(raw)
-        base_url = (settings.get("HA_BASE_URL") or "").rstrip("/")
-        token = settings.get("HA_TOKEN") or ""
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        base_url = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
         entry_id = settings.get("MA_CONFIG_ENTRY_ID") or ""
         return {"base_url": base_url, "token": token, "entry_id": entry_id}
 
@@ -113,8 +104,11 @@ class MusicAssistantPlugin(ToolPlugin):
         timeout: int = 20,
     ) -> Any:
         cfg = self._ha_settings()
-        if not cfg["base_url"] or not cfg["token"]:
-            raise RuntimeError("Home Assistant is not configured. Set HA_BASE_URL and HA_TOKEN in plugin settings.")
+        if not cfg["token"]:
+            raise RuntimeError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
 
         url = f'{cfg["base_url"]}/api/services/{domain}/{service}'
         if return_response:
@@ -135,6 +129,11 @@ class MusicAssistantPlugin(ToolPlugin):
 
     async def _ha_states(self) -> List[Dict[str, Any]]:
         cfg = self._ha_settings()
+        if not cfg["token"]:
+            raise RuntimeError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
         url = f'{cfg["base_url"]}/api/states'
         headers = self._ha_headers(cfg["token"])
 

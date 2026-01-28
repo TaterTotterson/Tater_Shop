@@ -28,7 +28,7 @@ class FindMyPhonePlugin(ToolPlugin):
 
     name = "find_my_phone"
     plugin_name = "Find My Phone"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "50"
     usage = (
         "{\n"
@@ -44,16 +44,6 @@ class FindMyPhonePlugin(ToolPlugin):
     pretty_name = "Finding Your Phone"
     settings_category = "Find My Phone"
     required_settings = {
-        "HA_BASE_URL": {
-            "label": "Home Assistant Base URL",
-            "type": "string",
-            "default": "http://homeassistant.local:8123",
-        },
-        "HA_TOKEN": {
-            "label": "Home Assistant Long-Lived Access Token",
-            "type": "string",
-            "default": "",
-        },
         "MOBILE_NOTIFY_SERVICE": {
             "label": "Notify service (ex: notify.mobile_app_taters_iphone)",
             "type": "string",
@@ -113,18 +103,22 @@ class FindMyPhonePlugin(ToolPlugin):
           - error: str
         """
         settings = self._load_settings()
-        ha_base = settings.get("HA_BASE_URL", "").strip()
-        ha_token = settings.get("HA_TOKEN", "").strip()
+        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        ha_token = (ha_settings.get("HA_TOKEN") or "").strip()
         notify_service_raw = settings.get("MOBILE_NOTIFY_SERVICE", "").strip()
 
         title = (settings.get("DEFAULT_TITLE", "") or "Find My Phone").strip()
         message = (settings.get("DEFAULT_MESSAGE", "") or "Phone alert requested.").strip()
 
-        if not ha_base or not ha_token:
+        if not ha_token:
             return {
                 "ok": False,
                 "count": 0,
-                "error": "Find My Phone is not configured. Please set HA_BASE_URL and HA_TOKEN in plugin settings.",
+                "error": (
+                    "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                ),
             }
 
         if not notify_service_raw:
