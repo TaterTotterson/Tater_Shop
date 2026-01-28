@@ -1,4 +1,3 @@
-
 <p align="center">
   <img 
     src="https://github.com/user-attachments/assets/e0a6e4ba-fa97-4faa-8028-d8aaee6ffda1" 
@@ -6,7 +5,6 @@
     width="300"
   />
 </p>
-
 <!-- AUTO:PLUGIN_TABLES:BEGIN -->
 ## 🧩 Tater Plugin Store (Tater Shop)
 
