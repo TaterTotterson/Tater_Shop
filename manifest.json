@@ -343,6 +343,24 @@
       "sha256": "f5dd2d011c317e9e0d32622106ff6010d081f16b27f43e9deb6009c4b71024c2"
     },
     {
+      "id": "music_assistant",
+      "name": "Music Assistant",
+      "version": "1.0.0",
+      "min_tater_version": "50",
+      "description": "Play music and control playback via Music Assistant in Home Assistant.",
+      "platforms": [
+        "webui",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Music Assistant",
+      "tags": [],
+      "entry": "plugins/music_assistant.py",
+      "sha256": "214712542cae1969a5974f5d7fffc78e1c7a7a86b613f38d1adaf5372a9a3bc3"
+    },
+    {
       "id": "ntfy_notifier",
       "name": "ntfy Notifier",
       "version": "1.0.0",
