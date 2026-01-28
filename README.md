@@ -7,9 +7,6 @@
   />
 </p>
 
-👉 Main Tater repository:  
-https://github.com/TaterTotterson/Tater
-
 <!-- AUTO:PLUGIN_TABLES:BEGIN -->
 ## 🧩 Tater Plugin Store (Tater Shop)
 
