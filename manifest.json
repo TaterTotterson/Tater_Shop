@@ -20,7 +20,7 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Send a one-time spoken announcement to your Home Assistant media players.",
       "platforms": [
@@ -33,12 +33,12 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "plugins/broadcast.py",
-      "sha256": "ffb84bc7c36f7eb6a907f2e4d680d2e611c67c234a2d291c1dda4415acd658a1"
+      "sha256": "2e980d5238bf2f86d41947d0a871872ab919aa1224cea056cfd8770461d2b7bd"
     },
     {
       "id": "camera_event",
       "name": "Camera Event",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Capture a Home Assistant camera snapshot, describe it with vision AI, and log the event.",
       "platforms": [
@@ -48,12 +48,12 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "1885da86240b5f42940b64a29ac1375c46888d8cf792aadd787081380cc5a392"
+      "sha256": "81f2e48e97b68b9cca84ee906b998105aed6e082f1858b23af32143274193dc5"
     },
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "platforms": [
@@ -66,7 +66,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "7256de4541ef242d9c9c9adbee1c681546132cc6a4f801f91973904e10cafbe4"
+      "sha256": "8d608ba39699ed2196129486478a3bc4da1497382f56c45fef8812b3d7b30d65"
     },
     {
       "id": "comfyui_image_plugin",
@@ -163,7 +163,7 @@
     {
       "id": "doorbell_alert",
       "name": "Doorbell Alert",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
       "platforms": [
@@ -173,7 +173,7 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "d9f2da0a8b69b3274b5c9d3190451b9704f3789187028a34c6e28a064f9eca90"
+      "sha256": "cd290c7417c1fc9e3a73b3eaade59330b0442748e839d386488d7a56e7804256"
     },
     {
       "id": "emoji_ai_responder",
@@ -193,7 +193,7 @@
     {
       "id": "events_query",
       "name": "Events Query",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Answer questions about stored household events by area and timeframe.",
       "platforms": [
@@ -205,12 +205,12 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "5e69a05cebd0ef096f474cf42349e177f9fbaaedb22650d24e23442d882f0b70"
+      "sha256": "5b87e80a4ed3a53d4733cfd545010b9f6fe62e75f2ffd4dbf5668a676ab31aa2"
     },
     {
       "id": "events_query_brief",
       "name": "Events Query Brief",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant.",
       "platforms": [
@@ -220,12 +220,12 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "84b3c4ebaba44bd68d0c34f880ff2480a596c1ff954f4621b4b40125094e71c6"
+      "sha256": "570362ce3b63a1dc04cf0a36b965aac9863dbe172acbfef8feec02d52fbca4bc"
     },
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "platforms": [
@@ -238,7 +238,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "plugins/find_my_phone.py",
-      "sha256": "6bc2d5ca1dad1467494075d8a0700ec4aeae9abc8baee44a3679b354f18ee56a"
+      "sha256": "50630a79df03114268e3d21911816b80ad928f3da7193f904c5f7616f160012f"
     },
     {
       "id": "ftp_browser",
@@ -274,7 +274,7 @@
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Control Home Assistant devices, including TV remotes, and read sensors.",
       "platforms": [
@@ -287,7 +287,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "7bd4593766d5c92e0783f0402d988c31cc7ebba0baad72e5f77f38918c96ee4e"
+      "sha256": "9a37f9e4b12f6d1966f4d25b0e89749f8fa31218c5816f411c1cd8199fad1b3b"
     },
     {
       "id": "list_feeds",
@@ -345,7 +345,7 @@
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "platforms": [
@@ -358,7 +358,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "plugins/music_assistant.py",
-      "sha256": "214712542cae1969a5974f5d7fffc78e1c7a7a86b613f38d1adaf5372a9a3bc3"
+      "sha256": "8be56a5fcf93d28a02549bed3befdfde864d7ead649e8ea2797791bc1d8d10c2"
     },
     {
       "id": "ntfy_notifier",
@@ -463,7 +463,7 @@
     {
       "id": "phone_events_alert",
       "name": "Phone Events Alert",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Capture a camera snapshot, describe it with vision AI, and send it to your phone (with cooldown + priority).",
       "platforms": [
@@ -473,7 +473,7 @@
       "settings_category": "Phone Events Alert",
       "tags": [],
       "entry": "plugins/phone_events_alert.py",
-      "sha256": "04d2520954dc8482a389afb997e7f5fb5a4d3a54d265043e796a12717cbda969"
+      "sha256": "1656dda5752dcfe396ce316a6625f16a713babf0c27bd4ad4e189e84c71d3bd9"
     },
     {
       "id": "premiumize_download",
@@ -651,7 +651,7 @@
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "platforms": [
@@ -664,7 +664,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "plugins/voicepe_remote_timer.py",
-      "sha256": "eec8973b5d60c43ded7bff268b1cadac3fda425d43c9955fad58f3f4e72e92af"
+      "sha256": "3fd31c042506d0a97aebaef7221ce66f4fcc6632dc17c7632a66ee38541298ee"
     },
     {
       "id": "watch_feed",
@@ -687,7 +687,7 @@
     {
       "id": "weather_brief",
       "name": "Weather Brief",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Give a short automation-friendly recap of recent weather conditions.",
       "platforms": [
@@ -697,7 +697,7 @@
       "settings_category": "Weather Brief",
       "tags": [],
       "entry": "plugins/weather_brief.py",
-      "sha256": "7c1bbbbeb64f602df7d899ab9d000a80bcf9980d048357b83190dfbfcf5c83ab"
+      "sha256": "ec41a2e309a0922713358d81753c7aab244515fc6c30e60e59a0b47613a486f8"
     },
     {
       "id": "weather_forecast",
@@ -808,7 +808,7 @@
     {
       "id": "zen_greeting",
       "name": "Zen Greeting",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Generate a calming daily greeting and message for dashboards.",
       "platforms": [
@@ -818,7 +818,7 @@
       "settings_category": "Zen Greeting",
       "tags": [],
       "entry": "plugins/zen_greeting.py",
-      "sha256": "ed555131c66e2553645bfc4b03024170db67249fefbe5e7f9e60abdcaaea33ed"
+      "sha256": "534455ea8eb0fba91cf98be63588c95739fcd14543db79871201f46ea85f9cbe"
     }
   ]
 }
