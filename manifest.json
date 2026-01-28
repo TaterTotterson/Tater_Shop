@@ -71,7 +71,7 @@
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "platforms": [
@@ -83,7 +83,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "4dd9d50bf33f50bcd5d2695ec5c8dd1ff04b3b87ab72993cf6976acc758b3491"
+      "sha256": "7302e85a905efd6c07c717910c3d2217f982cb9fe17a14615e731110df7750af"
     },
     {
       "id": "comfyui_image_video",
