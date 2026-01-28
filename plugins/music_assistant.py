@@ -39,7 +39,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "50"
 
     usage = (
@@ -72,10 +72,15 @@ class MusicAssistantPlugin(ToolPlugin):
         },
         "ROOM_MAP": {
             "label": "Room → Media Player Map (optional)",
-            "type": "string",
+            "type": "textarea",
             "default": "",
+            "rows": 10,
             "description": (
                 "Optional. One per line. Example:\n"
+                "\"Kitchen\": \"media_player.sonos_kitchen\"\n"
+                "\"Family Room\": \"media_player.sonos_family_room\""
+            ),
+            "placeholder": (
                 "\"Kitchen\": \"media_player.sonos_kitchen\"\n"
                 "\"Family Room\": \"media_player.sonos_family_room\""
             ),
