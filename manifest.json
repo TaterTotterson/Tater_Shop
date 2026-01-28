@@ -153,7 +153,9 @@
       "version": "1.0.0",
       "min_tater_version": "50",
       "description": "Post RSS summaries to a Discord channel via webhook.",
-      "platforms": [],
+      "platforms": [
+        "notifier"
+      ],
       "notifier": true,
       "settings_category": "Discord Notifier",
       "tags": [],
@@ -366,7 +368,9 @@
       "version": "1.0.0",
       "min_tater_version": "50",
       "description": "Send RSS announcements to an ntfy topic.",
-      "platforms": [],
+      "platforms": [
+        "notifier"
+      ],
       "notifier": true,
       "settings_category": "NTFY Notifier",
       "tags": [],
@@ -569,7 +573,9 @@
       "version": "1.0.0",
       "min_tater_version": "50",
       "description": "Send RSS summaries to a Telegram chat via bot token and chat ID.",
-      "platforms": [],
+      "platforms": [
+        "notifier"
+      ],
       "notifier": true,
       "settings_category": "Telegram Notifier",
       "tags": [],
@@ -780,7 +786,9 @@
       "version": "1.0.0",
       "min_tater_version": "50",
       "description": "Post RSS summaries to a WordPress site via its REST API.",
-      "platforms": [],
+      "platforms": [
+        "notifier"
+      ],
       "notifier": true,
       "settings_category": "WordPress Poster",
       "tags": [],
