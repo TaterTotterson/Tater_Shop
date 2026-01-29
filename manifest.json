@@ -4,7 +4,7 @@
     {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "50",
       "description": "Generate an image from a text prompt using your Automatic1111 server.",
       "platforms": [
@@ -15,7 +15,7 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "bca146f020c6ae93951c867f516aaa0d6b77ac8b221cc436dbcbd4dab277007e"
+      "sha256": "6b4765c5364d571997ba122986905d7a10da11bfb5ca4de81a77a94de9c43ee4"
     },
     {
       "id": "broadcast",
