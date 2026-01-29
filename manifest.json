@@ -347,7 +347,7 @@
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.3",
+      "version": "1.0.5",
       "min_tater_version": "50",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "platforms": [
@@ -360,7 +360,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "plugins/music_assistant.py",
-      "sha256": "3b680bdc73eee46ef129a9195011dc95f7a8e743f280df08f7f7768b3f2efd4f"
+      "sha256": "0ee4d39336b9f2dbabfc684118b2aa28fcae1a96171c9ddd3766c8a25971ff2c"
     },
     {
       "id": "ntfy_notifier",
