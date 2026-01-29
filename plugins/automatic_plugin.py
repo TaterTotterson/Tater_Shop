@@ -23,7 +23,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
     plugin_name = "Automatic1111 Image"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "50"
     usage = (
         "{\n"
