@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import requests
+import aiohttp
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
@@ -14,6 +15,7 @@ from helpers import redis_client, get_tater_name
 load_dotenv()
 logger = logging.getLogger("music_assistant")
 logger.setLevel(logging.INFO)
+
 
 def _decode_redis_map(m: Dict[Any, Any]) -> Dict[str, str]:
     """redis hgetall often returns bytes; normalize to plain str."""
@@ -32,14 +34,16 @@ def _decode_redis_map(m: Dict[Any, Any]) -> Dict[str, str]:
         out[k] = v
     return out
 
+
 class RoomPlayerNotFound(RuntimeError):
     """Raised when a requested room cannot be mapped to a media_player entity."""
     pass
 
+
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.3"
+    version = "1.0.5"
     min_tater_version = "50"
 
     usage = (
@@ -52,7 +56,6 @@ class MusicAssistantPlugin(ToolPlugin):
         "}\n"
     )
 
-    # Keep short, but acknowledge that room can be inferred from system prompt on some devices
     description = (
         "Play music and control playback via Music Assistant in Home Assistant."
         "Supports play/queue/pause/resume/stop/next/previous/volume. "
@@ -76,13 +79,14 @@ class MusicAssistantPlugin(ToolPlugin):
             "default": "",
             "rows": 10,
             "description": (
-                "Optional. One per line. Example:\n"
-                "\"Kitchen\": \"media_player.sonos_kitchen\"\n"
-                "\"Family Room\": \"media_player.sonos_family_room\""
+                "Optional. One per line. Simplest format:\n"
+                "Kitchen: media_player.sonos_kitchen\n"
+                "Family Room: media_player.sonos_family_room\n\n"
+                "Also accepts JSON formats for backwards compatibility."
             ),
             "placeholder": (
-                "\"Kitchen\": \"media_player.sonos_kitchen\"\n"
-                "\"Family Room\": \"media_player.sonos_family_room\""
+                "Kitchen: media_player.sonos_kitchen\n"
+                "Family Room: media_player.sonos_family_room"
             ),
         },
     }
@@ -98,10 +102,14 @@ class MusicAssistantPlugin(ToolPlugin):
     def _ha_settings(self) -> Dict[str, str]:
         raw = redis_client.hgetall("plugin_settings:Music Assistant") or {}
         settings = _decode_redis_map(raw)
-        ha_settings = redis_client.hgetall("homeassistant_settings") or {}
+
+        # IMPORTANT: decode HA settings too (hgetall often returns bytes)
+        ha_raw = redis_client.hgetall("homeassistant_settings") or {}
+        ha_settings = _decode_redis_map(ha_raw)
+
         base_url = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
         token = (ha_settings.get("HA_TOKEN") or "").strip()
-        entry_id = settings.get("MA_CONFIG_ENTRY_ID") or ""
+        entry_id = (settings.get("MA_CONFIG_ENTRY_ID") or "").strip()
         return {"base_url": base_url, "token": token, "entry_id": entry_id}
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
@@ -156,38 +164,213 @@ class MusicAssistantPlugin(ToolPlugin):
 
         return await asyncio.to_thread(_get)
 
+    async def _ha_ws_call(self, msg_type: str) -> Any:
+        """
+        Call a Home Assistant WebSocket command using the SAME HA_TOKEN as REST.
+
+        We do short-lived connect -> query -> disconnect (no subscriptions).
+        """
+        cfg = self._ha_settings()
+        if not cfg["token"]:
+            raise RuntimeError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
+
+        ws_url = f'{cfg["base_url"]}/api/websocket'
+        timeout = aiohttp.ClientTimeout(total=20)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                # 1) auth_required
+                first = await ws.receive_json()
+                if (first or {}).get("type") not in ("auth_required", "auth_ok"):
+                    # Sometimes proxies / errors do weird things
+                    logger.debug(f"[music_assistant] WS first msg: {first}")
+
+                # 2) auth
+                await ws.send_json({"type": "auth", "access_token": cfg["token"]})
+                auth_ok = await ws.receive_json()
+                if auth_ok.get("type") != "auth_ok":
+                    raise RuntimeError(f"HA websocket auth failed: {auth_ok}")
+
+                # 3) request
+                await ws.send_json({"id": 1, "type": msg_type})
+                resp = await ws.receive_json()
+
+                if not resp.get("success", False):
+                    raise RuntimeError(f"HA websocket call failed: {resp}")
+
+                return resp.get("result")
+
+    async def _media_players_for_room_area(self, room: str) -> List[Dict[str, str]]:
+        """
+        Try to reduce the candidate list by using HA Areas/Device/Entity registry via WebSocket.
+
+        Returns a list of:
+          [{"entity_id": "media_player.xyz", "friendly_name": "..."}]
+
+        If the area can't be resolved or has no players assigned, returns [].
+        """
+        room_l = (room or "").strip().lower()
+        if not room_l:
+            return []
+
+        try:
+            areas = await self._ha_ws_call("config/area_registry/list")
+            entities = await self._ha_ws_call("config/entity_registry/list")
+            devices = await self._ha_ws_call("config/device_registry/list")
+        except Exception as e:
+            logger.warning(f"[music_assistant] area-scoped lookup failed (ws): {e}")
+            return []
+
+        # Find matching area_id by name
+        area_id = None
+        for a in (areas or []):
+            if not isinstance(a, dict):
+                continue
+            if (a.get("name") or "").strip().lower() == room_l:
+                area_id = a.get("area_id")
+                break
+
+        if not area_id:
+            return []
+
+        # Map device_id -> area_id
+        device_area: Dict[str, str] = {}
+        for d in (devices or []):
+            if isinstance(d, dict) and d.get("id"):
+                device_area[d["id"]] = d.get("area_id")
+
+        in_area: set = set()
+
+        for e in (entities or []):
+            if not isinstance(e, dict):
+                continue
+            ent_id = (e.get("entity_id") or "").strip()
+            if not ent_id.startswith("media_player."):
+                continue
+
+            ent_area = e.get("area_id")
+            if ent_area == area_id:
+                in_area.add(ent_id)
+                continue
+
+            dev_id = e.get("device_id")
+            if dev_id and device_area.get(dev_id) == area_id:
+                in_area.add(ent_id)
+
+        if not in_area:
+            return []
+
+        # Enrich with friendly_name from /api/states (registry doesn't reliably include it)
+        try:
+            states = await self._ha_states()
+        except Exception:
+            states = []
+
+        players: List[Dict[str, str]] = []
+        for s in states:
+            ent = s.get("entity_id") or ""
+            if ent in in_area:
+                players.append(
+                    {
+                        "entity_id": ent,
+                        "friendly_name": ((s.get("attributes") or {}).get("friendly_name") or ent),
+                    }
+                )
+
+        return players
+
     # -------------------- Room map parsing --------------------
     def _parse_room_map(self, raw: str) -> Dict[str, str]:
         """
-        User-friendly input:
-          "Kitchen": "media_player.sonos_kitchen"
-          "Family Room": "media_player.sonos_family_room"
+        Accepts ROOM_MAP as:
+          - Simple lines:
+              Kitchen: media_player.sonos_kitchen
+              Family Room: media_player.sonos_family_room
 
-        We auto-wrap in {} and safely remove trailing commas.
-        Returns a dict with lowercase keys for matching.
+          - Legacy JSON-ish lines:
+              "Kitchen": "media_player.sonos_kitchen"
+              "Family Room": "media_player.sonos_family_room"
+
+          - Full JSON object:
+              { "Kitchen": "media_player.sonos_kitchen" }
         """
         raw = (raw or "").strip()
         if not raw:
             return {}
 
-        lines = []
+        # normalize smart quotes from iOS/macOS
+        raw = (
+            raw.replace("“", '"')
+               .replace("”", '"')
+               .replace("‘", "'")
+               .replace("’", "'")
+        )
+
+        # 1) If it looks like a full JSON object, try it first
+        if raw.lstrip().startswith("{") and raw.rstrip().endswith("}"):
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    out = {str(k).strip().lower(): str(v).strip() for k, v in data.items() if k and v}
+                    logger.info(f"[music_assistant] ROOM_MAP parsed (json object) keys={list(out.keys())}")
+                    return out
+            except Exception as e:
+                logger.error(f"[music_assistant] Invalid ROOM_MAP JSON object: {e}")
+
+        # 2) Parse line-by-line (supports both `Kitchen: entity` and `"Kitchen": "entity"`)
+        out: Dict[str, str] = {}
+        jsonish_lines = []
+
         for line in raw.splitlines():
             line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # strip inline comments (simple)
+            if " #" in line:
+                line = line.split(" #", 1)[0].rstrip()
+
+            # drop trailing commas
+            if line.endswith(","):
+                line = line[:-1].rstrip()
+
             if not line:
                 continue
-            if line.endswith(","):
-                line = line[:-1]
-            lines.append(line)
 
-        text = "{\n" + ",\n".join(lines) + "\n}"
+            # NEW simple format: Room: media_player.entity_id
+            if ":" in line and not line.lstrip().startswith('"'):
+                left, right = line.split(":", 1)
+                room = left.strip()
+                ent = right.strip()
+                if room and ent:
+                    out[room.lower()] = ent
+                continue
 
+            # Otherwise, treat it as legacy JSON-ish pair line: "Kitchen": "media_player.x"
+            jsonish_lines.append(line)
+
+        if out:
+            logger.info(f"[music_assistant] ROOM_MAP parsed (simple) keys={list(out.keys())}")
+            return out
+
+        # 3) Legacy JSON-ish lines fallback (wrap into { ... })
+        if not jsonish_lines:
+            return {}
+
+        text = "{\n" + ",\n".join(jsonish_lines) + "\n}"
         try:
             data = json.loads(text)
             if not isinstance(data, dict):
                 return {}
-            return {str(k).strip().lower(): str(v).strip() for k, v in data.items() if k and v}
+            out = {str(k).strip().lower(): str(v).strip() for k, v in data.items() if k and v}
+            logger.info(f"[music_assistant] ROOM_MAP parsed (legacy lines) keys={list(out.keys())}")
+            return out
         except Exception as e:
             logger.error(f"[music_assistant] Invalid ROOM_MAP format: {e}")
+            logger.error(f"[music_assistant] ROOM_MAP raw was:\n{raw}")
             return {}
 
     # -------------------- text helpers --------------------
@@ -487,7 +670,7 @@ class MusicAssistantPlugin(ToolPlugin):
         if explicit:
             return explicit
 
-        # NEW: optional ROOM_MAP override (user-friendly lines wrapped into JSON)
+        # optional ROOM_MAP override
         room_map: Dict[str, str] = {}
         try:
             raw = redis_client.hgetall("plugin_settings:Music Assistant") or {}
@@ -499,19 +682,26 @@ class MusicAssistantPlugin(ToolPlugin):
         if room:
             mapped = room_map.get(room.strip().lower())
             if mapped:
+                logger.info(f"[music_assistant] ROOM_MAP override: room='{room}' -> {mapped}")
                 return mapped
 
-        states = await self._ha_states()
-        players = []
-        for s in states:
-            ent = s.get("entity_id") or ""
-            if ent.startswith("media_player."):
-                players.append(
-                    {
-                        "entity_id": ent,
-                        "friendly_name": ((s.get("attributes") or {}).get("friendly_name") or ent),
-                    }
-                )
+        # NEW: If we have a room, try to reduce candidates to only players in that HA Area
+        players: List[Dict[str, str]] = []
+        if room:
+            players = await self._media_players_for_room_area(room)
+
+        # Fallback: old behavior (all media_players)
+        if not players:
+            states = await self._ha_states()
+            for s in states:
+                ent = s.get("entity_id") or ""
+                if ent.startswith("media_player."):
+                    players.append(
+                        {
+                            "entity_id": ent,
+                            "friendly_name": ((s.get("attributes") or {}).get("friendly_name") or ent),
+                        }
+                    )
 
         if not players:
             raise RoomPlayerNotFound("No media_player entities found in Home Assistant.")
@@ -519,7 +709,7 @@ class MusicAssistantPlugin(ToolPlugin):
         if not room:
             raise RoomPlayerNotFound("Which room should I play it in? (e.g., Kitchen, Family Room)")
 
-        # Ask LLM to pick best match
+        # Ask LLM to pick best match (now from a smaller list when area lookup succeeds)
         first, last = get_tater_name()
         sys = (
             f"You are {first} {last}. Pick the best media_player entity for the requested room.\n"
@@ -538,13 +728,12 @@ class MusicAssistantPlugin(ToolPlugin):
         except Exception:
             pass
 
-        # fallback: contains match
+        # fallback: contains match on friendly name
         room_l = room.lower()
         for p in players:
             if room_l in (p.get("friendly_name") or "").lower():
                 return p["entity_id"]
 
-        # NO silent fallback: this is what caused confusion (wrong room => looked like music search failed)
         choices = ", ".join([p["friendly_name"] for p in players[:10]])
         raise RoomPlayerNotFound(f"I couldn’t find a player for '{room}'. Available players include: {choices}")
 
@@ -565,8 +754,6 @@ class MusicAssistantPlugin(ToolPlugin):
         want_random = bool(plan.get("random")) if plan.get("random") is not None else False
         plan_room = (plan.get("room") or room)
 
-        # Always resolve room for ALL actions (stop/next/etc included) —
-        # but return a room-specific message if it fails (NOT a “no music found” message).
         try:
             media_player = await self._resolve_media_player(plan_room, args, llm_client)
         except RoomPlayerNotFound as e:
