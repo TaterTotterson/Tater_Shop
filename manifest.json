@@ -345,6 +345,27 @@
       "sha256": "f5dd2d011c317e9e0d32622106ff6010d081f16b27f43e9deb6009c4b71024c2"
     },
     {
+      "id": "moltbook_inspector",
+      "name": "Moltbook Inspector",
+      "version": "1.0.0",
+      "min_tater_version": "50",
+      "description": "Read Moltbook platform data stored in Redis and summarize it for the user.",
+      "platforms": [
+        "discord",
+        "webui",
+        "irc",
+        "homeassistant",
+        "matrix",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook",
+      "tags": [],
+      "entry": "plugins/moltbook_inspector.py",
+      "sha256": "9104e21d2b943914af6410b204986ffb3dc594e51a2c9c2070b029c0fa6f7002"
+    },
+    {
       "id": "music_assistant",
       "name": "Music Assistant",
       "version": "1.0.5",
