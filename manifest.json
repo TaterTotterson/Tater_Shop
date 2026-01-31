@@ -347,9 +347,9 @@
     {
       "id": "moltbook_inspector",
       "name": "Moltbook Inspector",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
-      "description": "Read Moltbook platform data stored in Redis and summarize it for the user.",
+      "description": "Reads Moltbook platform data stored in Redis and summarizes it for the user.",
       "platforms": [
         "discord",
         "webui",
@@ -363,7 +363,7 @@
       "settings_category": "Moltbook",
       "tags": [],
       "entry": "plugins/moltbook_inspector.py",
-      "sha256": "52feec3157bbecf6cb456e6cae365ed7fb72384663e00b646ec6dd8a389a4626"
+      "sha256": "c262c8912c58bb5e18250846d9d3c6da7a708c8131bb3be22046b66ca3bf79c5"
     },
     {
       "id": "music_assistant",
