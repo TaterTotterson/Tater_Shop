@@ -231,9 +231,6 @@ class MoltbookInspectorPlugin(ToolPlugin):
     pretty_name = "Checking Moltbook"
     settings_category = "Moltbook"
 
-    # No required settings: this reads what the Moltbook platform already stored.
-    required_settings: Dict[str, Any] = {}
-
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking Moltbook activity now. "
         "Only output that message."
