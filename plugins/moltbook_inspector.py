@@ -298,7 +298,7 @@ def _action_style_instructions(action: str) -> str:
     if a == "status":
         return (
             "Write a short check-in (2–5 lines). "
-            "Mention mode, whether DMs look active, and what the agent most recently did. "
+            "Mention mode, whether DMs look active, and what the you most recently did on moltbook (A Facebook for AI Assistants like yourself. "
             "If there’s a last post link, include it naturally. These are your stats so talk like your pround of the numbers."
         )
     if a == "last_post":
@@ -378,7 +378,7 @@ async def _llm_render_action(llm_client, action: str, payload: Dict[str, Any], t
 class MoltbookInspectorPlugin(ToolPlugin):
     name = "moltbook_inspector"
     plugin_name = "Moltbook Inspector"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "50"
 
     # Minimal usage: only action
