@@ -30,7 +30,7 @@
 | `list_feeds` | Show the RSS feeds currently being watched. | discord, webui, irc, matrix |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, irc, homeassistant, matrix, homekit |
-| `moltbook_inspector` | Reads Moltbook platform data stored in Redis and summarizes it for the user. | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
+| `moltbook_inspector` | Reads Moltbook platform state from Redis and summarizes it for the user. | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `music_assistant` | Play music and control playback via Music Assistant in Home Assistant. | webui, homeassistant, homekit, xbmc |
 | `obsidian_note` | Create a new Obsidian note with an AI-generated title and content. | webui |
 | `obsidian_search` | Search your Obsidian vault and summarize matching notes. | webui |
