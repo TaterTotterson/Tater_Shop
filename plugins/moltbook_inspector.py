@@ -20,10 +20,10 @@ DM_CONV_INDEX_KEY = "tater:moltbook:dm:conversations"
 DM_META_KEY_FMT = "tater:moltbook:dm:{cid}:meta"
 DM_MSGS_KEY_FMT = "tater:moltbook:dm:{cid}:messages"
 
-# Defaults (kept internal; not exposed in usage)
+# Internal defaults (not exposed in usage)
 _DEFAULT_EVENTS_LIMIT = 25
 _DEFAULT_DM_LIST_LIMIT = 12
-_DEFAULT_DM_MESSAGES_LOAD = 80
+_DEFAULT_DM_MESSAGES_LOAD = 90
 _DEFAULT_REPLY_MAX_CHARS = 650
 
 
@@ -106,7 +106,7 @@ def _format_event_line(e: Dict[str, Any]) -> str:
     cid = str(e.get("conversation_id") or "").strip()
     pid = str(e.get("post_id") or e.get("id") or "").strip()
 
-    bits = [f"- [{et}]"]
+    bits = [f"[{et}]"]
     if ts:
         bits.append(f"ts={ts}")
     if pid:
@@ -136,7 +136,6 @@ def _get_registration_info() -> Dict[str, str]:
 
 def _get_platform_settings_subset() -> Dict[str, str]:
     s = _hgetall_str(MOLT_SETTINGS_KEY)
-    # Keep this readable (common knobs)
     keys = [
         "mode",
         "dry_run",
@@ -168,7 +167,6 @@ def _get_platform_settings_subset() -> Dict[str, str]:
         if k in s and str(s.get(k) or "").strip() != "":
             out[k] = str(s.get(k) or "").strip()
 
-    # redact secrets
     out["api_key"] = "set" if str(s.get("api_key") or "").strip() else "missing"
     return out
 
@@ -185,9 +183,6 @@ def _count_dm_conversations() -> int:
 
 
 def _list_dm_conversations(limit: int) -> List[Tuple[str, Dict[str, str]]]:
-    """
-    Returns list of (cid, meta_map) sorted by updated_ts desc.
-    """
     limit = max(1, min(int(limit or 10), 50))
     try:
         cids = list(redis_client.smembers(DM_CONV_INDEX_KEY) or [])
@@ -234,26 +229,13 @@ def _summarize_mode(settings: Dict[str, str]) -> str:
     mode = (settings.get("mode") or "unknown").strip()
     dry_run = (settings.get("dry_run") or "").strip().lower() in ("1", "true", "yes", "on")
     if not mode or mode == "unknown":
-        return "Mode: unknown"
+        return "unknown"
     if dry_run:
-        return f"Mode: {mode} (dry_run ON — no writes)"
-    return f"Mode: {mode} (live writes enabled)"
-
-
-def _format_settings_lines(settings: Dict[str, str]) -> str:
-    if not settings:
-        return "- (no platform settings stored yet)"
-    lines = []
-    for k in sorted(settings.keys()):
-        lines.append(f"- {k}: {settings[k]}")
-    return "\n".join(lines)
+        return f"{mode} (dry_run on)"
+    return f"{mode} (live writes)"
 
 
 def _extract_last_post_from_events(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Finds the most recent 'post_created' event and returns a normalized dict:
-    {title, submolt, url, post_id, summary}
-    """
     evt = _get_last_event_of_type(events, "post_created")
     if not evt:
         return None
@@ -261,9 +243,7 @@ def _extract_last_post_from_events(events: List[Dict[str, Any]]) -> Optional[Dic
     title = str(evt.get("title") or "").strip()
     submolt = str(evt.get("submolt") or "").strip()
     url = str(evt.get("url") or evt.get("post_url") or "").strip()
-    post_id = str(evt.get("post_id") or "").strip()
-
-    # Some events store a short summary field
+    post_id = str(evt.get("post_id") or evt.get("id") or "").strip()
     summary = str(evt.get("summary") or "").strip()
 
     if not (title or summary or url or post_id):
@@ -305,78 +285,78 @@ def _llm_system_identity() -> str:
         "Hard rules:\n"
         "- Do NOT output JSON tool calls.\n"
         "- Do NOT output raw code.\n"
-        "- Keep responses practical and human-friendly.\n"
+        "- Keep responses natural and conversation-friendly.\n"
+        "- Do not invent facts. Use only the data provided.\n"
     )
 
 
-async def _llm_brief_status(
-    llm_client,
-    reg: Dict[str, str],
-    stats: Dict[str, str],
-    settings: Dict[str, str],
-    events: List[Dict[str, Any]],
-) -> str:
-    if not llm_client:
-        return ""
-
-    last_post = _extract_last_post_from_events(events)
-    last_dm_evt = _get_last_event_of_type(events, "dm_received")
-    dm_count = _count_dm_conversations()
-
-    prompt = (
-        "Write a short, friendly status update for the human about Moltbook activity.\n"
-        "- 3 to 6 bullet points.\n"
-        "- Include: mode/dry_run, last activity, whether DMs look active, and last post info if available.\n"
-        "- No JSON.\n\n"
-        f"Agent: {reg.get('agent_name') or '(unknown)'}\n"
-        f"Profile: {reg.get('profile_url') or '(none)'}\n"
-        f"{_summarize_mode(settings)}\n"
-        f"Posts: {stats.get('posts_created', '0')}  Comments: {stats.get('comments_created', '0')}  Votes: {stats.get('votes_cast', '0')}\n"
-        f"DMs received: {stats.get('dms_received', '0')}  DMs sent: {stats.get('dms_sent', '0')}  DM conversations stored: {dm_count}\n"
-        f"Last dm_received event: {json.dumps(last_dm_evt, ensure_ascii=False) if last_dm_evt else '(none)'}\n"
-        f"Last post: {json.dumps(last_post, ensure_ascii=False) if last_post else '(none)'}\n"
-    )
-
-    out = await _llm_chat(
-        llm_client,
-        [
-            {"role": "system", "content": _llm_system_identity()},
-            {"role": "user", "content": prompt},
-        ],
-        timeout=45,
-    )
-    if _looks_like_tool_json(out):
-        return ""
-    return _compact(out.strip(), 900)
-
-
-async def _llm_summarize_last_post(llm_client, post: Dict[str, Any]) -> str:
+def _action_style_instructions(action: str) -> str:
     """
-    Produce a human-friendly 1-2 sentence "what it was about" from event data.
-    If the event already contains a summary, we may just lightly refine it.
+    Tight guidance per action so output feels like chat instead of a report.
+    """
+    a = (action or "").strip().lower()
+    if a == "status":
+        return (
+            "Write a short check-in (2–5 lines). "
+            "Mention mode, whether DMs look active, and what the agent most recently did. "
+            "If there’s a last post link, include it naturally."
+        )
+    if a == "last_post":
+        return (
+            "Answer like a person in chat. "
+            "In 2–4 sentences: what the last post was about (topic + vibe), and include the link. "
+            "Avoid labels like 'Title:' or 'Submolt:' unless it helps readability."
+        )
+    if a == "events":
+        return (
+            "Give a quick summary of what kinds of events happened recently (1–3 sentences), "
+            "then show up to 10 of the most recent events as short bullet lines."
+        )
+    if a == "dm_list":
+        return (
+            "In 1–2 sentences, say how many DM threads exist and whether any look new. "
+            "Then list up to 8 threads with a short hint each (no IDs unless necessary)."
+        )
+    if a == "dm_summary":
+        return (
+            "Summarize the most recent DM conversation in 2–4 sentences. "
+            "Mention topic, tone, and any next step."
+        )
+    if a == "dm_reply_draft":
+        return (
+            "Write a friendly reply draft (under 650 chars). "
+            "Be warm and helpful. Ask one good follow-up question if useful."
+        )
+    if a == "registration":
+        return (
+            "Explain registration state in plain English. "
+            "If the agent isn't claimed or is missing config, say what's missing and what to do next."
+        )
+    if a == "settings":
+        return (
+            "Summarize settings in chat form (3–8 bullets max). "
+            "Call out mode/dry_run and a few important knobs. Do not dump every key."
+        )
+    if a == "stats":
+        return (
+            "Summarize the stats in a friendly way (3–7 bullets). "
+            "Mention posts/comments/votes and DM counts, plus last activity if available."
+        )
+    return "Respond naturally and briefly. Include links when available. No JSON."
+
+
+async def _llm_render_action(llm_client, action: str, payload: Dict[str, Any], timeout: int = 50) -> str:
+    """
+    Convert payload into a conversational response.
     """
     if not llm_client:
-        # Fallback: use stored summary if present
-        s = (post.get("summary") or "").strip()
-        if s:
-            return _compact(s, 400)
         return ""
 
-    title = (post.get("title") or "").strip()
-    submolt = (post.get("submolt") or "").strip()
-    summary = (post.get("summary") or "").strip()
-    url = (post.get("url") or "").strip()
-
     prompt = (
-        "You are helping a human understand what their agent just posted.\n"
-        "Write 1-2 sentences describing the topic and vibe of the post.\n"
-        "- Friendly and clear.\n"
-        "- No JSON.\n"
-        "- Don't invent details.\n\n"
-        f"Title: {title}\n"
-        f"Submolt: {submolt or '(unknown)'}\n"
-        f"Stored summary (may be empty): {summary or '(none)'}\n"
-        f"Link (may be empty): {url or '(none)'}\n"
+        f"Action: {action}\n"
+        f"Instructions: {_action_style_instructions(action)}\n\n"
+        "Data (JSON):\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
     )
 
     out = await _llm_chat(
@@ -385,108 +365,23 @@ async def _llm_summarize_last_post(llm_client, post: Dict[str, Any]) -> str:
             {"role": "system", "content": _llm_system_identity()},
             {"role": "user", "content": prompt},
         ],
-        timeout=35,
+        timeout=timeout,
     )
+
     if _looks_like_tool_json(out):
         return ""
-    return _compact(out.strip(), 500)
 
-
-async def _llm_summarize_dm(llm_client, cid: str, meta: Dict[str, str], msgs: List[Dict[str, Any]]) -> str:
-    if not llm_client:
-        return "DM summary unavailable (LLM client missing)."
-
-    lines = []
-    for m in msgs[-20:]:
-        frm = (m.get("from") or "unknown")
-        txt = (m.get("text") or "")
-        if txt:
-            lines.append(f"{frm}: {txt}")
-
-    participants = meta.get("participants") or meta.get("users") or meta.get("members") or ""
-    if participants and isinstance(participants, str) and participants.strip().startswith("["):
-        parsed = _safe_json_loads(participants)
-        if parsed is not None:
-            participants = json.dumps(parsed, ensure_ascii=False)
-
-    prompt = (
-        "Summarize this Moltbook DM conversation in 2-4 sentences.\n"
-        "- Mention the main topic(s).\n"
-        "- Mention any open questions or next steps.\n"
-        "- No JSON.\n\n"
-        f"Conversation ID: {cid}\n"
-        f"Participants: {participants}\n"
-        "Recent messages:\n"
-        + "\n".join(lines)
-    )
-
-    out = await _llm_chat(
-        llm_client,
-        [
-            {"role": "system", "content": _llm_system_identity()},
-            {"role": "user", "content": prompt},
-        ],
-        timeout=60,
-    )
-    if _looks_like_tool_json(out):
-        return "DM summary unavailable (model returned tool JSON)."
-    return _compact(out, 900)
-
-
-async def _llm_draft_dm_reply(llm_client, cid: str, meta: Dict[str, str], msgs: List[Dict[str, Any]], max_chars: int) -> str:
-    if not llm_client:
-        return "Draft unavailable (LLM client missing)."
-
-    max_chars = max(120, min(int(max_chars or 600), 1200))
-
-    lines = []
-    for m in msgs[-16:]:
-        frm = (m.get("from") or "unknown")
-        txt = (m.get("text") or "")
-        if txt:
-            lines.append(f"{frm}: {txt}")
-
-    participants = meta.get("participants") or meta.get("users") or meta.get("members") or ""
-    if participants and isinstance(participants, str) and participants.strip().startswith("["):
-        parsed = _safe_json_loads(participants)
-        if parsed is not None:
-            participants = json.dumps(parsed, ensure_ascii=False)
-
-    prompt = (
-        "Write a friendly DM reply to keep the conversation flowing.\n"
-        "- Be warm and natural.\n"
-        "- Answer what you can based on the context.\n"
-        "- Ask ONE good follow-up question if it helps.\n"
-        "- Keep it short.\n"
-        "- No JSON.\n"
-        f"- Hard limit: {max_chars} characters.\n\n"
-        f"Conversation ID: {cid}\n"
-        f"Participants: {participants}\n"
-        "Recent messages:\n"
-        + "\n".join(lines)
-    )
-
-    out = await _llm_chat(
-        llm_client,
-        [
-            {"role": "system", "content": _llm_system_identity()},
-            {"role": "user", "content": prompt},
-        ],
-        timeout=60,
-    )
-    if _looks_like_tool_json(out):
-        return "Draft unavailable (model returned tool JSON)."
-    return _compact(out, max_chars)
+    return _compact(out.strip(), 1200)
 
 
 # -------------------- Plugin --------------------
 class MoltbookInspectorPlugin(ToolPlugin):
     name = "moltbook_inspector"
     plugin_name = "Moltbook Inspector"
-    version = "1.0.2"  # bumped
+    version = "1.0.3"  # bumped
     min_tater_version = "50"
 
-    # IMPORTANT: keep this minimal (only action)
+    # Minimal usage: only action
     usage = (
         "{\n"
         '  "function": "moltbook_inspector",\n'
@@ -496,20 +391,13 @@ class MoltbookInspectorPlugin(ToolPlugin):
         "}\n"
     )
 
-    # Description is for the AI (make it directive & practical)
     description = (
-        "Use this to get info on your Moltbook page (A Facebook just for AI Assistants "
-        "Actions:\n"
-        "- status: check-in (mode, DMs, recent activity)\n"
-        "- last_post: tell the last post title/topic + link (based on stored events)\n"
-        "- events: show recent Moltbook event ledger lines\n"
-        "- dm_list: show DM conversations (recent first)\n"
-        "- dm_summary: summarize the MOST RECENT DM conversation\n"
-        "- dm_reply_draft: draft a reply for the MOST RECENT DM conversation\n"
-        "- settings/stats/registration: debugging info\n"
+        "Inspect Moltbook platform state stored in Redis and respond in natural conversation (no JSON). "
+        "Use action=status for a quick check-in, action=last_post to explain the last post + link, "
+        "events/dm_list for recent activity, dm_summary/dm_reply_draft for the most recent DM thread."
     )
 
-    plugin_dec = "Reads Moltbook platform state from Redis and summarizes it for the user."
+    plugin_dec = "Reads Moltbook platform state from Redis and summarizes it naturally for the user."
     pretty_name = "Checking Moltbook"
     settings_category = "Moltbook"
 
@@ -529,197 +417,222 @@ class MoltbookInspectorPlugin(ToolPlugin):
         settings = _get_platform_settings_subset()
         events = _read_events(limit=_DEFAULT_EVENTS_LIMIT)
 
-        # -------------------- status (AI-generated only) --------------------
+        # Build payloads per action
         if action == "status":
-            async def inner():
-                out = await _llm_brief_status(llm_client, reg, stats, settings, events)
-                if out:
-                    return f"🦞 Moltbook check-in\n{out}".strip()
+            last_post = _extract_last_post_from_events(events)
+            last_dm = _get_last_event_of_type(events, "dm_received")
+            payload = {
+                "agent_name": reg.get("agent_name") or "",
+                "profile_url": reg.get("profile_url") or "",
+                "mode": _summarize_mode(settings),
+                "counts": {
+                    "posts_created": stats.get("posts_created", "0"),
+                    "comments_created": stats.get("comments_created", "0"),
+                    "votes_cast": stats.get("votes_cast", "0"),
+                    "dms_received": stats.get("dms_received", "0"),
+                    "dms_sent": stats.get("dms_sent", "0"),
+                    "dm_conversations": _count_dm_conversations(),
+                },
+                "last_activity_ts": stats.get("last_activity_ts", ""),
+                "last_post": last_post or {},
+                "last_dm_event": last_dm or {},
+                "dry_run": settings.get("dry_run", ""),
+            }
 
-                # Fallback if llm missing/unavailable
-                dm_count = _count_dm_conversations()
-                last_post = _extract_last_post_from_events(events)
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=45)
+                if rendered:
+                    return rendered
+                # fallback (still readable)
                 lines = [
-                    "🦞 Moltbook check-in",
-                    f"- Agent: {reg.get('agent_name') or '(unknown)'}",
-                    f"- Profile: {reg.get('profile_url') or '(none)'}",
-                    f"- {_summarize_mode(settings)}",
-                    f"- Posts: {stats.get('posts_created', '0')}  Comments: {stats.get('comments_created', '0')}  Votes: {stats.get('votes_cast', '0')}",
-                    f"- DMs received: {stats.get('dms_received', '0')}  DMs sent: {stats.get('dms_sent', '0')}  DM conversations: {dm_count}",
+                    f"Agent: {payload['agent_name'] or '(unknown)'}",
+                    f"Mode: {payload['mode']}",
+                    f"Posts: {payload['counts']['posts_created']}  Comments: {payload['counts']['comments_created']}  Votes: {payload['counts']['votes_cast']}",
+                    f"DMs: {payload['counts']['dms_received']} received / {payload['counts']['dms_sent']} sent  (threads: {payload['counts']['dm_conversations']})",
                 ]
-                if last_post and (last_post.get("url") or last_post.get("title")):
-                    lines.append(f"- Last post: {last_post.get('title') or '(title unknown)'}")
-                    if last_post.get("url"):
-                        lines.append(f"  {last_post['url']}")
+                if payload.get("profile_url"):
+                    lines.append(f"Profile: {payload['profile_url']}")
+                lp = payload.get("last_post") or {}
+                if lp.get("title") or lp.get("url"):
+                    lines.append(f"Last post: {lp.get('title') or '(title unknown)'}")
+                    if lp.get("url"):
+                        lines.append(lp["url"])
                 return "\n".join(lines).strip()
 
             return await self._hybrid(inner)
 
-        # -------------------- last_post --------------------
         if action == "last_post":
             last_post = _extract_last_post_from_events(events)
-
-            # If events are trimmed, we can still try stats["last_post_url"]
             stats_url = (stats.get("last_post_url") or "").strip()
 
-            if not last_post and not stats_url:
-                return "🦞 Last Moltbook post\nI don’t see any recorded posts yet."
+            payload = {
+                "agent_name": reg.get("agent_name") or "",
+                "last_post": last_post or {},
+                "fallback_last_post_url": stats_url,
+            }
 
             async def inner():
-                # Prefer event info
-                title = (last_post.get("title") if last_post else "").strip()
-                submolt = (last_post.get("submolt") if last_post else "").strip()
-                url = (last_post.get("url") if last_post else "").strip() or stats_url
-                summary = (last_post.get("summary") if last_post else "").strip()
+                if not last_post and not stats_url:
+                    rendered = await _llm_render_action(
+                        llm_client,
+                        action,
+                        {"agent_name": payload["agent_name"], "last_post": {}, "fallback_last_post_url": ""},
+                        timeout=35,
+                    )
+                    return rendered or "I don’t see any recorded posts yet."
 
-                about = ""
-                if last_post:
-                    about = await _llm_summarize_last_post(llm_client, last_post)
+                # ensure URL exists if we only have stats_url
+                if last_post and not last_post.get("url") and stats_url:
+                    last_post["url"] = stats_url
+                    payload["last_post"] = last_post
 
-                lines = ["🦞 Last Moltbook post"]
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=35)
+                if rendered:
+                    return rendered
+
+                # fallback
+                lp = payload.get("last_post") or {}
+                url = (lp.get("url") or payload.get("fallback_last_post_url") or "").strip()
+                title = (lp.get("title") or "").strip()
+                about = (lp.get("summary") or "").strip()
+                parts = []
                 if title:
-                    lines.append(f"**Title:** {title}")
-                if submolt:
-                    lines.append(f"**Submolt:** {submolt}")
+                    parts.append(f"Last post: {title}")
                 if about:
-                    lines.append(f"**About:** {about}")
-                elif summary:
-                    lines.append(f"**About:** {summary}")
-
+                    parts.append(about)
                 if url:
-                    lines.append(f"**Link:** {url}")
-
-                # If we have *no* title/summary, at least show the link
-                return "\n".join(lines).strip()
+                    parts.append(url)
+                return "\n".join(parts).strip() if parts else (url or "I found a last post link, but no details.")
 
             return await self._hybrid(inner)
 
-        # -------------------- registration --------------------
         if action == "registration":
-            lines = [
-                "🦞 Moltbook registration",
-                f"- Agent name: {reg.get('agent_name') or '(unknown)'}",
-                f"- Agent id: {reg.get('agent_id') or '(unknown)'}",
-                f"- Created at: {reg.get('created_at') or '(unknown)'}",
-                f"- API key stored: {reg.get('api_key_set')}",
-            ]
+            payload = {"registration": reg}
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=40)
+                if rendered:
+                    return rendered
+                # fallback
+                lines = [
+                    f"Agent: {reg.get('agent_name') or '(unknown)'}",
+                    f"Agent id: {reg.get('agent_id') or '(unknown)'}",
+                    f"Created: {reg.get('created_at') or '(unknown)'}",
+                    f"API key stored: {reg.get('api_key_set')}",
+                ]
+                if reg.get("claim_url"):
+                    lines.append(f"Claim URL: {reg['claim_url']}")
+                if reg.get("verification_code"):
+                    lines.append(f"Verification code: {reg['verification_code']}")
+                return "\n".join(lines).strip()
+            return await self._hybrid(inner)
 
-            claim_url = (reg.get("claim_url", "") or "").strip()
-            vcode = (reg.get("verification_code", "") or "").strip()
-            if claim_url:
-                lines.append(f"- Claim URL: {claim_url}")
-            if vcode:
-                lines.append(f"- Verification code: {vcode}")
-
-            tweet = (reg.get("tweet_template", "") or "").strip()
-            if tweet:
-                lines.append("\nTweet template:\n" + tweet)
-
-            msg_tmpl = (reg.get("claim_message_template", "") or "").strip()
-            if msg_tmpl:
-                lines.append("\nClaim message template:\n" + msg_tmpl)
-
-            return "\n".join(lines).strip()
-
-        # -------------------- settings --------------------
         if action == "settings":
-            lines = [
-                "🦞 Moltbook platform settings (from Redis)",
-                _format_settings_lines(settings),
-            ]
-            return "\n".join(lines).strip()
+            payload = {"settings": settings}
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=40)
+                if rendered:
+                    return rendered
+                # fallback (trim)
+                keep = ["mode", "dry_run", "feed_source", "feed_sort", "feed_limit", "check_interval_seconds", "dm_check_interval_seconds", "max_actions_per_cycle", "reply_max_chars", "api_key"]
+                lines = []
+                for k in keep:
+                    if k in settings and str(settings.get(k) or "").strip():
+                        lines.append(f"- {k}: {settings.get(k)}")
+                return "Settings:\n" + ("\n".join(lines) if lines else "- (none found)")
+            return await self._hybrid(inner)
 
-        # -------------------- stats --------------------
         if action == "stats":
-            dm_count = _count_dm_conversations()
-            fields = [
-                ("agent_status", stats.get("agent_status", "")),
-                ("claimed", stats.get("claimed", "")),
-                ("posts_created", stats.get("posts_created", "0")),
-                ("comments_created", stats.get("comments_created", "0")),
-                ("votes_cast", stats.get("votes_cast", "0")),
-                ("dms_received", stats.get("dms_received", "0")),
-                ("dms_sent", stats.get("dms_sent", "0")),
-                ("tool_call_blocked", stats.get("tool_call_blocked", "0")),
-                ("last_post_url", stats.get("last_post_url", "")),
-                ("last_activity_ts", stats.get("last_activity_ts", "")),
-            ]
-            lines = ["🦞 Moltbook stats"] + [f"- {k}: {v}" for k, v in fields if str(v).strip() != ""]
-            lines.append(f"- dm_conversations: {dm_count}")
-            lines.append(f"- stats_fields_total: {len(stats)}")
-            return "\n".join(lines).strip()
+            payload = {
+                "stats": stats,
+                "dm_conversations": _count_dm_conversations(),
+                "mode": _summarize_mode(settings),
+                "profile_url": reg.get("profile_url") or "",
+                "agent_name": reg.get("agent_name") or "",
+            }
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=40)
+                if rendered:
+                    return rendered
+                # fallback
+                lines = [
+                    f"Posts: {stats.get('posts_created','0')}",
+                    f"Comments: {stats.get('comments_created','0')}",
+                    f"Votes: {stats.get('votes_cast','0')}",
+                    f"DMs: {stats.get('dms_received','0')} received / {stats.get('dms_sent','0')} sent",
+                ]
+                if stats.get("last_activity_ts"):
+                    lines.append(f"Last activity: {stats.get('last_activity_ts')}")
+                if stats.get("last_post_url"):
+                    lines.append(f"Last post link: {stats.get('last_post_url')}")
+                return "\n".join(lines).strip()
+            return await self._hybrid(inner)
 
-        # -------------------- events --------------------
         if action == "events":
             ev = _read_events(limit=_DEFAULT_EVENTS_LIMIT)
-            if not ev:
-                return "No Moltbook events found yet."
-            lines = [f"🦞 Recent Moltbook events (last {len(ev)}):"]
-            lines.extend(_format_event_line(e) for e in ev)
-            return "\n".join(lines).strip()
+            payload = {"events": ev[-_DEFAULT_EVENTS_LIMIT:]}
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=45)
+                if rendered:
+                    return rendered
+                # fallback: list last 10
+                if not ev:
+                    return "No Moltbook events found yet."
+                last10 = ev[-10:]
+                return "Recent events:\n" + "\n".join(f"- {_format_event_line(e)}" for e in last10)
+            return await self._hybrid(inner)
 
-        # -------------------- dm_list --------------------
         if action == "dm_list":
             items = _list_dm_conversations(limit=_DEFAULT_DM_LIST_LIMIT)
-            if not items:
-                return "No Moltbook DM conversations stored yet."
-            lines = [f"🦞 DM conversations (top {len(items)} by recent activity):"]
-            for cid2, meta in items:
-                updated = meta.get("updated_ts", "")
-                last_seen = meta.get("last_seen_ts", "")
-                new_last_poll = meta.get("new_messages_last_poll", "")
-                lines.append(f"- updated_ts={updated} new_last_poll={new_last_poll} cid={cid2} last_seen_ts={last_seen}")
-            lines.append("\nTip: Ask for dm_summary or dm_reply_draft to use the most recent conversation.")
-            return "\n".join(lines).strip()
+            payload = {"dm_threads": [{"cid": cid, "meta": meta} for cid, meta in items]}
+            async def inner():
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=45)
+                if rendered:
+                    return rendered
+                if not items:
+                    return "No Moltbook DM conversations stored yet."
+                lines = []
+                for cid, meta in items[:8]:
+                    updated = meta.get("updated_ts", "")
+                    new_last = meta.get("new_messages_last_poll", "")
+                    lines.append(f"- updated={updated} new={new_last} cid={cid}")
+                return "DM threads:\n" + "\n".join(lines)
+            return await self._hybrid(inner)
 
-        # -------------------- dm_summary (most recent) --------------------
         if action == "dm_summary":
             recent = _most_recent_dm_conversation()
             if not recent:
                 return "No Moltbook DM conversations stored yet."
             cid, meta = recent
-
-            msgs = _load_dm_messages(cid, limit=min(120, _DEFAULT_DM_MESSAGES_LOAD))
-            if not msgs:
-                return "Most recent DM conversation has no stored messages yet."
-
+            msgs = _load_dm_messages(cid, limit=min(140, _DEFAULT_DM_MESSAGES_LOAD))
+            payload = {"conversation": {"cid": cid, "meta": meta, "recent_messages": msgs[-25:]}}
             async def inner():
-                summary = await _llm_summarize_dm(llm_client, cid, meta, msgs)
-                return (
-                    f"🦞 DM summary (most recent)\n"
-                    f"- messages_loaded: {len(msgs)}\n\n"
-                    f"{summary}"
-                ).strip()
-
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=55)
+                if rendered:
+                    return rendered
+                return "I found a DM thread, but couldn’t summarize it (LLM unavailable)."
             return await self._hybrid(inner)
 
-        # -------------------- dm_reply_draft (most recent) --------------------
         if action == "dm_reply_draft":
             recent = _most_recent_dm_conversation()
             if not recent:
                 return "No Moltbook DM conversations stored yet."
             cid, meta = recent
-
-            msgs = _load_dm_messages(cid, limit=min(160, _DEFAULT_DM_MESSAGES_LOAD))
-            if not msgs:
-                return "Most recent DM conversation has no stored messages yet."
-
+            msgs = _load_dm_messages(cid, limit=min(170, _DEFAULT_DM_MESSAGES_LOAD))
+            payload = {
+                "conversation": {"cid": cid, "meta": meta, "recent_messages": msgs[-18:]},
+                "max_chars": _DEFAULT_REPLY_MAX_CHARS,
+            }
             async def inner():
-                draft = await _llm_draft_dm_reply(llm_client, cid, meta, msgs, _DEFAULT_REPLY_MAX_CHARS)
-                return (
-                    f"🦞 DM reply draft (most recent)\n"
-                    f"- messages_loaded: {len(msgs)}\n\n"
-                    f"{draft}"
-                ).strip()
-
+                rendered = await _llm_render_action(llm_client, action, payload, timeout=55)
+                if rendered:
+                    # enforce hard cap just in case
+                    return _compact(rendered, _DEFAULT_REPLY_MAX_CHARS)
+                return "I found the most recent DM thread, but couldn’t draft a reply (LLM unavailable)."
             return await self._hybrid(inner)
 
         return "Unknown action. Use: status | last_post | registration | settings | stats | events | dm_list | dm_summary | dm_reply_draft"
 
     async def _hybrid(self, coro_fn):
-        """
-        Run an async inner() in a way that works both inside and outside an event loop.
-        """
         try:
             asyncio.get_running_loop()
             return await coro_fn()
