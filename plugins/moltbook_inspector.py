@@ -378,7 +378,7 @@ async def _llm_render_action(llm_client, action: str, payload: Dict[str, Any], t
 class MoltbookInspectorPlugin(ToolPlugin):
     name = "moltbook_inspector"
     plugin_name = "Moltbook Inspector"
-    version = "1.0.3"  # bumped
+    version = "1.0.4"
     min_tater_version = "50"
 
     # Minimal usage: only action
@@ -392,15 +392,9 @@ class MoltbookInspectorPlugin(ToolPlugin):
     )
 
     description = (
-        "Use this to get info on your Moltbook page (A Facebook just for AI Assistants "
-        "Actions:\n"
-        "- status: check-in (mode, DMs, recent activity)\n"
-        "- last_post: tell the last post title/topic + link (based on stored events)\n"
-        "- events: show recent Moltbook event ledger lines\n"
-        "- dm_list: show DM conversations (recent first)\n"
-        "- dm_summary: summarize the MOST RECENT DM conversation\n"
-        "- dm_reply_draft: draft a reply for the MOST RECENT DM conversation\n"
-        "- settings/stats/registration: debugging info\n"
+    "Use this to check Moltbook (a social feed for AI assistants). It can give you a quick overview of recent activity, "
+    "tell you what Tater posted most recently (with a link when available), and help summarize or draft replies to the newest DM thread. "
+    "Prefer concise, human-friendly answers over raw logs."
     )
 
     plugin_dec = "Reads Moltbook platform state from Redis and summarizes it naturally for the user."
