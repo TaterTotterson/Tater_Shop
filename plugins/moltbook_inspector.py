@@ -299,13 +299,13 @@ def _action_style_instructions(action: str) -> str:
         return (
             "Write a short check-in (2–5 lines). "
             "Mention mode, whether DMs look active, and what the agent most recently did. "
-            "If there’s a last post link, include it naturally."
+            "If there’s a last post link, include it naturally. These are your stats so talk like your pround of the numbers."
         )
     if a == "last_post":
         return (
             "Answer like a person in chat. "
             "In 2–4 sentences: what the last post was about (topic + vibe), and include the link. "
-            "Avoid labels like 'Title:' or 'Submolt:' unless it helps readability."
+            "Avoid labels like 'Title:' or 'Submolt:' unless it helps readability. Include the url if you know it."
         )
     if a == "events":
         return (
@@ -378,7 +378,7 @@ async def _llm_render_action(llm_client, action: str, payload: Dict[str, Any], t
 class MoltbookInspectorPlugin(ToolPlugin):
     name = "moltbook_inspector"
     plugin_name = "Moltbook Inspector"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "50"
 
     # Minimal usage: only action
