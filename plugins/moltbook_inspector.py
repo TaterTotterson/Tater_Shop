@@ -20,6 +20,12 @@ DM_CONV_INDEX_KEY = "tater:moltbook:dm:conversations"
 DM_META_KEY_FMT = "tater:moltbook:dm:{cid}:meta"
 DM_MSGS_KEY_FMT = "tater:moltbook:dm:{cid}:messages"
 
+# Defaults (kept internal; not exposed in usage)
+_DEFAULT_EVENTS_LIMIT = 25
+_DEFAULT_DM_LIST_LIMIT = 12
+_DEFAULT_DM_MESSAGES_LOAD = 80
+_DEFAULT_REPLY_MAX_CHARS = 650
+
 
 # -------------------- Small helpers --------------------
 def _hgetall_str(key: str) -> Dict[str, str]:
@@ -35,15 +41,6 @@ def _safe_int(v: Any, default: int = 0) -> int:
         if v is None:
             return default
         return int(str(v).strip())
-    except Exception:
-        return default
-
-
-def _safe_float(v: Any, default: float = 0.0) -> float:
-    try:
-        if v is None:
-            return default
-        return float(str(v).strip())
     except Exception:
         return default
 
@@ -103,11 +100,11 @@ def _read_events(limit: int) -> List[Dict[str, Any]]:
 
 
 def _format_event_line(e: Dict[str, Any]) -> str:
-    et = (e.get("type") or "event").strip()
-    ts = str(e.get("ts") or "")
-    url = e.get("url") or e.get("post_url") or ""
-    cid = e.get("conversation_id") or ""
-    pid = e.get("post_id") or e.get("id") or ""
+    et = str(e.get("type") or "event").strip()
+    ts = str(e.get("ts") or "").strip()
+    url = str(e.get("url") or e.get("post_url") or "").strip()
+    cid = str(e.get("conversation_id") or "").strip()
+    pid = str(e.get("post_id") or e.get("id") or "").strip()
 
     bits = [f"- [{et}]"]
     if ts:
@@ -117,7 +114,7 @@ def _format_event_line(e: Dict[str, Any]) -> str:
     if cid:
         bits.append(f"cid={cid}")
     if url:
-        bits.append(str(url))
+        bits.append(url)
     return " ".join(bits)
 
 
@@ -139,7 +136,7 @@ def _get_registration_info() -> Dict[str, str]:
 
 def _get_platform_settings_subset() -> Dict[str, str]:
     s = _hgetall_str(MOLT_SETTINGS_KEY)
-    # Keep this readable (these are commonly useful for debugging behavior)
+    # Keep this readable (common knobs)
     keys = [
         "mode",
         "dry_run",
@@ -148,7 +145,9 @@ def _get_platform_settings_subset() -> Dict[str, str]:
         "feed_limit",
         "check_interval_seconds",
         "dm_check_interval_seconds",
+        "thread_check_interval_seconds",
         "max_actions_per_cycle",
+        "max_dm_replies_per_cycle",
         "allow_comments",
         "allow_votes",
         "allow_self_posts",
@@ -157,14 +156,20 @@ def _get_platform_settings_subset() -> Dict[str, str]:
         "reply_max_chars",
         "events_max",
         "dm_messages_max_per_conv",
+        "post_cooldown_seconds",
+        "comment_cooldown_seconds",
+        "dm_reply_cooldown_seconds",
+        "dm_reply_min_age_seconds",
+        "max_thread_replies_per_cycle",
+        "thread_reply_cooldown_seconds",
     ]
     out: Dict[str, str] = {}
     for k in keys:
         if k in s and str(s.get(k) or "").strip() != "":
             out[k] = str(s.get(k) or "").strip()
+
     # redact secrets
-    if "api_key" in s:
-        out["api_key"] = "set" if str(s.get("api_key") or "").strip() else "missing"
+    out["api_key"] = "set" if str(s.get("api_key") or "").strip() else "missing"
     return out
 
 
@@ -196,6 +201,11 @@ def _list_dm_conversations(limit: int) -> List[Tuple[str, Dict[str, str]]]:
 
     metas.sort(key=lambda x: _safe_int(x[1].get("updated_ts"), 0), reverse=True)
     return metas[:limit]
+
+
+def _most_recent_dm_conversation() -> Optional[Tuple[str, Dict[str, str]]]:
+    items = _list_dm_conversations(limit=1)
+    return items[0] if items else None
 
 
 def _load_dm_messages(cid: str, limit: int = 40) -> List[Dict[str, Any]]:
@@ -239,18 +249,44 @@ def _format_settings_lines(settings: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _extract_last_post_from_events(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Finds the most recent 'post_created' event and returns a normalized dict:
+    {title, submolt, url, post_id, summary}
+    """
+    evt = _get_last_event_of_type(events, "post_created")
+    if not evt:
+        return None
+
+    title = str(evt.get("title") or "").strip()
+    submolt = str(evt.get("submolt") or "").strip()
+    url = str(evt.get("url") or evt.get("post_url") or "").strip()
+    post_id = str(evt.get("post_id") or "").strip()
+
+    # Some events store a short summary field
+    summary = str(evt.get("summary") or "").strip()
+
+    if not (title or summary or url or post_id):
+        return None
+
+    return {
+        "title": title,
+        "submolt": submolt,
+        "url": url,
+        "post_id": post_id,
+        "summary": summary,
+        "ts": evt.get("ts"),
+        "raw": evt,
+    }
+
+
 # -------------------- LLM helpers --------------------
 async def _llm_chat(llm_client, messages: List[Dict[str, str]], timeout: int = 60) -> str:
-    """
-    Uses the common llm_client.chat(messages, timeout=...) shape used elsewhere in Tater.
-    Falls back gracefully if the client differs.
-    """
     if not llm_client:
         return ""
     try:
         resp = await llm_client.chat(messages, timeout=timeout)
     except TypeError:
-        # Some wrappers accept kwargs differently
         resp = await llm_client.chat(messages=messages, timeout=timeout)
     except Exception:
         try:
@@ -273,10 +309,90 @@ def _llm_system_identity() -> str:
     )
 
 
+async def _llm_brief_status(
+    llm_client,
+    reg: Dict[str, str],
+    stats: Dict[str, str],
+    settings: Dict[str, str],
+    events: List[Dict[str, Any]],
+) -> str:
+    if not llm_client:
+        return ""
+
+    last_post = _extract_last_post_from_events(events)
+    last_dm_evt = _get_last_event_of_type(events, "dm_received")
+    dm_count = _count_dm_conversations()
+
+    prompt = (
+        "Write a short, friendly status update for the human about Moltbook activity.\n"
+        "- 3 to 6 bullet points.\n"
+        "- Include: mode/dry_run, last activity, whether DMs look active, and last post info if available.\n"
+        "- No JSON.\n\n"
+        f"Agent: {reg.get('agent_name') or '(unknown)'}\n"
+        f"Profile: {reg.get('profile_url') or '(none)'}\n"
+        f"{_summarize_mode(settings)}\n"
+        f"Posts: {stats.get('posts_created', '0')}  Comments: {stats.get('comments_created', '0')}  Votes: {stats.get('votes_cast', '0')}\n"
+        f"DMs received: {stats.get('dms_received', '0')}  DMs sent: {stats.get('dms_sent', '0')}  DM conversations stored: {dm_count}\n"
+        f"Last dm_received event: {json.dumps(last_dm_evt, ensure_ascii=False) if last_dm_evt else '(none)'}\n"
+        f"Last post: {json.dumps(last_post, ensure_ascii=False) if last_post else '(none)'}\n"
+    )
+
+    out = await _llm_chat(
+        llm_client,
+        [
+            {"role": "system", "content": _llm_system_identity()},
+            {"role": "user", "content": prompt},
+        ],
+        timeout=45,
+    )
+    if _looks_like_tool_json(out):
+        return ""
+    return _compact(out.strip(), 900)
+
+
+async def _llm_summarize_last_post(llm_client, post: Dict[str, Any]) -> str:
+    """
+    Produce a human-friendly 1-2 sentence "what it was about" from event data.
+    If the event already contains a summary, we may just lightly refine it.
+    """
+    if not llm_client:
+        # Fallback: use stored summary if present
+        s = (post.get("summary") or "").strip()
+        if s:
+            return _compact(s, 400)
+        return ""
+
+    title = (post.get("title") or "").strip()
+    submolt = (post.get("submolt") or "").strip()
+    summary = (post.get("summary") or "").strip()
+    url = (post.get("url") or "").strip()
+
+    prompt = (
+        "You are helping a human understand what their agent just posted.\n"
+        "Write 1-2 sentences describing the topic and vibe of the post.\n"
+        "- Friendly and clear.\n"
+        "- No JSON.\n"
+        "- Don't invent details.\n\n"
+        f"Title: {title}\n"
+        f"Submolt: {submolt or '(unknown)'}\n"
+        f"Stored summary (may be empty): {summary or '(none)'}\n"
+        f"Link (may be empty): {url or '(none)'}\n"
+    )
+
+    out = await _llm_chat(
+        llm_client,
+        [
+            {"role": "system", "content": _llm_system_identity()},
+            {"role": "user", "content": prompt},
+        ],
+        timeout=35,
+    )
+    if _looks_like_tool_json(out):
+        return ""
+    return _compact(out.strip(), 500)
+
+
 async def _llm_summarize_dm(llm_client, cid: str, meta: Dict[str, str], msgs: List[Dict[str, Any]]) -> str:
-    """
-    Summarize what the DM is about in 2-4 sentences.
-    """
     if not llm_client:
         return "DM summary unavailable (LLM client missing)."
 
@@ -318,9 +434,6 @@ async def _llm_summarize_dm(llm_client, cid: str, meta: Dict[str, str], msgs: Li
 
 
 async def _llm_draft_dm_reply(llm_client, cid: str, meta: Dict[str, str], msgs: List[Dict[str, Any]], max_chars: int) -> str:
-    """
-    Draft a reply to the latest user message in the DM conversation.
-    """
     if not llm_client:
         return "Draft unavailable (LLM client missing)."
 
@@ -366,71 +479,37 @@ async def _llm_draft_dm_reply(llm_client, cid: str, meta: Dict[str, str], msgs: 
     return _compact(out, max_chars)
 
 
-async def _llm_brief_status(llm_client, reg: Dict[str, str], stats: Dict[str, str], settings: Dict[str, str], events: List[Dict[str, Any]]) -> str:
-    """
-    Produce a friendly 3-6 line “what’s going on” summary for the human.
-    """
-    if not llm_client:
-        return ""
-
-    last_post_url = (stats.get("last_post_url") or "").strip()
-    last_post_evt = _get_last_event_of_type(events, "post_created")
-    last_comment_evt = _get_last_event_of_type(events, "comment")
-    last_dm_evt = _get_last_event_of_type(events, "dm_received")
-
-    prompt = (
-        "Write a short, friendly status update for the human about Moltbook activity.\n"
-        "- 3 to 6 bullet points.\n"
-        "- Highlight: mode/dry_run, last activity, and if there are new DMs.\n"
-        "- No JSON.\n\n"
-        f"Agent: {reg.get('agent_name') or '(unknown)'}\n"
-        f"Profile: {reg.get('profile_url') or '(none)'}\n"
-        f"{_summarize_mode(settings)}\n"
-        f"Posts: {stats.get('posts_created', '0')}  Comments: {stats.get('comments_created', '0')}  Votes: {stats.get('votes_cast', '0')}\n"
-        f"DMs received: {stats.get('dms_received', '0')}  DMs sent: {stats.get('dms_sent', '0')}\n"
-        f"Last post url (if any): {last_post_url or '(none)'}\n"
-        f"Last post event: {json.dumps(last_post_evt, ensure_ascii=False) if last_post_evt else '(none)'}\n"
-        f"Last comment event: {json.dumps(last_comment_evt, ensure_ascii=False) if last_comment_evt else '(none)'}\n"
-        f"Last dm_received event: {json.dumps(last_dm_evt, ensure_ascii=False) if last_dm_evt else '(none)'}\n"
-    )
-
-    out = await _llm_chat(
-        llm_client,
-        [
-            {"role": "system", "content": _llm_system_identity()},
-            {"role": "user", "content": prompt},
-        ],
-        timeout=45,
-    )
-    if _looks_like_tool_json(out):
-        return ""
-    return _compact(out.strip(), 900)
-
-
 # -------------------- Plugin --------------------
 class MoltbookInspectorPlugin(ToolPlugin):
     name = "moltbook_inspector"
     plugin_name = "Moltbook Inspector"
-    version = "1.0.1"  # bumped
+    version = "1.0.2"  # bumped
     min_tater_version = "50"
 
+    # IMPORTANT: keep this minimal (only action)
     usage = (
         "{\n"
         '  "function": "moltbook_inspector",\n'
         '  "arguments": {\n'
-        '    "action": "status|status_ai|registration|settings|stats|events|dm_list|dm_summary|dm_reply_draft",\n'
-        '    "limit": 20,\n'
-        '    "conversation_id": "optional",\n'
-        '    "reply_max_chars": 600\n'
+        '    "action": "status|last_post|registration|settings|stats|events|dm_list|dm_summary|dm_reply_draft"\n'
         "  }\n"
         "}\n"
     )
 
+    # Description is for the AI (make it directive & practical)
     description = (
-        "Inspect Moltbook platform state stored in Redis and (optionally) generate friendly AI summaries/draft replies. "
-        "Use this to see recent events, registration info, stats, and DM conversation summaries."
+        "Use this to get info on your Moltbook page (A Facebook just for AI Assistants "
+        "Actions:\n"
+        "- status: check-in (mode, DMs, recent activity)\n"
+        "- last_post: tell the last post title/topic + link (based on stored events)\n"
+        "- events: show recent Moltbook event ledger lines\n"
+        "- dm_list: show DM conversations (recent first)\n"
+        "- dm_summary: summarize the MOST RECENT DM conversation\n"
+        "- dm_reply_draft: draft a reply for the MOST RECENT DM conversation\n"
+        "- settings/stats/registration: debugging info\n"
     )
-    plugin_dec = "Reads Moltbook platform data stored in Redis and summarizes it for the user."
+
+    plugin_dec = "Reads Moltbook platform state from Redis and summarizes it for the user."
     pretty_name = "Checking Moltbook"
     settings_category = "Moltbook"
 
@@ -444,51 +523,78 @@ class MoltbookInspectorPlugin(ToolPlugin):
     async def _run_action(self, args: Dict[str, Any], llm_client=None) -> str:
         args = args or {}
         action = (args.get("action") or "status").strip().lower()
-        limit = _safe_int(args.get("limit"), 20)
-        cid = (args.get("conversation_id") or "").strip()
-        reply_max_chars = _safe_int(args.get("reply_max_chars"), 600)
 
         reg = _get_registration_info()
         stats = _get_stats()
         settings = _get_platform_settings_subset()
-        events = _read_events(limit=max(20, min(limit, 200)))  # use slightly more for AI summaries
+        events = _read_events(limit=_DEFAULT_EVENTS_LIMIT)
 
+        # -------------------- status (AI-generated only) --------------------
         if action == "status":
-            dm_count = _count_dm_conversations()
-            claimed = (stats.get("claimed") or "").lower() in ("1", "true", "yes", "on")
-            agent_status = stats.get("agent_status") or reg.get("status") or "unknown"
-
-            lines = [
-                "🦞 Moltbook status",
-                f"- Agent: {reg.get('agent_name') or '(unknown)'}",
-                f"- Status: {agent_status} ({'claimed' if claimed else 'not claimed'})",
-                f"- Profile: {reg.get('profile_url') or '(none)'}",
-                f"- {_summarize_mode(settings)}",
-                f"- Posts: {stats.get('posts_created', '0')}",
-                f"- Comments: {stats.get('comments_created', '0')}",
-                f"- Votes: {stats.get('votes_cast', '0')}",
-                f"- DMs received: {stats.get('dms_received', '0')}",
-                f"- DMs sent: {stats.get('dms_sent', '0')}",
-                f"- DM conversations: {dm_count}",
-                f"- Tool calls blocked: {stats.get('tool_call_blocked', '0')}",
-            ]
-            last_post_url = (stats.get("last_post_url", "") or "").strip()
-            if last_post_url:
-                lines.append(f"- Last post: {last_post_url}")
-
-            return "\n".join(lines).strip()
-
-        if action == "status_ai":
-            # Friendly “what’s going on” summary for better conversation flow
             async def inner():
                 out = await _llm_brief_status(llm_client, reg, stats, settings, events)
                 if out:
                     return f"🦞 Moltbook check-in\n{out}".strip()
-                # fallback
-                return await self._run_action({"action": "status", "limit": limit}, llm_client)
+
+                # Fallback if llm missing/unavailable
+                dm_count = _count_dm_conversations()
+                last_post = _extract_last_post_from_events(events)
+                lines = [
+                    "🦞 Moltbook check-in",
+                    f"- Agent: {reg.get('agent_name') or '(unknown)'}",
+                    f"- Profile: {reg.get('profile_url') or '(none)'}",
+                    f"- {_summarize_mode(settings)}",
+                    f"- Posts: {stats.get('posts_created', '0')}  Comments: {stats.get('comments_created', '0')}  Votes: {stats.get('votes_cast', '0')}",
+                    f"- DMs received: {stats.get('dms_received', '0')}  DMs sent: {stats.get('dms_sent', '0')}  DM conversations: {dm_count}",
+                ]
+                if last_post and (last_post.get("url") or last_post.get("title")):
+                    lines.append(f"- Last post: {last_post.get('title') or '(title unknown)'}")
+                    if last_post.get("url"):
+                        lines.append(f"  {last_post['url']}")
+                return "\n".join(lines).strip()
 
             return await self._hybrid(inner)
 
+        # -------------------- last_post --------------------
+        if action == "last_post":
+            last_post = _extract_last_post_from_events(events)
+
+            # If events are trimmed, we can still try stats["last_post_url"]
+            stats_url = (stats.get("last_post_url") or "").strip()
+
+            if not last_post and not stats_url:
+                return "🦞 Last Moltbook post\nI don’t see any recorded posts yet."
+
+            async def inner():
+                # Prefer event info
+                title = (last_post.get("title") if last_post else "").strip()
+                submolt = (last_post.get("submolt") if last_post else "").strip()
+                url = (last_post.get("url") if last_post else "").strip() or stats_url
+                summary = (last_post.get("summary") if last_post else "").strip()
+
+                about = ""
+                if last_post:
+                    about = await _llm_summarize_last_post(llm_client, last_post)
+
+                lines = ["🦞 Last Moltbook post"]
+                if title:
+                    lines.append(f"**Title:** {title}")
+                if submolt:
+                    lines.append(f"**Submolt:** {submolt}")
+                if about:
+                    lines.append(f"**About:** {about}")
+                elif summary:
+                    lines.append(f"**About:** {summary}")
+
+                if url:
+                    lines.append(f"**Link:** {url}")
+
+                # If we have *no* title/summary, at least show the link
+                return "\n".join(lines).strip()
+
+            return await self._hybrid(inner)
+
+        # -------------------- registration --------------------
         if action == "registration":
             lines = [
                 "🦞 Moltbook registration",
@@ -515,6 +621,7 @@ class MoltbookInspectorPlugin(ToolPlugin):
 
             return "\n".join(lines).strip()
 
+        # -------------------- settings --------------------
         if action == "settings":
             lines = [
                 "🦞 Moltbook platform settings (from Redis)",
@@ -522,6 +629,7 @@ class MoltbookInspectorPlugin(ToolPlugin):
             ]
             return "\n".join(lines).strip()
 
+        # -------------------- stats --------------------
         if action == "stats":
             dm_count = _count_dm_conversations()
             fields = [
@@ -541,16 +649,18 @@ class MoltbookInspectorPlugin(ToolPlugin):
             lines.append(f"- stats_fields_total: {len(stats)}")
             return "\n".join(lines).strip()
 
+        # -------------------- events --------------------
         if action == "events":
-            ev = _read_events(limit=limit)
+            ev = _read_events(limit=_DEFAULT_EVENTS_LIMIT)
             if not ev:
                 return "No Moltbook events found yet."
             lines = [f"🦞 Recent Moltbook events (last {len(ev)}):"]
             lines.extend(_format_event_line(e) for e in ev)
             return "\n".join(lines).strip()
 
+        # -------------------- dm_list --------------------
         if action == "dm_list":
-            items = _list_dm_conversations(limit=limit)
+            items = _list_dm_conversations(limit=_DEFAULT_DM_LIST_LIMIT)
             if not items:
                 return "No Moltbook DM conversations stored yet."
             lines = [f"🦞 DM conversations (top {len(items)} by recent activity):"]
@@ -558,65 +668,53 @@ class MoltbookInspectorPlugin(ToolPlugin):
                 updated = meta.get("updated_ts", "")
                 last_seen = meta.get("last_seen_ts", "")
                 new_last_poll = meta.get("new_messages_last_poll", "")
-                lines.append(f"- cid={cid2} updated_ts={updated} last_seen_ts={last_seen} new_last_poll={new_last_poll}")
-            lines.append("\nTip: Use action=dm_summary (or dm_reply_draft) with conversation_id.")
+                lines.append(f"- updated_ts={updated} new_last_poll={new_last_poll} cid={cid2} last_seen_ts={last_seen}")
+            lines.append("\nTip: Ask for dm_summary or dm_reply_draft to use the most recent conversation.")
             return "\n".join(lines).strip()
 
+        # -------------------- dm_summary (most recent) --------------------
         if action == "dm_summary":
-            # If cid omitted, summarize the most recent conversation
-            if not cid:
-                items = _list_dm_conversations(limit=1)
-                if not items:
-                    return "No Moltbook DM conversations stored yet."
-                cid, meta = items[0]
-            else:
-                meta = _hgetall_str(_dm_meta_key(cid))
-                if not meta:
-                    return f"No DM metadata found for conversation_id={cid}"
+            recent = _most_recent_dm_conversation()
+            if not recent:
+                return "No Moltbook DM conversations stored yet."
+            cid, meta = recent
 
-            msgs = _load_dm_messages(cid, limit=60)
+            msgs = _load_dm_messages(cid, limit=min(120, _DEFAULT_DM_MESSAGES_LOAD))
             if not msgs:
-                return f"No stored messages found for conversation_id={cid}"
+                return "Most recent DM conversation has no stored messages yet."
 
             async def inner():
                 summary = await _llm_summarize_dm(llm_client, cid, meta, msgs)
                 return (
-                    f"🦞 DM summary\n"
-                    f"- conversation_id: {cid}\n"
+                    f"🦞 DM summary (most recent)\n"
                     f"- messages_loaded: {len(msgs)}\n\n"
                     f"{summary}"
                 ).strip()
 
             return await self._hybrid(inner)
 
+        # -------------------- dm_reply_draft (most recent) --------------------
         if action == "dm_reply_draft":
-            # Draft a reply to the latest DM message to improve conversation flow
-            if not cid:
-                items = _list_dm_conversations(limit=1)
-                if not items:
-                    return "No Moltbook DM conversations stored yet."
-                cid, meta = items[0]
-            else:
-                meta = _hgetall_str(_dm_meta_key(cid))
-                if not meta:
-                    return f"No DM metadata found for conversation_id={cid}"
+            recent = _most_recent_dm_conversation()
+            if not recent:
+                return "No Moltbook DM conversations stored yet."
+            cid, meta = recent
 
-            msgs = _load_dm_messages(cid, limit=80)
+            msgs = _load_dm_messages(cid, limit=min(160, _DEFAULT_DM_MESSAGES_LOAD))
             if not msgs:
-                return f"No stored messages found for conversation_id={cid}"
+                return "Most recent DM conversation has no stored messages yet."
 
             async def inner():
-                draft = await _llm_draft_dm_reply(llm_client, cid, meta, msgs, reply_max_chars)
+                draft = await _llm_draft_dm_reply(llm_client, cid, meta, msgs, _DEFAULT_REPLY_MAX_CHARS)
                 return (
-                    f"🦞 DM reply draft\n"
-                    f"- conversation_id: {cid}\n"
+                    f"🦞 DM reply draft (most recent)\n"
                     f"- messages_loaded: {len(msgs)}\n\n"
                     f"{draft}"
                 ).strip()
 
             return await self._hybrid(inner)
 
-        return "Unknown action. Use: status | status_ai | registration | settings | stats | events | dm_list | dm_summary | dm_reply_draft"
+        return "Unknown action. Use: status | last_post | registration | settings | stats | events | dm_list | dm_summary | dm_reply_draft"
 
     async def _hybrid(self, coro_fn):
         """
