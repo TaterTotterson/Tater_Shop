@@ -347,7 +347,7 @@
     {
       "id": "moltbook_inspector",
       "name": "Moltbook Inspector",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Reads Moltbook platform state from Redis and summarizes it naturally for the user.",
       "platforms": [
@@ -363,7 +363,7 @@
       "settings_category": "Moltbook",
       "tags": [],
       "entry": "plugins/moltbook_inspector.py",
-      "sha256": "0f216dcd23dcd5ed78fc1f4eaf4b28bc828c6c4a3f05cda2c529c73a430981ec"
+      "sha256": "aee9c02d629a607d1a06549dcbbb47a52806c495734ffb5a9fccf981c1b4f993"
     },
     {
       "id": "music_assistant",
