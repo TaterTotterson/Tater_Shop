@@ -2,6 +2,25 @@
   "schema": 1,
   "plugins": [
     {
+      "id": "ai_tasks",
+      "name": "AI Tasks",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response.",
+      "platforms": [
+        "discord",
+        "irc",
+        "matrix",
+        "homeassistant",
+        "webui"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/ai_tasks.py",
+      "sha256": "f15395f86777f964dae13a7b789227660021e9d1b5d152cec77c01f5f50586e2"
+    },
+    {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
       "version": "1.0.8",
@@ -48,7 +67,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "81f2e48e97b68b9cca84ee906b998105aed6e082f1858b23af32143274193dc5"
+      "sha256": "d5febae005bb2fde90a120233fad8de315f1ea836a4e0d1cd680b3350c18d9aa"
     },
     {
       "id": "comfyui_audio_ace",
@@ -83,7 +102,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "7302e85a905efd6c07c717910c3d2217f982cb9fe17a14615e731110df7750af"
+      "sha256": "5cfcffd1d21a9c581e2bb0bf2b89d740cb8150e4994b5213b5949c67143dad33"
     },
     {
       "id": "comfyui_image_video",
@@ -145,22 +164,7 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "plugins/device_compare.py",
-      "sha256": "6ee595b0bb3542af9e4de0c7c65f3511c1373b800c135260367024d34c2f250c"
-    },
-    {
-      "id": "discord_notifier",
-      "name": "Discord Notifier",
-      "version": "1.0.0",
-      "min_tater_version": "50",
-      "description": "Post RSS summaries to a Discord channel via webhook.",
-      "platforms": [
-        "notifier"
-      ],
-      "notifier": true,
-      "settings_category": "Discord Notifier",
-      "tags": [],
-      "entry": "plugins/discord_notifier.py",
-      "sha256": "9d15657cb43cf7c01a7c8ca8fee5e0014827ec8461ea85e0babd650fd7c67b09"
+      "sha256": "f1c79085f2955dad0b1ea1eca54126b475cc7c0afdb51f5f3161814944e7eb2b"
     },
     {
       "id": "doorbell_alert",
@@ -222,7 +226,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "570362ce3b63a1dc04cf0a36b965aac9863dbe172acbfef8feec02d52fbca4bc"
+      "sha256": "7a29fcea86bc67932c61b0c1f6ee28ff45f772a30144f21641099ecdee287263"
     },
     {
       "id": "find_my_phone",
@@ -255,7 +259,7 @@
       "settings_category": "FTPBrowser",
       "tags": [],
       "entry": "plugins/ftp_browser.py",
-      "sha256": "190acd8af78a4ae67b657239189800a130f9b75a5c33a4789728a01b474ceb0d"
+      "sha256": "87e04c619131f4f5bbb6037ad92f2309e0137c011a88f3c7fffdeac21e47f188"
     },
     {
       "id": "get_notifications",
@@ -289,7 +293,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "9a37f9e4b12f6d1966f4d25b0e89749f8fa31218c5816f411c1cd8199fad1b3b"
+      "sha256": "910f54a51076617a90718db8b16599a27e656ec62403a5ec746f48de9e6755df"
     },
     {
       "id": "list_feeds",
@@ -307,7 +311,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/list_feeds.py",
-      "sha256": "f2ad9730e7f4110597f85829ac5db19203b75f95892474f493c3a9fc39e87710"
+      "sha256": "2301c1cb2d96711f435a3326905963fb305eedb98a8a18f753b5d4e37275e9f3"
     },
     {
       "id": "lowfi_video",
@@ -342,7 +346,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "f5dd2d011c317e9e0d32622106ff6010d081f16b27f43e9deb6009c4b71024c2"
+      "sha256": "af63af619a98b184973b80974f6dafb298bc0944c046e58a5d2e434651091833"
     },
     {
       "id": "music_assistant",
@@ -363,8 +367,68 @@
       "sha256": "0ee4d39336b9f2dbabfc684118b2aa28fcae1a96171c9ddd3766c8a25971ff2c"
     },
     {
-      "id": "ntfy_notifier",
-      "name": "ntfy Notifier",
+      "id": "notify_discord",
+      "name": "Discord Notifier",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Queue notifications for Discord delivery.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "Discord Notifier",
+      "tags": [],
+      "entry": "plugins/notify_discord.py",
+      "sha256": "7cb2739f3139f4701e31cfb81f97ca48f655c5d57ad1e46ee1b1553d1622c24a"
+    },
+    {
+      "id": "notify_homeassistant",
+      "name": "Home Assistant Notifier",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Queue notifications for Home Assistant delivery.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "Home Assistant Notifier",
+      "tags": [],
+      "entry": "plugins/notify_homeassistant.py",
+      "sha256": "48f566a18876c0f268faaa1d17b030ca470899f8cdde31c4f34ebf0aeac8ff8f"
+    },
+    {
+      "id": "notify_irc",
+      "name": "IRC Notifier",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Queue notifications for IRC delivery.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "IRC Notifier",
+      "tags": [],
+      "entry": "plugins/notify_irc.py",
+      "sha256": "9eb015e29c936f4a8356d8da3533d903bd8a55667f2faa15edfa204d688bd298"
+    },
+    {
+      "id": "notify_matrix",
+      "name": "Matrix Notifier",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Queue notifications for Matrix delivery.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "Matrix Notifier",
+      "tags": [],
+      "entry": "plugins/notify_matrix.py",
+      "sha256": "0dc4adaa0df3a77b428eaa680335bf902121e00fd3403e4dab3f3f706175d4c4"
+    },
+    {
+      "id": "notify_ntfy",
+      "name": "Ntfy Notifier",
       "version": "1.0.0",
       "min_tater_version": "50",
       "description": "Send RSS announcements to an ntfy topic.",
@@ -374,8 +438,38 @@
       "notifier": true,
       "settings_category": "NTFY Notifier",
       "tags": [],
-      "entry": "plugins/ntfy_notifier.py",
-      "sha256": "24e8184a57175e9ae9359b187c80a73030f0e9bdd44a1733912b907986289a86"
+      "entry": "plugins/notify_ntfy.py",
+      "sha256": "300bb3b64207ff959756df7ed42aed52e6b3f718435091c51dae86102de29a3b"
+    },
+    {
+      "id": "notify_telegram",
+      "name": "Telegram Notifier",
+      "version": "1.0.0",
+      "min_tater_version": "50",
+      "description": "Send RSS summaries to a Telegram chat via bot token and chat ID.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "Telegram Notifier",
+      "tags": [],
+      "entry": "plugins/notify_telegram.py",
+      "sha256": "4b03ec2dd0372a086ea89445bde64b94ab0ed892de4b0493c00ac7db8b12f8ce"
+    },
+    {
+      "id": "notify_wordpress",
+      "name": "WordPress Poster",
+      "version": "1.0.0",
+      "min_tater_version": "50",
+      "description": "Post RSS summaries to a WordPress site via its REST API.",
+      "platforms": [
+        "notifier"
+      ],
+      "notifier": true,
+      "settings_category": "WordPress Poster",
+      "tags": [],
+      "entry": "plugins/notify_wordpress.py",
+      "sha256": "8dd97c8b0e94b7f4dccec5f91b172bdfcd2721f74f251d20a6fa73baeecae6c6"
     },
     {
       "id": "obsidian_note",
@@ -390,7 +484,7 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_note.py",
-      "sha256": "a61838fd54dd1511c539f9c43debe1f89e74f76b27839fe433e390292397ad7b"
+      "sha256": "24d97e41061ea8f513fabe92fbd22f50619555f7765d7aa3b3ba3d23ab7b3cdd"
     },
     {
       "id": "obsidian_search",
@@ -405,7 +499,7 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_search.py",
-      "sha256": "6059c04d3699b5246c46106b4a2c667fa9857e5df852795758ebf90e32fd65fe"
+      "sha256": "7a7c7af58d37f5cacb25de77abfe3890e6123dc26e641848d0f8c56a06c6c8ae"
     },
     {
       "id": "overseerr_details",
@@ -495,7 +589,7 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "65310661ffab959cdfd27c88ee1688d27651679203b9978ab5812a20d390a1a3"
+      "sha256": "5547d14bc72f599c211bbf50cfe20c91f396e21268dbfb67bbce11672be1ec2a"
     },
     {
       "id": "premiumize_torrent",
@@ -511,7 +605,26 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_torrent.py",
-      "sha256": "b63523b4502679b208c6291e78a49cf8da576985b3a7879f0c8e34cb1d55ee99"
+      "sha256": "205f75c247222bf6e2e6a0ebdfaca56accbe2baf969b1339c977297f20ea5ddd"
+    },
+    {
+      "id": "send_message",
+      "name": "Send Message",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant). When used from Discord, attached files are forwarded automatically.",
+      "platforms": [
+        "discord",
+        "irc",
+        "matrix",
+        "homeassistant",
+        "webui"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/send_message.py",
+      "sha256": "4f61237991600552e3f06b1a7dcb12bd99046422470664e9873a936a8a8c5af5"
     },
     {
       "id": "sftpgo_account",
@@ -529,7 +642,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "plugins/sftpgo_account.py",
-      "sha256": "a12b2fbaed44e931b1b58ff61e392bbbc371255a4cdd2b11f28480d146b764bc"
+      "sha256": "ef0b61f1bbbdd6377a3f6aff927b864aaacda0570b2055b70210900415b5f8e1"
     },
     {
       "id": "sftpgo_activity",
@@ -568,21 +681,6 @@
       "sha256": "c4a5c49b2798e9c244ca1824b5e463ce43d25ad3522ff298c344cedc7b715f47"
     },
     {
-      "id": "telegram_notifier",
-      "name": "Telegram Notifier",
-      "version": "1.0.0",
-      "min_tater_version": "50",
-      "description": "Send RSS summaries to a Telegram chat via bot token and chat ID.",
-      "platforms": [
-        "notifier"
-      ],
-      "notifier": true,
-      "settings_category": "Telegram Notifier",
-      "tags": [],
-      "entry": "plugins/telegram_notifier.py",
-      "sha256": "2dd16fc0eef0554f3db185d1dc4d2f7d28c03454f681c315368f3dde4bc0f56d"
-    },
-    {
       "id": "unifi_network",
       "name": "UniFi Network",
       "version": "1.0.0",
@@ -616,7 +714,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "9ad3a392b5c227c24c395cff848685fcd309b16d6d39d0a85ba2a0e4c6a00619"
+      "sha256": "53e323a1828f6e4be7b7895f9cdddd6b27bcb759261992b53b8e24b7ed4db43c"
     },
     {
       "id": "unwatch_feed",
@@ -634,7 +732,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/unwatch_feed.py",
-      "sha256": "e71e17c653b608998f404349450deb86a82a77f3efae126c137ff0acd2819814"
+      "sha256": "3ad84901b4e673a66524b5f763146ffea5f2e4734d7224341d237f460c4f4761"
     },
     {
       "id": "vision_describer",
@@ -677,7 +775,7 @@
       "name": "Watch Feed",
       "version": "1.0.0",
       "min_tater_version": "50",
-      "description": "Add an RSS/Atom feed to the watch list and track new items.",
+      "description": "Add an RSS/Atom feed to the watch list and post only the newest item once.",
       "platforms": [
         "discord",
         "webui",
@@ -688,7 +786,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/watch_feed.py",
-      "sha256": "0be6a55947c15bed10286639235ee1b179038a5be9225499e366de2bffc7c932"
+      "sha256": "b23984f2c82345d5a94661b5dcd00aaac258f297dc08001e88f46d21b725da53"
     },
     {
       "id": "weather_brief",
@@ -724,7 +822,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "f7f6d08d4a2050cfb09e8027618ec408061089d942b60c0dd257522b175d169a"
+      "sha256": "e3af45c1a322201899e71773dfab49f98cc03c24cc964821a262ca009fd15a6b"
     },
     {
       "id": "web_search",
@@ -745,7 +843,7 @@
       "settings_category": "Web Search",
       "tags": [],
       "entry": "plugins/web_search.py",
-      "sha256": "61d1a513bff5fc35c31bd84613e3d085802c2055a6eeaf44b5b9ffd00b2231f0"
+      "sha256": "450528fab951dd4701ad2037ceddedddb51380d47bbccee03decda1992313457"
     },
     {
       "id": "web_summary",
@@ -763,7 +861,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/web_summary.py",
-      "sha256": "60946e3902692cc833c4b3b4cdcc4dca928e2d7f4d570f0915509fafc0dfeb02"
+      "sha256": "34e33408da2886f0be0f83ebf527d7182c2abfabe887886d79f9a842f6b87946"
     },
     {
       "id": "webdav_browser",
@@ -778,22 +876,7 @@
       "settings_category": "WebDAV Browser",
       "tags": [],
       "entry": "plugins/webdav_browser.py",
-      "sha256": "3405f4e8e5943402f060f21e64e0b926bf969f83b92237a05b77435a8ffde193"
-    },
-    {
-      "id": "wordpress_poster",
-      "name": "WordPress Poster",
-      "version": "1.0.0",
-      "min_tater_version": "50",
-      "description": "Post RSS summaries to a WordPress site via its REST API.",
-      "platforms": [
-        "notifier"
-      ],
-      "notifier": true,
-      "settings_category": "WordPress Poster",
-      "tags": [],
-      "entry": "plugins/wordpress_poster.py",
-      "sha256": "1a0ec286584d9610c88fa152ec88db39d2b00110a717347a455313ffe22bf968"
+      "sha256": "d68f2d14df5b4baefcf546a3f091243456430e7e2dfed744becc3df10574b163"
     },
     {
       "id": "youtube_summary",
@@ -811,7 +894,7 @@
       "settings_category": "YouTube Summary",
       "tags": [],
       "entry": "plugins/youtube_summary.py",
-      "sha256": "4a59d41b61f562569076d00fe740018c745f01d07d710093afef12bb23dc6ed1"
+      "sha256": "b4aef99a9d27cda58ba7202e7ec74aefbdf171dff2c72194e345e9f1df8dd18e"
     },
     {
       "id": "zen_greeting",
