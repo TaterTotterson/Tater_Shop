@@ -1,6 +1,5 @@
 # plugins/sftpgo_account.py
 import os
-import asyncio
 import aiohttp
 import base64
 import redis

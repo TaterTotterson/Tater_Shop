@@ -1,4 +1,4 @@
-# plugins/ntfy_notifier.py
+# plugins/notify_ntfy.py
 import re
 import logging
 import requests
@@ -8,11 +8,12 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 
-logger = logging.getLogger("ntfy_notifier")
+logger = logging.getLogger("notify_ntfy")
 
 class NtfyNotifierPlugin(ToolPlugin):
-    name = "ntfy_notifier"
-    plugin_name = "ntfy Notifier"
+    name = "notify_ntfy"
+    plugin_name = "Ntfy Notifier"
+    pretty_name = "Ntfy Notifier"
     version = "1.0.0"
     min_tater_version = "50"
     description = "Sends RSS announcements to an ntfy topic (self-hosted or ntfy.sh)."
@@ -130,7 +131,7 @@ class NtfyNotifierPlugin(ToolPlugin):
         head = f"## {title.strip()}\n\n" if title and title.strip() else ""
         return f"{head}{msg}"
 
-    def post_to_ntfy(self, title: str, message: str):
+    def post_to_ntfy(self, title: str, message: str) -> bool:
         settings = get_plugin_settings(self.settings_category)
         server = (settings.get("ntfy_server") or "https://ntfy.sh").rstrip("/")
         topic = (settings.get("ntfy_topic") or "").strip()
@@ -144,7 +145,7 @@ class NtfyNotifierPlugin(ToolPlugin):
 
         if not topic:
             logger.debug("ntfy topic not set; skipping.")
-            return
+            return False
 
         url = f"{server}/{topic}"
         headers = {
@@ -174,10 +175,16 @@ class NtfyNotifierPlugin(ToolPlugin):
             resp = requests.post(url, data=body.encode("utf-8"), headers=headers, auth=auth, timeout=10)
             if resp.status_code >= 300:
                 logger.warning(f"ntfy publish failed ({resp.status_code}): {resp.text[:300]}")
+                return False
+            return True
         except Exception as e:
             logger.warning(f"Failed to send ntfy message: {e}")
+            return False
 
-    async def notify(self, title: str, content: str):
-        await asyncio.to_thread(self.post_to_ntfy, title, content)
+    async def notify(self, title: str, content: str, targets=None, origin=None, meta=None):
+        ok = await asyncio.to_thread(self.post_to_ntfy, title, content)
+        if ok:
+            return "Queued notification for ntfy"
+        return "Cannot queue: missing ntfy topic or send failed"
 
 plugin = NtfyNotifierPlugin()

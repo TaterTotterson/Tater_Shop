@@ -1,4 +1,4 @@
-import os, json, asyncio, logging, re, time, difflib, requests, mimetypes
+import json, logging, re, time, difflib, requests, mimetypes
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json  # <-- we use your extractor

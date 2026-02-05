@@ -4,7 +4,7 @@ import base64
 import logging
 import time
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 from datetime import datetime
 

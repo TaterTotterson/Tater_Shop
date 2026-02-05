@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import datetime
 from urllib.parse import quote
-from typing import Dict, Optional
+from typing import Dict
 
 import requests
 from plugin_base import ToolPlugin

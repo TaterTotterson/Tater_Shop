@@ -1,9 +1,7 @@
 # plugins/web_summary.py
-import os
 import requests
 import asyncio
 import logging
-import streamlit as st
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin

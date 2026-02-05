@@ -1,5 +1,4 @@
 # plugins/premiumize_download.py
-import os
 import aiohttp
 import logging
 import asyncio

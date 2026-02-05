@@ -1,19 +1,9 @@
 # plugins/youtube_summary.py
-import os
-import re
-import time
 import asyncio
 import subprocess
-import requests
-import json
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
-import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi
 from plugin_base import ToolPlugin
-from helpers import redis_client
-import redis
-import discord
 
 load_dotenv()
 DEFAULT_MAX_TOKENS = 2048

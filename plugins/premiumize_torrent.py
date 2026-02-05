@@ -1,11 +1,9 @@
 # plugins/premiumize_torrent.py
-import os
 import aiohttp
 import hashlib
 import bencodepy
 from urllib.parse import quote
 import logging
-import asyncio
 import base64
 
 # Discord bits are optional; keep imports but scope usage to the Discord handler

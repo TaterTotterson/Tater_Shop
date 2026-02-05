@@ -1,5 +1,4 @@
 # plugins/comfyui_image_plugin.py
-import os
 import json
 import time
 import asyncio
@@ -7,7 +6,7 @@ import secrets
 import copy
 import requests
 import imghdr
-from typing import Optional, Tuple
+from typing import Optional
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
