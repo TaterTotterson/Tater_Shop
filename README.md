@@ -13,6 +13,7 @@
 
 | Plugin Name | Description | Platform |
 |------------|-------------|----------|
+| `ai_tasks` | Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response. | discord, irc, matrix, homeassistant, webui |
 | `automatic_plugin` | Generate an image from a text prompt using your Automatic1111 server. | discord, webui |
 | `broadcast` | Send a one-time spoken announcement to your Home Assistant media players. | homeassistant, homekit, xbmc, webui |
 | `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, homeassistant, matrix |
@@ -38,6 +39,7 @@
 | `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, irc, homeassistant, matrix, homekit |
 | `premiumize_download` | Check if a link is cached on Premiumize and return direct download links. | discord, webui, irc, matrix |
 | `premiumize_torrent` | Check the latest torrent or magnet against Premiumize cache and provide direct links. | discord, matrix |
+| `send_message` | Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant). When used from Discord, attached files are forwarded automatically. | discord, irc, matrix, homeassistant, webui |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, irc, matrix |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, irc, matrix |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, discord, irc, matrix |
@@ -46,7 +48,7 @@
 | `unwatch_feed` | Remove an RSS feed from the watch list. | discord, webui, irc, matrix |
 | `vision_describer` | Describe the most recent image using a vision-capable model. | discord, webui, matrix, irc |
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui |
-| `watch_feed` | Add an RSS/Atom feed to the watch list and track new items. | discord, webui, irc, matrix |
+| `watch_feed` | Add an RSS/Atom feed to the watch list and post only the newest item once. | discord, webui, irc, matrix |
 | `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_search` | Search the web via Google CSE and summarize a relevant result. | discord, webui, irc, homeassistant, matrix, homekit, xbmc |
 | `web_summary` | Summarize the main points of a webpage from its URL. | discord, webui, irc, matrix |
@@ -68,9 +70,12 @@
 
 | Plugin Name | Description | Platform |
 |------------|-------------|----------|
-| `discord_notifier` | Post RSS summaries to a Discord channel via webhook. | notifier |
-| `ntfy_notifier` | Send RSS announcements to an ntfy topic. | notifier |
-| `telegram_notifier` | Send RSS summaries to a Telegram chat via bot token and chat ID. | notifier |
-| `wordpress_poster` | Post RSS summaries to a WordPress site via its REST API. | notifier |
+| `notify_discord` | Queue notifications for Discord delivery. | notifier |
+| `notify_homeassistant` | Queue notifications for Home Assistant delivery. | notifier |
+| `notify_irc` | Queue notifications for IRC delivery. | notifier |
+| `notify_matrix` | Queue notifications for Matrix delivery. | notifier |
+| `notify_ntfy` | Send RSS announcements to an ntfy topic. | notifier |
+| `notify_telegram` | Send RSS summaries to a Telegram chat via bot token and chat ID. | notifier |
+| `notify_wordpress` | Post RSS summaries to a WordPress site via its REST API. | notifier |
 
 <!-- AUTO:PLUGIN_TABLES:END -->
