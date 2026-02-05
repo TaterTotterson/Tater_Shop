@@ -1,8 +1,6 @@
 # plugins/device_compare.py
-import os
 import io
 import json
-import asyncio
 import logging
 from typing import List, Dict, Any
 import requests

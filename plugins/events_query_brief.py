@@ -1,7 +1,7 @@
 # plugins/events_query_brief.py
 import logging
 import json
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 import re

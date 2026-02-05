@@ -1,4 +1,4 @@
-# plugins/telegram_notifier.py
+# plugins/notify_telegram.py
 import html
 import re
 import requests
@@ -8,11 +8,12 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 
-logger = logging.getLogger("telegram_notifier")
+logger = logging.getLogger("notify_telegram")
 
 class TelegramNotifierPlugin(ToolPlugin):
-    name = "telegram_notifier"
+    name = "notify_telegram"
     plugin_name = "Telegram Notifier"
+    pretty_name = "Telegram Notifier"
     version = "1.0.0"
     min_tater_version = "50"
     description = "Provides Telegram bot token and chat ID settings for RSS announcements."
@@ -47,14 +48,14 @@ class TelegramNotifierPlugin(ToolPlugin):
         except Exception:
             return url
 
-    def post_to_telegram(self, message: str):
+    def post_to_telegram(self, message: str) -> bool:
         settings = get_plugin_settings(self.settings_category)
         bot_token = settings.get("telegram_bot_token")
         chat_id = settings.get("telegram_chat_id")
 
         if not bot_token or not chat_id:
             logger.debug("Telegram bot token or chat ID not set.")
-            return
+            return False
 
         try:
             lines = message.strip().splitlines()
@@ -97,12 +98,20 @@ class TelegramNotifierPlugin(ToolPlugin):
             }
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            requests.post(url, json=payload, timeout=10)
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code >= 300:
+                logger.warning(f"Telegram publish failed ({resp.status_code}): {resp.text[:300]}")
+                return False
+            return True
 
         except Exception as e:
             logger.warning(f"Failed to send Telegram message: {e}")
+            return False
 
-    async def notify(self, title: str, content: str):
-        await asyncio.to_thread(self.post_to_telegram, content)
+    async def notify(self, title: str, content: str, targets=None, origin=None, meta=None):
+        ok = await asyncio.to_thread(self.post_to_telegram, content)
+        if ok:
+            return "Queued notification for telegram"
+        return "Cannot queue: missing telegram settings or send failed"
 
 plugin = TelegramNotifierPlugin()

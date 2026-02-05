@@ -1,5 +1,4 @@
 # plugins/weather_forecast.py
-import json
 import asyncio
 import logging
 import re

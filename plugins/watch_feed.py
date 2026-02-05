@@ -1,12 +1,12 @@
 # plugins/watch_feed.py
 import os
-import time
 import feedparser
 import logging
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 import redis
 from typing import Optional
+from rss_store import ensure_feed
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -28,8 +28,8 @@ class WatchFeedPlugin(ToolPlugin):
         '  "arguments": {"feed_url": "<RSS feed URL>"}\n'
         "}\n"
     )
-    description = "Adds an RSS/Atom feed to the watch list and records the latest seen item so future checks only post new entries."
-    plugin_dec = "Add an RSS/Atom feed to the watch list and track new items."
+    description = "Adds an RSS/Atom feed to the watch list; the poller posts only the newest item once, then tracks new entries."
+    plugin_dec = "Add an RSS/Atom feed to the watch list and post only the newest item once."
     pretty_name = "Adding Your Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re adding the feed to the watch list now! "
@@ -38,31 +38,6 @@ class WatchFeedPlugin(ToolPlugin):
     platforms = ["discord", "webui", "irc", "matrix"]
 
     # -------- internals --------
-    def _latest_entry_ts(self, parsed_feed) -> float:
-        """
-        Return the most recent timestamp available from entries.
-        Falls back to current time if none are timestamped.
-        """
-        last_ts = 0.0
-        try:
-            entries = getattr(parsed_feed, "entries", []) or []
-            for entry in entries:
-                # Prefer published_parsed, then updated_parsed
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    ts = time.mktime(entry.published_parsed)
-                elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                    ts = time.mktime(entry.updated_parsed)
-                else:
-                    continue
-                if ts > last_ts:
-                    last_ts = ts
-        except Exception as e:
-            logger.debug(f"[watch_feed] timestamp scan failed: {e}")
-
-        if last_ts <= 0.0:
-            last_ts = time.time()
-        return float(last_ts)
-
     async def _watch_feed(self, feed_url: Optional[str], username: Optional[str] = None) -> str:
         prefix = f"{username}: " if username else ""
         if not feed_url:
@@ -79,9 +54,8 @@ class WatchFeedPlugin(ToolPlugin):
         if getattr(parsed, "bozo", 0) and not getattr(parsed, "entries", None):
             return f"{prefix}Failed to parse feed: {feed_url}"
 
-        last_ts = self._latest_entry_ts(parsed)
-        # store as integer epoch seconds for simplicity
-        redis_client.hset("rss:feeds", feed_url, int(last_ts))
+        # Set last_ts=0 so the poller posts only the newest item once.
+        ensure_feed(redis_client, feed_url, 0.0)
         return f"{prefix}Now watching feed: {feed_url}"
 
     # -------- platform handlers --------

@@ -1,8 +1,6 @@
 # plugins/ftp_browser.py
 import discord
-from discord.ext import commands
 import io
-import asyncio
 import aioftp
 from plugin_base import ToolPlugin
 from helpers import redis_client

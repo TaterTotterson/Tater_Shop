@@ -1,10 +1,6 @@
 import discord
-from discord.ext import commands
 import io
-import asyncio
 import aiohttp
-import base64
-import streamlit as st
 from plugin_base import ToolPlugin
 from helpers import redis_client
 

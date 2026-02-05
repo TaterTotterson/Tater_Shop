@@ -1,4 +1,4 @@
-# plugins/wordpress_poster.py
+# plugins/notify_wordpress.py
 import base64
 import requests
 import re
@@ -9,8 +9,9 @@ from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_enabled, get_plugin_settings
 
 class WordPressPosterPlugin(ToolPlugin):
-    name = "wordpress_poster"
+    name = "notify_wordpress"
     plugin_name = "WordPress Poster"
+    pretty_name = "WordPress Poster"
     version = "1.0.0"
     min_tater_version = "50"
     platforms = []
@@ -100,9 +101,9 @@ class WordPressPosterPlugin(ToolPlugin):
 
         return "\n\n".join(html_parts) + "\n"
 
-    def wordpress_post(self, title: str, content: str, entry_url: str = None):
+    def wordpress_post(self, title: str, content: str, entry_url: str = None) -> bool:
         if not get_plugin_enabled(self.name):
-            return
+            return False
 
         settings = get_plugin_settings(self.settings_category)
         site_url = settings.get("wordpress_site_url", "").rstrip("/")
@@ -113,7 +114,7 @@ class WordPressPosterPlugin(ToolPlugin):
 
         if not site_url or not username or not password:
             print("[WordPress] Missing required settings.")
-            return
+            return False
 
         api_url = f"{site_url}/wp-json/wp/v2/posts"
         auth = base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -139,12 +140,18 @@ class WordPressPosterPlugin(ToolPlugin):
             if response.status_code == 201:
                 post_url = response.json().get("link", "(unknown)")
                 print(f"[WordPress] Post created: {post_url}")
+                return True
             else:
                 print(f"[WordPress] Failed: {response.status_code} {response.text}")
+                return False
         except Exception as e:
             print(f"[WordPress] Error: {e}")
+            return False
 
-    async def notify(self, title: str, content: str):
-        await asyncio.to_thread(self.wordpress_post, title, content)
+    async def notify(self, title: str, content: str, targets=None, origin=None, meta=None):
+        ok = await asyncio.to_thread(self.wordpress_post, title, content)
+        if ok:
+            return "Queued notification for wordpress"
+        return "Cannot queue: missing wordpress settings or send failed"
 
 plugin = WordPressPosterPlugin()

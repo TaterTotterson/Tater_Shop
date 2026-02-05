@@ -4,7 +4,7 @@ import re
 import json as _json
 import time
 import requests
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
 from plugin_base import ToolPlugin
 from helpers import redis_client

@@ -1,14 +1,10 @@
 # plugins/web_search.py
-import os
 import json
 import asyncio
 import logging
 import re
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 from dotenv import load_dotenv
-import time
-import random
 import requests
 from plugin_base import ToolPlugin
 from helpers import extract_json, redis_client, get_tater_name

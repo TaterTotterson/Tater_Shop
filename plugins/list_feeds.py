@@ -2,8 +2,10 @@
 import os
 import logging
 import redis
+import time
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
+from rss_store import get_all_feeds
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -34,7 +36,7 @@ class ListFeedsPlugin(ToolPlugin):
     platforms = ["discord", "webui", "irc", "matrix"]
 
     async def _list_feeds(self, username: str | None = None) -> str:
-        feeds = redis_client.hgetall("rss:feeds") or {}
+        feeds = get_all_feeds(redis_client) or {}
         # sort for stable output
         items = sorted(feeds.items(), key=lambda kv: kv[0].lower())
 
@@ -42,13 +44,33 @@ class ListFeedsPlugin(ToolPlugin):
         if not items:
             return f"{prefix}No RSS feeds are currently being watched."
 
-        if username:
-            lines = [f"{username}: Currently watched feeds:"]
-            lines += [f"{name} (last update: {last})" for name, last in items]
-            return "\n".join(lines)
-        else:
-            feed_list = "\n".join(f"{name} (last update: {last})" for name, last in items)
-            return f"Currently watched feeds:\n{feed_list}"
+        def _fmt_ts(ts):
+            try:
+                return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+            except Exception:
+                return str(ts)
+
+        lines = []
+        for name, cfg in items:
+            status = "enabled" if cfg.get("enabled", True) else "disabled"
+            last = _fmt_ts(cfg.get("last_ts") or 0)
+            lines.append(f"{name} | {status} | last update: {last}")
+
+            platforms = cfg.get("platforms") or {}
+            if platforms:
+                parts = []
+                for p, pcfg in sorted(platforms.items(), key=lambda kv: kv[0]):
+                    pstat = "on" if pcfg.get("enabled", True) else "off"
+                    targets = pcfg.get("targets") or {}
+                    if targets:
+                        tgt = ", ".join(f"{k}={v}" for k, v in targets.items())
+                        parts.append(f"{p}:{pstat} ({tgt})")
+                    else:
+                        parts.append(f"{p}:{pstat}")
+                lines.append(f"Overrides: {', '.join(parts)}")
+
+        header = f"{username}: Currently watched feeds:" if username else "Currently watched feeds:"
+        return "\n".join([header] + lines)
 
     # ---------- Discord ----------
     async def handle_discord(self, message, args, llm_client):

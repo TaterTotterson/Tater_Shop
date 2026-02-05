@@ -4,6 +4,7 @@ import logging
 import redis
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
+from rss_store import delete_feed
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class UnwatchFeedPlugin(ToolPlugin):
         if not feed_url:
             return f"{prefix}No feed URL provided for unwatching."
 
-        removed = redis_client.hdel("rss:feeds", feed_url)
+        removed = delete_feed(redis_client, feed_url)
         if removed:
             return f"{prefix}Stopped watching feed: {feed_url}"
         else:
