@@ -12,13 +12,14 @@
         "irc",
         "matrix",
         "homeassistant",
+        "telegram",
         "webui"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "f15395f86777f964dae13a7b789227660021e9d1b5d152cec77c01f5f50586e2"
+      "sha256": "c10176aa9e9302b8bc64a828dace0f66d937f8929991ce77e3c3e2a0d7f4ca4e"
     },
     {
       "id": "automatic_plugin",
@@ -28,31 +29,36 @@
       "description": "Generate an image from a text prompt using your Automatic1111 server.",
       "platforms": [
         "discord",
-        "webui"
+        "webui",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "6b4765c5364d571997ba122986905d7a10da11bfb5ca4de81a77a94de9c43ee4"
+      "sha256": "6c246df32c281b89b90e7a310dd13b68e04566b03c035a0f8f966ad1c57a74eb"
     },
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Send a one-time spoken announcement to your Home Assistant media players.",
       "platforms": [
         "homeassistant",
         "homekit",
         "xbmc",
-        "webui"
+        "webui",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "plugins/broadcast.py",
-      "sha256": "2e980d5238bf2f86d41947d0a871872ab919aa1224cea056cfd8770461d2b7bd"
+      "sha256": "6cbfa2db9f8dfa18164630e56a06a667d839a3ac0c6746ebd298f674f71c6686"
     },
     {
       "id": "camera_event",
@@ -79,30 +85,32 @@
         "discord",
         "webui",
         "homeassistant",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "8d608ba39699ed2196129486478a3bc4da1497382f56c45fef8812b3d7b30d65"
+      "sha256": "2e3673d2fdf2dea5dd1147b16ae58c35baf3bed62ece56d0ec81a01e9290f6d2"
     },
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "platforms": [
         "discord",
         "webui",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "5cfcffd1d21a9c581e2bb0bf2b89d740cb8150e4994b5213b5949c67143dad33"
+      "sha256": "8cb5c902976b9be254445534758aaa94b57423988e9f3b4d1b79a702c00d16b4"
     },
     {
       "id": "comfyui_image_video",
@@ -158,13 +166,14 @@
       "platforms": [
         "discord",
         "webui",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "plugins/device_compare.py",
-      "sha256": "f1c79085f2955dad0b1ea1eca54126b475cc7c0afdb51f5f3161814944e7eb2b"
+      "sha256": "67bbca347399a805df5995e0f91768fb585ad200bf8543242df275372a502f7d"
     },
     {
       "id": "doorbell_alert",
@@ -199,19 +208,23 @@
     {
       "id": "events_query",
       "name": "Events Query",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "min_tater_version": "50",
       "description": "Answer questions about stored household events by area and timeframe.",
       "platforms": [
         "webui",
         "homeassistant",
-        "homekit"
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "5b87e80a4ed3a53d4733cfd545010b9f6fe62e75f2ffd4dbf5668a676ab31aa2"
+      "sha256": "d273dd665c6f08b1c14aaf598dff26d3940c63adedd0cf055b08a3115478439a"
     },
     {
       "id": "events_query_brief",
@@ -231,20 +244,24 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "platforms": [
         "webui",
         "homeassistant",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "plugins/find_my_phone.py",
-      "sha256": "50630a79df03114268e3d21911816b80ad928f3da7193f904c5f7616f160012f"
+      "sha256": "4f046e21f29694768f5496b4e169a4013a9772a9efba5cf793110a47a53af206"
     },
     {
       "id": "ftp_browser",
@@ -280,20 +297,24 @@
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.0.1",
+      "version": "1.1.4",
       "min_tater_version": "50",
-      "description": "Control Home Assistant devices, including TV remotes, and read sensors.",
+      "description": "Control Home Assistant devices.",
       "platforms": [
         "homeassistant",
         "webui",
         "xbmc",
-        "homekit"
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "910f54a51076617a90718db8b16599a27e656ec62403a5ec746f48de9e6755df"
+      "sha256": "ad4108e14ead38185ecb98ce8fa193125871a1b903fd4afba99f75fb4831d843"
     },
     {
       "id": "list_feeds",
@@ -305,13 +326,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/list_feeds.py",
-      "sha256": "2301c1cb2d96711f435a3326905963fb305eedb98a8a18f753b5d4e37275e9f3"
+      "sha256": "ddea57f2e79d341e3677a89e45fd4b541cc398568f4bbc27d4d988bffc396eaf"
     },
     {
       "id": "lowfi_video",
@@ -331,7 +353,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -340,31 +362,36 @@
         "irc",
         "homeassistant",
         "matrix",
-        "homekit"
+        "homekit",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "af63af619a98b184973b80974f6dafb298bc0944c046e58a5d2e434651091833"
+      "sha256": "5eea7b6d518f94e27774e52f17386b0e271b8855a7968fcb007ff61c50439625"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.5",
+      "version": "1.0.8",
       "min_tater_version": "50",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "platforms": [
         "webui",
         "homeassistant",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "plugins/music_assistant.py",
-      "sha256": "0ee4d39336b9f2dbabfc684118b2aa28fcae1a96171c9ddd3766c8a25971ff2c"
+      "sha256": "44fd0f32591acf18a3ff316d39b2285e807f8cadd70956cbbe997285c0d640d2"
     },
     {
       "id": "notify_discord",
@@ -444,9 +471,9 @@
     {
       "id": "notify_telegram",
       "name": "Telegram Notifier",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
-      "description": "Send RSS summaries to a Telegram chat via bot token and chat ID.",
+      "description": "Send messages to Telegram via the Telegram platform queue.",
       "platforms": [
         "notifier"
       ],
@@ -454,7 +481,7 @@
       "settings_category": "Telegram Notifier",
       "tags": [],
       "entry": "plugins/notify_telegram.py",
-      "sha256": "4b03ec2dd0372a086ea89445bde64b94ab0ed892de4b0493c00ac7db8b12f8ce"
+      "sha256": "2e76272d2df2284c79c283b6d364b47c3b364e978f1aa8e549efaa63058a2df6"
     },
     {
       "id": "notify_wordpress",
@@ -513,30 +540,35 @@
         "irc",
         "homeassistant",
         "matrix",
-        "homekit"
+        "homekit",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_details.py",
-      "sha256": "65462e6a3818e0a081fdc56af5b8b56e7c6862bb05688a04f2155e9d0e36d17c"
+      "sha256": "fa27770a85fd44de2d9666169109480754869f90009f244d4d286a20728b66c0"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Request a movie or TV show in Overseerr by title.",
       "platforms": [
         "webui",
         "homeassistant",
-        "homekit"
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_request.py",
-      "sha256": "908f4a745d4fb47ae5973902a3210d614fbd3b3257bad1b5b943b5359bc123df"
+      "sha256": "6da2113803311c5dccd78c2dcafa94a37a153cabfd01ba30de9cf0f00f92cd82"
     },
     {
       "id": "overseerr_trending",
@@ -550,13 +582,14 @@
         "irc",
         "homeassistant",
         "matrix",
-        "homekit"
+        "homekit",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_trending.py",
-      "sha256": "223cdff07a1aeaec520c656d46ff4cb1fb6de33b58b838cfce3c7b4d8fbcf61f"
+      "sha256": "b895f875653893efd63b83cea0f6e6c9b7d29a8aa80c1ec0c8b0e5574560d0e9"
     },
     {
       "id": "phone_events_alert",
@@ -576,25 +609,26 @@
     {
       "id": "premiumize_download",
       "name": "Premiumize Download",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Check if a link is cached on Premiumize and return direct download links.",
       "platforms": [
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "5547d14bc72f599c211bbf50cfe20c91f396e21268dbfb67bbce11672be1ec2a"
+      "sha256": "6ef920875e713e85d0df4d5b181dd4a337c59a1b0c796b7e07d957ec8a7929a8"
     },
     {
       "id": "premiumize_torrent",
       "name": "Premiumize Torrent",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Check the latest torrent or magnet against Premiumize cache and provide direct links.",
       "platforms": [
@@ -605,26 +639,27 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_torrent.py",
-      "sha256": "205f75c247222bf6e2e6a0ebdfaca56accbe2baf969b1339c977297f20ea5ddd"
+      "sha256": "78bda79b52669b112dae867fcaa49f7a0105b3ea2300ff3d89c5c8c50fa6079b"
     },
     {
       "id": "send_message",
       "name": "Send Message",
       "version": "0.0.0",
       "min_tater_version": "0.0.0",
-      "description": "Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant). When used from Discord, attached files are forwarded automatically.",
+      "description": "Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). When used from Discord, attached files are forwarded automatically.",
       "platforms": [
         "discord",
         "irc",
         "matrix",
         "homeassistant",
+        "telegram",
         "webui"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/send_message.py",
-      "sha256": "4f61237991600552e3f06b1a7dcb12bd99046422470664e9873a936a8a8c5af5"
+      "sha256": "e90e61b9d0045eb9e5b1002e9575e2fbeb18a9d5bff74ed07f71fd6a895d32b5"
     },
     {
       "id": "sftpgo_account",
@@ -636,13 +671,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "plugins/sftpgo_account.py",
-      "sha256": "ef0b61f1bbbdd6377a3f6aff927b864aaacda0570b2055b70210900415b5f8e1"
+      "sha256": "e8b3495847cd7a0018908c469851549575d5f15c268d716a7009a3b780ff8eea"
     },
     {
       "id": "sftpgo_activity",
@@ -654,13 +690,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "plugins/sftpgo_activity.py",
-      "sha256": "697af05107c4277fddbe8176b8e470d116c957bd7a763cfba46866ff77e18b98"
+      "sha256": "bf08077fb1cc7270af8231d547f716c31cb69325da42f9ae08ac79fb056878d4"
     },
     {
       "id": "tater_gits_add_feed",
@@ -672,49 +709,58 @@
         "webui",
         "discord",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Tater Gits",
       "tags": [],
       "entry": "plugins/tater_gits_add_feed.py",
-      "sha256": "c4a5c49b2798e9c244ca1824b5e463ce43d25ad3522ff298c344cedc7b715f47"
+      "sha256": "e2b44440a1a4da1fdc7bdc16b7d824d8bc75a7e00ce816e47181184234d72961"
     },
     {
       "id": "unifi_network",
       "name": "UniFi Network",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Fetch UniFi Network sites/clients/devices via the official API and let the LLM answer questions from computed facts + compact lists.",
       "platforms": [
         "webui",
         "homeassistant",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "62464a4d0d7622bd6ad8fba74a0643a98b14ea5e0fd652cda5aebb31e2d96650"
+      "sha256": "f95717e57f0d9650dbe23f2f3d14fa42c41331e0fc16c3bd46bee7eb895153d9"
     },
     {
       "id": "unifi_protect",
       "name": "UniFi Protect",
-      "version": "1.0.0",
+      "version": "1.0.5",
       "min_tater_version": "50",
       "description": "Get UniFi Protect sensor status and camera snapshot vision summaries.",
       "platforms": [
         "webui",
         "homeassistant",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "53e323a1828f6e4be7b7895f9cdddd6b27bcb759261992b53b8e24b7ed4db43c"
+      "sha256": "c9688821497f00517569fc07b34178bf77cf3cbad3f487e8950311dfa8bb1e9d"
     },
     {
       "id": "unwatch_feed",
@@ -726,13 +772,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/unwatch_feed.py",
-      "sha256": "3ad84901b4e673a66524b5f763146ffea5f2e4734d7224341d237f460c4f4761"
+      "sha256": "f538933f78c321def2683ea8c2a112ec48972ebc857853efe6ca309ba5edce44"
     },
     {
       "id": "vision_describer",
@@ -744,31 +791,36 @@
         "discord",
         "webui",
         "matrix",
-        "irc"
+        "irc",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Vision",
       "tags": [],
       "entry": "plugins/vision_describer.py",
-      "sha256": "4734b709628cfdd32a3a6ee8476772a8234277605a7f72469f1ff37e08d19c31"
+      "sha256": "d3f40355bee64a62607318c77aeb5bd56eaa3ac079c0e057071538a9be2d252a"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "platforms": [
         "homeassistant",
         "homekit",
         "xbmc",
-        "webui"
+        "webui",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "plugins/voicepe_remote_timer.py",
-      "sha256": "3fd31c042506d0a97aebaef7221ce66f4fcc6632dc17c7632a66ee38541298ee"
+      "sha256": "ad7f57aeeb2a512a2c0729e0496740e36c7a7d79c7cb71f0e92b76139cf66e5f"
     },
     {
       "id": "watch_feed",
@@ -780,13 +832,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/watch_feed.py",
-      "sha256": "b23984f2c82345d5a94661b5dcd00aaac258f297dc08001e88f46d21b725da53"
+      "sha256": "9d4c2d1d233a46902574f2122b1ef7e56a6fc89eedfec8273024b146d00881cd"
     },
     {
       "id": "weather_brief",
@@ -806,7 +859,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.0.0",
+      "version": "1.0.9",
       "min_tater_version": "50",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "platforms": [
@@ -816,18 +869,19 @@
         "homeassistant",
         "matrix",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "e3af45c1a322201899e71773dfab49f98cc03c24cc964821a262ca009fd15a6b"
+      "sha256": "dad415bfb60b1068c6ba1e4363cd054a3637e8474b527208303a010eea84fdbc"
     },
     {
       "id": "web_search",
       "name": "Web Search",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Search the web via Google CSE and summarize a relevant result.",
       "platforms": [
@@ -837,31 +891,33 @@
         "homeassistant",
         "matrix",
         "homekit",
-        "xbmc"
+        "xbmc",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Web Search",
       "tags": [],
       "entry": "plugins/web_search.py",
-      "sha256": "450528fab951dd4701ad2037ceddedddb51380d47bbccee03decda1992313457"
+      "sha256": "760941983ed21f79267c50120e4deed07d652470519bde073dd162e58e61c40e"
     },
     {
       "id": "web_summary",
       "name": "Web Summary",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Summarize the main points of a webpage from its URL.",
       "platforms": [
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/web_summary.py",
-      "sha256": "34e33408da2886f0be0f83ebf527d7182c2abfabe887886d79f9a842f6b87946"
+      "sha256": "b9e343cc4342e54585a48b0a0992acc99c03b0d68698b6c8fc466c61785d9753"
     },
     {
       "id": "webdav_browser",
@@ -888,13 +944,14 @@
         "discord",
         "webui",
         "irc",
-        "matrix"
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "YouTube Summary",
       "tags": [],
       "entry": "plugins/youtube_summary.py",
-      "sha256": "b4aef99a9d27cda58ba7202e7ec74aefbdf171dff2c72194e345e9f1df8dd18e"
+      "sha256": "7ecc71701f24923c07602bfe29314e95d792b8c0a17673990fc6211b04cba812"
     },
     {
       "id": "zen_greeting",
