@@ -28,7 +28,7 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     plugin_dec = "Add a GitHub releases feed to the tater-gits watcher with smart naming."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
-    platforms = ["webui", "discord", "irc", "matrix"]
+    platforms = ["webui", "discord", "irc", "matrix", "telegram"]
     settings_category = "Tater Gits"
 
     required_settings = {
@@ -215,6 +215,9 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
         if not url:
             return "❌ Please provide a GitHub releases feed URL."
         return await self._run(url, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = TaterGitsAddFeedPlugin()

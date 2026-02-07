@@ -36,7 +36,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
         "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit"]
+    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -290,6 +290,13 @@ class OverseerrTrendingPlugin(ToolPlugin):
             return await self._answer(args or {}, llm_client, platform="matrix")
         except Exception as e:
             logger.exception("[OverseerrTrending handle_matrix] %s", e)
+            return f"Error: {e}"
+
+    async def handle_telegram(self, update, args, llm_client):
+        try:
+            return await self._answer(args or {}, llm_client, platform="telegram")
+        except Exception as e:
+            logger.exception("[OverseerrTrending handle_telegram] %s", e)
             return f"Error: {e}"
 
     async def handle_homekit(self, args, llm_client):

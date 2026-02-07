@@ -22,7 +22,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",
@@ -139,6 +139,10 @@ class SFTPGoActivityPlugin(ToolPlugin):
             return [await self._get_activity_summary(llm_client)]
         except RuntimeError:
             return [asyncio.run(self._get_activity_summary(llm_client))]
+
+    # Telegram
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
     # Matrix
     async def handle_matrix(self, client, room, sender, body, args, llm_client):

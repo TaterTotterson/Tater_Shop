@@ -43,7 +43,7 @@ class DeviceComparePlugin(ToolPlugin):
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
     # Matrix supported (images only). IRC still not supported (images).
-    platforms = ["discord", "webui", "matrix"]
+    platforms = ["discord", "webui", "matrix", "telegram"]
 
     required_settings = {
         "GOOGLE_API_KEY": {"label": "Google API Key", "type": "string", "default": ""},
@@ -753,6 +753,9 @@ class DeviceComparePlugin(ToolPlugin):
             out.append("**Sources**\n" + data["sources_text"])
 
         return out
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
     # ---------- Matrix ----------
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
