@@ -80,7 +80,7 @@ class AutomaticPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a fun, casual message telling {mention} you’re drawing their masterpiece now! Only output that message."
-    platforms = ["discord", "webui"]
+    platforms = ["discord", "webui", "telegram"]
 
     @staticmethod
     def _generate_image(prompt: str) -> bytes:
@@ -177,6 +177,9 @@ class AutomaticPlugin(ToolPlugin):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
     # --- IRC Handler ---
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):

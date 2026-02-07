@@ -41,7 +41,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ["discord", "webui", "homeassistant", "matrix"]
+    platforms = ["discord", "webui", "homeassistant", "matrix", "telegram"]
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {
@@ -354,6 +354,9 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         if audio_meta:
             return [audio_meta, message_text]
         return [f"Your song is ready: {media_url}", message_text]
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
     # ---------------------------------------
     # Matrix

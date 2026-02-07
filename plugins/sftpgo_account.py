@@ -66,7 +66,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     @staticmethod
     async def safe_send(channel, content: str, **kwargs):
@@ -327,6 +327,9 @@ class SFTPGoAccountPlugin(ToolPlugin):
         if state == "token_error":
             return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
         return "❌ Failed to create the SFTP account. Please try again later."
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self.handle_webui(args, llm_client)
 
 
 plugin = SFTPGoAccountPlugin()

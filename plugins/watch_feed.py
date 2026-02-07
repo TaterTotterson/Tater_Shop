@@ -35,7 +35,7 @@ class WatchFeedPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re adding the feed to the watch list now! "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "matrix"]
+    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
 
     # -------- internals --------
     async def _watch_feed(self, feed_url: Optional[str], username: Optional[str] = None) -> str:
@@ -64,6 +64,10 @@ class WatchFeedPlugin(ToolPlugin):
         return await self._watch_feed(feed_url)
 
     async def handle_webui(self, args, llm_client):
+        feed_url = args.get("feed_url")
+        return await self._watch_feed(feed_url)
+
+    async def handle_telegram(self, update, args, llm_client):
         feed_url = args.get("feed_url")
         return await self._watch_feed(feed_url)
 
