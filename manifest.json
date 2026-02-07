@@ -4,7 +4,7 @@
     {
       "id": "ai_tasks",
       "name": "AI Tasks",
-      "version": "0.0.0",
+      "version": "1.0.1",
       "min_tater_version": "0.0.0",
       "description": "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response.",
       "platforms": [
@@ -19,7 +19,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "c10176aa9e9302b8bc64a828dace0f66d937f8929991ce77e3c3e2a0d7f4ca4e"
+      "sha256": "59b3013d9dcd827ff9f42c4f11c448c29a40d688517b2a02113aabbcefc95f32"
     },
     {
       "id": "automatic_plugin",
@@ -63,7 +63,7 @@
     {
       "id": "camera_event",
       "name": "Camera Event",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Capture a Home Assistant camera snapshot, describe it with vision AI, and log the event.",
       "platforms": [
@@ -73,7 +73,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "d5febae005bb2fde90a120233fad8de315f1ea836a4e0d1cd680b3350c18d9aa"
+      "sha256": "a3d319d83c1bdc26beabb19cbe7aa322b47d4f9b34c5da4c939f53b777baab91"
     },
     {
       "id": "comfyui_audio_ace",
@@ -178,7 +178,7 @@
     {
       "id": "doorbell_alert",
       "name": "Doorbell Alert",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "min_tater_version": "50",
       "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
       "platforms": [
@@ -188,7 +188,7 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "cd290c7417c1fc9e3a73b3eaade59330b0442748e839d386488d7a56e7804256"
+      "sha256": "f1ed87edb2f3e8dbd3074d0d3f3eadeb9181eb8e6208d27679c8fd25aff89f46"
     },
     {
       "id": "emoji_ai_responder",
@@ -208,7 +208,7 @@
     {
       "id": "events_query",
       "name": "Events Query",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Answer questions about stored household events by area and timeframe.",
       "platforms": [
@@ -224,12 +224,12 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "d273dd665c6f08b1c14aaf598dff26d3940c63adedd0cf055b08a3115478439a"
+      "sha256": "91d22d8b0c8431b32ac1110b21ee931961cb3c0d7247edaf81f418e0df25d92c"
     },
     {
       "id": "events_query_brief",
       "name": "Events Query Brief",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant.",
       "platforms": [
@@ -239,7 +239,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "7a29fcea86bc67932c61b0c1f6ee28ff45f772a30144f21641099ecdee287263"
+      "sha256": "455f5c640b522708074417fff8febf3b49b5487fca5fbf76249abba0e0960e4e"
     },
     {
       "id": "find_my_phone",
@@ -411,7 +411,7 @@
     {
       "id": "notify_homeassistant",
       "name": "Home Assistant Notifier",
-      "version": "0.0.0",
+      "version": "1.0.1",
       "min_tater_version": "0.0.0",
       "description": "Queue notifications for Home Assistant delivery.",
       "platforms": [
@@ -421,7 +421,7 @@
       "settings_category": "Home Assistant Notifier",
       "tags": [],
       "entry": "plugins/notify_homeassistant.py",
-      "sha256": "48f566a18876c0f268faaa1d17b030ca470899f8cdde31c4f34ebf0aeac8ff8f"
+      "sha256": "269f667dc4e9f7c548fa440beab609fe1e9460b33e7e77f7af072821213fd46b"
     },
     {
       "id": "notify_irc",
@@ -659,7 +659,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/send_message.py",
-      "sha256": "e90e61b9d0045eb9e5b1002e9575e2fbeb18a9d5bff74ed07f71fd6a895d32b5"
+      "sha256": "3905dc5d95d582fda563a725901924f3dd746aca43e2a88f8c5e15211464f7df"
     },
     {
       "id": "sftpgo_account",
@@ -844,7 +844,7 @@
     {
       "id": "weather_brief",
       "name": "Weather Brief",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Give a short automation-friendly recap of recent weather conditions.",
       "platforms": [
@@ -854,7 +854,7 @@
       "settings_category": "Weather Brief",
       "tags": [],
       "entry": "plugins/weather_brief.py",
-      "sha256": "ec41a2e309a0922713358d81753c7aab244515fc6c30e60e59a0b47613a486f8"
+      "sha256": "90e3c31f4523b56216a46b8e21ce2dd5849c6aec651ad61af7d9d38b18a0747a"
     },
     {
       "id": "weather_forecast",
@@ -956,7 +956,7 @@
     {
       "id": "zen_greeting",
       "name": "Zen Greeting",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Generate a calming daily greeting and message for dashboards.",
       "platforms": [
@@ -966,7 +966,7 @@
       "settings_category": "Zen Greeting",
       "tags": [],
       "entry": "plugins/zen_greeting.py",
-      "sha256": "534455ea8eb0fba91cf98be63588c95739fcd14543db79871201f46ea85f9cbe"
+      "sha256": "c977afa45c001fe0690343543a52fc7896d5e320df801153d46647502b567f0c"
     }
   ]
 }
