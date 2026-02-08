@@ -50,7 +50,6 @@
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui, discord, telegram, matrix, irc |
 | `watch_feed` | Add an RSS/Atom feed to the watch list and post only the newest item once. | discord, webui, irc, matrix, telegram |
 | `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, irc, homeassistant, matrix, homekit, xbmc, telegram |
-| `web_search` | Search the web via Google CSE and summarize a relevant result. | discord, webui, irc, homeassistant, matrix, homekit, xbmc, telegram |
 | `web_summary` | Summarize the main points of a webpage from its URL. | discord, webui, irc, matrix, telegram |
 | `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |
 | `youtube_summary` | Summarize a YouTube video using its transcript. | discord, webui, irc, matrix, telegram |
