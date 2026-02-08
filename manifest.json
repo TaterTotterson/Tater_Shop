@@ -19,12 +19,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "59b3013d9dcd827ff9f42c4f11c448c29a40d688517b2a02113aabbcefc95f32"
+      "sha256": "259f3f431f9526da28188d34258008dd90e0d49051f52e141bb0f47fd1244ccb"
     },
     {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
-      "version": "1.0.8",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Generate an image from a text prompt using your Automatic1111 server.",
       "platforms": [
@@ -36,12 +36,12 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "6c246df32c281b89b90e7a310dd13b68e04566b03c035a0f8f966ad1c57a74eb"
+      "sha256": "cfb4af75c41ba9c4840e733d049ad1c37832cb0d1f09650100087b454004e3ff"
     },
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.0.2",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Send a one-time spoken announcement to your Home Assistant media players.",
       "platforms": [
@@ -58,14 +58,14 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "plugins/broadcast.py",
-      "sha256": "6cbfa2db9f8dfa18164630e56a06a667d839a3ac0c6746ebd298f674f71c6686"
+      "sha256": "42299fd73e635711c9c9a981d4265c111cda6858ce0ba25796696de9dff51a21"
     },
     {
       "id": "camera_event",
       "name": "Camera Event",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "min_tater_version": "50",
-      "description": "Capture a Home Assistant camera snapshot, describe it with vision AI, and log the event.",
+      "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
       "platforms": [
         "automation"
       ],
@@ -73,12 +73,12 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "a3d319d83c1bdc26beabb19cbe7aa322b47d4f9b34c5da4c939f53b777baab91"
+      "sha256": "3c37f0b50d95b65cc7a41f361b7759d5a595f74cfbbbba8d11f88e41a33630fc"
     },
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "platforms": [
@@ -92,12 +92,12 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "2e3673d2fdf2dea5dd1147b16ae58c35baf3bed62ece56d0ec81a01e9290f6d2"
+      "sha256": "85c9fce32ddc663b0e0c6ee5b1c43c09d491032b9323ae8c9df9512bb003f52c"
     },
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "50",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "platforms": [
@@ -110,12 +110,12 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "8cb5c902976b9be254445534758aaa94b57423988e9f3b4d1b79a702c00d16b4"
+      "sha256": "35c32503ba4b851962615a2eb1c2d174c5e26e028eccb0146478a110b2fbc33d"
     },
     {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "platforms": [
@@ -125,12 +125,12 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "plugins/comfyui_image_video.py",
-      "sha256": "e6d080f4ef588c83b1a252cc97e0e8fa982daa784d86d2dfa770cfa9f4cb4237"
+      "sha256": "394a38a44cf98303cd09e083943811540680c49d3d4dd9e37ac6274d4c5b4254"
     },
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "platforms": [
@@ -140,12 +140,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "17ca6bdb9cb585e56d8d49185146fc85053633e9adad32a0e810998c392ea9d9"
+      "sha256": "1bc3a820c8f223c9932e121a6bf2b6ab5e06e29cee4fa6178a2562437450dd48"
     },
     {
       "id": "comfyui_video_plugin",
       "name": "ComfyUI Video",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
       "platforms": [
@@ -155,12 +155,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "b9258806db2780365a61fa569432116446b4ebe0ae067e027546e092fb1bc3da"
+      "sha256": "a02bcc06ef2c45e246c6ae05025c5edf56de7a2d8acae7d7c599c093ffb4d1f7"
     },
     {
       "id": "device_compare",
       "name": "Device Compare",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Compare two devices with spec tables and per-game FPS benchmarks.",
       "platforms": [
@@ -173,12 +173,12 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "plugins/device_compare.py",
-      "sha256": "67bbca347399a805df5995e0f91768fb585ad200bf8543242df275372a502f7d"
+      "sha256": "d1c22db77d3071a2447eda8785ff8f27e1c57a556f7537fe4324f0d4f8227559"
     },
     {
       "id": "doorbell_alert",
       "name": "Doorbell Alert",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
       "platforms": [
@@ -188,27 +188,27 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "f1ed87edb2f3e8dbd3074d0d3f3eadeb9181eb8e6208d27679c8fd25aff89f46"
+      "sha256": "bc693e08255654c14af4d542dd0373f8435ab9ee00e373e03f40656b0cfbda37"
     },
     {
       "id": "emoji_ai_responder",
       "name": "Emoji AI Responder",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
-      "description": "Pick an emoji reaction that matches a user's message.",
+      "description": "Pick a contextual emoji reaction.",
       "platforms": [
         "passive"
       ],
       "notifier": false,
-      "settings_category": null,
+      "settings_category": "Emoji AI Responder",
       "tags": [],
       "entry": "plugins/emoji_ai_responder.py",
-      "sha256": "bb1a28f0766113f31f3108a3c13e5162d4fe07e2a80c6cfe6a66e2ec4b460310"
+      "sha256": "cae3968c226ba28d2b0ae0717ff7018f65e9389f8547cea143056c790eebe15b"
     },
     {
       "id": "events_query",
       "name": "Events Query",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "50",
       "description": "Answer questions about stored household events by area and timeframe.",
       "platforms": [
@@ -224,7 +224,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "91d22d8b0c8431b32ac1110b21ee931961cb3c0d7247edaf81f418e0df25d92c"
+      "sha256": "1db03fbce92735d0977ce7c0388fa1d0e6f0d4a412dcb0a1b88f8b0de50484f9"
     },
     {
       "id": "events_query_brief",
@@ -244,7 +244,7 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "50",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "platforms": [
@@ -261,12 +261,12 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "plugins/find_my_phone.py",
-      "sha256": "4f046e21f29694768f5496b4e169a4013a9772a9efba5cf793110a47a53af206"
+      "sha256": "a69e7f0bcac40526c3e7b1649a7d18f68f04e371c4499c649cfdf2bdd940f0ee"
     },
     {
       "id": "ftp_browser",
       "name": "FTP Browser",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Browse and download files from the configured FTP server.",
       "platforms": [
@@ -276,23 +276,27 @@
       "settings_category": "FTPBrowser",
       "tags": [],
       "entry": "plugins/ftp_browser.py",
-      "sha256": "87e04c619131f4f5bbb6037ad92f2309e0137c011a88f3c7fffdeac21e47f188"
+      "sha256": "953b2fde8c4b5cd7bab055366b8735d9935599e4f848aa16538679d327e25b1a"
     },
     {
       "id": "get_notifications",
       "name": "Get Notifications",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Fetch queued notifications from the Home Assistant bridge.",
       "platforms": [
         "webui",
-        "homeassistant"
+        "homeassistant",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
       ],
       "notifier": false,
       "settings_category": "Notifications",
       "tags": [],
       "entry": "plugins/get_notifications.py",
-      "sha256": "91eeb0da2bf89b60dd230cbe4c21c73438758b98c1315c8e1689f360a3358a53"
+      "sha256": "aae6bd3dcec6303b719e69bca1234567c279ad3a6dce2a8aaddc4ebefd12f4cc"
     },
     {
       "id": "ha_control",
@@ -314,12 +318,12 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "ad4108e14ead38185ecb98ce8fa193125871a1b903fd4afba99f75fb4831d843"
+      "sha256": "5566d85de4b0addc581e3ef1183b86117ad9713a252fb29133921e7c05b64a0f"
     },
     {
-      "id": "list_feeds",
-      "name": "List Feeds",
-      "version": "1.0.0",
+      "id": "rss_list",
+      "name": "RSS List",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Show the RSS feeds currently being watched.",
       "platforms": [
@@ -333,12 +337,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/list_feeds.py",
-      "sha256": "ddea57f2e79d341e3677a89e45fd4b541cc398568f4bbc27d4d988bffc396eaf"
+      "sha256": "89e47e7d93112ff142d9ff261d98393214c77b62af088649ee4ac71768ce9f7b"
     },
     {
       "id": "lowfi_video",
       "name": "Lofi Video",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Create a cozy lofi video by generating music and looping a matching animation.",
       "platforms": [
@@ -348,12 +352,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "c236e55c7a6cfc853fd4e4cb708e6b338f5762a5ddfc9280a4e324e9be7e3407"
+      "sha256": "ca295471083a73b946242231f52b02ebd7501ae03b41584934253a21934d2070"
     },
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -369,7 +373,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "5eea7b6d518f94e27774e52f17386b0e271b8855a7968fcb007ff61c50439625"
+      "sha256": "011cfd2defd012db19ea3569e8940a427b1c89d64c6531cb3047fe5941d31965"
     },
     {
       "id": "music_assistant",
@@ -501,9 +505,9 @@
     {
       "id": "obsidian_note",
       "name": "Obsidian Note",
-      "version": "1.0.0",
+      "version": "3.0.0",
       "min_tater_version": "50",
-      "description": "Create a new Obsidian note with an AI-generated title and content.",
+      "description": "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags.",
       "platforms": [
         "webui"
       ],
@@ -511,14 +515,14 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_note.py",
-      "sha256": "24d97e41061ea8f513fabe92fbd22f50619555f7765d7aa3b3ba3d23ab7b3cdd"
+      "sha256": "1ad0cf9d78e22c4d221f22dd678a061a791207aa2eda70d7e7cd49a2a3b68506"
     },
     {
       "id": "obsidian_search",
       "name": "Obsidian Search",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "min_tater_version": "50",
-      "description": "Search your Obsidian vault and summarize matching notes.",
+      "description": "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis.",
       "platforms": [
         "webui"
       ],
@@ -526,12 +530,12 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_search.py",
-      "sha256": "7a7c7af58d37f5cacb25de77abfe3890e6123dc26e641848d0f8c56a06c6c8ae"
+      "sha256": "bfc83108ac589f8de0e1aa79a6a2eaccb4abf403c27e66f51c0375c73fd515e0"
     },
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Fetch details for a specific title from Overseerr.",
       "platforms": [
@@ -547,12 +551,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_details.py",
-      "sha256": "fa27770a85fd44de2d9666169109480754869f90009f244d4d286a20728b66c0"
+      "sha256": "1bc03c905e376051f53690a279339a687c4d9eb5455c8ebc9661a850b2c20a99"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "50",
       "description": "Request a movie or TV show in Overseerr by title.",
       "platforms": [
@@ -568,12 +572,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_request.py",
-      "sha256": "6da2113803311c5dccd78c2dcafa94a37a153cabfd01ba30de9cf0f00f92cd82"
+      "sha256": "d60e37a53bb1cbb263a71f78ca1da63569c84d19aa1bd3aff89b7f41244161d0"
     },
     {
       "id": "overseerr_trending",
       "name": "Overseerr Trending",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "List trending or upcoming movies/TV from Overseerr.",
       "platforms": [
@@ -589,22 +593,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_trending.py",
-      "sha256": "b895f875653893efd63b83cea0f6e6c9b7d29a8aa80c1ec0c8b0e5574560d0e9"
-    },
-    {
-      "id": "phone_events_alert",
-      "name": "Phone Events Alert",
-      "version": "1.0.1",
-      "min_tater_version": "50",
-      "description": "Capture a camera snapshot, describe it with vision AI, and send it to your phone (with cooldown + priority).",
-      "platforms": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Phone Events Alert",
-      "tags": [],
-      "entry": "plugins/phone_events_alert.py",
-      "sha256": "1656dda5752dcfe396ce316a6625f16a713babf0c27bd4ad4e189e84c71d3bd9"
+      "sha256": "0405440e89adb02ac1c202c545630560dfa6e814ccebdb2d1b456195191c0f10"
     },
     {
       "id": "premiumize_download",
@@ -763,9 +752,9 @@
       "sha256": "c9688821497f00517569fc07b34178bf77cf3cbad3f487e8950311dfa8bb1e9d"
     },
     {
-      "id": "unwatch_feed",
-      "name": "Unwatch Feed",
-      "version": "1.0.0",
+      "id": "rss_unwatch",
+      "name": "RSS Unwatch",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Remove an RSS feed from the watch list.",
       "platforms": [
@@ -779,7 +768,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/unwatch_feed.py",
-      "sha256": "f538933f78c321def2683ea8c2a112ec48972ebc857853efe6ca309ba5edce44"
+      "sha256": "69de932f9a649274fbd76cb833ac9a6d64a0daf7e65d1ee6e115e1987fe3c0ad"
     },
     {
       "id": "vision_describer",
@@ -823,9 +812,9 @@
       "sha256": "ad7f57aeeb2a512a2c0729e0496740e36c7a7d79c7cb71f0e92b76139cf66e5f"
     },
     {
-      "id": "watch_feed",
-      "name": "Watch Feed",
-      "version": "1.0.0",
+      "id": "rss_watch",
+      "name": "RSS Watch",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Add an RSS/Atom feed to the watch list and post only the newest item once.",
       "platforms": [
@@ -839,7 +828,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/watch_feed.py",
-      "sha256": "9d4c2d1d233a46902574f2122b1ef7e56a6fc89eedfec8273024b146d00881cd"
+      "sha256": "8518d08c7de0dd33d89cd621b1451540dd02c3164d2ae351f789c6d39a1b19ec"
     },
     {
       "id": "weather_brief",
