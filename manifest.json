@@ -879,28 +879,6 @@
       "sha256": "dad415bfb60b1068c6ba1e4363cd054a3637e8474b527208303a010eea84fdbc"
     },
     {
-      "id": "web_search",
-      "name": "Web Search",
-      "version": "1.0.1",
-      "min_tater_version": "50",
-      "description": "Search the web via Google CSE and summarize a relevant result.",
-      "platforms": [
-        "discord",
-        "webui",
-        "irc",
-        "homeassistant",
-        "matrix",
-        "homekit",
-        "xbmc",
-        "telegram"
-      ],
-      "notifier": false,
-      "settings_category": "Web Search",
-      "tags": [],
-      "entry": "plugins/web_search.py",
-      "sha256": "760941983ed21f79267c50120e4deed07d652470519bde073dd162e58e61c40e"
-    },
-    {
       "id": "web_summary",
       "name": "Web Summary",
       "version": "1.0.1",
