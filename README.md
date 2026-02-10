@@ -41,13 +41,12 @@
 | `rss_list` | Show the RSS feeds currently being watched. | discord, webui, irc, matrix, telegram |
 | `rss_unwatch` | Remove an RSS feed from the watch list. | discord, webui, irc, matrix, telegram |
 | `rss_watch` | Add an RSS/Atom feed to the watch list and post only the newest item once. | discord, webui, irc, matrix, telegram |
-| `send_message` | Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). When used from Discord, attached files are forwarded automatically. | discord, irc, matrix, homeassistant, telegram, webui |
+| `send_message` | Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). Room/channel names like #tater are accepted for routing. When used from Discord, attached files are forwarded automatically. | discord, irc, matrix, homeassistant, telegram, webui |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, irc, matrix, telegram |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, discord, irc, matrix, telegram |
 | `unifi_network` | Fetch UniFi Network sites/clients/devices via the official API and let the LLM answer questions from computed facts + compact lists. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `unifi_protect` | Get UniFi Protect sensor status and camera snapshot vision summaries. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `vision_describer` | Describe the most recent image using a vision-capable model. | discord, webui, matrix, irc, telegram |
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui, discord, telegram, matrix, irc |
 | `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, irc, homeassistant, matrix, homekit, xbmc, telegram |
 | `web_summary` | Summarize the main points of a webpage from its URL. | discord, webui, irc, matrix, telegram |
@@ -66,14 +65,6 @@
 
 ### 📡 RSS Notifier Plugins
 
-| Plugin Name | Description | Platform |
-|------------|-------------|----------|
-| `notify_discord` | Queue notifications for Discord delivery. | notifier |
-| `notify_homeassistant` | Queue notifications for Home Assistant delivery. | notifier |
-| `notify_irc` | Queue notifications for IRC delivery. | notifier |
-| `notify_matrix` | Queue notifications for Matrix delivery. | notifier |
-| `notify_ntfy` | Send RSS announcements to an ntfy topic. | notifier |
-| `notify_telegram` | Send messages to Telegram via the Telegram platform queue. | notifier |
-| `notify_wordpress` | Post RSS summaries to a WordPress site via its REST API. | notifier |
+*(none)*
 
 <!-- AUTO:PLUGIN_TABLES:END -->
