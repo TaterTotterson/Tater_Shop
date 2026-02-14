@@ -297,19 +297,9 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     # ─────────────────────────────────────────────────────────────
 
     async def _llm_phrase(self, llm_client, prompt: str, fallback: str, max_chars: int = 240) -> str:
-        if not llm_client:
-            return fallback[:max_chars]
-        try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
-            txt = (resp.get("message") or {}).get("content", "")
-            txt = (txt or "").strip().strip('"').strip()
-            if txt:
-                txt = re.sub(r"[`*_]{1,3}", "", txt)
-                txt = re.sub(r"\s+", " ", txt).strip()
-                return txt[:max_chars]
-        except Exception as e:
-            logger.warning(f"[voicepe_remote_timer] LLM phrasing failed: {e}")
-        return fallback[:max_chars]
+        text = re.sub(r"[`*_]{1,3}", "", str(fallback or ""))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
 
     async def _llm_time_left_message(self, remaining_seconds: int, llm_client) -> str:
         remaining_text = self._format_remaining(remaining_seconds)

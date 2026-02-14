@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from helpers import redis_client
 from plugin_base import ToolPlugin
-from plugin_result import action_failure
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("automatic_plugin")
@@ -265,9 +265,9 @@ class AutomaticPlugin(ToolPlugin):
 
         return cls._decode_image_data(images[0])
 
-    async def _respond_to_image(self, prompt_text: str, llm_client) -> str:
+    async def _build_flair(self, prompt_text: str, llm_client) -> str:
         if llm_client is None:
-            return "Here is your image."
+            return ""
         safe_prompt = prompt_text[:300].strip()
         try:
             final_response = await llm_client.chat(
@@ -288,9 +288,9 @@ class AutomaticPlugin(ToolPlugin):
                 temperature=0.4,
             )
             content = ((final_response.get("message", {}) or {}).get("content", "") or "").strip()
-            return content or "Here is your image."
+            return content[:240] if content else ""
         except Exception:
-            return "Here is your image."
+            return ""
 
     async def _run(self, args: Dict[str, Any], llm_client):
         prompt_text = self._resolve_prompt(args or {})
@@ -303,14 +303,25 @@ class AutomaticPlugin(ToolPlugin):
             )
 
         image_bytes = await asyncio.to_thread(self._generate_image, prompt_text, args or {})
-        reply = await self._respond_to_image(prompt_text, llm_client)
+        flair = await self._build_flair(prompt_text, llm_client)
         image_data = _build_media_metadata(
             image_bytes,
             media_type="image",
             name="generated_image.png",
             mimetype="image/png",
         )
-        return [image_data, reply]
+        return action_success(
+            facts={
+                "prompt": prompt_text,
+                "artifact_type": "image",
+                "artifact_count": 1,
+                "file_name": "generated_image.png",
+            },
+            summary_for_user="Generated one image from your prompt.",
+            flair=flair,
+            say_hint="Confirm image generation and reference the attached image.",
+            artifacts=[image_data],
+        )
 
     async def handle_discord(self, message, args, llm_client):
         try:
@@ -339,7 +350,12 @@ class AutomaticPlugin(ToolPlugin):
         return await self.handle_webui(args or {}, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return f"{user}: This plugin only works in Discord, WebUI, and Telegram."
+        return action_failure(
+            code="unsupported_platform",
+            message="`automatic_plugin` is only available on Discord, WebUI, and Telegram.",
+            say_hint="Explain this plugin is not available on IRC.",
+            available_on=["discord", "webui", "telegram"],
+        )
 
 
 plugin = AutomaticPlugin()

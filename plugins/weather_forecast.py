@@ -235,6 +235,7 @@ class WeatherForecastPlugin(ToolPlugin):
 
         return action_success(
             facts={"request": request_text, "result": msg},
+            summary_for_user=msg,
             say_hint="Provide the weather answer exactly as returned.",
             suggested_followups=["Want the forecast for another day or location?"],
         )
@@ -553,31 +554,72 @@ class WeatherForecastPlugin(ToolPlugin):
             f"Wind up to {maxwind} {wind_unit}. Rain {rain_chance}% (snow {snow_chance}%)."
         )
 
-    # -------------------- LLM answer --------------------
+    # -------------------- Deterministic answer builder --------------------
 
-    async def _answer_with_llm(self, llm_client, user_request: str, facts: str, max_chars: int) -> str:
-        first, last = get_tater_name()
+    def _deterministic_answer(
+        self,
+        *,
+        data: Dict[str, Any],
+        request_text: str,
+        units: str,
+        wanted_date: Optional[date],
+        days: int,
+        max_chars: int,
+    ) -> str:
+        temp_unit = "°F" if units == "us" else "°C"
+        wind_unit = "mph" if units == "us" else "kph"
+        req = (request_text or "").lower()
 
-        prompt = (
-            f"You are {first} {last}. The user asked:\n"
-            f"{user_request}\n\n"
-            "You have weather facts below.\n\n"
-            "RULES:\n"
-            "- Answer ONLY what the user asked. Do not dump everything.\n"
-            "- If the user asked about tomorrow, focus on tomorrow.\n"
-            "- If they asked current weather, focus on current.\n"
-            "- Mention alerts ONLY if the user asked about alerts, OR if they are safety-critical.\n"
-            "- Keep it short, clear, and practical.\n"
-            f"- Hard limit: {max_chars} characters.\n"
-            "- Output plain text (no JSON, no markdown).\n\n"
-            "WEATHER FACTS:\n"
-            f"{facts}\n"
+        loc = data.get("location") or {}
+        loc_name = ", ".join(
+            [str(loc.get("name") or "").strip(), str(loc.get("region") or "").strip(), str(loc.get("country") or "").strip()]
         )
+        loc_name = ", ".join([part for part in loc_name.split(", ") if part])
 
-        resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
-        text = (resp.get("message", {}) or {}).get("content", "") or ""
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:max_chars]
+        cur = data.get("current") or {}
+        cond = ((cur.get("condition") or {}).get("text") or "Unknown").strip()
+        temp = cur.get("temp_f") if units == "us" else cur.get("temp_c")
+        feels = cur.get("feelslike_f") if units == "us" else cur.get("feelslike_c")
+        wind = cur.get("wind_mph") if units == "us" else cur.get("wind_kph")
+        humidity = cur.get("humidity")
+
+        current_line = (
+            f"Current in {loc_name}: {cond}, {temp}{temp_unit}, feels like {feels}{temp_unit}, "
+            f"wind {wind} {wind_unit}, humidity {humidity}%."
+        ).strip()
+
+        forecast_days = ((data.get("forecast") or {}).get("forecastday") or [])
+        day_lines: List[str] = []
+        for fd in forecast_days[: max(1, min(days, 3))]:
+            day_lines.append(self._format_one_day_plain(fd, units))
+
+        if wanted_date:
+            match = next(
+                (fd for fd in forecast_days if str(fd.get("date") or "").strip() == wanted_date.strftime("%Y-%m-%d")),
+                None,
+            )
+            if match:
+                answer = f"Forecast for {wanted_date.isoformat()} in {loc_name}: {self._format_one_day_plain(match, units)}"
+            else:
+                answer = f"I could not find forecast data for {wanted_date.isoformat()} in {loc_name}."
+        elif any(token in req for token in ("current", "right now", "currently", "now")):
+            answer = current_line
+        elif "tomorrow" in req and len(forecast_days) >= 2:
+            answer = f"Tomorrow in {loc_name}: {self._format_one_day_plain(forecast_days[1], units)}"
+        elif day_lines:
+            answer = f"{current_line} Forecast: " + " ".join(day_lines)
+        else:
+            answer = current_line
+
+        alert_list = ((data.get("alerts") or {}).get("alert") or [])
+        asks_alerts = any(token in req for token in ("alert", "warning", "watch", "advisory"))
+        if asks_alerts and isinstance(alert_list, list) and alert_list:
+            headline = str((alert_list[0] or {}).get("headline") or (alert_list[0] or {}).get("event") or "").strip()
+            if headline:
+                answer += f" Alert: {headline}."
+
+        answer = re.sub(r"\s+", " ", answer).strip()
+        return answer[:max_chars]
 
     # -------------------- Core execution --------------------
 
@@ -586,9 +628,6 @@ class WeatherForecastPlugin(ToolPlugin):
         api_key = settings["WEATHERAPI_KEY"]
         if not api_key:
             return "Weather is not configured. Please set your WeatherAPI.com API key in the plugin settings."
-
-        if llm_client is None:
-            return "Weather failed: LLM client not provided."
 
         args = args or {}
 
@@ -692,16 +731,17 @@ class WeatherForecastPlugin(ToolPlugin):
                 req_bits.append(f"next {hours} hours")
             loc_label = location if location else "default location"
             request_text = f"{' and '.join(req_bits)} in {loc_label}"
+        if not facts:
+            return "No weather data returned."
 
-        # Always summarize via LLM (no fallback)
-        try:
-            answered = await self._answer_with_llm(llm_client, request_text, facts, max_chars=max_chars)
-            if answered:
-                return answered
-        except Exception as e:
-            logger.error(f"[weather_forecast] summarize failed: {e}", exc_info=True)
-
-        return "I couldn’t summarize the weather right now. Please try again."
+        return self._deterministic_answer(
+            data=data,
+            request_text=request_text,
+            units=units,
+            wanted_date=wanted_date,
+            days=days,
+            max_chars=max_chars,
+        )
 
     # -------------------- Platform handlers --------------------
 

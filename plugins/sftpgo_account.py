@@ -7,6 +7,7 @@ import secrets
 import string
 import logging
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, action_success
 
 # Discord types are optional; import lazily in the Discord handler if needed
 try:
@@ -235,29 +236,32 @@ class SFTPGoAccountPlugin(ToolPlugin):
         state, _welcome = await self.create_sftp_account(username, password, message)
 
         if state == "created":
-            prompt = f"Generate a brief message stating that an account for '{username}' has been successfully created."
-        elif state == "exists":
-            prompt = f"Generate a brief message stating that '{username}' already has an account but is trying to make a new one!"
-        elif state == "token_error":
-            prompt = f"Generate a brief apology: we couldn't authenticate with SFTPGo while creating '{username}'."
-        else:
-            prompt = f"Generate a brief message stating that an error occurred while creating the account for '{username}'."
-
-        try:
-            resp = await llm_client.chat(messages=[{"role": "user", "content": prompt}])
-            text = (resp.get("message", {}) or {}).get("content", "").strip()
-        except Exception:
-            text = ""
-
-        if state == "created":
-            if text:
-                text += f"\n\n🔐 Password: `{password}`"
-            else:
-                text = f"Account created for **{username}**.\n🔐 Password: `{password}`"
-        elif not text:
-            text = "There was a problem creating your account."
-
-        return text
+            return action_success(
+                facts={
+                    "username": username,
+                    "password": password,
+                    "state": state,
+                },
+                summary_for_user=f"SFTP account created for {username}.",
+                say_hint="Confirm account creation and provide the generated credentials.",
+            )
+        if state == "exists":
+            return action_failure(
+                code="account_exists",
+                message=f"The account `{username}` already exists.",
+                say_hint="Explain the account already exists and ask whether to use a different username.",
+            )
+        if state == "token_error":
+            return action_failure(
+                code="sftpgo_auth_failed",
+                message="Could not authenticate with SFTPGo. Check plugin settings.",
+                say_hint="Explain SFTPGo authentication failed and ask to verify API settings.",
+            )
+        return action_failure(
+            code="account_create_failed",
+            message=f"Failed to create SFTP account for `{username}`.",
+            say_hint="Explain account creation failed and suggest retrying.",
+        )
 
     async def handle_webui(self, args, llm_client):
         desired = (args or {}).get("username", "").strip()
@@ -269,16 +273,32 @@ class SFTPGoAccountPlugin(ToolPlugin):
         state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
 
         if state == "created":
-            return (
-                f"✅ Account created for **{username}**.\n"
-                f"🔐 Password: `{password}`\n"
-                "You can now log in via SFTP."
+            return action_success(
+                facts={
+                    "username": username,
+                    "password": password,
+                    "state": state,
+                },
+                summary_for_user=f"SFTP account created for {username}.",
+                say_hint="Confirm account creation and provide the generated credentials.",
             )
         if state == "exists":
-            return f"ℹ️ The account **{username}** already exists."
+            return action_failure(
+                code="account_exists",
+                message=f"The account `{username}` already exists.",
+                say_hint="Explain the account already exists and ask whether to use a different username.",
+            )
         if state == "token_error":
-            return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
-        return "❌ Failed to create the SFTP account. Please try again later."
+            return action_failure(
+                code="sftpgo_auth_failed",
+                message="Could not authenticate with SFTPGo. Check plugin settings.",
+                say_hint="Explain SFTPGo authentication failed and ask to verify API settings.",
+            )
+        return action_failure(
+            code="account_create_failed",
+            message="Failed to create the SFTP account. Please try again later.",
+            say_hint="Explain account creation failed and suggest retrying.",
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         desired = (args or {}).get("username", "").strip() or user
@@ -288,12 +308,32 @@ class SFTPGoAccountPlugin(ToolPlugin):
         state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
 
         if state == "created":
-            return f"{user}: Account created for {username}. Password: {password}"
+            return action_success(
+                facts={
+                    "username": username,
+                    "password": password,
+                    "state": state,
+                },
+                summary_for_user=f"SFTP account created for {username}.",
+                say_hint="Confirm account creation and provide the generated credentials.",
+            )
         if state == "exists":
-            return f"{user}: The account {username} already exists."
+            return action_failure(
+                code="account_exists",
+                message=f"The account `{username}` already exists.",
+                say_hint="Explain the account already exists and ask whether to use a different username.",
+            )
         if state == "token_error":
-            return f"{user}: Could not authenticate with SFTPGo. Check settings."
-        return f"{user}: Failed to create the SFTP account."
+            return action_failure(
+                code="sftpgo_auth_failed",
+                message="Could not authenticate with SFTPGo. Check plugin settings.",
+                say_hint="Explain SFTPGo authentication failed and ask to verify API settings.",
+            )
+        return action_failure(
+            code="account_create_failed",
+            message="Failed to create the SFTP account.",
+            say_hint="Explain account creation failed and suggest retrying.",
+        )
 
     # -------- Matrix handler --------
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
@@ -312,16 +352,32 @@ class SFTPGoAccountPlugin(ToolPlugin):
         state, _welcome = await self.create_sftp_account(username, password, message_obj=None)
 
         if state == "created":
-            return (
-                f"✅ Account created for **{username}**.\n"
-                f"🔐 Password: `{password}`\n"
-                "You can now log in via SFTP."
+            return action_success(
+                facts={
+                    "username": username,
+                    "password": password,
+                    "state": state,
+                },
+                summary_for_user=f"SFTP account created for {username}.",
+                say_hint="Confirm account creation and provide the generated credentials.",
             )
         if state == "exists":
-            return f"ℹ️ The account **{username}** already exists."
+            return action_failure(
+                code="account_exists",
+                message=f"The account `{username}` already exists.",
+                say_hint="Explain the account already exists and ask whether to use a different username.",
+            )
         if state == "token_error":
-            return "❌ Could not authenticate with SFTPGo. Please check the SFTPGo plugin settings."
-        return "❌ Failed to create the SFTP account. Please try again later."
+            return action_failure(
+                code="sftpgo_auth_failed",
+                message="Could not authenticate with SFTPGo. Check plugin settings.",
+                say_hint="Explain SFTPGo authentication failed and ask to verify API settings.",
+            )
+        return action_failure(
+            code="account_create_failed",
+            message="Failed to create the SFTP account. Please try again later.",
+            say_hint="Explain account creation failed and suggest retrying.",
+        )
 
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args, llm_client)

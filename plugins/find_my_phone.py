@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("find_my_phone")
@@ -76,12 +77,6 @@ class FindMyPhonePlugin(ToolPlugin):
     }
     waiting_prompt_template = (
         "Write a short, friendly message telling {mention} you're looking for their phone now. "
-        "Only output that message."
-    )
-    # We will use this to generate the *final* confirmation message
-    final_prompt_template = (
-        "Write a short, friendly message telling {mention} their phone should be making noise now "
-        "and they should go find it. Mention that the alert was sent {count} time(s). "
         "Only output that message."
     )
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
@@ -284,28 +279,6 @@ class FindMyPhonePlugin(ToolPlugin):
 
         return {"ok": True, "count": count, "error": ""}
 
-    async def _llm_final_message(self, llm_client, mention: str, count: int) -> str:
-        fallback = f"✅ Okay! I sent the phone alert {count} time(s). Listen for it now."
-        if not llm_client:
-            return fallback
-
-        prompt = self.final_prompt_template.format(mention=mention or "you", count=count)
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": "Write one short, friendly confirmation line."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
-                max_tokens=80,
-            )
-            text = (resp.get("message", {}) or {}).get("content", "")
-            text = (text or "").strip()
-            return text or fallback
-        except Exception as e:
-            logger.error(f"[find_my_phone] final LLM message error: {e}")
-            return fallback
-
     def _siri_flatten(self, text: str | None) -> str:
         if not text:
             return "No answer available."
@@ -314,49 +287,64 @@ class FindMyPhonePlugin(ToolPlugin):
         out = re.sub(r"\s+", " ", out).strip()
         return out[:280]
 
-    async def _run(self, args: Dict[str, Any] | None, llm_client, mention: str = "you") -> str:
+    async def _run(self, args: Dict[str, Any] | None, llm_client, mention: str = "you") -> Dict[str, Any]:
         overrides = self._extract_overrides(args)
         result = await asyncio.to_thread(self._trigger_phone_alert, overrides)
 
         if not result.get("ok"):
-            return (result.get("error") or "Something went wrong triggering the phone alert.").strip()
+            err_msg = (result.get("error") or "Something went wrong triggering the phone alert.").strip()
+            code = "phone_alert_failed"
+            if "token is not set" in err_msg.lower():
+                code = "ha_token_missing"
+            elif "not configured" in err_msg.lower():
+                code = "notify_service_missing"
+            elif "invalid" in err_msg.lower():
+                code = "notify_service_invalid"
+            return action_failure(
+                code=code,
+                message=err_msg,
+                say_hint="Explain why the phone alert failed and what setting to fix.",
+            )
 
         count = int(result.get("count", 1) or 1)
-        return await self._llm_final_message(llm_client, mention=mention, count=count)
+        return action_success(
+            facts={"alert_count": count, "mention": mention},
+            summary_for_user=f"Sent the phone alert {count} time(s).",
+            say_hint="Confirm that the alert was sent and suggest listening for the phone.",
+        )
 
     # ---- platform handlers ----
     async def handle_webui(self, args, llm_client):
         return await self._run(args or {}, llm_client, mention="you")
 
     async def handle_homeassistant(self, args, llm_client):
-        return (await self._run(args or {}, llm_client, mention="you")).strip()
+        return await self._run(args or {}, llm_client, mention="you")
 
     async def handle_homekit(self, args, llm_client):
-        answer = await self._run(args or {}, llm_client, mention="you")
-        return self._siri_flatten(answer)
+        return await self._run(args or {}, llm_client, mention="you")
 
     async def handle_xbmc(self, args, llm_client):
-        return (await self._run(args or {}, llm_client, mention="you")).strip()
+        return await self._run(args or {}, llm_client, mention="you")
 
     async def handle_discord(self, message, args, llm_client):
         mention = getattr(getattr(message, "author", None), "mention", None) or "you"
-        return (await self._run(args or {}, llm_client, mention=mention)).strip()
+        return await self._run(args or {}, llm_client, mention=mention)
 
     async def handle_telegram(self, update, args, llm_client):
         sender = (update or {}).get("from") or {}
         username = (sender.get("username") or sender.get("first_name") or "you").strip()
         mention = f"@{username}" if username and username != "you" and not username.startswith("@") else (username or "you")
-        return (await self._run(args or {}, llm_client, mention=mention)).strip()
+        return await self._run(args or {}, llm_client, mention=mention)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         mention = str(sender or "you").strip() or "you"
-        return (await self._run(args or {}, llm_client, mention=mention)).strip()
+        return await self._run(args or {}, llm_client, mention=mention)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         mention = str(user or "you").strip() or "you"
-        return (await self._run(args or {}, llm_client, mention=mention)).strip()
+        return await self._run(args or {}, llm_client, mention=mention)
 
 
 plugin = FindMyPhonePlugin()

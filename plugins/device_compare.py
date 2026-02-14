@@ -8,6 +8,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, action_success
 from helpers import (
     extract_json,
     redis_client,
@@ -774,19 +775,28 @@ class DeviceComparePlugin(ToolPlugin):
     async def _handle_compare(self, args: Dict[str, Any], llm_client):
         device_a, device_b = self._extract_devices(args or {})
         if not device_a or not device_b:
-            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
+            return action_failure(
+                code="missing_devices",
+                message='Please provide two devices using {"device_a":"...","device_b":"..."}.',
+                needs=["Which two devices should I compare?"],
+                say_hint="Ask for both device names to run the comparison.",
+            )
 
         data = await self._pipeline(device_a, device_b, llm_client)
         if "error" in data:
-            return [data["error"]]
+            return action_failure(
+                code="comparison_failed",
+                message=str(data["error"]),
+                say_hint="Explain the comparison failed and suggest retrying with clearer device names.",
+            )
 
-        out = []
+        artifacts = []
         spec_png = self._render_table_image(
             headers=data["spec_headers"],
             rows=data["spec_rows"],
             title=data["title"]
         )
-        out.append(self._img_payload(spec_png, "comparison.png"))
+        artifacts.append(self._img_payload(spec_png, "comparison.png"))
 
         if data.get("fps_rows"):
             fps_png = self._render_table_image(
@@ -794,12 +804,25 @@ class DeviceComparePlugin(ToolPlugin):
                 rows=data["fps_rows"],
                 title="Per-Game FPS"
             )
-            out.append(self._img_payload(fps_png, "fps.png"))
+            artifacts.append(self._img_payload(fps_png, "fps.png"))
 
-        if data.get("sources_text"):
-            out.append("**Sources**\n" + data["sources_text"])
-
-        return out
+        return action_success(
+            facts={
+                "device_a": device_a,
+                "device_b": device_b,
+                "title": data.get("title") or f"{device_a} vs {device_b}",
+                "spec_row_count": len(data.get("spec_rows") or []),
+                "fps_row_count": len(data.get("fps_rows") or []),
+                "sources_text": data.get("sources_text") or "",
+                "artifact_count": len(artifacts),
+            },
+            summary_for_user=(
+                f"Compared {device_a} and {device_b} and generated {len(artifacts)} comparison image"
+                f"{'' if len(artifacts) == 1 else 's'}."
+            ),
+            say_hint="Present the comparison result and mention attached comparison image artifacts.",
+            artifacts=artifacts,
+        )
 
     # ---------- platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
@@ -820,8 +843,18 @@ class DeviceComparePlugin(ToolPlugin):
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         device_a, device_b = self._extract_devices(args or {})
         if not device_a or not device_b:
-            return ['Please provide two devices: {"device_a": "...", "device_b": "..."}']
+            return action_failure(
+                code="missing_devices",
+                message='Please provide two devices using {"device_a":"...","device_b":"..."}.',
+                needs=["Which two devices should I compare?"],
+                say_hint="Ask for both device names to run the comparison.",
+            )
 
-        return [f"Image comparison for '{device_a}' vs '{device_b}' is not supported on IRC."]
+        return action_failure(
+            code="platform_not_supported",
+            message=f"Image comparison for '{device_a}' vs '{device_b}' is not supported on IRC.",
+            available_on=["discord", "webui", "matrix", "telegram"],
+            say_hint="Explain this comparison tool needs an image-capable platform.",
+        )
 
 plugin = DeviceComparePlugin()

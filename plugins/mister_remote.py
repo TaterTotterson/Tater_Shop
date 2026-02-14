@@ -437,11 +437,20 @@ class MisterRemotePlugin(ToolPlugin):
             title = title[:-3].strip()
 
         if not title:
-            return "I didn’t catch the game title. Try: “play super mario on super nintendo.”"
+            return action_failure(
+                code="missing_game_title",
+                message="I could not detect the game title from that request.",
+                needs=["Which game should I launch?"],
+                say_hint="Ask for the game title to launch.",
+            )
 
         systems = self._systems_cache()
         if not systems:
-            return "No MiSTer systems found."
+            return action_failure(
+                code="no_systems_found",
+                message="No MiSTer systems were found.",
+                say_hint="Explain that MiSTer returned no systems.",
+            )
 
         sys_id = await self._ai_pick_system(llm_client, utterance, systems) if llm_client else None
         if not sys_id and system_text:
@@ -450,7 +459,12 @@ class MisterRemotePlugin(ToolPlugin):
             sys_id = self._resolve_system_syn(title, systems)
         if not sys_id:
             top = ", ".join([s["id"] for s in systems[:10]])
-            return f"I couldn’t determine the system. Try saying it explicitly (e.g., 'on SNES'). Here are some: {top}"
+            return action_failure(
+                code="system_not_resolved",
+                message=f"I could not determine the MiSTer system. Available examples: {top}",
+                needs=["Which system should I use? (for example: SNES)"],
+                say_hint="Ask for the exact system when system matching is ambiguous.",
+            )
 
         res = self._search(title, sys_id)
         items = (res or {}).get("data") or []
@@ -461,7 +475,12 @@ class MisterRemotePlugin(ToolPlugin):
                 items = sorted(items, key=lambda it: it.get("system", {}).get("id") != sys_id)
 
         if not items:
-            return f'No matches for "{title}" on {sys_id}.'
+            return action_failure(
+                code="game_not_found",
+                message=f'No matches were found for "{title}" on {sys_id}.',
+                needs=["Try a more exact game title or specify a different system."],
+                say_hint="Explain that no matching game was found.",
+            )
 
         chosen = await self._ai_pick_game(llm_client, title, sys_id, items) if llm_client else None
         if not chosen:
@@ -469,7 +488,11 @@ class MisterRemotePlugin(ToolPlugin):
 
         path = chosen.get("path")
         if not path:
-            return f'Found matches for "{title}" but no valid path.'
+            return action_failure(
+                code="missing_game_path",
+                message=f'Found matches for "{title}" but could not resolve a launch path.',
+                say_hint="Explain that a valid launch path was not returned.",
+            )
 
         self._launch(path)
         time.sleep(0.3)
@@ -477,11 +500,20 @@ class MisterRemotePlugin(ToolPlugin):
         sys_name = now.get("systemName") or chosen.get("system", {}).get("name") or sys_id
         game_name = now.get("gameName") or chosen.get("name") or title
 
-        msg = f"Launching **{game_name}** on **{sys_name}**."
         follow = await self._ai_followup(llm_client, game_name, sys_name) if llm_client else None
-        if follow:
-            msg = f"{msg}\n{follow}"
-        return msg
+        return action_success(
+            facts={
+                "command": "play",
+                "requested_title": title,
+                "system_id": sys_id,
+                "system_name": sys_name,
+                "game_name": game_name,
+                "path": path,
+            },
+            summary_for_user=f"Launching {game_name} on {sys_name}.",
+            flair=follow or "",
+            say_hint="Confirm the MiSTer launch result with the selected game and system.",
+        )
 
     def _capture_screenshot(self):
         self._shot()
@@ -585,6 +617,7 @@ class MisterRemotePlugin(ToolPlugin):
                 facts["messages"] = texts[:3]
             return action_success(
                 facts=facts,
+                summary_for_user=texts[0][:300] if texts else "MiSTer action completed.",
                 say_hint="Confirm what MiSTer did using these facts only.",
                 suggested_followups=["Want another game or command?"],
                 artifacts=artifacts,
@@ -638,6 +671,7 @@ class MisterRemotePlugin(ToolPlugin):
 
         return action_success(
             facts={"command": cmd, "utterance": utterance, "result": msg},
+            summary_for_user=msg[:300],
             say_hint="Confirm the MiSTer result in a short factual sentence.",
             suggested_followups=["Want me to launch another title?"],
         )
@@ -662,18 +696,28 @@ class MisterRemotePlugin(ToolPlugin):
             if cmd == "now_playing":
                 now = self._playing() or {}
                 if not (now.get("system") or now.get("gameName")):
-                    return "Nothing is currently running."
+                    return action_failure(
+                        code="nothing_running",
+                        message="Nothing is currently running on MiSTer.",
+                        say_hint="Explain that no game is currently active.",
+                    )
                 sys_name = now.get('systemName', now.get('system',''))
                 game_name = now.get('gameName','')
-                msg = f"Now playing: **{game_name}** on **{sys_name}**."
                 follow = await self._ai_followup(llm_client, game_name, sys_name) if (llm_client and game_name) else None
-                if follow:
-                    msg = f"{msg}\n{follow}"
-                return msg
+                return action_success(
+                    facts={"command": "now_playing", "game_name": game_name, "system_name": sys_name},
+                    summary_for_user=f"Now playing {game_name} on {sys_name}.",
+                    flair=follow or "",
+                    say_hint="Report the currently running MiSTer game and system.",
+                )
 
             if cmd == "go_to_menu":
                 self._menu()
-                return "Back to the MiSTer menu."
+                return action_success(
+                    facts={"command": "go_to_menu", "result": "menu_opened"},
+                    summary_for_user="Switched MiSTer back to the main menu.",
+                    say_hint="Confirm MiSTer returned to the main menu.",
+                )
 
             if cmd == "screenshot_take":
                 return self._do_screenshot_and_payload()
@@ -682,13 +726,26 @@ class MisterRemotePlugin(ToolPlugin):
             if not cmd and utt and re.search(r"\b(play|launch|start)\b", utt.lower()):
                 return await self._do_play_ai(utt, llm_client)
 
-            return "Unknown command. Try: play, now_playing, go_to_menu, or screenshot_take."
+            return action_failure(
+                code="unknown_command",
+                message="Unknown command. Try play, now_playing, go_to_menu, or screenshot_take.",
+                needs=["Which MiSTer command should I run?"],
+                say_hint="Explain valid MiSTer command options.",
+            )
 
         except requests.HTTPError as e:
-            return f"MiSTer HTTP error: {e.response.status_code} {e.response.text[:200]}"
+            return action_failure(
+                code="mister_http_error",
+                message=f"MiSTer HTTP error: {e.response.status_code} {e.response.text[:200]}",
+                say_hint="Explain MiSTer returned an HTTP error response.",
+            )
         except Exception as e:
             logger.exception("[mister_remote] failure")
-            return f"Failed: {e}"
+            return action_failure(
+                code="mister_exception",
+                message=f"MiSTer request failed: {e}",
+                say_hint="Explain the MiSTer request failed and suggest retrying.",
+            )
 
     # ---------------- Platform wrappers ----------
     async def handle_discord(self, message, args, llm_client):

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("zen_greeting")
@@ -205,7 +206,14 @@ class ZenGreetingPlugin(ToolPlugin):
     # ---------- Automation entrypoint ----------
     async def handle_automation(self, args: Dict[str, Any], llm_client) -> Any:
         s = self._get_settings()
-        ha = self._ha(s)
+        try:
+            ha = self._ha(s)
+        except Exception as exc:
+            return action_failure(
+                code="ha_not_configured",
+                message=str(exc),
+                say_hint="Explain Home Assistant settings are required for this automation.",
+            )
 
         # Enforce a strict ceiling that matches HA input_text constraints (your target: 100 chars).
         max_chars = int(s.get("MAX_CHARS") or 100)
@@ -232,11 +240,22 @@ class ZenGreetingPlugin(ToolPlugin):
 
         # Write to input_text if configured (or overridden)
         input_text_entity = (args.get("input_text_entity") or s.get("INPUT_TEXT_ENTITY") or "").strip()
+        wrote_input_text = False
         if input_text_entity:
             self._set_input_text(ha["base"], ha["token"], input_text_entity, out)
+            wrote_input_text = True
 
-        # Also return the string (useful for logs / tracing)
-        return out
+        return action_success(
+            facts={
+                "message": out,
+                "tone": tone or "zen",
+                "include_date": bool(include_date),
+                "input_text_entity": input_text_entity,
+                "wrote_input_text": wrote_input_text,
+            },
+            summary_for_user="Generated one zen greeting message.",
+            say_hint="Provide the generated zen greeting message from facts.message.",
+        )
 
 
 plugin = ZenGreetingPlugin()

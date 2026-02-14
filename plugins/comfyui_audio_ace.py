@@ -11,6 +11,7 @@ import requests
 from urllib.parse import quote
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+from plugin_result import action_failure, action_success
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -318,6 +319,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 mimetype="audio/mpeg",
             )
 
+        flair = ""
         if llm_client is not None:
             try:
                 system_msg = f'The user received a ComfyUI-generated song based on: "{prompt}"'
@@ -327,13 +329,24 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                         {"role": "user", "content": "Send a short friendly comment about the new song. Only generate the message. Do not respond to this message."}
                     ]
                 )
-                message_text = response["message"].get("content", "").strip() or "Hope you enjoy the track!"
+                flair = (response["message"].get("content", "") or "").strip()[:240]
             except Exception:
-                message_text = "Hope you enjoy the track!"
-        else:
-            message_text = "Hope you enjoy the track!"
+                flair = ""
 
-        return audio_meta, message_text, media_url, audio_bytes
+        facts = {
+            "prompt": prompt,
+            "tags": tags,
+            "lyrics_preview": (lyrics or "")[:280],
+            "media_url": media_url,
+            "artifact_count": 1 if audio_meta else 0,
+        }
+        return action_success(
+            facts=facts,
+            summary_for_user="Generated one song track.",
+            flair=flair,
+            say_hint="Confirm the song generation result and reference the attached audio or URL.",
+            artifacts=[audio_meta] if audio_meta else [],
+        )
 
     # ---------------------------------------
     # Discord
@@ -342,15 +355,21 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         args = args or {}
         user_prompt = str(args.get("prompt") or "").strip()
         if not user_prompt:
-            return "No prompt provided."
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the song you want."],
+                say_hint="Ask the user for a music prompt.",
+            )
         try:
-            audio_meta, message_text, media_url, audio_bytes = await self._generate(user_prompt, llm_client)
-            if audio_bytes:
-                return [audio_meta, message_text]
-            return [f"Your song is ready: {media_url}", message_text]
+            return await self._generate(user_prompt, llm_client)
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin Discord error: %s", e)
-            return f"Failed to create song: {e}"
+            return action_failure(
+                code="song_generation_failed",
+                message=f"Failed to create song: {e}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
 
     # ---------------------------------------
     # WebUI
@@ -359,15 +378,21 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         args = args or {}
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
-            return ["No prompt provided."]
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the song you want."],
+                say_hint="Ask the user for a music prompt.",
+            )
         try:
-            audio_meta, message_text, media_url, _audio_bytes = await self._generate(prompt, llm_client)
+            return await self._generate(prompt, llm_client)
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin WebUI error: %s", e)
-            return [f"Failed to create song: {e}"]
-        if audio_meta:
-            return [audio_meta, message_text]
-        return [f"Your song is ready: {media_url}", message_text]
+            return action_failure(
+                code="song_generation_failed",
+                message=f"Failed to create song: {e}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
 
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)
@@ -381,15 +406,21 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         args = args or {}
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
-            return "No prompt provided."
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the song you want."],
+                say_hint="Ask the user for a music prompt.",
+            )
         try:
-            audio_meta, message_text, media_url, _audio_bytes = await self._generate(prompt, llm_client)
-            if audio_meta:
-                return [audio_meta, message_text]
-            return [f"Your song is ready: {media_url}", message_text]
+            return await self._generate(prompt, llm_client)
         except Exception as e:
             logger.exception("ComfyUIAudioAcePlugin Matrix error: %s", e)
-            return f"Failed to create song: {e}"
+            return action_failure(
+                code="song_generation_failed",
+                message=f"Failed to create song: {e}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
 
     # ---------------------------------------
     # Home Assistant
@@ -405,7 +436,12 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         args = args or {}
         prompt = (args.get("prompt") or "").strip()
         if not prompt:
-            return "No prompt provided."
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the song you want."],
+                say_hint="Ask the user for a music prompt.",
+            )
 
         target_player = self._pick_target_player(context=context)
         if not target_player:
@@ -415,11 +451,15 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             hint = ""
             if dev or area:
                 hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
-            return (
-                "I can create your song, but I couldn't find a media player to play it on."
-                f"{hint} "
-                "Set **Default media_player entity** in the ComfyUI Audio Ace plugin settings, "
-                "or make sure your Voice PE device exposes a media_player entity in Home Assistant."
+            return action_failure(
+                code="missing_media_player",
+                message=(
+                    "I can create your song, but I couldn't find a media player to play it on."
+                    f"{hint} Set a default media_player entity in ComfyUI Audio Ace settings, "
+                    "or ensure the Voice PE device exposes a media_player entity in Home Assistant."
+                ),
+                needs=["Set `HA_DEFAULT_MEDIA_PLAYER` in ComfyUI Audio Ace settings."],
+                say_hint="Explain the missing media player configuration and ask the user to set it.",
             )
 
         # Fire-and-forget the heavy work
@@ -427,27 +467,21 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
             asyncio.create_task(self._bg_generate_and_play(prompt, llm_client, target_player))
         except Exception as e:
             logger.exception("Failed to schedule background job: %s", e)
+            return action_failure(
+                code="background_job_failed",
+                message=f"Failed to schedule song generation: {e}",
+                say_hint="Explain that background scheduling failed and suggest retrying.",
+            )
 
-        # Upbeat ACK (keep it short for TTS)
-        system_msg = (
-            f"The user asked for a song that will be played on {target_player}. "
-            "Write a short, fun, upbeat message telling them the track is being created and "
-            "will play soon. Include one friendly emoji, and output only the message."
+        return action_success(
+            facts={
+                "prompt": prompt,
+                "target_player": target_player,
+                "background_started": True,
+            },
+            summary_for_user=f"Started generating a song and queued playback on {target_player}.",
+            say_hint="Confirm that generation started and playback will occur on the selected player.",
         )
-        try:
-            if llm_client is not None:
-                resp = await llm_client.chat(
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": "Generate that short message now."}
-                    ]
-                )
-                msg = resp["message"].get("content", "").strip() or f"Your song will play soon on {target_player}!"
-                return msg
-            return f"Your song will play soon on {target_player}!"
-        except Exception as e:
-            logger.exception("LLM ack generation failed: %s", e)
-            return f"Your song will play soon on {target_player}!"
 
     async def _bg_generate_and_play(self, prompt: str, llm_client, target_player: str):
         """

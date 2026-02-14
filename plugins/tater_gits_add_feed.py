@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import extract_json
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -143,11 +144,11 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
                 async with s.post(f"{base}/feeds", json=payload, headers=headers, timeout=12) as r:
                     txt = await r.text()
                     if r.status != 200:
-                        return f"❌ Add failed: {r.status} {txt}"
+                        return f"Add failed: {r.status} {txt}"
         except Exception as e:
-            return f"❌ Request error: {e}"
+            return f"Request error: {e}"
         # success here means watcher accepted it
-        return f"✅ Added: [{payload['category']}] {payload['title_prefix']}{payload['url']}"
+        return f"Added: [{payload['category']}] {payload['title_prefix']}{payload['url']}"
 
     async def _get_cfg(self):
         try:
@@ -161,11 +162,20 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
 
     async def _run(self, url: str, llm_client=None):
         if not url:
-            return "❌ Need a GitHub releases feed URL (e.g., https://github.com/OWNER/REPO/releases.atom)."
+            return action_failure(
+                code="missing_url",
+                message="Need a GitHub releases feed URL (e.g., https://github.com/OWNER/REPO/releases.atom).",
+                needs=["Provide a GitHub releases feed URL."],
+                say_hint="Ask for the GitHub releases feed URL.",
+            )
 
         repo_url, owner, repo = self._parse_repo(url)
         if not repo_url:
-            return "❌ That doesn’t look like a GitHub repo/releases URL."
+            return action_failure(
+                code="invalid_url",
+                message="That does not look like a GitHub repo/releases URL.",
+                say_hint="Explain the URL must be a GitHub repo or releases feed URL.",
+            )
 
         app_title = self._prettify_repo_name(repo)
         readme_text = await self._fetch_readme_text(owner, repo)
@@ -173,16 +183,35 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
         # Classification must complete BEFORE posting
         category = await self._classify_category(app_title, readme_text, llm_client)
         if category is None:
-            return "❌ Couldn’t classify this repo (AI didn’t return a category). Try again in a moment."
+            return action_failure(
+                code="classification_failed",
+                message="Could not classify this repo (AI did not return a category). Try again in a moment.",
+                say_hint="Explain feed classification failed and suggest retrying.",
+            )
 
         title_prefix = f"{app_title} - "
 
         base, key = await self._get_cfg()
         if not base:
-            return "❌ No watcher_url configured in plugin settings."
+            return action_failure(
+                code="watcher_not_configured",
+                message="No watcher_url configured in plugin settings.",
+                say_hint="Explain watcher URL is missing in plugin settings.",
+            )
 
         payload = {"url": url.strip(), "title_prefix": title_prefix, "category": category}
-        return await self._add_via_watcher(payload, base, key)
+        result = await self._add_via_watcher(payload, base, key)
+        if result.lower().startswith("added:"):
+            return action_success(
+                facts={"url": payload["url"], "title_prefix": payload["title_prefix"], "category": payload["category"]},
+                summary_for_user=result,
+                say_hint="Confirm the feed was added with the chosen category and title prefix.",
+            )
+        return action_failure(
+            code="feed_add_failed",
+            message=result,
+            say_hint="Explain feed creation failed and include the watcher error.",
+        )
 
     # ───────────────────────── handlers ─────────────────────────
     async def handle_webui(self, args, llm_client):
@@ -191,16 +220,26 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
     async def handle_discord(self, message, args, llm_client):
         url = (args or {}).get("url")
         if not url:
-            return f"{message.author.mention}: ❌ Please provide a GitHub releases feed URL."
+            return action_failure(
+                code="missing_url",
+                message="Please provide a GitHub releases feed URL.",
+                needs=["Provide a GitHub releases feed URL."],
+                say_hint="Ask for the GitHub releases feed URL.",
+            )
         result = await self._run(url, llm_client)
         return result  # Matrix/Discord layer will send/segment as needed
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = (args or {}).get("url")
         if not url:
-            return f"{user}: ❌ Please provide a GitHub releases feed URL."
+            return action_failure(
+                code="missing_url",
+                message="Please provide a GitHub releases feed URL.",
+                needs=["Provide a GitHub releases feed URL."],
+                say_hint="Ask for the GitHub releases feed URL.",
+            )
         result = await self._run(url, llm_client)
-        return f"{user}: {result}"
+        return result
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         """
@@ -208,7 +247,12 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
         """
         url = (args or {}).get("url")
         if not url:
-            return "❌ Please provide a GitHub releases feed URL."
+            return action_failure(
+                code="missing_url",
+                message="Please provide a GitHub releases feed URL.",
+                needs=["Provide a GitHub releases feed URL."],
+                say_hint="Ask for the GitHub releases feed URL.",
+            )
         return await self._run(url, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):

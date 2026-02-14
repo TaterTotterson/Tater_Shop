@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, extract_json
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("events_query")
@@ -566,23 +567,6 @@ class EventsQueryPlugin(ToolPlugin):
             }
         }
 
-        if llm_client is not None:
-            try:
-                resp = await llm_client.chat(
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                    ],
-                    temperature=0.2,
-                    max_tokens=400,
-                    timeout_ms=60_000,
-                )
-                text = (resp.get("message", {}) or {}).get("content", "").strip()
-                if text:
-                    return text
-            except Exception as e:
-                logger.info(f"[events_query] LLM summary failed; using fallback: {e}")
-
         # Fallback list
         if not ordered_events:
             return f"No events found for {area_phrase or 'all areas'} {label}."
@@ -659,7 +643,11 @@ class EventsQueryPlugin(ToolPlugin):
         # Discover area sources from Redis
         sources_catalog = self._discover_sources()
         if not sources_catalog:
-            return "No event sources are configured yet."
+            return action_failure(
+                code="events_sources_missing",
+                message="No event sources are configured yet.",
+                say_hint="Explain that no automation event sources are available yet.",
+            )
 
         # If a specific area was given, try to map it to one or more sources
         area_raw = (args.get("area") or "").strip()
@@ -701,7 +689,17 @@ class EventsQueryPlugin(ToolPlugin):
             answers = []
             for a in friendly_targets:
                 answers.append(self._presence_answer_for_area(now, a, todays))
-            return "\n".join(answers)
+            summary = "\n".join(answers)
+            return action_success(
+                facts={
+                    "intent": "presence",
+                    "areas": friendly_targets,
+                    "timeframe": "today",
+                    "event_count": len(todays),
+                },
+                summary_for_user=summary,
+                say_hint="Provide the presence answer exactly from the computed event facts.",
+            )
 
         # Summarization path
         if resolved_sources:
@@ -709,10 +707,30 @@ class EventsQueryPlugin(ToolPlugin):
             resolved_friendly = [self._source_to_area(src) for src in resolved_sources]
             # Already fetched only chosen sources & windowed, so just forward
             label_hint = f"{label} (areas: {', '.join(resolved_friendly)})"
-            return await self._summarize(items, area_phrase or None, label_hint, llm_client, user_query=user_query)
+            summary = await self._summarize(items, area_phrase or None, label_hint, llm_client, user_query=user_query)
+            return action_success(
+                facts={
+                    "intent": "summary",
+                    "areas": resolved_friendly,
+                    "timeframe": label,
+                    "event_count": len(items),
+                },
+                summary_for_user=summary,
+                say_hint="Provide a concise event summary from fetched events.",
+            )
         else:
             # Whole-home or unresolved phrase
-            return await self._summarize(items, area_phrase or None, label, llm_client, user_query=user_query)
+            summary = await self._summarize(items, area_phrase or None, label, llm_client, user_query=user_query)
+            return action_success(
+                facts={
+                    "intent": "summary",
+                    "areas": [],
+                    "timeframe": label,
+                    "event_count": len(items),
+                },
+                summary_for_user=summary,
+                say_hint="Provide a concise event summary from fetched events.",
+            )
 
     # ---------- Platform shims ----------
     async def handle_webui(self, args: Dict[str, Any], llm_client):

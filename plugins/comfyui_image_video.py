@@ -12,6 +12,7 @@ from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_latest_image_from_history, run_comfy_prompt
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("comfyui_image_video")
 logger.setLevel(logging.INFO)
@@ -324,7 +325,12 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         image_bytes, filename = get_latest_image_from_history("webui:chat_history")
 
         if not image_bytes:
-            return ["❌ No image found. Please upload one or generate one using an image plugin first."]
+            return action_failure(
+                code="missing_source_image",
+                message="No image found. Upload one or generate one first.",
+                needs=["Provide or generate an image before requesting animation."],
+                say_hint="Explain that no source image is available yet.",
+            )
 
         try:
             animated_bytes, ext = await asyncio.to_thread(
@@ -369,39 +375,63 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
                             {"role": "system", "content": f'The user has just been shown an animated video based on the prompt: "{prompt}".'},
                             {"role": "user", "content": "Reply with a short, fun message celebrating the animation. No lead-in phrases or instructions."}
                         ])
-                        followup_text = (msg.get("message", {}) or {}).get("content", "").strip() or "Here's your animated video!"
+                        followup_text = ((msg.get("message", {}) or {}).get("content", "") or "").strip()[:240]
                     except Exception:
-                        followup_text = "Here's your animated video!"
+                        followup_text = ""
                 else:
-                    followup_text = "Here's your animated video!"
+                    followup_text = ""
             else:
                 mime = "video/mp4" if ext == "mp4" else "image/webp"
                 file_name = f"animated.{ext}"
-                followup_text = "Here's your animated video!" if ext == "mp4" else "Here's your animated image!"
+                followup_text = ""
 
             media_type = "video" if ext == "mp4" else "image"
-            return [
-                _build_media_metadata(
-                    animated_bytes,
-                    media_type=media_type,
-                    name=file_name,
-                    mimetype=mime,
-                ),
-                followup_text
-            ]
+            artifact = _build_media_metadata(
+                animated_bytes,
+                media_type=media_type,
+                name=file_name,
+                mimetype=mime,
+            )
+            return action_success(
+                facts={
+                    "prompt": prompt,
+                    "source_image": filename,
+                    "artifact_type": media_type,
+                    "artifact_count": 1,
+                    "file_name": file_name,
+                },
+                summary_for_user=f"Generated an animated {media_type}.",
+                flair=followup_text,
+                say_hint="Confirm the animation result and reference the attached artifact.",
+                artifacts=[artifact],
+            )
         except Exception as e:
             logger.exception("ComfyUI image-video generation failed: %s", e)
-            return [f"❌ Failed to generate animation: {e}"]
+            return action_failure(
+                code="animation_failed",
+                message=f"Failed to generate animation: {e}",
+                say_hint="Explain the animation failure and suggest retrying.",
+            )
 
     # --- Discord Handler ---
     async def handle_discord(self, message, args, llm_client):
-        return "❌ This plugin is only available in the WebUI due to file size limitations."
+        return action_failure(
+            code="unsupported_platform",
+            message="`comfyui_image_video` is only available in WebUI due to file size limitations.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
         return await self._generate(args or {}, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return f"{user}: This plugin is only available in the WebUI."
+        return action_failure(
+            code="unsupported_platform",
+            message="`comfyui_image_video` is only available in WebUI.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
 plugin = ComfyUIImageVideoPlugin()

@@ -3,6 +3,7 @@ import io
 import aiohttp
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 async def safe_send(channel, content: str, **kwargs):
     if len(content) > 2000:
@@ -160,13 +161,7 @@ class WebDAVBrowserPlugin(ToolPlugin):
                 size = await WebDAVBrowserPlugin.get_file_size(new_path)
                 if size > WebDAVBrowserPlugin.max_upload_size_bytes:
                     await interaction.response.defer()
-                    response = await self.llm_client.chat(
-                        messages=[
-                            {"role": "system", "content": f"User tried to download `{self.path}` which is too large."},
-                            {"role": "user", "content": "Tell them to download it manually via WebDAV."}
-                        ]
-                    )
-                    reply = response["message"].get("content", "").strip() or "That file is too big to send here — try downloading it directly using a WebDAV client."
+                    reply = "That file is too big to send here. Download it directly using a WebDAV client."
                     await interaction.followup.send(reply)
                 else:
                     file_data = await WebDAVBrowserPlugin.download_webdav_file(new_path)
@@ -216,32 +211,45 @@ class WebDAVBrowserPlugin(ToolPlugin):
             entries = await WebDAVBrowserPlugin.list_webdav_files(path)
         except Exception as e:
             await safe_send(message.channel, f"❌ Failed to access `{path}`: {e}")
-            return "There was a problem accessing that folder."
+            return action_failure(
+                code="webdav_access_failed",
+                message=f"Failed to access `{path}`: {e}",
+                say_hint="Explain the WebDAV folder access failure.",
+            )
 
         if not entries:
             await safe_send(message.channel, f"📁 `{path}` is empty.")
-            return f"`{path}` is empty — maybe try another folder?"
+            return action_success(
+                facts={"path": path, "entry_count": 0},
+                summary_for_user=f"`{path}` is empty.",
+                say_hint="Report that the selected WebDAV folder is empty.",
+            )
 
         await safe_send(
             message.channel,
             f"📁 Browsing `{path}`",
             view=WebDAVBrowserPlugin.FileBrowserView(self, user_id, path, entries, page=page, llm_client=llm_client)
         )
-
-        system_msg = f"The user is now browsing the WebDAV server path: `{path}` with {len(entries)} entries."
-        followup = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": "Send a short friendly message to encourage their WebDAV browsing. Do not include any instructions — just the message."}
-            ]
+        return action_success(
+            facts={"path": path, "entry_count": len(entries), "page": page, "interactive_view_sent": True},
+            summary_for_user=f"WebDAV browser opened at `{path}` with {len(entries)} entries.",
+            say_hint="Confirm the browser view is ready in Discord.",
         )
 
-        return followup["message"].get("content", "").strip() or "Happy browsing!"
-
     async def handle_webui(self, args, llm_client):
-        return "📂 WebDAV browsing is only available on Discord for now."
+        return action_failure(
+            code="unsupported_platform",
+            message="WebDAV browsing is only available on Discord.",
+            say_hint="Explain this plugin is discord-only.",
+            available_on=["discord"],
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        await bot.privmsg(channel, f"{user}: WebDAV browsing is only available on Discord for now.")
+        return action_failure(
+            code="unsupported_platform",
+            message="WebDAV browsing is only available on Discord.",
+            say_hint="Explain this plugin is discord-only.",
+            available_on=["discord"],
+        )
 
 plugin = WebDAVBrowserPlugin()

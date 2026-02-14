@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name, get_tater_personality
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("unifi_network")
@@ -480,38 +481,20 @@ class UnifiNetworkPlugin(ToolPlugin):
 
         return None
 
-    async def _llm_answer(self, *, compact_ctx: Dict[str, Any], llm_client) -> str:
-        assistant_name, personality = self._assistant_identity()
-
-        system = (
-            f"You are {assistant_name}, a helpful home network assistant.\n"
-            "You will be given compact, precomputed UniFi facts and small top-lists.\n"
-            "Answer the user's question using ONLY the provided data.\n"
-            "Be concise and practical.\n"
+    def _summary_from_context(self, compact_ctx: Dict[str, Any]) -> str:
+        facts = (compact_ctx or {}).get("facts") or {}
+        counts = facts.get("counts") or {}
+        matches = facts.get("matches") or []
+        if isinstance(matches, list) and matches:
+            first = matches[0] if isinstance(matches[0], dict) else {}
+            name = str(first.get("name") or first.get("entity_id") or "match").strip()
+            kind = str(first.get("kind") or "item").strip()
+            return f"Found {len(matches)} matching {kind} result(s). First match: {name}."
+        return (
+            f"Clients: {counts.get('clients_total', 0)} total "
+            f"({counts.get('clients_wireless', 0)} wireless, {counts.get('clients_wired', 0)} wired). "
+            f"Devices: {counts.get('devices_total', 0)} total, {counts.get('devices_offline', 0)} offline."
         )
-
-        if personality:
-            system += (
-                "\nPersonality / style guidelines:\n"
-                f"{personality}\n"
-            )
-
-        system += (
-            "\nIMPORTANT RULES:\n"
-            "- Do NOT guess counts. Use facts.counts.* exactly.\n"
-            "- If you mention wired vs wireless, use facts.counts.clients_wired / clients_wireless / clients_unknown_link.\n"
-            "- If the user asks to 'show all', you may present more items, but keep it readable.\n"
-            "- If facts.matches is present and non-empty, prefer those results for 'find' queries.\n"
-            "- If a detail is missing, say you can’t confirm it from the data.\n"
-        )
-
-        resp = await llm_client.chat(messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(compact_ctx, ensure_ascii=False)},
-        ])
-        content = (resp.get("message", {}) or {}).get("content", "").strip()
-        content = self._strip_code_fences(content)
-        return content or "I couldn’t find anything to report."
 
     # -------------------------
     # Platform entrypoints
@@ -576,15 +559,29 @@ class UnifiNetworkPlugin(ToolPlugin):
 
         if not query:
             if action in ("find_client", "find_device"):
-                return "Please provide the client or device name to find."
-            return "Please provide an action (and name if needed), or a query like: “how’s the network?”"
+                return action_failure(
+                    code="missing_name",
+                    message="Please provide the client or device name to find.",
+                    needs=["Provide `name` for find_client/find_device."],
+                    say_hint="Ask for the specific client or device name.",
+                )
+            return action_failure(
+                code="missing_query",
+                message="Please provide an action (and name if needed), or a query like 'how’s the network?'.",
+                needs=["Provide an action or query for UniFi Network."],
+                say_hint="Ask the user what network information they want.",
+            )
 
         s = self._get_settings()
         try:
             base = self._base(s)
             api_key = self._api_key(s)
         except Exception as e:
-            return f"UniFi Network is not configured: {e}"
+            return action_failure(
+                code="unifi_network_not_configured",
+                message=f"UniFi Network is not configured: {e}",
+                say_hint="Explain required UniFi Network settings are missing.",
+            )
 
         headers = self._headers(api_key)
 
@@ -594,7 +591,11 @@ class UnifiNetworkPlugin(ToolPlugin):
             site_id, site_name = self._pick_site(sites)
         except Exception as e:
             logger.exception("[unifi_network] sites fetch failed")
-            return f"I couldn't reach UniFi to list sites: {e}"
+            return action_failure(
+                code="unifi_sites_failed",
+                message=f"I couldn't reach UniFi to list sites: {e}",
+                say_hint="Explain that listing UniFi sites failed.",
+            )
 
         # Fetch ALL clients + ALL devices (paged)
         try:
@@ -619,19 +620,17 @@ class UnifiNetworkPlugin(ToolPlugin):
 
         direct = self._direct_answer_if_simple(query, compact_ctx)
         if direct:
-            return direct
-
-        try:
-            return await self._llm_answer(compact_ctx=compact_ctx, llm_client=llm_client)
-        except Exception as e:
-            logger.exception("[unifi_network] llm answer failed")
-            facts = (compact_ctx or {}).get("facts") or {}
-            counts = facts.get("counts") or {}
-            return (
-                f"I pulled UniFi data for site “{site_name}”, but summarization failed.\n"
-                f"Clients: {counts.get('clients_total', 0)}, Devices: {counts.get('devices_total', 0)}.\n"
-                f"Error: {e}"
+            return action_success(
+                facts=(compact_ctx or {}).get("facts") or {},
+                summary_for_user=direct,
+                say_hint="Provide the direct network answer from the computed counts.",
             )
+
+        return action_success(
+            facts=(compact_ctx or {}).get("facts") or {},
+            summary_for_user=self._summary_from_context(compact_ctx),
+            say_hint="Summarize network counts and any matched items from the provided facts.",
+        )
 
 
 plugin = UnifiNetworkPlugin()

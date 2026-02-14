@@ -13,8 +13,8 @@ import requests
 import urllib3
 
 from plugin_base import ToolPlugin
-from plugin_result import action_failure
-from helpers import redis_client, get_tater_name, get_tater_personality
+from plugin_result import action_failure, action_success
+from helpers import redis_client, get_tater_name
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -712,34 +712,52 @@ class UniFiProtectPlugin(ToolPlugin):
         )
 
     # ----------------------------
-    # LLM: final answer using facts
+    # Deterministic summary from facts
     # ----------------------------
-    async def _answer_with_facts(self, user_query: str, facts: Any, llm_client) -> str:
-        first, last = get_tater_name()
-        personality = get_tater_personality() or ""
+    def _summary_from_facts(self, user_query: str, facts: Any) -> str:
+        if not isinstance(facts, dict):
+            return "Completed UniFi Protect request."
 
-        assistant_name = f"{(first or '').strip()} {(last or '').strip()}".strip() or "Tater"
+        if isinstance(facts.get("sensor"), dict):
+            sensor = facts.get("sensor") or {}
+            name = _coerce_str(sensor.get("name") or "sensor")
+            opened = "open" if sensor.get("isOpened") else "closed"
+            batt = sensor.get("batteryPct")
+            return f"{name} is {opened}. Battery: {batt}%." if batt is not None else f"{name} is {opened}."
 
-        system = (
-            f"You are {assistant_name}, a helpful home-lab assistant.\n"
-            "You must answer using ONLY the provided FACTS.\n"
-            "If the facts do not contain the requested detail, say what is missing.\n"
-            "Keep the response short, spoken-friendly, and avoid technical API terms.\n"
-            "If you are given camera_descriptions, base your answer primarily on those.\n"
-        )
-        if personality.strip():
-            system += f"\nStyle/personality:\n{personality.strip()}\n"
+        if isinstance(facts.get("sensors"), dict):
+            sensors = facts.get("sensors") or {}
+            total = int(sensors.get("total") or 0)
+            open_count = len(sensors.get("open") or [])
+            low_batt = len(sensors.get("lowBattery") or [])
+            return f"Sensors: {total} total, {open_count} open, {low_batt} low battery."
 
-        user = json.dumps({
-            "user_query": user_query,
-            "facts": facts,
-        }, ensure_ascii=False)
+        if isinstance(facts.get("cameras"), list):
+            cams = facts.get("cameras") or []
+            return f"Cameras: {len(cams)} available."
 
-        resp = await llm_client.chat(messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-        return _coerce_str((resp.get("message", {}) or {}).get("content", "")).strip() or "Done."
+        if isinstance(facts.get("vision_description"), str):
+            text = _coerce_str(facts.get("vision_description")).strip()
+            cam = _coerce_str((facts.get("camera") or {}).get("name") or "camera")
+            if text:
+                return f"{cam}: {text}"
+            return f"{cam}: snapshot captured."
+
+        if isinstance(facts.get("camera_descriptions"), list):
+            desc = [d for d in facts.get("camera_descriptions") or [] if isinstance(d, dict)]
+            if not desc:
+                return "No camera descriptions available."
+            first = desc[0]
+            cam = _coerce_str(first.get("camera") or "camera")
+            txt = _coerce_str(first.get("vision") or "").strip()
+            if len(desc) == 1:
+                return f"{cam}: {txt}" if txt else f"{cam}: snapshot captured."
+            return f"Captured {len(desc)} camera snapshots. First: {cam}: {txt}" if txt else f"Captured {len(desc)} camera snapshots."
+
+        note = _coerce_str(facts.get("note")).strip()
+        if note:
+            return note
+        return "Completed UniFi Protect request."
 
     # ----------------------------
     # Platform handlers
@@ -786,9 +804,13 @@ class UniFiProtectPlugin(ToolPlugin):
     async def _handle(self, args, llm_client, platform: str = "webui", context: Optional[dict] = None):
         client = self._get_client()
         if not client:
-            return (
-                "UniFi Protect is not configured. "
-                "Please set UNIFI_PROTECT_BASE_URL and UNIFI_PROTECT_API_KEY in plugin settings."
+            return action_failure(
+                code="unifi_protect_not_configured",
+                message=(
+                    "UniFi Protect is not configured. "
+                    "Set UNIFI_PROTECT_BASE_URL and UNIFI_PROTECT_API_KEY in plugin settings."
+                ),
+                say_hint="Explain required UniFi Protect settings are missing.",
             )
 
         args = args or {}
@@ -854,15 +876,23 @@ class UniFiProtectPlugin(ToolPlugin):
                 sensors = client.list_sensors()
             except Exception as e:
                 logger.error(f"[unifi_protect] list_sensors error: {e}")
-                return f"I couldn't reach UniFi Protect sensors. {e}"
+                return action_failure(
+                    code="unifi_sensors_failed",
+                    message=f"I couldn't reach UniFi Protect sensors. {e}",
+                    say_hint="Explain that sensor retrieval failed.",
+                )
 
             compact = self._compact_sensors(sensors)
 
             if action == "sensor_detail":
                 hit = self._find_best_named(compact.get("items") or [], target or query)
                 if not hit:
-                    facts = {"sensors": compact, "note": f"No specific sensor matched: {target or query}"}
-                    return await self._answer_with_facts(query, facts, llm_client)
+                    return action_failure(
+                        code="sensor_not_found",
+                        message=f"No specific sensor matched: {target or query}",
+                        needs=["Specify a camera/sensor name, such as front door or garage door."],
+                        say_hint="Explain that no matching sensor was found and ask for a clearer name.",
+                    )
 
                 # Optionally fetch full detail
                 try:
@@ -871,10 +901,18 @@ class UniFiProtectPlugin(ToolPlugin):
                     full = None
 
                 facts = {"sensor": hit, "sensor_detail": full}
-                return await self._answer_with_facts(query, facts, llm_client)
+                return action_success(
+                    facts=facts,
+                    summary_for_user=self._summary_from_facts(query, facts),
+                    say_hint="Report the requested UniFi sensor status from the provided facts.",
+                )
 
             facts = {"sensors": compact}
-            return await self._answer_with_facts(query, facts, llm_client)
+            return action_success(
+                facts=facts,
+                summary_for_user=self._summary_from_facts(query, facts),
+                say_hint="Summarize UniFi sensor status from the provided facts.",
+            )
 
         # ---- Cameras list
         if action == "list_cameras":
@@ -882,10 +920,18 @@ class UniFiProtectPlugin(ToolPlugin):
                 cams = client.list_cameras()
             except Exception as e:
                 logger.error(f"[unifi_protect] list_cameras error: {e}")
-                return f"I couldn't list cameras. {e}"
+                return action_failure(
+                    code="unifi_cameras_failed",
+                    message=f"I couldn't list cameras. {e}",
+                    say_hint="Explain that camera listing failed.",
+                )
 
             facts = {"cameras": self._compact_cameras(cams), "total": len(cams or [])}
-            return await self._answer_with_facts(query, facts, llm_client)
+            return action_success(
+                facts=facts,
+                summary_for_user=self._summary_from_facts(query, facts),
+                say_hint="Summarize available cameras from the provided facts.",
+            )
 
         # ---- Describe a specific camera (snapshot + vision + summary)
         if action == "describe_camera":
@@ -893,13 +939,21 @@ class UniFiProtectPlugin(ToolPlugin):
                 cams = client.list_cameras()
             except Exception as e:
                 logger.error(f"[unifi_protect] list_cameras error: {e}")
-                return f"I couldn't list cameras. {e}"
+                return action_failure(
+                    code="unifi_cameras_failed",
+                    message=f"I couldn't list cameras. {e}",
+                    say_hint="Explain that camera listing failed.",
+                )
 
             compact_cams = self._compact_cameras(cams)
             hit = self._find_best_named(compact_cams, target or query)
             if not hit:
-                facts = {"cameras": compact_cams, "note": f"No camera matched: {target or query}"}
-                return await self._answer_with_facts(query, facts, llm_client)
+                return action_failure(
+                    code="camera_not_found",
+                    message=f"No camera matched: {target or query}",
+                    needs=["Specify a camera name, such as doorbell, front yard, or garage."],
+                    say_hint="Explain that no matching camera was found and ask for a clearer name.",
+                )
 
             cam_id = _coerce_str(hit.get("id"))
             cam_name = _coerce_str(hit.get("name") or "Camera")
@@ -909,7 +963,11 @@ class UniFiProtectPlugin(ToolPlugin):
             except Exception as e:
                 logger.error(f"[unifi_protect] snapshot error: {e}")
                 facts = {"camera": hit, "note": f"Snapshot not available for that camera: {e}"}
-                return await self._answer_with_facts(query, facts, llm_client)
+                return action_failure(
+                    code="snapshot_failed",
+                    message=f"Snapshot not available for that camera: {e}",
+                    say_hint="Explain snapshot capture failed for the selected camera.",
+                )
 
             # Vision describe (run in thread; requests is blocking)
             vision_prompt = self._vision_prompt_for_query(query, cam_name)
@@ -925,22 +983,28 @@ class UniFiProtectPlugin(ToolPlugin):
                 "vision_description": vision_text,
                 "snapshot_meta": {"mimetype": mimetype, "bytes": len(img_bytes)},
             }
-
-            text = await self._answer_with_facts(query, facts, llm_client)
+            summary = self._summary_from_facts(query, facts)
 
             # WebUI can render image blobs. Others: return text only (spoken-friendly).
             if _platform_supports_media(platform):
-                return [
-                    _build_media_metadata(
-                        img_bytes,
-                        media_type="image",
-                        name=f"{cam_name}.jpg",
-                        mimetype=mimetype,
-                    ),
-                    text,
-                ]
+                artifact = _build_media_metadata(
+                    img_bytes,
+                    media_type="image",
+                    name=f"{cam_name}.jpg",
+                    mimetype=mimetype,
+                )
+                return action_success(
+                    facts=facts,
+                    summary_for_user=summary,
+                    say_hint="Describe the camera snapshot using the vision facts provided.",
+                    artifacts=[artifact],
+                )
 
-            return text
+            return action_success(
+                facts=facts,
+                summary_for_user=summary,
+                say_hint="Describe the camera snapshot using the vision facts provided.",
+            )
 
         # ---- Describe an area (multiple snapshots + per-cam vision + combined summary)
         if action == "describe_area":
@@ -948,13 +1012,21 @@ class UniFiProtectPlugin(ToolPlugin):
                 cams = client.list_cameras()
             except Exception as e:
                 logger.error(f"[unifi_protect] list_cameras error: {e}")
-                return f"I couldn't list cameras. {e}"
+                return action_failure(
+                    code="unifi_cameras_failed",
+                    message=f"I couldn't list cameras. {e}",
+                    say_hint="Explain that camera listing failed.",
+                )
 
             compact_cams = self._compact_cameras(cams)
             picked = self._pick_cameras_for_area(compact_cams, target or query)
             if not picked:
-                facts = {"cameras": compact_cams, "note": f"No cameras matched area: {target or query}"}
-                return await self._answer_with_facts(query, facts, llm_client)
+                return action_failure(
+                    code="area_not_found",
+                    message=f"No cameras matched area: {target or query}",
+                    needs=["Specify an area such as front yard, back yard, porch, or garage."],
+                    say_hint="Explain no area cameras matched and ask for a clearer area.",
+                )
 
             # We'll do up to 6 snapshots max (keeps it reasonable)
             picked = picked[:6]
@@ -1021,15 +1093,27 @@ class UniFiProtectPlugin(ToolPlugin):
                 "camera_descriptions": camera_descriptions,
                 "snapshot_results": snapshot_results,
             }
-
-            text = await self._answer_with_facts(query, facts, llm_client)
+            summary = self._summary_from_facts(query, facts)
 
             if _platform_supports_media(platform):
-                return images_out + [text]
-            return text
+                return action_success(
+                    facts=facts,
+                    summary_for_user=summary,
+                    say_hint="Summarize area snapshots and notable activity from the provided facts.",
+                    artifacts=images_out,
+                )
+            return action_success(
+                facts=facts,
+                summary_for_user=summary,
+                say_hint="Summarize area snapshots and notable activity from the provided facts.",
+            )
 
         # fallback
-        return "I couldn't figure out what to do with that request."
+        return action_failure(
+            code="invalid_action",
+            message="I couldn't figure out what to do with that request.",
+            say_hint="Ask the user to choose sensors status, camera list, or a camera/area description.",
+        )
 
 
 plugin = UniFiProtectPlugin()

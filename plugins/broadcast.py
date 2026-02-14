@@ -8,6 +8,7 @@ import requests
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("broadcast")
@@ -241,7 +242,7 @@ class BroadcastPlugin(ToolPlugin):
                     failures.append(f"{mp} (speak:{speak_status}, piper_say:error)")
         return ok_count, failures
 
-    async def _broadcast(self, raw_text: str, llm_client) -> str:
+    async def _broadcast(self, raw_text: str, llm_client) -> dict:
         s = self._get_settings()
         timeout_seconds = self._as_int(s.get("REQUEST_TIMEOUT_SECONDS"), default=15, minimum=5, maximum=120)
 
@@ -249,15 +250,25 @@ class BroadcastPlugin(ToolPlugin):
         ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
         token = (ha_settings.get("HA_TOKEN") or "").strip()
         if not token:
-            return (
-                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
-                "and add a Long-Lived Access Token."
+            return action_failure(
+                code="missing_ha_token",
+                message=(
+                    "Home Assistant token is not set. Open WebUI Settings Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                ),
+                needs=["Please set HA_TOKEN in Home Assistant settings."],
+                say_hint="Explain Home Assistant token is missing and ask to configure it.",
             )
 
         tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
         players = self._targets(s)
         if not players:
-            return "No broadcast devices are configured (DEVICE_1..DEVICE_5)."
+            return action_failure(
+                code="no_broadcast_targets",
+                message="No broadcast devices are configured.",
+                needs=["Please configure DEVICE_1 through DEVICE_5 with media_player entities."],
+                say_hint="Explain there are no configured broadcast targets.",
+            )
 
         announcement = (
             await self._make_announcement_text(raw_text, llm_client)
@@ -265,7 +276,12 @@ class BroadcastPlugin(ToolPlugin):
             else (raw_text or "").strip()
         )
         if not announcement:
-            return "No announcement text provided."
+            return action_failure(
+                code="missing_announcement_text",
+                message="No announcement text was provided.",
+                needs=["What should I announce?"],
+                say_hint="Ask what announcement text should be broadcast.",
+            )
 
         try:
             ok_count, failures = await asyncio.to_thread(
@@ -279,19 +295,46 @@ class BroadcastPlugin(ToolPlugin):
             )
         except Exception as e:
             logger.error(f"[broadcast] TTS call failed: {e}")
-            return "Broadcast failed (TTS service call error)."
+            return action_failure(
+                code="broadcast_tts_error",
+                message=f"Broadcast failed due to a TTS service call error: {e}",
+                say_hint="Explain the TTS service call failed and suggest retrying.",
+            )
 
         total = len(players)
         if ok_count <= 0:
-            detail = f" Failures: {', '.join(failures[:3])}." if failures else ""
-            return f"Broadcast failed (all target devices rejected TTS).{detail}"
-        if failures:
-            return (
-                f"Broadcast sent to {ok_count}/{total} devices. "
-                f"Some devices failed: {', '.join(failures[:3])}. "
-                f"Announcement: {announcement}"
+            detail = ", ".join(failures[:3]) if failures else ""
+            return action_failure(
+                code="broadcast_all_targets_failed",
+                message=f"Broadcast failed on all target devices.{f' Failures: {detail}' if detail else ''}",
+                say_hint="Explain that all target devices rejected the broadcast.",
             )
-        return f"Broadcast sent to {ok_count}/{total} devices. Announcement: {announcement}"
+        if failures:
+            return action_success(
+                facts={
+                    "announcement": announcement,
+                    "tts_entity": tts_entity,
+                    "target_count": total,
+                    "ok_count": ok_count,
+                    "failed_targets": failures[:10],
+                },
+                summary_for_user=(
+                    f"Broadcast sent to {ok_count} of {total} devices. "
+                    f"{len(failures)} device targets failed."
+                ),
+                say_hint="Confirm partial broadcast success and mention failed targets if useful.",
+            )
+        return action_success(
+            facts={
+                "announcement": announcement,
+                "tts_entity": tts_entity,
+                "target_count": total,
+                "ok_count": ok_count,
+                "failed_targets": [],
+            },
+            summary_for_user=f"Broadcast sent to all {total} configured devices.",
+            say_hint="Confirm the broadcast was sent successfully.",
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Platform handlers
@@ -300,7 +343,7 @@ class BroadcastPlugin(ToolPlugin):
     async def handle_homeassistant(self, args, llm_client):
         args = args or {}
         text = self._extract_announcement_arg(args)
-        return (await self._broadcast(text, llm_client)).strip()
+        return await self._broadcast(text, llm_client)
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
@@ -309,13 +352,11 @@ class BroadcastPlugin(ToolPlugin):
 
     async def handle_homekit(self, args, llm_client):
         args = args or {}
-        final = await self._broadcast(self._extract_announcement_arg(args), llm_client)
-        return self._siri_flatten(final)
+        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
 
     async def handle_xbmc(self, args, llm_client):
         args = args or {}
-        final = await self._broadcast(self._extract_announcement_arg(args), llm_client)
-        return (final or "No announcement.").strip()
+        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
 
     async def handle_discord(self, message, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)

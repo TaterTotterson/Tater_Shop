@@ -10,6 +10,7 @@ from typing import Optional
 
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+from plugin_result import action_failure, action_success
 
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -435,7 +436,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     @staticmethod
     async def _celebrate(llm_client, user_prompt: str) -> str:
         if llm_client is None:
-            return "Here’s your generated image!"
+            return ""
         safe_prompt = "".join(ch for ch in user_prompt[:300] if ch.isprintable()).strip()
         system_msg = f'The user has just been shown an AI-generated image based on the prompt: "{safe_prompt}".'
         final_response = await llm_client.chat(
@@ -447,7 +448,7 @@ class ComfyUIImagePlugin(ToolPlugin):
                 },
             ]
         )
-        return (final_response.get("message", {}) or {}).get("content", "").strip() or "Here's your generated image!"
+        return ((final_response.get("message", {}) or {}).get("content", "") or "").strip()[:240]
 
     # ---------------------------------------
     # Discord
@@ -476,9 +477,24 @@ class ComfyUIImagePlugin(ToolPlugin):
                     name=file_name,
                     mimetype=mime,
                 )
-                return [image_data, message_text]
+                return action_success(
+                    facts={
+                        "prompt": user_prompt,
+                        "artifact_type": "image",
+                        "artifact_count": 1,
+                        "file_name": file_name,
+                    },
+                    summary_for_user="Generated one image.",
+                    flair=message_text,
+                    say_hint="Confirm the image generation result and reference the attached image.",
+                    artifacts=[image_data],
+                )
         except Exception as e:
-            return f"Failed to queue prompt: {type(e).__name__}: {e}"
+            return action_failure(
+                code="image_generation_failed",
+                message=f"Failed to generate image: {type(e).__name__}: {e}",
+                say_hint="Explain the image generation failure and suggest retrying.",
+            )
 
     # ---------------------------------------
     # WebUI
@@ -506,9 +522,24 @@ class ComfyUIImagePlugin(ToolPlugin):
             )
 
             message_text = await self._celebrate(llm_client, user_prompt)
-            return [image_data, message_text]
+            return action_success(
+                facts={
+                    "prompt": user_prompt,
+                    "artifact_type": "image",
+                    "artifact_count": 1,
+                    "file_name": file_name,
+                },
+                summary_for_user="Generated one image.",
+                flair=message_text,
+                say_hint="Confirm the image generation result and reference the attached image.",
+                artifacts=[image_data],
+            )
         except Exception as e:
-            return f"Failed to queue prompt: {type(e).__name__}: {e}"
+            return action_failure(
+                code="image_generation_failed",
+                message=f"Failed to generate image: {type(e).__name__}: {e}",
+                say_hint="Explain the image generation failure and suggest retrying.",
+            )
 
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)
@@ -542,10 +573,25 @@ class ComfyUIImagePlugin(ToolPlugin):
             )
 
             message_text = await self._celebrate(llm_client, user_prompt)
-            return [image_payload, message_text]
+            return action_success(
+                facts={
+                    "prompt": user_prompt,
+                    "artifact_type": "image",
+                    "artifact_count": 1,
+                    "file_name": file_name,
+                },
+                summary_for_user="Generated one image.",
+                flair=message_text,
+                say_hint="Confirm the image generation result and reference the attached image.",
+                artifacts=[image_payload],
+            )
 
         except Exception as e:
-            return f"Failed to create image: {type(e).__name__}: {e}"
+            return action_failure(
+                code="image_generation_failed",
+                message=f"Failed to create image: {type(e).__name__}: {e}",
+                say_hint="Explain the image generation failure and suggest retrying.",
+            )
 
 
 plugin = ComfyUIImagePlugin()

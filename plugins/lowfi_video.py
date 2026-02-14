@@ -14,6 +14,7 @@ import logging
 from math import ceil
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+from plugin_result import action_failure, action_success
 
 SETTINGS_CATEGORY = "Lofi Video"
 logger = logging.getLogger("lowfi_video")
@@ -890,7 +891,12 @@ class LowfiVideoPlugin(ToolPlugin):
         arg_map = args if isinstance(args, dict) else {}
         prompt_text = self._extract_prompt(arg_map)
         if not prompt_text:
-            return ["No prompt given. Pass one of: prompt, query, request, or text."]
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt given. Pass one of: prompt, query, request, or text.",
+                needs=["Provide a prompt describing the lofi scene."],
+                say_hint="Ask the user for a lofi scene prompt.",
+            )
 
         settings = self._decode_map(redis_client.hgetall(f"plugin_settings:{self.settings_category}"))
 
@@ -930,31 +936,58 @@ class LowfiVideoPlugin(ToolPlugin):
                     ])
                     generated = (msg.get("message", {}).get("content") or "").strip()
                     if generated:
-                        followup_text = generated
+                        followup_text = generated[:240]
                 except Exception:
                     pass
 
-            return [
-                _build_media_metadata(
-                    final_bytes,
-                    media_type="video",
-                    name="lofi_video.mp4",
-                    mimetype="video/mp4",
-                ),
-                followup_text,
-            ]
+            artifact = _build_media_metadata(
+                final_bytes,
+                media_type="video",
+                name="lofi_video.mp4",
+                mimetype="video/mp4",
+            )
+            return action_success(
+                facts={
+                    "prompt": prompt_text,
+                    "refined_prompt": prompt_text_refined,
+                    "audio_minutes": audio_minutes,
+                    "video_minutes": video_minutes,
+                    "loop_seconds": loop_seconds,
+                    "artifact_type": "video",
+                    "artifact_count": 1,
+                    "file_name": "lofi_video.mp4",
+                },
+                summary_for_user="Generated one lofi video.",
+                flair=followup_text,
+                say_hint="Confirm the lofi video result and reference the attached video.",
+                artifacts=[artifact],
+            )
         except Exception as exc:
-            return [f"Lofi video failed: {type(exc).__name__}: {exc}"]
+            return action_failure(
+                code="lofi_video_failed",
+                message=f"Lofi video failed: {type(exc).__name__}: {exc}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
         finally:
             for path in (audio_path, loop_clip_path, final_path):
                 if path:
                     self._safe_unlink(path)
 
     async def handle_discord(self, message, args, llm_client):
-        return "❌ This plugin is only available in the WebUI due to file size limitations."
+        return action_failure(
+            code="unsupported_platform",
+            message="`lowfi_video` is only available in WebUI due to file size limitations.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        await bot.privmsg(channel, f"{user}: ❌ This plugin is only available in the WebUI.")
+        return action_failure(
+            code="unsupported_platform",
+            message="`lowfi_video` is only available in WebUI.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
 
 plugin = LowfiVideoPlugin()

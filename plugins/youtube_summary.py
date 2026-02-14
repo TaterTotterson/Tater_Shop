@@ -4,6 +4,7 @@ import subprocess
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, research_success
 
 load_dotenv()
 DEFAULT_MAX_TOKENS = 2048
@@ -155,16 +156,30 @@ class YouTubeSummaryPlugin(ToolPlugin):
     async def handle_discord(self, message, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
-            return "No YouTube URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No YouTube URL provided.",
+                needs=["Provide a YouTube video URL."],
+                say_hint="Ask the user for a YouTube URL to summarize.",
+            )
 
         try:
             loop = asyncio.get_running_loop()
             summary = await self._fetch_summary(video_url, llm_client)
         except RuntimeError:
             summary = asyncio.run(self._fetch_summary(video_url, llm_client))
-
+        if not summary:
+            return action_failure(
+                code="summary_failed",
+                message="Failed to summarize the video.",
+                say_hint="Explain the video summary failed and suggest retrying.",
+            )
         formatted = self.format_article(summary)
-        return "\n".join(self.split_message(formatted, 1500))
+        return research_success(
+            answer=formatted.strip(),
+            sources=[{"title": "YouTube Video", "url": video_url, "publisher": "YouTube", "date": ""}],
+            say_hint="Provide the summary and include the source URL.",
+        )
 
     # ---------------------------------------------------------
     # WebUI handler
@@ -172,7 +187,12 @@ class YouTubeSummaryPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         video_url = args.get("video_url")
         if not video_url:
-            return ["No YouTube URL provided."]
+            return action_failure(
+                code="missing_url",
+                message="No YouTube URL provided.",
+                needs=["Provide a YouTube video URL."],
+                say_hint="Ask the user for a YouTube URL to summarize.",
+            )
 
         try:
             loop = asyncio.get_running_loop()
@@ -181,20 +201,32 @@ class YouTubeSummaryPlugin(ToolPlugin):
             summary = asyncio.run(self._fetch_summary(video_url, llm_client))
 
         if not summary:
-            return ["Failed to summarize the video."]
+            return action_failure(
+                code="summary_failed",
+                message="Failed to summarize the video.",
+                say_hint="Explain the video summary failed and suggest retrying.",
+            )
 
         formatted = self.format_article(summary)
-        return self.split_message(formatted, 1500)
+        return research_success(
+            answer=formatted.strip(),
+            sources=[{"title": "YouTube Video", "url": video_url, "publisher": "YouTube", "date": ""}],
+            say_hint="Provide the summary and include the source URL.",
+        )
 
     # ---------------------------------------------------------
     # IRC handler
     # ---------------------------------------------------------
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         video_url = args.get("video_url")
-        nick = user
 
         if not video_url:
-            return f"{nick}: No YouTube URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No YouTube URL provided.",
+                needs=["Provide a YouTube video URL."],
+                say_hint="Ask the user for a YouTube URL to summarize.",
+            )
 
         try:
             loop = asyncio.get_running_loop()
@@ -203,10 +235,18 @@ class YouTubeSummaryPlugin(ToolPlugin):
             summary = asyncio.run(self._fetch_summary(video_url, llm_client))
 
         if not summary:
-            return f"{nick}: Could not generate summary."
+            return action_failure(
+                code="summary_failed",
+                message="Could not generate summary.",
+                say_hint="Explain the video summary failed and suggest retrying.",
+            )
 
         article = self.format_article(summary)
-        return f"{nick}: {article}"
+        return research_success(
+            answer=article.strip(),
+            sources=[{"title": "YouTube Video", "url": video_url, "publisher": "YouTube", "date": ""}],
+            say_hint="Provide the summary and include the source URL.",
+        )
 
     # ---------------------------------------------------------
     # Matrix handler
@@ -215,18 +255,34 @@ class YouTubeSummaryPlugin(ToolPlugin):
         llm = llm_client or kwargs.get("llm")
         video_url = (args or {}).get("video_url")
         if not video_url:
-            return "No YouTube URL provided."
+            return action_failure(
+                code="missing_url",
+                message="No YouTube URL provided.",
+                needs=["Provide a YouTube video URL."],
+                say_hint="Ask the user for a YouTube URL to summarize.",
+            )
 
         try:
             summary = await self._fetch_summary(video_url, llm)
         except Exception as e:
-            return f"Failed to summarize the video: {e}"
+            return action_failure(
+                code="summary_exception",
+                message=f"Failed to summarize the video: {e}",
+                say_hint="Explain the video summary failed and suggest retrying.",
+            )
 
         if not summary:
-            return "Failed to summarize the video."
+            return action_failure(
+                code="summary_failed",
+                message="Failed to summarize the video.",
+                say_hint="Explain the video summary failed and suggest retrying.",
+            )
 
-        # Matrix platform will handle chunking; return one string.
-        return self.format_article(summary)
+        return research_success(
+            answer=self.format_article(summary).strip(),
+            sources=[{"title": "YouTube Video", "url": video_url, "publisher": "YouTube", "date": ""}],
+            say_hint="Provide the summary and include the source URL.",
+        )
 
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args, llm_client)

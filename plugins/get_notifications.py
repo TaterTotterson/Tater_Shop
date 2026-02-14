@@ -1,11 +1,11 @@
 import logging
-import json as _json
 from typing import Any, Dict, List
 
 import httpx
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("get_notifications")
 logger.setLevel(logging.INFO)
@@ -108,66 +108,6 @@ class GetNotificationsPlugin(ToolPlugin):
             return None
 
     @staticmethod
-    async def _llm_summary(
-        notifs: List[Dict[str, Any]],
-        llm_client,
-        total_count: int,
-        omitted_count: int,
-    ) -> str:
-        if llm_client is None:
-            return ""
-
-        trimmed = [
-            {
-                "title": (n.get("title") or "").strip(),
-                "message": (n.get("message") or "").strip(),
-                "level": (n.get("level") or "info"),
-                "source": (n.get("source") or ""),
-                "type": (n.get("type") or ""),
-                "entity_id": (n.get("entity_id") or ""),
-                "ha_time": (n.get("ha_time") or ""),  # include only if present
-                "data": n.get("data") or {},
-            }
-            for n in notifs
-        ]
-
-        system = (
-            "You summarize home notifications for spoken output.\n"
-            "Rules:\n"
-            f"1) Start with exactly: 'You have {total_count} notifications.'\n"
-            "2) Merge similar items (for example, repeated doorbell visitors) into one short roll-up.\n"
-            "3) Include the 'ha_time' when available. If missing, omit the time entirely.\n"
-            "4) Keep it short, natural, and clear. No emojis. No code blocks. No technical IDs.\n"
-            "5) If omitted_count > 0, add one short sentence saying you are showing recent items only."
-        )
-
-        user = _json.dumps(
-            {
-                "total_count": total_count,
-                "shown_count": len(trimmed),
-                "omitted_count": omitted_count,
-                "notifications": trimmed,
-            },
-            ensure_ascii=False,
-        )
-
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.2,
-                max_tokens=320,
-                timeout_ms=45000,
-            )
-            text = (resp.get("message", {}) or {}).get("content", "").strip()
-            return text or f"You have {total_count} notification{'s' if total_count != 1 else ''}."
-        except Exception as e:
-            logger.warning(f"[get_notifications] LLM summary failed: {e}")
-            return ""
-
-    @staticmethod
     def _fallback_summary(notifs: List[Dict[str, Any]], total_count: int, omitted_count: int) -> str:
         lines = [f"You have {total_count} notification{'s' if total_count != 1 else ''}."]
         if omitted_count > 0:
@@ -226,18 +166,44 @@ class GetNotificationsPlugin(ToolPlugin):
 
         notifs = await self._pull_notifications()
         if notifs is None:
-            return "I could not reach the notifications service."
+            return action_failure(
+                code="notifications_unreachable",
+                message="I could not reach the notifications service.",
+                say_hint="Explain that notifications could not be fetched and suggest retrying.",
+            )
         if len(notifs) == 0:
-            return "You have no notifications."
+            return action_success(
+                facts={"total_count": 0, "shown_count": 0, "notifications": []},
+                summary_for_user="You have no notifications.",
+                say_hint="Report that there are no notifications.",
+            )
 
         shown = notifs[:limit]
         omitted_count = max(0, len(notifs) - len(shown))
-
-        summary = await self._llm_summary(shown, llm_client, total_count=len(notifs), omitted_count=omitted_count)
-        if summary:
-            return summary
-
-        return self._fallback_summary(shown, total_count=len(notifs), omitted_count=omitted_count)
+        summary = self._fallback_summary(shown, total_count=len(notifs), omitted_count=omitted_count)
+        compact = []
+        for item in shown:
+            if not isinstance(item, dict):
+                continue
+            compact.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "message": str(item.get("message") or "").strip(),
+                    "level": str(item.get("level") or "info").strip(),
+                    "source": str(item.get("source") or "").strip(),
+                    "ha_time": str(item.get("ha_time") or "").strip(),
+                }
+            )
+        return action_success(
+            facts={
+                "total_count": len(notifs),
+                "shown_count": len(compact),
+                "omitted_count": omitted_count,
+                "notifications": compact,
+            },
+            summary_for_user=summary,
+            say_hint="Summarize notification count and key recent items.",
+        )
 
 
 plugin = GetNotificationsPlugin()

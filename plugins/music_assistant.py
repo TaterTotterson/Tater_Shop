@@ -979,6 +979,7 @@ class MusicAssistantPlugin(ToolPlugin):
                 "room": room or "auto",
                 "result": msg,
             },
+            summary_for_user=msg[:300],
             say_hint="Confirm what happened in Music Assistant using only these facts.",
             suggested_followups=["Want me to queue something else?"],
         )
