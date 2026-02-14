@@ -322,7 +322,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -338,7 +338,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "5e479353223ef32e2c478943b18a3293004ee000f87b5079e9d670916e314298"
+      "sha256": "da6abc3016cfb7f0b2899a0089095d7d9f10f58cf5b0f1b49a0c7f01f2bdada5"
     },
     {
       "id": "music_assistant",
@@ -630,7 +630,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "plugins/voicepe_remote_timer.py",
-      "sha256": "2395feecdd31b5292ca22295581f93e32fe03f9a4636ab0a39a0907e213f3610"
+      "sha256": "a72b5b291ba525c0c991e5495dca3cf069683948b247eaf9006e5ad592e4cf8d"
     },
     {
       "id": "rss_watch",
