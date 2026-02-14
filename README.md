@@ -13,7 +13,6 @@
 
 | Plugin Name | Description | Platform |
 |------------|-------------|----------|
-| `ai_tasks` | Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response. | discord, irc, matrix, homeassistant, telegram, webui |
 | `automatic_plugin` | Generate an image from a text prompt using your Automatic1111 server. | discord, webui, telegram |
 | `broadcast` | Send a one-time spoken announcement to your Home Assistant media players. | homeassistant, homekit, xbmc, webui, discord, telegram, matrix, irc |
 | `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, homeassistant, matrix, telegram |
@@ -22,7 +21,6 @@
 | `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui |
 | `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui |
 | `device_compare` | Compare two devices with spec tables and per-game FPS benchmarks. | discord, webui, matrix, telegram |
-| `emoji_ai_responder` | Pick a contextual emoji reaction. | passive |
 | `events_query` | Answer questions about stored household events by area and timeframe. | webui, homeassistant, homekit, discord, telegram, matrix, irc |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
@@ -41,7 +39,6 @@
 | `rss_list` | Show the RSS feeds currently being watched. | discord, webui, irc, matrix, telegram |
 | `rss_unwatch` | Remove an RSS feed from the watch list. | discord, webui, irc, matrix, telegram |
 | `rss_watch` | Add an RSS/Atom feed to the watch list and post only the newest item once. | discord, webui, irc, matrix, telegram |
-| `send_message` | Queue a message via the notifier system. If no destination is provided, it defaults to the origin platform (Discord/IRC/Matrix/Home Assistant/Telegram). Room/channel names like #tater are accepted for routing. When used from Discord, attached files are forwarded automatically. | discord, irc, matrix, homeassistant, telegram, webui |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, irc, matrix, telegram |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, discord, irc, matrix, telegram |
