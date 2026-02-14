@@ -5,6 +5,7 @@ import aiohttp
 import base64
 import redis
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, action_success
 
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
@@ -78,7 +79,11 @@ class SFTPGoActivityPlugin(ToolPlugin):
         settings = self.get_sftpgo_settings()
         jwt_token = await self.get_jwt_token(settings)
         if not jwt_token:
-            return "❌ Failed to obtain JWT token."
+            return action_failure(
+                code="sftpgo_auth_failed",
+                message="Failed to obtain JWT token.",
+                say_hint="Explain SFTPGo authentication failed and ask to verify API settings.",
+            )
 
         connector = aiohttp.TCPConnector(ssl=False)
         try:
@@ -88,35 +93,44 @@ class SFTPGoActivityPlugin(ToolPlugin):
                     headers={"Authorization": f"Bearer {jwt_token}"}
                 ) as resp:
                     if resp.status != 200:
-                        return f"❌ Failed to retrieve connections: {resp.status}"
+                        return action_failure(
+                            code="sftpgo_connections_failed",
+                            message=f"Failed to retrieve connections: HTTP {resp.status}.",
+                            say_hint="Explain that retrieving SFTPGo connections failed.",
+                        )
 
                     conns = await resp.json()
                     if not conns:
-                        return "No active connections."
-
-                    lines = ["Active Connections:"]
-                    for c in conns:
-                        lines.append(
-                            f"User: {c.get('username')}, "
-                            f"Client: {c.get('client_version')}, "
-                            f"Protocol: {c.get('protocol')}, "
-                            f"Last Activity: {c.get('last_activity')}"
+                        return action_success(
+                            facts={"active_count": 0, "connections": []},
+                            summary_for_user="No active SFTPGo connections.",
+                            say_hint="Report that there are no active SFTPGo connections.",
                         )
-                    joined = "\n".join(lines)
 
-                    prompt = (
-                        f"The following are the current connection details from the server:\n\n{joined}\n\n"
-                        "Please provide a brief status report of the current connection status on the server. "
-                        "Only generate the message. Do not respond to this message."
+                    compact = []
+                    for c in conns[:25]:
+                        if not isinstance(c, dict):
+                            continue
+                        compact.append(
+                            {
+                                "username": c.get("username"),
+                                "client_version": c.get("client_version"),
+                                "protocol": c.get("protocol"),
+                                "last_activity": c.get("last_activity"),
+                            }
+                        )
+                    return action_success(
+                        facts={"active_count": len(conns), "connections": compact},
+                        summary_for_user=f"Found {len(conns)} active SFTPGo connection(s).",
+                        say_hint="Report active connection count and key connection details.",
                     )
-
-                    response = await llm_client.chat(
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                    return response["message"].get("content", "").strip() or joined
 
         except Exception as e:
-            return f"❌ Error retrieving activity: {e}"
+            return action_failure(
+                code="sftpgo_activity_failed",
+                message=f"Error retrieving activity: {e}",
+                say_hint="Explain that reading SFTPGo activity failed and suggest retrying.",
+            )
 
     # Discord
     async def handle_discord(self, message, args, llm_client):
@@ -124,16 +138,15 @@ class SFTPGoActivityPlugin(ToolPlugin):
 
     # IRC (return string; the platform will send it)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        msg = await self._get_activity_summary(llm_client)
-        return f"{user}: {msg}"
+        return await self._get_activity_summary(llm_client)
 
     # WebUI
     async def handle_webui(self, args, llm_client):
         try:
             asyncio.get_running_loop()
-            return [await self._get_activity_summary(llm_client)]
+            return await self._get_activity_summary(llm_client)
         except RuntimeError:
-            return [asyncio.run(self._get_activity_summary(llm_client))]
+            return asyncio.run(self._get_activity_summary(llm_client))
 
     # Telegram
     async def handle_telegram(self, update, args, llm_client):

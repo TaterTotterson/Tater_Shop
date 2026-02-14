@@ -5,8 +5,9 @@ from typing import Any, Dict, List, Tuple
 import requests
 from dotenv import load_dotenv
 
-from helpers import get_tater_name, redis_client
+from helpers import redis_client
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("overseerr_trending")
@@ -140,45 +141,6 @@ class OverseerrTrendingPlugin(ToolPlugin):
     async def _ask_llm_intro_prefix(self, kind: str, when: str, titles: List[str], llm_client) -> str:
         kind_label = "movies" if self._coerce_kind(kind) == "movie" else "TV shows"
         when_norm = self._coerce_when(when)
-        if llm_client is None:
-            if when_norm == "trending":
-                return f"Here are this week’s hottest {kind_label}:"
-            return f"Here are some upcoming {kind_label}:"
-
-        first, last = get_tater_name()
-        tater = f"{first} {last}"
-        sample = ", ".join(titles[:5])
-
-        system = (
-            f"You are {tater}. Write one short friendly intro prefix for a list of {when_norm} {kind_label}.\n"
-            "Rules:\n"
-            "- Output only the prefix text.\n"
-            "- Do not include any title names.\n"
-            "- End with a colon.\n"
-            "- No emojis.\n"
-            "- Keep it under 80 characters.\n"
-            "- If when is trending, prefer wording like \"Here are this week’s hottest ...:\".\n"
-        )
-        user = (
-            f"Context: user asked for {when_norm} {kind_label}.\n"
-            f"Examples (do not include in output): {sample}\n"
-            "Write the intro prefix now."
-        )
-
-        try:
-            resp = await llm_client.chat(
-                [{"role": "system", "content": system}, {"role": "user", "content": user}]
-            )
-            content = ((resp or {}).get("message", {}) or {}).get("content", "") or ""
-            out = re.sub(r"\s+", " ", content).strip()
-            if out and not out.endswith(":"):
-                out = out.rstrip(".") + ":"
-            out = out[:80].strip()
-            if out:
-                return out
-        except Exception as exc:
-            logger.exception("[Overseerr intro prefix LLM error] %s", exc)
-
         if when_norm == "trending":
             return f"Here are this week’s hottest {kind_label}:"
         return f"Here are some upcoming {kind_label}:"
@@ -190,78 +152,88 @@ class OverseerrTrendingPlugin(ToolPlugin):
 
         data = self._fetch_list(kind, when)
         if "error" in data:
-            return str(data["error"])
+            return action_failure(
+                code="overseerr_list_failed",
+                message=str(data["error"]),
+                say_hint="Explain fetching Overseerr lists failed and suggest checking settings.",
+            )
 
         titles = self._extract_titles(data, kind)
         if not titles:
-            return f"No {self._coerce_when(when)} results found."
+            return action_failure(
+                code="no_results",
+                message=f"No {self._coerce_when(when)} results found.",
+                say_hint="Explain there were no matching trending/upcoming results.",
+            )
 
         intro = await self._ask_llm_intro_prefix(kind, when, titles, llm_client)
         if self._is_tts_platform(platform):
             intro_sentence = intro.rstrip(":").strip() + "."
             spoken_titles = self._tts_title_list(titles, max_titles=8)
-            return f"{intro_sentence} {spoken_titles}".strip()
-
-        list_block = "\n".join(titles)
-        return f"{intro}\n\n{list_block}"
+            summary = f"{intro_sentence} {spoken_titles}".strip()
+        else:
+            summary = f"{intro} {'; '.join(titles[:10])}".strip()
+        return action_success(
+            facts={
+                "kind": self._coerce_kind(kind),
+                "when": self._coerce_when(when),
+                "titles": titles,
+                "count": len(titles),
+            },
+            summary_for_user=summary,
+            say_hint="Provide the requested trending/upcoming title list from the returned facts.",
+        )
 
     async def handle_discord(self, message, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="discord")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="discord")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_discord] %s", exc)
-            return [f"Error: {exc}"]
+            return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
     async def handle_webui(self, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="webui")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="webui")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_webui] %s", exc)
-            return [f"Error: {exc}"]
+            return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="irc")
-            return [f"{user}: {answer}"]
+            return await self._answer(args or {}, llm_client, platform="irc")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_irc] %s", exc)
-            return [f"{user}: Error: {exc}"]
+            return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
     async def handle_homeassistant(self, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="homeassistant")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="homeassistant")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_homeassistant] %s", exc)
-            return ["There was an error fetching results."]
+            return action_failure(code="overseerr_trending_exception", message="There was an error fetching results.")
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         try:
-            answer = await self._answer(args or {}, llm_client, platform="matrix")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="matrix")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_matrix] %s", exc)
-            return [f"Error: {exc}"]
+            return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
     async def handle_telegram(self, update, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="telegram")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="telegram")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_telegram] %s", exc)
-            return [f"Error: {exc}"]
+            return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
     async def handle_homekit(self, args, llm_client):
         try:
-            answer = await self._answer(args or {}, llm_client, platform="homekit")
-            return [answer]
+            return await self._answer(args or {}, llm_client, platform="homekit")
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_homekit] %s", exc)
-            return ["There was an error fetching results."]
+            return action_failure(code="overseerr_trending_exception", message="There was an error fetching results.")
 
 
 plugin = OverseerrTrendingPlugin()

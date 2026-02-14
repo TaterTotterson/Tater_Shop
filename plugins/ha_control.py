@@ -1065,48 +1065,11 @@ class HAControlPlugin(ToolPlugin):
         return None
 
     async def _speak_response_state(self, user_query: str, friendly: str, value: str, unit: str, llm_client) -> str:
-        system = (
-            "You are a smart home voice assistant.\n"
-            "Write exactly ONE short, natural spoken response.\n"
-            "- No emojis. No technical wording. No entity IDs.\n"
-            "- If the value is numeric and a unit is provided, include it naturally.\n\n"
-            f"User asked: {user_query}\n"
-            f"Entity: {friendly}\n"
-            f"Value: {value}\n"
-            f"Unit: {unit}\n"
-        )
-        try:
-            resp = await llm_client.chat(messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": "Say it now."},
-            ])
-            msg = (resp.get("message", {}) or {}).get("content", "").strip()
-            return msg or f"{friendly} is {value}{(' ' + unit) if unit else ''}."
-        except Exception:
-            return f"{friendly} is {value}{(' ' + unit) if unit else ''}."
+        return f"{friendly} is {value}{(' ' + unit) if unit else ''}."
 
     async def _speak_response_confirm(self, user_query: str, friendly: str, action_spoken: str, extras: str, llm_client) -> str:
-        system = (
-            "You are a smart home voice assistant.\n"
-            "Write exactly ONE short, natural confirmation sentence.\n"
-            "Constraints:\n"
-            "- Sound conversational and spoken aloud.\n"
-            "- Mention the device name naturally.\n"
-            "- Include extra details only if provided.\n"
-            "- No emojis. No technical wording. No entity IDs.\n\n"
-            f"User asked: {user_query}\n"
-            f"Result: {action_spoken} {friendly}.\n"
-            f"Extras: {extras}\n"
-        )
-        try:
-            resp = await llm_client.chat(messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": "Say it now."},
-            ])
-            msg = (resp.get("message", {}) or {}).get("content", "").strip()
-            return msg or f"Okay, {action_spoken} {friendly}."
-        except Exception:
-            return f"Okay, {action_spoken} {friendly}."
+        extras_txt = f" {extras.strip()}" if str(extras or "").strip() else ""
+        return f"Okay, {action_spoken} {friendly}.{extras_txt}".strip()
 
     def _ha_diagnosis(self) -> dict:
         hash_diag = diagnose_hash_fields(

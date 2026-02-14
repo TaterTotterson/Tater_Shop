@@ -19,6 +19,7 @@ from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from plugin_settings import get_plugin_settings
 from helpers import redis_client, run_comfy_prompt
+from plugin_result import action_failure, action_success
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
 SETTINGS_CATEGORY = "ComfyUI Music Video"
@@ -770,13 +771,21 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
     async def _generate_music_video(self, prompt, llm_client):
         if llm_client is None:
-            return "This plugin requires an available LLM to generate lyrics and scene prompts."
+            return action_failure(
+                code="llm_required",
+                message="This plugin requires an available LLM to generate lyrics and scene prompts.",
+                say_hint="Explain that the model is required for lyrics and scene generation.",
+            )
         job_id = str(uuid.uuid4())[:8]
 
         # --- 1) Lyrics + tags via Audio Ace ---
         tags, lyrics = await _ComfyUIAudioAceHelper.generate_tags_and_lyrics(prompt, llm_client)
         if not lyrics:
-            return "❌ No lyrics returned for visuals."
+            return action_failure(
+                code="lyrics_missing",
+                message="No lyrics were returned for visuals.",
+                say_hint="Explain that lyric generation failed and suggest retrying.",
+            )
 
         # --- 2) Render audio using the refactored per-job Comfy helper ---
         audio_path = f"/tmp/{job_id}_audio.mp3"
@@ -785,7 +794,11 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
         # CHANGED: call the new sync method and run it in a worker thread
         audio_bytes = await asyncio.to_thread(_ComfyUIAudioAceHelper.process_prompt_sync, tags, lyrics)
         if not audio_bytes:
-            return "❌ No audio generated for the music video."
+            return action_failure(
+                code="audio_missing",
+                message="No audio was generated for the music video.",
+                say_hint="Explain that audio generation failed and suggest retrying.",
+            )
         with open(audio_path, "wb") as f:
             f.write(audio_bytes)
 
@@ -794,7 +807,11 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
 
         sections = self.split_sections(lyrics)
         if not sections:
-            return "❌ No sections found for animation."
+            return action_failure(
+                code="lyrics_sections_missing",
+                message="No lyric sections were found for animation.",
+                say_hint="Explain that section parsing failed and suggest retrying.",
+            )
 
         num_clips = len(sections) * 2
         per = duration / num_clips
@@ -906,7 +923,11 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     clip_idx += 1
 
             if not vids:
-                return "❌ Failed to generate any video clips."
+                return action_failure(
+                    code="no_clips_generated",
+                    message="Failed to generate any video clips.",
+                    say_hint="Explain that clip generation failed and suggest retrying.",
+                )
 
             self.ffmpeg_concat(vids, audio_path, final_video_path)
 
@@ -918,30 +939,52 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                     {"role": "system", "content": f"User got a music video for '{prompt}'"},
                     {"role": "user", "content": "Send short celebration text."}
                 ])
-                msg_text = ((msg.get("message", {}) or {}).get("content", "") or "").strip() or "Here's your music video!"
+                msg_text = (((msg.get("message", {}) or {}).get("content", "") or "").strip() or "")[:240]
             except Exception:
-                msg_text = "Here's your music video!"
+                msg_text = ""
 
-            return [
-                _build_media_metadata(
-                    final_bytes,
-                    media_type="video",
-                    name="music_video.mp4",
-                    mimetype="video/mp4",
-                ),
-                msg_text,
-            ]
+            artifact = _build_media_metadata(
+                final_bytes,
+                media_type="video",
+                name="music_video.mp4",
+                mimetype="video/mp4",
+            )
+            return action_success(
+                facts={
+                    "prompt": prompt,
+                    "tags": tags,
+                    "sections_count": len(sections),
+                    "clip_count": len(vids),
+                    "duration_seconds": duration,
+                    "artifact_type": "video",
+                    "artifact_count": 1,
+                    "file_name": "music_video.mp4",
+                },
+                summary_for_user="Generated one music video.",
+                flair=msg_text,
+                say_hint="Confirm the music video result and reference the attached video.",
+                artifacts=[artifact],
+            )
         finally:
             self.cleanup_temp_files(job_id, clip_idx, list(exts_used))
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
         if "prompt" not in args:
-            return ["No prompt given."]
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt given.",
+                needs=["Provide a prompt describing the music video concept."],
+                say_hint="Ask the user for a music video prompt.",
+            )
         try:
             return await self._generate_music_video(args["prompt"], llm_client)
         except Exception as e:
             logger.exception("ComfyUI music-video generation failed: %s", e)
-            return [f"⚠️ Error generating music video: {e}"]
+            return action_failure(
+                code="music_video_failed",
+                message=f"Error generating music video: {e}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
 
 plugin = ComfyUIMusicVideoPlugin()

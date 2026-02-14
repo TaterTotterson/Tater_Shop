@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("weather_brief")
@@ -205,38 +206,6 @@ class WeatherBriefPlugin(ToolPlugin):
         user_query: Optional[str],
         llm_client,
     ) -> str:
-        system = (
-            "You are summarizing recent outdoor weather conditions for a smart home dashboard.\n"
-            "HARD REQUIREMENTS:\n"
-            "- Plain text only.\n"
-            "- At most 3 short sentences.\n"
-            "- Max ~240 characters.\n"
-            "- Mention temperature range, wind, and whether it rained (if available).\n"
-            "- If no data, say 'No recent weather data available.'\n"
-        )
-
-        payload = {
-            "user_request": user_query or f"Summarize outdoor weather for the last {hours} hours.",
-            "timeframe_hours": hours,
-            "metrics": metrics,
-        }
-
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                temperature=0.2,
-                max_tokens=160,
-                timeout_ms=30_000,
-            )
-            text = (resp.get("message", {}) or {}).get("content", "").strip()
-            if text:
-                return text
-        except Exception as e:
-            logger.info(f"[weather_brief] LLM summary failed; using fallback: {e}")
-
         temp = metrics.get("temperature")
         wind = metrics.get("wind")
         rain = metrics.get("rain")
@@ -328,7 +297,11 @@ class WeatherBriefPlugin(ToolPlugin):
         if input_text_entity:
             self._set_input_text(ha["base"], ha["token"], input_text_entity, compact)
 
-        return compact
+        return action_success(
+            facts={"hours": hours, "metrics": metrics, "input_text_entity": input_text_entity or ""},
+            summary_for_user=compact,
+            say_hint="Return a compact weather brief from the provided metrics.",
+        )
 
     # ---------- Automation entrypoint ----------
     async def handle_automation(self, args: Dict[str, Any], llm_client):
@@ -338,7 +311,14 @@ class WeatherBriefPlugin(ToolPlugin):
           - query (optional)
           - input_text_entity (optional override; otherwise uses plugin setting INPUT_TEXT_ENTITY)
         """
-        return await self._handle(args, llm_client)
+        try:
+            return await self._handle(args, llm_client)
+        except Exception as exc:
+            return action_failure(
+                code="weather_brief_failed",
+                message=f"Weather brief failed: {exc}",
+                say_hint="Explain weather brief generation failed and suggest checking sensor settings.",
+            )
 
 
 plugin = WeatherBriefPlugin()

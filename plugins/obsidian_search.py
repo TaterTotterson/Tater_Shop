@@ -7,7 +7,7 @@ import requests
 
 from helpers import redis_client
 from plugin_base import ToolPlugin
-from plugin_result import action_failure
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("obsidian_search")
 logger.setLevel(logging.INFO)
@@ -429,42 +429,7 @@ class ObsidianSearchPlugin(ToolPlugin):
         return "\n".join(lines).strip()
 
     async def _synthesize_answer(self, query: str, hits: List[Dict[str, Any]], llm_client: Any) -> str:
-        if llm_client is None or not hits:
-            return ""
-
-        chunks: List[str] = []
-        for hit in hits[:8]:
-            path = str(hit.get("path") or "")
-            snippet = str(hit.get("snippet") or "")
-            terms = ", ".join(hit.get("matched_terms") or [])
-            chunks.append(
-                f"File: {path}\n"
-                f"Matched terms: {terms or 'n/a'}\n"
-                f"Snippet:\n{snippet}"
-            )
-
-        joined = "\n\n---\n\n".join(chunks)
-        system = (
-            "You answer using only provided Obsidian snippets. "
-            "If evidence is incomplete, say that clearly."
-        )
-        user = (
-            f"User query: {query}\n\n"
-            "Use only these snippets to answer. Keep it concise and factual.\n"
-            "Then include a short 'Sources' list with file paths.\n\n"
-            f"{joined}"
-        )
-
-        try:
-            resp = await llm_client.chat(
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                timeout=25,
-            )
-            text = ((resp.get("message", {}) or {}).get("content", "") or "").strip()
-            return text
-        except Exception as exc:
-            logger.warning("[Obsidian Search] synthesis failed: %s", exc)
-            return ""
+        return ""
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
@@ -502,19 +467,34 @@ class ObsidianSearchPlugin(ToolPlugin):
         )
 
         if total_count == 0:
-            return ["No markdown notes were found in the Obsidian vault."]
+            return action_failure(
+                code="no_markdown_notes",
+                message="No markdown notes were found in the Obsidian vault.",
+                say_hint="Explain that no markdown notes are available in the vault.",
+            )
 
         if not hits:
-            return [f"No matching notes found for `{query}` (scanned {scanned_count} of {total_count} files)."]
+            return action_failure(
+                code="no_matches",
+                message=f"No matching notes found for `{query}` (scanned {scanned_count} of {total_count} files).",
+                say_hint="Explain no matching notes were found for the query.",
+            )
 
         synthesis = ""
         if ai_synthesis and llm_client is not None:
             synthesis = await self._synthesize_answer(query, hits, llm_client)
 
-        if synthesis:
-            return [synthesis]
-
-        return [self._format_hits(query, hits, scanned_count, total_count)]
+        summary = synthesis or self._format_hits(query, hits, scanned_count, total_count)
+        return action_success(
+            facts={
+                "query": query,
+                "scanned_count": scanned_count,
+                "total_count": total_count,
+                "hits": hits,
+            },
+            summary_for_user=summary,
+            say_hint="Answer using the ranked Obsidian hit snippets only.",
+        )
 
     async def handle_discord(self, message, args, llm_client):
         return "Obsidian search is only supported in the WebUI."

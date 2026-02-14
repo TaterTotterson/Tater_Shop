@@ -8,6 +8,7 @@ import discord
 
 from helpers import redis_client
 from plugin_base import ToolPlugin
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("ftp_browser")
 logger.setLevel(logging.INFO)
@@ -205,30 +206,10 @@ class FtpBrowserPlugin(ToolPlugin):
     @staticmethod
     async def _large_file_reply(file_name: str, size_bytes: int, llm_client) -> str:
         size_mb = max(1, size_bytes // (1024 * 1024))
-        fallback = (
+        return (
             f"`{file_name}` is about {size_mb} MB, which is too large for Discord uploads. "
             "Please download it directly with your FTP client."
         )
-        if llm_client is None:
-            return fallback
-        try:
-            response = await llm_client.chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"User tried to download `{file_name}` but it is too large ({size_mb} MB).",
-                    },
-                    {
-                        "role": "user",
-                        "content": "Write one short friendly sentence asking them to download it directly via FTP.",
-                    },
-                ]
-            )
-            text = ((response or {}).get("message", {}) or {}).get("content", "").strip()
-            return text or fallback
-        except Exception:
-            logger.exception("Failed generating large-file response")
-            return fallback
 
     class FileBrowserView(discord.ui.View):
         def __init__(self, plugin, user_id, current_path, entries, page=0, llm_client=None):
@@ -401,11 +382,19 @@ class FtpBrowserPlugin(ToolPlugin):
             entries = await FtpBrowserPlugin.list_ftp_files(path)
         except Exception as exc:
             await safe_send(message.channel, f"❌ Failed to access `{path}`: {exc}")
-            return "There was a problem accessing that FTP folder."
+            return action_failure(
+                code="ftp_access_failed",
+                message=f"Failed to access `{path}`: {exc}",
+                say_hint="Explain the FTP folder access failure.",
+            )
 
         if not entries:
             await safe_send(message.channel, f"📁 `{path}` is empty.")
-            return f"`{path}` is empty."
+            return action_success(
+                facts={"path": path, "entry_count": 0},
+                summary_for_user=f"`{path}` is empty.",
+                say_hint="Report that the selected FTP folder is empty.",
+            )
 
         page = FtpBrowserPlugin._clamp_page(page, len(entries))
         await safe_send(
@@ -414,32 +403,27 @@ class FtpBrowserPlugin(ToolPlugin):
             view=FtpBrowserPlugin.FileBrowserView(self, user_id, path, entries, page=page, llm_client=llm_client),
         )
 
-        if llm_client is None:
-            return "FTP browser is ready."
-
-        try:
-            followup = await llm_client.chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"The user is browsing FTP path `{path}` and there are {len(entries)} entries.",
-                    },
-                    {
-                        "role": "user",
-                        "content": "Write one short friendly message about the browser being ready. No instructions.",
-                    },
-                ]
-            )
-            return ((followup or {}).get("message", {}) or {}).get("content", "").strip() or "FTP browser is ready."
-        except Exception:
-            logger.exception("Failed to generate FTP browser follow-up message")
-            return "FTP browser is ready."
+        return action_success(
+            facts={"path": path, "entry_count": len(entries), "page": page, "interactive_view_sent": True},
+            summary_for_user=f"FTP browser opened at `{path}` with {len(entries)} entries.",
+            say_hint="Confirm the browser view is ready in Discord.",
+        )
 
     async def handle_webui(self, args, llm_client):
-        return "📂 FTP browsing is only available on Discord for now."
+        return action_failure(
+            code="unsupported_platform",
+            message="FTP browsing is only available on Discord.",
+            say_hint="Explain this plugin is discord-only.",
+            available_on=["discord"],
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        await bot.privmsg(channel, f"{user}: FTP browsing is only available on Discord for now.")
+        return action_failure(
+            code="unsupported_platform",
+            message="FTP browsing is only available on Discord.",
+            say_hint="Explain this plugin is discord-only.",
+            available_on=["discord"],
+        )
 
 
 plugin = FtpBrowserPlugin()

@@ -8,7 +8,7 @@ import requests
 
 from helpers import redis_client
 from plugin_base import ToolPlugin
-from plugin_result import action_failure
+from plugin_result import action_failure, action_success
 
 logger = logging.getLogger("obsidian_note")
 logger.setLevel(logging.INFO)
@@ -561,16 +561,30 @@ class ObsidianNotePlugin(ToolPlugin):
             )
 
         tag_suffix = f" (tags: {', '.join(tags)})" if tags and operation == "create" else ""
-        return [f"Saved Obsidian note ({operation}): `{note_path}`{tag_suffix}"]
+        return action_success(
+            facts={"operation": operation, "path": note_path, "tags": tags if operation == "create" else []},
+            summary_for_user=f"Saved Obsidian note ({operation}): `{note_path}`{tag_suffix}",
+            say_hint="Confirm the note save result and reference the final note path.",
+        )
 
     async def handle_webui(self, args, llm_client):
         return await self._save_note(args or {}, llm_client)
 
     async def handle_discord(self, message, args, llm_client):
-        return "Obsidian note editing is only supported in the WebUI."
+        return action_failure(
+            code="unsupported_platform",
+            message="Obsidian note editing is only supported in the WebUI.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return f"{user}: Obsidian note editing is only supported in the WebUI."
+        return action_failure(
+            code="unsupported_platform",
+            message="Obsidian note editing is only supported in the WebUI.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
 
 plugin = ObsidianNotePlugin()

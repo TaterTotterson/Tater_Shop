@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
 from helpers import redis_client
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("events_query_brief")
@@ -152,42 +153,6 @@ class EventsQueryBriefPlugin(ToolPlugin):
     # ─────────────────────────────────────────────────────────────
 
     async def _summarize(self, events, area, label, llm_client, query):
-        payload = {
-            "area": area or "all areas",
-            "timeframe": label,
-            "user_query": query,
-            "events": [
-                {
-                    "area": e.get("source", "").replace("_", " "),
-                    "title": e.get("title", ""),
-                    "message": e.get("message", ""),
-                }
-                for e in events
-            ],
-        }
-
-        system = (
-            "Summarize household events for an automation.\n"
-            "Rules:\n"
-            "- Plain text only\n"
-            "- Max 3 short sentences\n"
-            "- Very concise\n"
-            "- If nothing happened, clearly say so\n"
-        )
-
-        try:
-            r = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(payload)},
-                ],
-                temperature=0.1,
-                max_tokens=120,
-            )
-            return r["message"]["content"].strip()
-        except Exception:
-            pass
-
         if not events:
             return f"No activity detected {label}."
 
@@ -264,10 +229,26 @@ class EventsQueryBriefPlugin(ToolPlugin):
                 # Don't break the automation result just because HA write failed
                 logger.warning("[events_query_brief] Failed to set %s: %s", input_text_entity, e)
 
-        return summary
+        return action_success(
+            facts={
+                "timeframe": label,
+                "area": area or "",
+                "event_count": len(events),
+                "input_text_entity": input_text_entity or "",
+            },
+            summary_for_user=summary,
+            say_hint="Return a concise events brief from the provided event set.",
+        )
 
     async def handle_automation(self, args: Dict[str, Any], llm_client):
-        return await self._handle(args, llm_client)
+        try:
+            return await self._handle(args, llm_client)
+        except Exception as exc:
+            return action_failure(
+                code="events_query_brief_failed",
+                message=f"Events brief failed: {exc}",
+                say_hint="Explain events brief generation failed and suggest checking event bridge settings.",
+            )
 
 
 plugin = EventsQueryBriefPlugin()

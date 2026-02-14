@@ -13,6 +13,7 @@ from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from plugin_base import ToolPlugin
 from helpers import redis_client, run_comfy_prompt
+from plugin_result import action_failure, action_success
 
 SETTINGS_CATEGORY = "ComfyUI Video"
 logger = logging.getLogger("comfyui_video_plugin")
@@ -659,7 +660,11 @@ class ComfyUIVideoPlugin(ToolPlugin):
                     final_clips.append(anim_path)
 
             if not final_clips:
-                return "❌ No clips generated."
+                return action_failure(
+                    code="no_clips_generated",
+                    message="No clips were generated.",
+                    say_hint="Explain that no video clips were produced and suggest retrying.",
+                )
 
             self.ffmpeg_concat(final_clips, out_path)
             with open(out_path, "rb") as f:
@@ -671,36 +676,65 @@ class ComfyUIVideoPlugin(ToolPlugin):
                     {"role": "system", "content": f"The user has just been shown a video based on '{prompt}'."},
                     {"role": "user", "content": "Reply with a short, fun message celebrating the video. No lead-in phrases or instructions."}
                 ])
-                msg_text = (msg["message"]["content"].strip() if msg and msg.get("message") else "") or "Here's your video!"
+                msg_text = (msg["message"]["content"].strip() if msg and msg.get("message") else "")[:240]
             else:
-                msg_text = "Here's your video!"
+                msg_text = ""
 
-            return [
-                _build_media_metadata(
-                    final_bytes,
-                    media_type="video",
-                    name="generated_video.mp4",
-                    mimetype="video/mp4",
-                ),
-                msg_text
-            ]
+            artifact = _build_media_metadata(
+                final_bytes,
+                media_type="video",
+                name="generated_video.mp4",
+                mimetype="video/mp4",
+            )
+            return action_success(
+                facts={
+                    "prompt": prompt,
+                    "clip_count": len(final_clips),
+                    "artifact_type": "video",
+                    "artifact_count": 1,
+                    "file_name": "generated_video.mp4",
+                },
+                summary_for_user="Generated one video.",
+                flair=msg_text,
+                say_hint="Confirm video generation and reference the attached file.",
+                artifacts=[artifact],
+            )
         finally:
             self.cleanup_temp_files(temp_paths)
 
     async def handle_discord(self, message, args, llm_client):
-        return "❌ This plugin is only available in the WebUI due to file size limitations."
+        return action_failure(
+            code="unsupported_platform",
+            message="`comfyui_video_plugin` is only available in WebUI due to file size limitations.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
         if "prompt" not in args:
-            return ["No prompt provided."]
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the video you want."],
+                say_hint="Ask the user for a video prompt.",
+            )
         try:
             return await self._generate_video(args["prompt"], llm_client)
         except Exception as e:
             logger.exception("ComfyUI video generation failed: %s", e)
-            return [f"⚠️ Error generating video: {e}"]
+            return action_failure(
+                code="video_generation_failed",
+                message=f"Error generating video: {e}",
+                say_hint="Explain the generation failure and suggest retrying.",
+            )
 
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
-        return f"{user}: This plugin is supported only on WebUI."
+        return action_failure(
+            code="unsupported_platform",
+            message="`comfyui_video_plugin` is only available in WebUI.",
+            say_hint="Explain this plugin is webui-only.",
+            available_on=["webui"],
+        )
 
 plugin = ComfyUIVideoPlugin()

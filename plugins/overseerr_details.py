@@ -8,6 +8,7 @@ import re
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
 from helpers import redis_client, get_tater_name
+from plugin_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("overseerr_details")
@@ -160,65 +161,70 @@ class OverseerrDetailsPlugin(ToolPlugin):
         return "\n".join(lines).strip()
 
     async def _ask_llm_details(self, detail: dict, title: str, llm_client):
-        if llm_client is None:
-            return self._fallback_details_text(detail)
-
-        first, last = get_tater_name()
-        tater = f"{first} {last}"
-
-        sys = (
-            f"You are {tater}, a concise media guide. "
-            "You are given JSON for ONE title (movie or TV). "
-            "Write: 1 short overview paragraph (2–4 sentences) + 3–6 fact bullets. "
-            "Keep it friendly and not too long."
-        )
-
-        user = (
-            f"Title user asked about: {title}\n\n"
-            f"Overseerr details JSON:\n{json.dumps(detail, ensure_ascii=False)}\n"
-        )
-
-        try:
-            resp = await llm_client.chat([{"role": "system", "content": sys}, {"role": "user", "content": user}])
-            content = ((resp or {}).get("message", {}) or {}).get("content", "") or ""
-            out = content.strip()
-            return out if out else self._fallback_details_text(detail)
-        except Exception as e:
-            logger.exception("[Overseerr details LLM error] %s", e)
-            return self._fallback_details_text(detail)
+        return self._fallback_details_text(detail)
 
     async def _answer(self, args, llm_client):
         args = args or {}
         title = (args.get("title") or "").strip()
         if not title:
-            return "Tell me the movie or show title you want details for."
+            return action_failure(
+                code="missing_title",
+                message="Tell me the movie or show title you want details for.",
+                needs=["Provide the movie or TV title."],
+                say_hint="Ask for the specific title to look up.",
+            )
 
         prefer_type = (args.get("media_type") or "").strip().lower()
 
         search_data = self._search(title)
         if "error" in search_data:
-            return search_data["error"]
+            return action_failure(
+                code="overseerr_search_failed",
+                message=str(search_data["error"]),
+                say_hint="Explain the Overseerr search failed and suggest checking settings.",
+            )
 
         picked = self._pick_result(search_data, prefer_type)
         if not picked:
-            return f"I couldn’t find '{title}' in Overseerr."
+            return action_failure(
+                code="title_not_found",
+                message=f"I couldn’t find '{title}' in Overseerr.",
+                say_hint="Explain no matching title was found in Overseerr.",
+            )
 
         tmdb_id = picked.get("id")
         media_type = (picked.get("mediaType") or picked.get("media_type") or prefer_type or "movie").lower()
 
         if not tmdb_id:
-            return f"I couldn’t resolve an ID for '{title}'."
+            return action_failure(
+                code="title_id_missing",
+                message=f"I couldn’t resolve an ID for '{title}'.",
+                say_hint="Explain that Overseerr did not return a resolvable title ID.",
+            )
 
         detail = self._fetch_details(media_type, int(tmdb_id))
         if "error" in detail:
-            return detail["error"]
+            return action_failure(
+                code="overseerr_details_failed",
+                message=str(detail["error"]),
+                say_hint="Explain fetching title details failed.",
+            )
 
-        return await self._ask_llm_details(detail, title, llm_client)
+        summary = await self._ask_llm_details(detail, title, llm_client)
+        return action_success(
+            facts={
+                "requested_title": title,
+                "media_type": media_type,
+                "tmdb_id": int(tmdb_id),
+                "details": detail,
+            },
+            summary_for_user=summary,
+            say_hint="Summarize title details using the returned facts.",
+        )
 
     # ---------- Platform handlers ----------
     async def handle_discord(self, message, args, llm_client):
-        answer = await self._answer(args, llm_client)
-        return [answer]
+        return await self._answer(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
         async def inner():
@@ -226,30 +232,26 @@ class OverseerrDetailsPlugin(ToolPlugin):
 
         try:
             asyncio.get_running_loop()
-            return [await inner()]
+            return await inner()
         except RuntimeError:
-            return [asyncio.run(inner())]
+            return asyncio.run(inner())
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        answer = await self._answer(args, llm_client)
-        return [f"{user}: {answer}"]
+        return await self._answer(args, llm_client)
 
     async def handle_homeassistant(self, args, llm_client):
-        answer = await self._answer(args, llm_client)
-        return [self._tame_text(answer, 700)]
+        return await self._answer(args, llm_client)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
-        answer = await self._answer(args or {}, llm_client)
-        return [answer]
+        return await self._answer(args or {}, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):
-        return [await self._answer(args or {}, llm_client)]
+        return await self._answer(args or {}, llm_client)
 
     async def handle_homekit(self, args, llm_client):
-        answer = await self._answer(args or {}, llm_client)
-        return [self._tame_text(answer, 500)]
+        return await self._answer(args or {}, llm_client)
 
 
 plugin = OverseerrDetailsPlugin()
