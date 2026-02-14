@@ -686,7 +686,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "4fc24cc74493863114d33ff64d923ca3611c369b0f3e6a4147787395a5649a9a"
+      "sha256": "dfbd2df5ac105f15a3f6561942e3cdeb8fe0402327c469f26def8d17ea0e2ccf"
     },
     {
       "id": "web_summary",
