@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -95,7 +95,10 @@ class MisterRemotePlugin(ToolPlugin):
         },
     }
 
-    waiting_prompt_template = "Talking to your MiSTer now…"
+    waiting_prompt_template = (
+        "Write a short, friendly message telling {mention} you are connecting to thier MiSTer now. "
+        "Only output that message."
+    )
 
     def _settings(self) -> dict:
         return redis_client.hgetall("plugin_settings:MiSTer Remote") or {}
