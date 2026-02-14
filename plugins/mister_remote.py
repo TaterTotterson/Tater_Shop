@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -357,7 +357,9 @@ class MisterRemotePlugin(ToolPlugin):
     async def _ai_pick_game(self, llm_client, title_query: str, system_id: str, results: list[dict]) -> dict | None:
         if not llm_client:
             return None
-        short = results[:10]
+        short = [r for r in (results or []) if isinstance(r, dict) and _strip(r.get("path", ""))][:10]
+        if not short:
+            return None
         choices = "\n".join([
             f'- name="{r.get("name","")}"  path="{r.get("path","")}"'
             for r in short
@@ -428,6 +430,114 @@ class MisterRemotePlugin(ToolPlugin):
                     return s["id"]
         return None
 
+    def _candidate_name(self, item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        name = _strip(item.get("name", ""))
+        if name:
+            return name
+        path = _strip(item.get("path", ""))
+        if not path:
+            return ""
+        base = path.replace("\\", "/").rsplit("/", 1)[-1]
+        base = re.sub(r"\.[A-Za-z0-9]{1,6}$", "", base)
+        return base
+
+    def _search_queries(self, title: str) -> list[str]:
+        raw = _strip(title)
+        if not raw:
+            return []
+
+        parts = [re.sub(r"\s+", " ", raw).strip()]
+        cleaned = re.sub(r"[^a-z0-9 ]+", " ", raw.lower())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            parts.append(cleaned)
+
+        stop = {"the", "a", "an", "of", "for", "on", "in", "to", "game", "rom", "please"}
+        words = [w for w in cleaned.split(" ") if w and w not in stop]
+        if words:
+            parts.append(" ".join(words))
+            if len(words) >= 2:
+                parts.append(" ".join(words[:2]))
+            if len(words) >= 3:
+                parts.append(" ".join(words[:3]))
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in parts:
+            q = re.sub(r"\s+", " ", _strip(p))
+            if not q:
+                continue
+            key = _norm(q)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(q)
+        return out
+
+    def _search_games(self, title: str, system_id: str) -> list[dict]:
+        items: list[dict] = []
+        seen_paths: set[str] = set()
+
+        for query in self._search_queries(title):
+            res = self._search(query, system_id or "")
+            batch = (res or {}).get("data") or []
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                path = _strip(item.get("path", ""))
+                marker = path or f"{_strip(item.get('name', ''))}:{_strip((item.get('system') or {}).get('id', ''))}"
+                if marker in seen_paths:
+                    continue
+                seen_paths.add(marker)
+                items.append(item)
+            if len(items) >= 40:
+                break
+        return items
+
+    def _score_game_candidate(self, title: str, preferred_system: str, item: dict) -> float:
+        query = _norm(title)
+        name = _norm(self._candidate_name(item))
+        if not query or not name:
+            return 0.0
+
+        score = 0.0
+        if not _strip(item.get("path", "")):
+            score -= 500.0
+        if query == name:
+            score += 500.0
+        if query in name:
+            score += 320.0
+        if name in query and len(name) > 3:
+            score += 180.0
+
+        score += difflib.SequenceMatcher(None, query, name).ratio() * 100.0
+
+        q_words = [w for w in re.findall(r"[a-z0-9]+", title.lower()) if w]
+        n_words = [w for w in re.findall(r"[a-z0-9]+", self._candidate_name(item).lower()) if w]
+        if q_words and n_words:
+            overlap = len(set(q_words) & set(n_words))
+            score += overlap * 18.0
+
+        item_sys = _strip((item.get("system") or {}).get("id", ""))
+        if preferred_system and item_sys and item_sys == preferred_system:
+            score += 35.0
+        if _strip(item.get("path", "")):
+            score += 8.0
+        return score
+
+    def _pick_game_heuristic(self, title: str, preferred_system: str, items: list[dict]) -> dict | None:
+        ranked = sorted(
+            [it for it in (items or []) if isinstance(it, dict)],
+            key=lambda it: (
+                self._score_game_candidate(title, preferred_system, it),
+                self._candidate_name(it),
+            ),
+            reverse=True,
+        )
+        return ranked[0] if ranked else None
+
     # ---------------- Orchestration --------------
     async def _do_play_ai(self, utterance: str, llm_client):
         parsed_title, system_text = self._parse_play_utterance(utterance)
@@ -457,47 +567,47 @@ class MisterRemotePlugin(ToolPlugin):
             sys_id = self._resolve_system_syn(system_text, systems)
         if not sys_id:
             sys_id = self._resolve_system_syn(title, systems)
-        if not sys_id:
-            top = ", ".join([s["id"] for s in systems[:10]])
-            return action_failure(
-                code="system_not_resolved",
-                message=f"I could not determine the MiSTer system. Available examples: {top}",
-                needs=["Which system should I use? (for example: SNES)"],
-                say_hint="Ask for the exact system when system matching is ambiguous.",
-            )
 
-        res = self._search(title, sys_id)
-        items = (res or {}).get("data") or []
+        items = self._search_games(title, sys_id or "")
         if not items:
-            res_all = self._search(title, "")
-            items = (res_all or {}).get("data") or []
-            if items:
-                items = sorted(items, key=lambda it: it.get("system", {}).get("id") != sys_id)
+            items = self._search_games(title, "")
+            if items and sys_id:
+                items = sorted(items, key=lambda it: _strip((it.get("system") or {}).get("id", "")) != sys_id)
 
         if not items:
             return action_failure(
                 code="game_not_found",
-                message=f'No matches were found for "{title}" on {sys_id}.',
-                needs=["Try a more exact game title or specify a different system."],
-                say_hint="Explain that no matching game was found.",
+                message=f'No matches were found for "{title}".',
+                needs=["Try a shorter alias, alternate title, or include the system (example: SNES)."],
+                say_hint="Explain that no matching game was found and suggest a simpler title alias.",
             )
 
-        chosen = await self._ai_pick_game(llm_client, title, sys_id, items) if llm_client else None
+        chosen = await self._ai_pick_game(llm_client, title, sys_id or "", items) if llm_client else None
         if not chosen:
+            chosen = self._pick_game_heuristic(title, sys_id or "", items)
+        if not chosen and items:
             chosen = items[0]
 
-        path = chosen.get("path")
+        path = _strip((chosen or {}).get("path", ""))
+        if not path:
+            launchable = [it for it in items if isinstance(it, dict) and _strip(it.get("path", ""))]
+            if launchable:
+                chosen = self._pick_game_heuristic(title, sys_id or "", launchable) or launchable[0]
+                path = _strip((chosen or {}).get("path", ""))
+
         if not path:
             return action_failure(
-                code="missing_game_path",
-                message=f'Found matches for "{title}" but could not resolve a launch path.',
-                say_hint="Explain that a valid launch path was not returned.",
+                code="not_launchable",
+                message=f'I found matches for "{title}" but none were launchable.',
+                needs=["Try a shorter alias or specify the system (example: SNES)."],
+                say_hint="Explain no launchable match was returned and ask for a simpler title/system hint.",
             )
 
         self._launch(path)
         time.sleep(0.3)
         now = self._playing() or {}
-        sys_name = now.get("systemName") or chosen.get("system", {}).get("name") or sys_id
+        chosen_sys = chosen.get("system", {}) if isinstance(chosen.get("system"), dict) else {}
+        sys_name = now.get("systemName") or chosen_sys.get("name") or sys_id or chosen_sys.get("id") or "MiSTer"
         game_name = now.get("gameName") or chosen.get("name") or title
 
         follow = await self._ai_followup(llm_client, game_name, sys_name) if llm_client else None
@@ -505,7 +615,7 @@ class MisterRemotePlugin(ToolPlugin):
             facts={
                 "command": "play",
                 "requested_title": title,
-                "system_id": sys_id,
+                "system_id": _strip(chosen_sys.get("id", "")) or sys_id,
                 "system_name": sys_name,
                 "game_name": game_name,
                 "path": path,
@@ -665,8 +775,8 @@ class MisterRemotePlugin(ToolPlugin):
                 code="not_found",
                 message=msg,
                 diagnosis=self._diagnosis(),
-                needs=["What exact game title or system should I use?"],
-                say_hint="Explain what couldn't be matched and ask for a clearer game/system request.",
+                needs=["Try a shorter title alias or include the target system (example: SNES)."],
+                say_hint="Explain what couldn't be matched and suggest a simpler game alias.",
             )
 
         return action_success(

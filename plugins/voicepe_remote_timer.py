@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 import requests
 
@@ -50,6 +51,36 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
             "type": "number",
             "default": 7200,
             "description": "Clamp very large durations (default 2 hours).",
+        },
+        "TIMER_SECONDS_ENTITY": {
+            "label": "Timer Seconds Entity (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Explicit number entity for timer seconds, e.g. number.voicepe_office_remote_timer_seconds.",
+        },
+        "START_BUTTON_ENTITY": {
+            "label": "Start Button Entity (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Explicit button entity to start timer, e.g. button.voicepe_office_remote_timer_start.",
+        },
+        "CANCEL_BUTTON_ENTITY": {
+            "label": "Cancel Button Entity (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Explicit button entity to cancel timer, e.g. button.voicepe_office_remote_timer_cancel.",
+        },
+        "REMAINING_SENSOR_ENTITY": {
+            "label": "Remaining Sensor Entity (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Explicit sensor entity for remaining seconds, e.g. sensor.voicepe_office_remote_timer_remaining_seconds.",
+        },
+        "RUNNING_SENSOR_ENTITY": {
+            "label": "Running Sensor Entity (optional)",
+            "type": "string",
+            "default": "",
+            "description": "Explicit binary_sensor entity for running state, e.g. binary_sensor.voicepe_office_remote_timer_running.",
         },
         # (optional): if your entity ids follow a predictable pattern, you can override this.
         "VOICEPE_ENTITY_PREFIX": {
@@ -143,7 +174,17 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
             return None
 
         ctx = context or {}
-        device_name = (ctx.get("device_name") or "").strip()
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        device_name = (
+            ctx.get("device_name")
+            or ctx.get("device")
+            or ctx.get("device_id")
+            or origin.get("device_name")
+            or origin.get("device")
+            or origin.get("device_id")
+            or ""
+        )
+        device_name = str(device_name).strip()
         if not device_name and (s.get("VOICEPE_ENTITY_PREFIX") or "").strip():
             # if user set prefix, allow inference without device_name
             device_name = s.get("VOICEPE_ENTITY_PREFIX")
@@ -239,7 +280,27 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
         return None
 
+    @staticmethod
+    def _clean_entity_id(value: Any) -> str:
+        return str(value or "").strip()
+
+    def _explicit_entities_from_settings(self) -> Optional[Dict[str, str]]:
+        s = self._get_settings() or {}
+        out = {
+            "TIMER_SECONDS_ENTITY": self._clean_entity_id(s.get("TIMER_SECONDS_ENTITY")),
+            "START_BUTTON_ENTITY": self._clean_entity_id(s.get("START_BUTTON_ENTITY")),
+            "CANCEL_BUTTON_ENTITY": self._clean_entity_id(s.get("CANCEL_BUTTON_ENTITY")),
+            "REMAINING_SENSOR_ENTITY": self._clean_entity_id(s.get("REMAINING_SENSOR_ENTITY")),
+            "RUNNING_SENSOR_ENTITY": self._clean_entity_id(s.get("RUNNING_SENSOR_ENTITY")),
+        }
+        if all(out.values()):
+            return out
+        return None
+
     def _resolve_entities(self, context: dict | None = None) -> dict | None:
+        explicit = self._explicit_entities_from_settings()
+        if explicit:
+            return explicit
         return self._infer_entities_from_context(context)
 
     # ─────────────────────────────────────────────────────────────
@@ -291,6 +352,63 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         if s == 0:
             return f"{m} minute" + ("s" if m != 1 else "")
         return f"{m}m {s}s"
+
+    def _extract_duration_from_text(self, text: str) -> str:
+        src = str(text or "").strip().lower()
+        if not src:
+            return ""
+
+        hhmm = re.search(r"\b(\d{1,2}:\d{2})\b", src)
+        if hhmm:
+            return hhmm.group(1)
+
+        matches = re.findall(
+            r"\b(\d+\s*(?:hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s))\b",
+            src,
+        )
+        if matches:
+            return " ".join(matches)
+
+        if "timer" in src:
+            n_for = re.search(r"\bfor\s+(\d{1,4})\b", src)
+            if n_for:
+                return f"{n_for.group(1)} minutes"
+            n_plain = re.search(r"\b(\d{1,4})\b", src)
+            if n_plain:
+                return f"{n_plain.group(1)} minutes"
+        return ""
+
+    def _resolve_action_duration(self, args: Dict[str, Any]) -> tuple[str, str]:
+        a = args if isinstance(args, dict) else {}
+        action = str(a.get("action") or "").strip().lower()
+        duration = str(a.get("duration") or "").strip()
+        if duration:
+            return action, duration
+
+        text_fields = (
+            a.get("request"),
+            a.get("query"),
+            a.get("message"),
+            a.get("prompt"),
+            a.get("text"),
+            a.get("content"),
+        )
+        merged = " ".join(str(v or "").strip() for v in text_fields if str(v or "").strip()).strip().lower()
+        if not merged:
+            return action, ""
+
+        if not action:
+            if re.search(r"\b(cancel|stop|clear|end)\b", merged):
+                action = "cancel"
+            elif re.search(r"\b(status|remaining|left|how much time|time left|check timer)\b", merged):
+                action = "status"
+            elif re.search(r"\b(start|set)\b", merged) and "timer" in merged:
+                action = "start"
+
+        inferred_duration = self._extract_duration_from_text(merged)
+        if inferred_duration:
+            duration = inferred_duration
+        return action, duration
 
     # ─────────────────────────────────────────────────────────────
     # LLM phrasing helpers
@@ -609,11 +727,16 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     async def _handle(self, args, llm_client, context: dict | None = None) -> str:
         args = args or {}
-        action = (args.get("action") or "").strip().lower()
-        duration = (args.get("duration") or "").strip()
+        action, duration = self._resolve_action_duration(args)
 
         if action in ("cancel", "stop", "clear"):
             return await self._cancel(llm_client, context=context)
+
+        if action in ("status", "check", "remaining", "time_left") and not duration:
+            return await self._status(llm_client, context=context)
+
+        if action in ("start", "set") and not duration:
+            return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
         if not duration:
             return await self._status(llm_client, context=context)
