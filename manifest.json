@@ -322,7 +322,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "50",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -338,7 +338,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "da6abc3016cfb7f0b2899a0089095d7d9f10f58cf5b0f1b49a0c7f01f2bdada5"
+      "sha256": "b1a08b38a09a9459f65504a0d8a7dade0e1d4fa9b2ae5289048cf164cfa1fd07"
     },
     {
       "id": "music_assistant",
