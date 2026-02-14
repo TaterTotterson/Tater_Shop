@@ -258,9 +258,10 @@ class WeatherForecastPlugin(ToolPlugin):
             except Exception:
                 return default
 
+        raw_default_location = s.get("DEFAULT_LOCATION", s.get("default_location", "60614"))
         out = {
             "WEATHERAPI_KEY": s.get("WEATHERAPI_KEY", ""),
-            "DEFAULT_LOCATION": s.get("DEFAULT_LOCATION", "60614"),
+            "DEFAULT_LOCATION": self._normalize_location_value(raw_default_location),
             "DEFAULT_DAYS": _int(s.get("DEFAULT_DAYS", 3), 3),
             "DEFAULT_UNITS": (s.get("DEFAULT_UNITS", "us") or "us").strip().lower(),
             "INCLUDE_AQI": _bool(s.get("INCLUDE_AQI", "true"), True),
@@ -279,6 +280,28 @@ class WeatherForecastPlugin(ToolPlugin):
         return out
 
     # -------------------- Utility helpers --------------------
+
+    @staticmethod
+    def _normalize_location_value(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        lowered = text.lower()
+        generic = {
+            "default",
+            "default location",
+            "the default",
+            "use default",
+            "my default",
+            "current location",
+            "here",
+            "this location",
+            "this area",
+        }
+        if lowered in generic:
+            return ""
+        return text
 
     @staticmethod
     def _siri_flatten(text: Optional[str]) -> str:
@@ -632,22 +655,23 @@ class WeatherForecastPlugin(ToolPlugin):
         args = args or {}
 
         # Explicit structured arguments (preferred)
-        location = (args.get("location") or "").strip()
+        location = self._normalize_location_value(args.get("location"))
         days = args.get("days")
         date_str = (args.get("date") or "").strip() or None
         hours = args.get("hours")
         units = (args.get("units") or "").strip().lower()
 
-        explicit_args = any(
-            k in args
-            for k in ("location", "days", "date", "hours", "units")
+        explicit_args = bool(location) or any(
+            k in args for k in ("days", "date", "hours", "units")
         )
 
         request_text = (args.get("request") or "").strip()
 
         # Back-compat: if no explicit args provided, parse the raw request text
         if not explicit_args and request_text:
-            location_override = self._extract_location_override(request_text)
+            location_override = self._normalize_location_value(
+                self._extract_location_override(request_text)
+            )
             if location_override:
                 location = location_override
             parsed = self._interpret_request(
@@ -661,7 +685,7 @@ class WeatherForecastPlugin(ToolPlugin):
 
         used_default_location = False
         if not location:
-            location = settings["DEFAULT_LOCATION"]
+            location = self._normalize_location_value(settings["DEFAULT_LOCATION"])
             used_default_location = True
 
         if not location:
