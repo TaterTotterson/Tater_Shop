@@ -45,10 +45,11 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "50"
 
-    usage = '{"function":"music_assistant","arguments":{"action":"play|queue|pause|resume|stop|next|previous|volume","query":"What to play or queue (artist/album/track/playlist). Required for play/queue.","room":"Optional room name like Kitchen.","volume":"0-100 (only for action=volume).","prefer":"Optional hint like artist|album|track|playlist|radio.","random":false}}'
+    usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
+    optional_args = []
 
     description = (
         "Play music and control playback via Music Assistant in Home Assistant."

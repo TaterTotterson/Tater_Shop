@@ -355,14 +355,14 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "50"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
 
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"unifi_protect","arguments":{"action":"Optional: sensors_status|sensor_detail|list_cameras|describe_camera|describe_area.","target":"Optional name hint (front door, garage, doorbell, front yard).","camera":"Optional camera name (alias of target for describe_camera).","area":"Optional area name (alias of target for describe_area).","query":"Optional: user request text; plugin will infer action/target if omitted."}}'
+    usage = '{"function":"unifi_protect","arguments":{"query":"User request about UniFi Protect (sensors status, list cameras, or describe a camera/area)."}}'
 
     description = (
         "Query UniFi Protect sensors (door/motion/temp/humidity/battery) and cameras "
@@ -376,9 +376,7 @@ class UniFiProtectPlugin(ToolPlugin):
     common_needs = ["camera or area name (optional if already in the request)"]
     required_args = []
     optional_args = ["action", "target", "camera", "area", "query"]
-    missing_info_prompts = [
-        "Which camera or area should I describe (for example: back yard, front door, garage)?",
-    ]
+    missing_info_prompts = []
 
     argument_schema = {
         "type": "object",

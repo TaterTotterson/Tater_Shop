@@ -55,12 +55,12 @@ def _as_float(value: Any, default: float, minimum: float, maximum: float) -> flo
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
     plugin_name = "Automatic1111 Image"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "50"
     pretty_name = "Your Image"
     settings_category = "Automatic111"
 
-    usage = '{"function":"automatic_plugin","arguments":{"prompt":"<Text prompt for the image>","negative_prompt":"<Optional negative prompt>","steps":20,"cfg_scale":7,"width":1024,"height":1024,"sampler_name":"DPM++ 2M","scheduler":"Simple","seed":-1}}'
+    usage = '{"function":"automatic_plugin","arguments":{"prompt":"<Text prompt for the image>","negative_prompt":"<Optional negative prompt>"}'
     required_args = ["prompt"]
     optional_args = [
         "negative_prompt",

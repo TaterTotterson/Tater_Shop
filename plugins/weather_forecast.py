@@ -36,13 +36,13 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.0.9"
+    version = "1.1.0"
     min_tater_version = "50"
     description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com; always uses the default location if none is specified."
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
     when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."
     common_needs = ["weather request (e.g., current, tonight, tomorrow, multi-day)"]
-    required_args = ["request"]
+    required_args = []
     optional_args = []
     missing_info_prompts = [
         "What weather do you want (current conditions, tonight, tomorrow, or multi-day forecast)?",
@@ -50,7 +50,7 @@ class WeatherForecastPlugin(ToolPlugin):
     pretty_name = "Checking the Weather"
     settings_category = "Weather Forecast"
 
-    usage = '{"function":"weather_forecast","arguments":{"request":"User weather request in natural language. If the user asked multiple things, include only the weather part."}}'
+    usage = '{"function":"weather_forecast","arguments":{"request":"User weather request in natural language."}}'
 
     required_settings = {
         "WEATHERAPI_KEY": {

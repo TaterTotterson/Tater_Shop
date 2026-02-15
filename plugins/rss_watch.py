@@ -43,17 +43,17 @@ def _normalize_feed_url(raw_url: str) -> str:
     return urlunsplit((scheme, netloc, path, parsed.query or "", ""))
 
 
-class WatchFeedPlugin(ToolPlugin):
+class RssWatchPlugin(ToolPlugin):
     name = "rss_watch"
     plugin_name = "RSS Watch"
     version = "1.1.0"
     min_tater_version = "50"
     when_to_use = "Use when the user asks to subscribe to or watch an RSS/Atom feed URL."
     optional_args = ["url", "rss_url", "feed"]
-    usage = '{"function":"watch_feed","arguments":{"feed_url":"<RSS feed URL>"}}'
+    usage = '{"function":"rss_watch","arguments":{"feed_url":"<RSS feed URL>"}}'
     description = "Adds an RSS/Atom feed to the watch list; the poller posts only the newest item once, then tracks new entries."
     plugin_dec = "Add an RSS/Atom feed to the watch list and post only the newest item once."
-    pretty_name = "Adding Your Feed"
+    pretty_name = "RSS Watch Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you are adding the feed to the watch list now. "
         "Only output that message."
@@ -76,7 +76,7 @@ class WatchFeedPlugin(ToolPlugin):
         try:
             parsed = feedparser.parse(normalized_url)
         except Exception as e:
-            logger.debug(f"[watch_feed] feedparser threw: {e}")
+            logger.debug(f"[rss_watch] feedparser threw: {e}")
             return f"{prefix}Failed to parse feed: {normalized_url}"
 
         entries = list(getattr(parsed, "entries", None) or [])
@@ -120,4 +120,4 @@ class WatchFeedPlugin(ToolPlugin):
         return await self._watch_feed(feed_url)
 
 
-plugin = WatchFeedPlugin()
+plugin = RssWatchPlugin()

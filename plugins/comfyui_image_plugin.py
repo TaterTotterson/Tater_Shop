@@ -28,9 +28,9 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "50"
-    usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>","width":1024,"height":1024}}'
+    usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>"}}'
     description = "Draws a picture from a text prompt using your ComfyUI workflow."
     plugin_dec = "Generate a still image from a text prompt using your ComfyUI workflow."
     pretty_name = "Your Image"
@@ -59,7 +59,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     waiting_prompt_template = (
         "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     )
-    platforms = ["discord", "webui", "matrix", "telegram"]  # matrix supported
+    platforms = ["discord", "webui", "matrix", "telegram"]
 
     # ---------------------------
     # Server URL helpers

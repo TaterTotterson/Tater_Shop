@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.2"
+    version = "1.1.3"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -79,7 +79,7 @@ class MisterRemotePlugin(ToolPlugin):
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
-    usage = '{"function":"mister_remote","arguments":{"command":"<play|now_playing|go_to_menu|screenshot_take>","utterance":"<FULL original user message (required for play)>"}}'
+    usage = '{"function":"mister_remote","arguments":{"command":"<optional: play|now_playing|go_to_menu|screenshot_take>","utterance":"<FULL original user message (authoritative)>"}}'
 
     settings_category = "MiSTer Remote"
     required_settings = {
@@ -795,12 +795,14 @@ class MisterRemotePlugin(ToolPlugin):
 
     # ---------------- Dispatcher -----------------
     async def _handle_async(self, args: dict, llm_client):
-        cmd = _strip((args or {}).get("command", ""))
+        cmd = self._normalize_command(_strip((args or {}).get("command", "")))
 
         # Accept multiple keys + be resilient
-        utt = _strip((args or {}).get("utterance", "")) \
-              or _strip((args or {}).get("user request", "")) \
-              or _strip((args or {}).get("user_request", ""))
+        utt = self._extract_utterance(args or {})
+        inferred_cmd = self._infer_command_from_utterance(utt)
+        if inferred_cmd:
+            # The original user utterance is authoritative when it clearly maps to a command.
+            cmd = inferred_cmd
 
         try:
             if cmd == "play":
