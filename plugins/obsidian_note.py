@@ -138,6 +138,9 @@ class ObsidianNotePlugin(ToolPlugin):
 
     _INVALID_PATH_CHARS_RE = re.compile(r'[\\:*?"<>|]')
     _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+    common_needs = []
+    missing_info_prompts = []
+
 
     def _settings(self) -> Dict[str, str]:
         return redis_client.hgetall(f"plugin_settings:{self.settings_category}") or {}

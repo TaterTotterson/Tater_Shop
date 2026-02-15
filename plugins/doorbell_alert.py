@@ -118,6 +118,10 @@ class DoorbellAlertPlugin(ToolPlugin):
             "description": "Optional; leave blank for local stacks."
         },
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- Utils ----------
     @staticmethod

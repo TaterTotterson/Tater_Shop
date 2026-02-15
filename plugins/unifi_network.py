@@ -78,6 +78,8 @@ class UnifiNetworkPlugin(ToolPlugin):
     _TOP_CLIENTS_DEFAULT = 25
     _TOP_DEVICES_DEFAULT = 25
     _TOP_MATCHES_DEFAULT = 10
+    missing_info_prompts = []
+
 
     # -------------------------
     # Settings / HTTP helpers

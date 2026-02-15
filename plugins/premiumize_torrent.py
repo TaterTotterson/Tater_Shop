@@ -42,6 +42,10 @@ class PremiumizeTorrentPlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["discord", "matrix"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def _diagnosis(self) -> dict:
         hash_diag = diagnose_hash_fields(

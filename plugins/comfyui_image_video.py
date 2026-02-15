@@ -68,6 +68,10 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     }
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
     platforms = ["webui"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------------------------
     # URL helpers

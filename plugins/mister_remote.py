@@ -99,6 +99,10 @@ class MisterRemotePlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} you are connecting to thier MiSTer now. "
         "Only output that message."
     )
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def _settings(self) -> dict:
         return redis_client.hgetall("plugin_settings:MiSTer Remote") or {}

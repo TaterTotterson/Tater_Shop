@@ -53,6 +53,10 @@ class DeviceComparePlugin(ToolPlugin):
     }
 
     waiting_prompt_template = "Let {mention} know you’re grabbing specs, benchmarks, and rendering comparison images now. Only output that message."
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- settings / http / search ----------
     @staticmethod

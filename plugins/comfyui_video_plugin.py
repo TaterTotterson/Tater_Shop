@@ -431,6 +431,10 @@ class ComfyUIVideoPlugin(ToolPlugin):
         "720p": (1280, 720),
         "1080p": (1920, 1080)
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def cleanup_temp_files(self, paths):
         for path in paths:

@@ -163,6 +163,9 @@ class ObsidianSearchPlugin(ToolPlugin):
         "why",
         "with",
     }
+    common_needs = []
+    missing_info_prompts = []
+
 
     def _settings(self) -> Dict[str, str]:
         return redis_client.hgetall(f"plugin_settings:{self.settings_category}") or {}

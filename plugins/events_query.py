@@ -56,6 +56,9 @@ class EventsQueryPlugin(ToolPlugin):
         "Let {mention} know you’re checking recent home events now. "
         "Keep it short and friendly. No emojis. Only output that message."
     )
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- Settings / Env ----------
     def _s(self) -> Dict[str, str]:

@@ -76,6 +76,10 @@ class WeatherBriefPlugin(ToolPlugin):
         "Tell {mention} you’re checking recent weather sensor data and will return a very short summary. "
         "Keep it to a single short sentence. No emojis. Only output that message."
     )
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- Settings / HA ----------
     def _get_settings(self) -> Dict[str, str]:

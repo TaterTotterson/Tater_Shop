@@ -57,6 +57,9 @@ class RssUnwatchPlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    common_needs = []
+    missing_info_prompts = []
+
 
     async def _unwatch_feed(self, feed_url: Optional[str], username: Optional[str] = None) -> str:
         prefix = f"{username}: " if username else ""

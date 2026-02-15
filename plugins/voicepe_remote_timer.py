@@ -101,6 +101,10 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     )
 
     platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ─────────────────────────────────────────────────────────────
     # Settings / HA helpers

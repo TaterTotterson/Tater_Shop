@@ -697,6 +697,10 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
             "description": "Target resolution for animation clips."
         }
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def split_sections(lyrics):

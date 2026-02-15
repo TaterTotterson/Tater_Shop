@@ -22,6 +22,10 @@ class WebSummaryPlugin(ToolPlugin):
     pretty_name = "Summarizing Your Article"
     waiting_prompt_template = "Write a casual, friendly message telling {mention} you’re reading the article and preparing a summary now! Only output that message."
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def fetch_web_summary(webpage_url, model=None):

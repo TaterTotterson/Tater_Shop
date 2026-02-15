@@ -53,6 +53,10 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Keep it short and friendly. Only output that message."
     )
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- Settings ----------
     @staticmethod

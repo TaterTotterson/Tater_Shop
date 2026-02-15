@@ -69,6 +69,10 @@ class FtpBrowserPlugin(ToolPlugin):
     max_upload_size_bytes = 25 * 1024 * 1024  # 25 MB
     items_per_page = 22
     user_paths: Dict[int, str] = {}
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:

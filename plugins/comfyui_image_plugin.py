@@ -60,6 +60,10 @@ class ComfyUIImagePlugin(ToolPlugin):
         "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     )
     platforms = ["discord", "webui", "matrix", "telegram"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------------------------
     # Server URL helpers

@@ -39,6 +39,10 @@ class SFTPGoActivityPlugin(ToolPlugin):
             "description": "The password to authenticate with the SFTPGo API."
         }
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def get_sftpgo_settings(self):
         redis_host = os.getenv('REDIS_HOST', '127.0.0.1')

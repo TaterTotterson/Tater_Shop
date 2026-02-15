@@ -62,6 +62,10 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! "
         "Only output that message."
     )
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------------------------
     # Settings / URL helpers

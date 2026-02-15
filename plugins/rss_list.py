@@ -23,6 +23,9 @@ class RssListPlugin(ToolPlugin):
         "Write a friendly, casual message telling {mention} you are grabbing the current watched feeds now. Only output that message."
     )
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def _boolish(value, default: bool = True) -> bool:
