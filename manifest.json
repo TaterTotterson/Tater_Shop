@@ -16,7 +16,7 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "a8e9a4d07424ccaf5fdcb2ea565bdcdd3b416c0b16e1e2343ac3935b74001897"
+      "sha256": "2933e70b6498dacbd3c0be27d6c6dd449466768b6d91dc91b336b648bf0c5146"
     },
     {
       "id": "broadcast",
@@ -38,7 +38,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "plugins/broadcast.py",
-      "sha256": "767445046456fcce1f7be8b8877caf712ff25f8f208c2dfe2c8b81940a4500fb"
+      "sha256": "5247c6694671031480b53e3acbceed2dea444a0610c5670f015edae54fffc082"
     },
     {
       "id": "camera_event",
@@ -53,7 +53,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "64b5d50c3a47e4d1a336dbcca6b6f7459da5b223f2ceec678120796a293d7397"
+      "sha256": "990f503f6574ade90aef3fdec0b12596d7deaca86231cab61af1c1db4ea472cb"
     },
     {
       "id": "comfyui_audio_ace",
@@ -72,7 +72,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "79cf3689de41e1bab46e5bc29b5525a05f779631f250f1ed71db8eb369c2f23c"
+      "sha256": "8e02479b34ead91b7148fc784ab0869b5996f9dbdfcf145f258e7ed9b7c5e02a"
     },
     {
       "id": "comfyui_image_plugin",
@@ -90,7 +90,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "e14d2ab897f0c2926c3bfb4e4e662703a01882a3c6693b39390c6aae0ef61dcb"
+      "sha256": "f26ffccd3d4f78ba19f9100b31e88da47624c0127eea4f2e7866cb03443aa010"
     },
     {
       "id": "comfyui_image_video",
@@ -105,7 +105,7 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "plugins/comfyui_image_video.py",
-      "sha256": "0d66b72c69820f15fbc45cf47a2ed98720fbdaeb92f51d5bdd2c8dc8848863ee"
+      "sha256": "bd4d9877c6496615111ce80be91838f0f9eac66f3a884121fd3725796e4c40da"
     },
     {
       "id": "comfyui_music_video",
@@ -120,7 +120,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_music_video.py",
-      "sha256": "45b509d9670175f62506fe4c9fe0c7698503f965d678bbdcf434413a8ed36897"
+      "sha256": "c3b80b1f85fd5231baa98dbf4f125102e4844604f04952e5f5fe580091292ae7"
     },
     {
       "id": "comfyui_video_plugin",
@@ -135,7 +135,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/comfyui_video_plugin.py",
-      "sha256": "8176610fe687f94067bfa02e41838c6adfe3d73c0019a02393d699901df4c9db"
+      "sha256": "4d85c11fbd1ba2d3d4ea8c8249cd114a35008afbfc08a41898acfd621f59da34"
     },
     {
       "id": "device_compare",
@@ -153,7 +153,7 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "plugins/device_compare.py",
-      "sha256": "632929eed00453b78d5bc9b17836c481bcdedc53de07df6d05fa7fc35e85c222"
+      "sha256": "cdb2bc04ab06eea3471f171e478db52ffe89e4e587c007f6a77820d9bb6818f1"
     },
     {
       "id": "doorbell_alert",
@@ -168,7 +168,7 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "feb55b27f890057f97ffe8db9abc98b12cd7ae15ed113a56e5fa62a6a88caff9"
+      "sha256": "d9a92cf8ebb458f49e78f8e8457556044ddbad12dc27f4c02f777bf819e6591b"
     },
     {
       "id": "events_query",
@@ -189,7 +189,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "ba8ee71e929c906f9c948490d9e699530c647d6ae8549fa3e3d0eedb5b39c386"
+      "sha256": "829e4b4531b67b1edecc6889a6cd0d4dfb49a6c1c6d4a63f304ef000334a7a6a"
     },
     {
       "id": "events_query_brief",
@@ -204,7 +204,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "21b5a489c09b5c522b30fb904240e576c080470b00c6d50d4a63adc67c37c214"
+      "sha256": "0a38f70eb7d224df8072ae0a5a41220d085638b2ddc3f76770d8acc2e7cda992"
     },
     {
       "id": "find_my_phone",
@@ -226,7 +226,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "plugins/find_my_phone.py",
-      "sha256": "fb223e2c09303fcf0971c5f43280c73593d3506121a9448aa8cfd3f58ddd1c11"
+      "sha256": "4532921cf2be7bbef29ee5caacf5bbae4f3b4b2691fe66d9db9646ea4e1363f4"
     },
     {
       "id": "ftp_browser",
@@ -241,7 +241,7 @@
       "settings_category": "FTPBrowser",
       "tags": [],
       "entry": "plugins/ftp_browser.py",
-      "sha256": "4fe2e008054cbe565998e472141cd6a33e3346a58653487674e0a994f94d55d0"
+      "sha256": "8a88d98f43ff2d39fc5f9666807c28d6a9306d2f33774089fe4f7e05502c333b"
     },
     {
       "id": "get_notifications",
@@ -261,7 +261,7 @@
       "settings_category": "Notifications",
       "tags": [],
       "entry": "plugins/get_notifications.py",
-      "sha256": "6c24acb5d2f5e1954ce3d74b340c1800a407c8ec94a518ddb78856738eef686f"
+      "sha256": "342ae72692759231dbd02d9ab85400559aef246cab53a25ccf8bdd133af902ea"
     },
     {
       "id": "ha_control",
@@ -298,7 +298,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "a90412f0b52ab2ed2a90e40f4e888331c47b10b6d06e3e57f1b368b52a6a8b07"
+      "sha256": "ffcd888f1052636ccd5bf95ed29a75f88c61c7cde515a08f6cf679db0b96086e"
     },
     {
       "id": "mister_remote",
@@ -319,7 +319,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "7397a31b462638039735dfad6c79f7f80eb33e378ec013573c8370f741d82a14"
+      "sha256": "bbfac6206118b4acf0de12a0d2ab7c18e743e92a912844d8cad618fb7e9c0233"
     },
     {
       "id": "music_assistant",
@@ -356,7 +356,7 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_note.py",
-      "sha256": "95107a6b6e0eda022f2ffc88084acbc10a7d3bcd785c075b0bb9a684f2279b1b"
+      "sha256": "c1565ce6be47d053bb906570e29c3cee5531f4a9eb72a9048171f1e6b4053534"
     },
     {
       "id": "obsidian_search",
@@ -371,7 +371,7 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_search.py",
-      "sha256": "b60a2029afa6d65fdd8143960d187887237f492b7383eacb1887b2d89b49f908"
+      "sha256": "ca111de5bc35fba6a5b71e8a608bb38f2d7245cbcdc6928fb903852d4da6ad15"
     },
     {
       "id": "overseerr_details",
@@ -392,7 +392,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_details.py",
-      "sha256": "f87790ab4909af4852a1eab9b44c91f2c46656f40998d3de6700720cb66a579a"
+      "sha256": "820c136a3ffbb1560178b623902e604ddf52e87d3a341452777a7895451bc52c"
     },
     {
       "id": "overseerr_request",
@@ -413,7 +413,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_request.py",
-      "sha256": "784ae965a184f78692cb962d6085967cb265dbd30833b571bd19b334fcedac26"
+      "sha256": "e8e4d9b678a20903c42915b3954afd86c830d6587f04e045f3328a1ff809edf5"
     },
     {
       "id": "overseerr_trending",
@@ -434,7 +434,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_trending.py",
-      "sha256": "67acec7d58a29636aa37dee78d1746e00c34603730333347b2911a923e5e7f36"
+      "sha256": "5f143e139038e88c7feea2a75df7294e0e90e50d0c997696a1588028c5106902"
     },
     {
       "id": "premiumize_download",
@@ -453,7 +453,7 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "4fa985003d8ebd3b6746d8231928fd1d72466f195c293e52d58cb46e3333e479"
+      "sha256": "3fd67c6a04440c899e870645a9faf750bae6a3546c29754c7f2680df48d6a90e"
     },
     {
       "id": "premiumize_torrent",
@@ -469,7 +469,7 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_torrent.py",
-      "sha256": "18004fbdfc25c9fd49544a44fa5dd4ad603914d366e1986f0f18ba107f235953"
+      "sha256": "c18d90325e3ab11ae4cce1910021e9340ed4401bd98bc1985742612706fa0c80"
     },
     {
       "id": "rss_list",
@@ -488,7 +488,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/rss_list.py",
-      "sha256": "87ad1de42d7aa3aeb70f18fad78d73fac08afb9b13d0176b24665c9c41041ab3"
+      "sha256": "da9bcb35be89fdfe4d3591cf4d4dde2469b47d2a3a2715f1d18b328b31674ca4"
     },
     {
       "id": "rss_unwatch",
@@ -507,7 +507,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/rss_unwatch.py",
-      "sha256": "bf31767567fe6ac3c1eaf01050179aa44de6ecbc339340497b68c9f822942ed9"
+      "sha256": "1269aef852609f1fc9fd96a062bc498773c7234160bb04b8b3693ed7b71357ee"
     },
     {
       "id": "rss_watch",
@@ -526,7 +526,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/rss_watch.py",
-      "sha256": "64715aeb47979aa27cf42f798acd9100e970aedcb8a607314a589addf4f9c82e"
+      "sha256": "573161c2f38981b5f3934002200587d0e9c833e37423febb325901856427131a"
     },
     {
       "id": "sftpgo_account",
@@ -545,7 +545,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "plugins/sftpgo_account.py",
-      "sha256": "a05100197ba64f668be7014c3d8c745f1a5a23deee70211f65385e35ae59e9ef"
+      "sha256": "57f7f0d71f8bcb82a27124a73772f1ee55284eda7c6c391d4a033e83fe4a7e78"
     },
     {
       "id": "sftpgo_activity",
@@ -564,7 +564,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "plugins/sftpgo_activity.py",
-      "sha256": "3c6160bd3db451ed4fd2c77c5c7055478feb34e7cfc804099e5c366d0a6ebaa7"
+      "sha256": "7f8b57361568bbb4f2abe4eb6620522b224b5ffd26f06fad88faba2fc3d9ff00"
     },
     {
       "id": "tater_gits_add_feed",
@@ -583,7 +583,7 @@
       "settings_category": "Tater Gits",
       "tags": [],
       "entry": "plugins/tater_gits_add_feed.py",
-      "sha256": "f45c71059b0b2968ff224e0c1e9aa38a6821ede56a47342a363cd4814210d94f"
+      "sha256": "14b4b4d24aed69b70cfd5c55e9065307387edad49c90b9b2821aa62670e0da06"
     },
     {
       "id": "unifi_network",
@@ -605,7 +605,7 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "c7b02c2b4bd881e9ad201820ff9c3379a3ee34b211ba442bedf37caed7f1b1f8"
+      "sha256": "9a6cff38b18bd03b3f36caf0055c54a4a6f760211c080a49b01380f3fb9a8ce0"
     },
     {
       "id": "unifi_protect",
@@ -649,7 +649,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "plugins/voicepe_remote_timer.py",
-      "sha256": "a72b5b291ba525c0c991e5495dca3cf069683948b247eaf9006e5ad592e4cf8d"
+      "sha256": "de1ae72d0c5b8e7c4ae34146e8a08d91084164736b880c7e619907f637135f57"
     },
     {
       "id": "weather_brief",
@@ -664,7 +664,7 @@
       "settings_category": "Weather Brief",
       "tags": [],
       "entry": "plugins/weather_brief.py",
-      "sha256": "5e5431c57046f5115496c2089b808d7336e8cd23b6a8f76174b20cb59c7ced7a"
+      "sha256": "bf93d3041ba76b6d526da554c31fbcd4bf35f17d5f7cc769dba966262db37415"
     },
     {
       "id": "weather_forecast",
@@ -705,7 +705,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/web_summary.py",
-      "sha256": "847e9ca9b47e99ee501863313d1289a2876b50e92c451264b2536cfca1df5716"
+      "sha256": "4990cb7f8b6eb1d5c12b34fecadfc6d8daa619a12152811012f9a38566367329"
     },
     {
       "id": "webdav_browser",
@@ -720,7 +720,7 @@
       "settings_category": "WebDAV Browser",
       "tags": [],
       "entry": "plugins/webdav_browser.py",
-      "sha256": "700c7820f599fd0bbb1adf95a17f3762964254e98dff004353835f4c5e02e24c"
+      "sha256": "3503fb8a6a2ba0f2b3b6b136a2995c2ba9ce55fc6a59e7c81f1c37c1162c261a"
     },
     {
       "id": "youtube_summary",
@@ -739,7 +739,7 @@
       "settings_category": "YouTube Summary",
       "tags": [],
       "entry": "plugins/youtube_summary.py",
-      "sha256": "2087419e72614b1f0758b8716a3cc94c61410efdd45fd98a6b9b281a54895c9a"
+      "sha256": "51266563d922f4deb14d2368540e3783bad57412debf9fc32da938577747aa19"
     },
     {
       "id": "zen_greeting",
@@ -754,7 +754,7 @@
       "settings_category": "Zen Greeting",
       "tags": [],
       "entry": "plugins/zen_greeting.py",
-      "sha256": "ad2e3f93499b1e7ebef76b37a32e218739dd7c5f1709bb965599248630e02cf0"
+      "sha256": "609070f06ab991c46d2446eb14306e6bcfa5c24fdcf951d3278a801f24d34981"
     }
   ]
 }
