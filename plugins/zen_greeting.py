@@ -61,6 +61,10 @@ class ZenGreetingPlugin(ToolPlugin):
     }
 
     waiting_prompt_template = "Creating a calm zen message of the day. This will be quick."
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ---------- Settings / HA ----------
     def _get_settings(self) -> Dict[str, str]:

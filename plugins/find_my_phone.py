@@ -80,6 +80,9 @@ class FindMyPhonePlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:

@@ -413,6 +413,10 @@ class LowfiVideoPlugin(ToolPlugin):
             "description": "Play each loop forward then backward for a seamless boomerang effect."
         },
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ------------------------- Helpers -------------------------
 

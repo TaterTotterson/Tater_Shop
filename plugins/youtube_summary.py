@@ -28,6 +28,10 @@ class YouTubeSummaryPlugin(ToolPlugin):
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re watching the video and working on it now! Only output that message."
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def handle_setting_button(self, key):
         if key == "update_transcript_api":

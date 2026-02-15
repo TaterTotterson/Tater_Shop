@@ -44,6 +44,10 @@ class OverseerrTrendingPlugin(ToolPlugin):
             "default": "",
         },
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def _coerce_kind(kind: str) -> str:

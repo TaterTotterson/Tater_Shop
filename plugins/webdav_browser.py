@@ -50,6 +50,10 @@ class WebDAVBrowserPlugin(ToolPlugin):
 
     max_upload_size_bytes = 25 * 1024 * 1024  # 25 MB
     user_paths = {}
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def get_settings():

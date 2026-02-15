@@ -140,6 +140,9 @@ class AutomaticPlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["discord", "webui", "telegram"]
+    common_needs = []
+    missing_info_prompts = []
+
 
     @staticmethod
     def _decode_map(raw: Dict[str, Any]) -> Dict[str, str]:

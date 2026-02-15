@@ -63,6 +63,10 @@ class EventsQueryBriefPlugin(ToolPlugin):
     }
 
     waiting_prompt_template = "Checking recent home events now. This will be quick."
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ─────────────────────────────────────────────────────────────
     # Settings / HA helpers

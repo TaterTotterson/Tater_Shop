@@ -34,6 +34,9 @@ class GetNotificationsPlugin(ToolPlugin):
         "Let {mention} know you are checking for notifications now. "
         "Keep it short and friendly. No emojis. Only output that message."
     )
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ----------------------------
     # Helpers

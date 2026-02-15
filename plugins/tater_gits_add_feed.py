@@ -41,6 +41,10 @@ class TaterGitsAddFeedPlugin(ToolPlugin):
             "description": "Optional shared secret; sent as X-Tater-Auth"
         },
     }
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     # ───────────────────────── internals ─────────────────────────
     def _parse_repo(self, url: str):

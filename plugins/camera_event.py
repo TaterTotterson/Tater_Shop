@@ -151,6 +151,10 @@ class CameraEventPlugin(ToolPlugin):
     }
 
     waiting_prompt_template = "Checking the camera event and posting updates now."
+    when_to_use = ""
+    common_needs = []
+    missing_info_prompts = []
+
 
     def _get_settings(self) -> Dict[str, str]:
         settings = (

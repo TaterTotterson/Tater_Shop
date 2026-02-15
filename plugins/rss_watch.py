@@ -59,6 +59,9 @@ class RssWatchPlugin(ToolPlugin):
         "Only output that message."
     )
     platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    common_needs = []
+    missing_info_prompts = []
+
 
     # -------- internals --------
     async def _watch_feed(self, feed_url: Optional[str], username: Optional[str] = None) -> str:
