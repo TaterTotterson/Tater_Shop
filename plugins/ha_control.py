@@ -62,14 +62,14 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.4"
+    version = "1.1.5"
     min_tater_version = "50"
     pretty_name = "Home Assistant Control"
 
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"ha_control","arguments":{"query":"Single Home Assistant command in natural language. If the user asked multiple things, include only the Home Assistant part and resolve pronouns to explicit devices or areas."}}'
+    usage = '{"function":"ha_control","arguments":{"query":"Single Home Assistant command in natural language. Always pass the FULL original user request text here. If the user asked multiple things, include only the Home Assistant part and resolve pronouns to explicit devices or areas."}}'
 
     description = (
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
@@ -78,11 +78,9 @@ class HAControlPlugin(ToolPlugin):
     plugin_dec = "Control Home Assistant devices."
     when_to_use = "Use to control or query Home Assistant devices based on a single natural-language command."
     common_needs = ["device/area and action (e.g., \"office lights\" + \"turn off\")"]
-    required_args = ["query"]
+    required_args = []
     optional_args = []
-    missing_info_prompts = [
-        "Which Home Assistant device or area should I control, and what action should I take (e.g., \"turn off the office lights\")?",
-    ]
+    missing_info_prompts = []
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re accessing Home Assistant devices now! "
@@ -178,44 +176,6 @@ class HAControlPlugin(ToolPlugin):
         if text in ("0", "false", "no", "off"):
             return False
         return default
-
-    def _extract_desired_from_args(self, args: dict) -> dict:
-        desired: dict = {}
-        raw = args.get("desired")
-        if isinstance(raw, dict):
-            desired.update(raw)
-        elif isinstance(raw, str) and raw.strip():
-            try:
-                parsed = _json.loads(raw)
-                if isinstance(parsed, dict):
-                    desired.update(parsed)
-            except Exception:
-                pass
-
-        for key in ("temperature", "brightness_pct", "color_name", "command", "activity"):
-            if key not in desired and args.get(key) is not None:
-                desired[key] = args.get(key)
-        return desired
-
-    def _synthetic_query_from_args(self, args: dict) -> str:
-        raw = (args.get("query") or "").strip()
-        if raw:
-            return raw
-        action = (args.get("action") or args.get("intent") or "").strip()
-        entity_id = (args.get("entity_id") or "").strip()
-        scope = (args.get("scope") or "").strip()
-        domain_hint = (args.get("domain_hint") or "").strip()
-        parts = [action, entity_id or scope or domain_hint]
-        joined = " ".join([p for p in parts if p]).strip()
-        return joined or "Home Assistant request"
-
-    def _validated_entity_id(self, entity_id: str, query: str) -> str:
-        eid = (entity_id or "").strip().lower()
-        if not eid:
-            return ""
-        if not re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", eid):
-            return ""
-        return eid
 
     # ----------------------------
     # Internal helpers
@@ -614,6 +574,11 @@ class HAControlPlugin(ToolPlugin):
             "turn", "on", "off", "the", "a", "an", "please", "to", "in", "of", "for",
             "set", "make", "switch", "device", "devices", "area", "room",
             "light", "lights", "lamp", "lamps", "bulb", "bulbs", "led", "hue", "sconce",
+            "your", "you", "yours", "my", "mine", "our", "ours", "me", "us",
+            # Color/style words should not be used as entity-name match tokens.
+            "red", "green", "blue", "purple", "violet", "pink", "magenta", "orange",
+            "yellow", "white", "warm", "cool", "cyan", "teal", "indigo", "lavender",
+            "gold", "silver", "amber", "turquoise", "brightness", "bright", "dim",
         }
         out = [tok for tok in tokens if tok not in stop and len(tok) > 1]
         return out
@@ -625,6 +590,29 @@ class HAControlPlugin(ToolPlugin):
         if ":" in s:
             s = s.split(":", 1)[1]
         return self._extract_keywords(s)
+
+    def _scope_from_origin(self, args: dict) -> str:
+        src = args.get("origin") if isinstance(args, dict) else None
+        if not isinstance(src, dict):
+            return ""
+
+        def _clean(v: Any) -> str:
+            text = str(v or "").strip()
+            if not text:
+                return ""
+            low = text.lower()
+            if low in {"unknown", "default", "none", "null", "n/a"}:
+                return ""
+            return text
+
+        area = _clean(src.get("area_id") or src.get("area_name") or src.get("room"))
+        if area:
+            return f"area:{area}"
+
+        device = _clean(src.get("device_name") or src.get("device_id"))
+        if device:
+            return f"device:{device}"
+        return ""
 
     def _filter_candidates_by_tokens(self, candidates: List[dict], tokens: List[str]) -> Tuple[List[dict], bool]:
         if not candidates or not tokens:
@@ -850,13 +838,15 @@ class HAControlPlugin(ToolPlugin):
         """
         dh = (domain_hint or "").lower().strip()
 
-        # ✅ Never override a light intent
+        # Never override a light intent
         if dh == "light":
             return {"light"}
 
         # Remote requests stay remote-first
         if dh == "remote":
-            return {"remote", "media_player"}
+            if (action or "").lower().strip() == "send_command":
+                return {"remote", "media_player"}
+            return {"media_player", "switch", "remote"}
 
         # Only TV-ish "power" requests prefer media_player/switch/remote
         if self._is_power_request(action, query):
@@ -1175,12 +1165,10 @@ class HAControlPlugin(ToolPlugin):
     async def _handle_structured(self, args, llm_client):
         args = args or {}
         query = (args.get("query") or "").strip()
-        if not query:
-            query = self._synthetic_query_from_args(args)
         out = await self._handle(args, llm_client)
         if isinstance(out, dict) and "ok" in out:
             return out
-        return self._structured_from_text(str(out), query, args)
+        return self._structured_from_text(str(out), query, {"query": query})
 
     # ----------------------------
     # Handlers
@@ -1222,56 +1210,9 @@ class HAControlPlugin(ToolPlugin):
 
         args = args or {}
         query = (args.get("query") or "").strip()
-        action_arg = (args.get("action") or "").strip().lower()
-        intent_arg = (args.get("intent") or "").strip().lower()
-        scope_arg = (args.get("scope") or "").strip()
-        domain_hint_arg = (args.get("domain_hint") or "").strip()
-        explicit_entity = (args.get("entity_id") or "").strip()
-        desired_arg = self._extract_desired_from_args(args)
-
-        structured_args = any(
-            k in args
-            for k in (
-                "action",
-                "intent",
-                "scope",
-                "domain_hint",
-                "temperature",
-                "brightness_pct",
-                "color_name",
-                "command",
-                "activity",
-                "desired",
-            )
-        )
-        explicit_args = bool(structured_args and (action_arg or intent_arg or not query))
-        if not explicit_args:
-            if not query:
-                return "Please provide 'query' with the user's exact request."
-        else:
-            if not intent_arg:
-                if action_arg == "set_temperature":
-                    intent_arg = "set_temperature"
-                elif action_arg == "get_state":
-                    intent_arg = "get_state"
-                elif action_arg:
-                    intent_arg = "control"
-
-            if intent_arg in ("get_state", "get_temp") and not action_arg:
-                action_arg = "get_state"
-            if intent_arg == "set_temperature" and not action_arg:
-                action_arg = "set_temperature"
-
-            if not action_arg:
-                return "Missing action. Please specify what Home Assistant should do."
-
-            if not query:
-                query = self._synthetic_query_from_args(args)
-
-        explicit_entity = self._validated_entity_id(explicit_entity, query)
-
-        if explicit_entity and "." not in explicit_entity:
-            return "Please provide the full entity_id (for example: light.kitchen)."
+        if not query:
+            return "Please provide 'query' with the user's exact request."
+        explicit_entity = ""
 
         excluded = self._excluded_entities_set()
 
@@ -1283,87 +1224,70 @@ class HAControlPlugin(ToolPlugin):
 
         # ✅ Fast-path: try deterministic intent parsing first (skips interpret LLM for common commands)
         intent: Optional[dict] = None
-        if explicit_args:
-            inferred_hint = domain_hint_arg or self._infer_domain_hint_from_query(query)
-            intent = {
-                "intent": intent_arg or "control",
-                "action": action_arg,
-                "scope": scope_arg or "unknown",
-                "domain_hint": inferred_hint or "",
-                "desired": desired_arg,
-            }
-        else:
-            if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
-                try:
-                    intent = self._fast_intent_from_text(query)
-                except Exception:
-                    intent = None
+        if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
+            try:
+                intent = self._fast_intent_from_text(query)
+            except Exception:
+                intent = None
 
-            if not intent:
-                try:
-                    intent = await self._interpret_query(query, llm_client)
-                except Exception as e:
-                    logger.error(f"[ha_control] interpret_query failed: {e}")
-                    return "I couldn't understand that request."
+        if not intent:
+            try:
+                intent = await self._interpret_query(query, llm_client)
+            except Exception as e:
+                logger.error(f"[ha_control] interpret_query failed: {e}")
+                return "I couldn't understand that request."
 
         intent_type = (intent.get("intent") or "").strip()
         action = (intent.get("action") or "").strip()
         scope = (intent.get("scope") or "").strip()
         domain_hint = (intent.get("domain_hint") or "").strip()
+        if not scope or scope.lower() == "unknown":
+            scope_from_origin = self._scope_from_origin(args)
+            if scope_from_origin:
+                scope = scope_from_origin
 
         desired = intent.get("desired") or {}
         if not isinstance(desired, dict):
             desired = {}
 
-        # Apply explicit overrides even when parsing from natural-language query.
-        if scope_arg:
-            scope = scope_arg
-        if domain_hint_arg:
-            domain_hint = domain_hint_arg
-        if isinstance(desired_arg, dict):
-            for key, value in desired_arg.items():
-                if value not in (None, "", "null"):
-                    desired[key] = value
+        # Fill missing "desired" fields from the raw query
+        if desired.get("color_name") in (None, "", "null"):
+            cn = self._parse_color_name_from_text(query)
+            if cn:
+                desired["color_name"] = cn
+        if desired.get("brightness_pct") in (None, "", "null"):
+            bp = self._parse_brightness_pct_from_text(query)
+            if bp is not None:
+                desired["brightness_pct"] = bp
+        if desired.get("temperature") in (None, "", "null"):
+            tp = self._parse_temperature_from_text(query)
+            if tp is not None:
+                desired["temperature"] = tp
 
-        if not explicit_args:
-            # Fill missing "desired" fields from the raw query
-            if desired.get("color_name") in (None, "", "null"):
-                cn = self._parse_color_name_from_text(query)
-                if cn:
-                    desired["color_name"] = cn
-            if desired.get("brightness_pct") in (None, "", "null"):
-                bp = self._parse_brightness_pct_from_text(query)
-                if bp is not None:
-                    desired["brightness_pct"] = bp
-            if desired.get("temperature") in (None, "", "null"):
-                tp = self._parse_temperature_from_text(query)
-                if tp is not None:
-                    desired["temperature"] = tp
+        # Remote fallbacks
+        if desired.get("command") in (None, "", "null"):
+            cmd = self._normalize_remote_command(query)
+            if cmd:
+                desired["command"] = cmd
+        if desired.get("activity") in (None, "", "null"):
+            act = self._guess_activity_from_text(query)
+            if act:
+                desired["activity"] = act
 
-            # Remote fallbacks
-            if desired.get("command") in (None, "", "null"):
-                cmd = self._normalize_remote_command(query)
-                if cmd:
-                    desired["command"] = cmd
-            if desired.get("activity") in (None, "", "null"):
-                act = self._guess_activity_from_text(query)
-                if act:
-                    desired["activity"] = act
-
-            # Light color hard-guard (extra safety)
-            if self._is_light_color_command(query):
-                intent_type = "control"
-                action = "turn_on"
-                domain_hint = "light"
-                if not scope:
-                    scope = "unknown"
-                if not desired.get("color_name"):
-                    desired["color_name"] = self._parse_color_name_from_text(query) or "white"
+        # Light color hard-guard (extra safety)
+        if self._is_light_color_command(query):
+            intent_type = "control"
+            action = "turn_on"
+            domain_hint = "light"
+            if not scope:
+                scope = "unknown"
+            if not desired.get("color_name"):
+                desired["color_name"] = self._parse_color_name_from_text(query) or "white"
 
         is_temp_question = False
         if intent_type == "get_temp":
             is_temp_question = True
-        elif not explicit_args:
+        else:
             is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
         if intent_type == "get_temp" or (is_temp_question and intent_type in ("get_state", "control", "set_temperature")):
             scope_l = (scope or "").lower()
@@ -1394,11 +1318,7 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] temp get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
-        wants_thermostat = False
-        if not explicit_args:
-            wants_thermostat = self._contains_any(query, ["thermostat", "hvac"])
-        elif (domain_hint or "").lower() == "climate":
-            wants_thermostat = True
+        wants_thermostat = self._contains_any(query, ["thermostat", "hvac"]) or (domain_hint or "").lower() == "climate"
         if wants_thermostat and intent_type in ("get_state", "control") and action == "get_state":
             climate_candidates = self._candidates_for_domains(catalog, {"climate"})
             if excluded:
@@ -1475,9 +1395,10 @@ class HAControlPlugin(ToolPlugin):
 
             tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
             if not explicit_entity:
-                candidates, matched = self._filter_candidates_by_tokens(candidates, tokens)
-                if tokens and not matched:
-                    return f"I couldn't find a device matching '{' '.join(tokens)}'."
+                filtered, matched = self._filter_candidates_by_tokens(candidates, tokens)
+                if tokens and matched:
+                    candidates = filtered
+                # If token filtering misses, keep full candidate list and let chooser decide.
 
             entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
             if not entity_id:
@@ -1770,9 +1691,10 @@ class HAControlPlugin(ToolPlugin):
 
             tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
             if not explicit_entity:
-                candidates, matched = self._filter_candidates_by_tokens(candidates, tokens)
-                if tokens and not matched:
-                    return f"I couldn't find a device matching '{' '.join(tokens)}'."
+                filtered, matched = self._filter_candidates_by_tokens(candidates, tokens)
+                if tokens and matched:
+                    candidates = filtered
+                # If token filtering misses, keep full candidate list and let chooser decide.
 
             entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
             if not entity_id:

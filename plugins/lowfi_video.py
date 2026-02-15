@@ -344,10 +344,10 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolPlugin):
     name = "lowfi_video"
     plugin_name = "Lofi Video"
-    version = "1.1.0"
-    min_tater_version = "50"
-    usage = '{"function":"lowfi_video","arguments":{"prompt":"<scene prompt for the visual>","audio_minutes":2,"video_minutes":20,"loop_seconds":15}}'
-    optional_args = ["query", "request", "text", "audio_minutes", "video_minutes", "loop_seconds"]
+    version = "1.1.1"
+    min_tater_version = "56"
+    usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
+    optional_args = []
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
     plugin_dec = "Create a cozy lofi video by generating music and looping a matching animation."
     pretty_name = "Your Lofi Video"

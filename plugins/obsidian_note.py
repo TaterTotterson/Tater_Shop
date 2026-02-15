@@ -43,25 +43,15 @@ class ObsidianNotePlugin(ToolPlugin):
     name = "obsidian_note"
     plugin_name = "Obsidian Note"
     pretty_name = "Add to Obsidian"
-    version = "3.0.0"
+    version = "3.0.1"
     min_tater_version = "50"
 
     description = "Create, append, or overwrite markdown notes in your Obsidian vault with strict path safety."
     plugin_dec = "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags."
     when_to_use = "Use when the user wants to save text as an Obsidian note, append to a note, or overwrite a note."
-    usage = '{"function":"obsidian_note","arguments":{"content":"<markdown content>","title":"Optional note title if path is omitted","path":"Optional relative path like inbox/today.md","folder":"Optional folder prefix when path has no folder","append":false,"overwrite":false,"unique":true,"separator":"\\\\n\\\\n","title_mode":"ai|first_line|timestamp","tags":["project","notes"]}}'
+    usage = '{"function":"obsidian_note","arguments":{"content":"Markdown content for the note.","title":"Optional note title."}}'
     required_args = ["content"]
-    optional_args = [
-        "title",
-        "path",
-        "folder",
-        "append",
-        "overwrite",
-        "unique",
-        "separator",
-        "title_mode",
-        "tags",
-    ]
+    optional_args = ["title"]
 
     settings_category = "Obsidian"
     required_settings = {

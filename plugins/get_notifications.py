@@ -14,12 +14,12 @@ logger.setLevel(logging.INFO)
 class GetNotificationsPlugin(ToolPlugin):
     name = "get_notifications"
     plugin_name = "Get Notifications"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "50"
-    usage = '{"function":"get_notifications","arguments":{"limit":8}}'
-    optional_args = ["limit"]
+    usage = '{"function":"get_notifications","arguments":{}}'
+    optional_args = []
     when_to_use = (
-        "Use when the user asks for notifications, alerts, or what happened recently in Home Assistant."
+        "Use when the user asks for notifications or alerts."
     )
     description = (
         "Fetches queued notifications from the Home Assistant bridge. "

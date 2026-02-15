@@ -9,16 +9,16 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-class ListFeedsPlugin(ToolPlugin):
+class RssListPlugin(ToolPlugin):
     name = "rss_list"
     plugin_name = "RSS List"
     version = "1.1.0"
     min_tater_version = "50"
     when_to_use = "Use when the user asks to list, show, or review watched RSS feeds."
-    usage = '{"function":"list_feeds","arguments":{}}'
+    usage = '{"function":"rss_list","arguments":{}}'
     description = "Lists the RSS feeds currently being watched."
     plugin_dec = "Show the RSS feeds currently being watched."
-    pretty_name = "Listing RSS Feeds"
+    pretty_name = "RSS Feed List"
     waiting_prompt_template = (
         "Write a friendly, casual message telling {mention} you are grabbing the current watched feeds now. Only output that message."
     )
@@ -58,7 +58,7 @@ class ListFeedsPlugin(ToolPlugin):
         for platform_name, platform_cfg in sorted(platforms_cfg.items(), key=lambda kv: str(kv[0]).lower()):
             if not isinstance(platform_cfg, dict):
                 continue
-            enabled = ListFeedsPlugin._boolish(platform_cfg.get("enabled"), True)
+                enabled = RssListPlugin._boolish(platform_cfg.get("enabled"), True)
             targets = platform_cfg.get("targets") or {}
             bit = f"{platform_name}:{'on' if enabled else 'off'}"
             if isinstance(targets, dict) and targets:
@@ -111,4 +111,4 @@ class ListFeedsPlugin(ToolPlugin):
         return await self._list_feeds()
 
 
-plugin = ListFeedsPlugin()
+plugin = RssListPlugin()

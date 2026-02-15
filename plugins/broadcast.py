@@ -22,11 +22,11 @@ class BroadcastPlugin(ToolPlugin):
     """
     name = "broadcast"
     plugin_name = "Broadcast"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "50"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     required_args = ["text"]
-    optional_args = ["message", "content", "announcement", "request"]
+    optional_args = []
     description = (
         "Send a one-time whole-house spoken announcement using Home Assistant TTS on the configured devices. "
         "Use ONLY when the user explicitly asks to broadcast/announce/page an audio message (e.g., 'announce dinner is ready', "

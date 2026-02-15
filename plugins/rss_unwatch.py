@@ -41,17 +41,17 @@ def _normalize_feed_url(raw_url: str) -> str:
     return urlunsplit((scheme, netloc, path, parsed.query or "", ""))
 
 
-class UnwatchFeedPlugin(ToolPlugin):
+class RssUnwatchPlugin(ToolPlugin):
     name = "rss_unwatch"
     plugin_name = "RSS Unwatch"
     version = "1.1.0"
     min_tater_version = "50"
     when_to_use = "Use when the user asks to stop watching or unsubscribe from an RSS/Atom feed."
     optional_args = ["url", "rss_url", "feed"]
-    usage = '{"function":"unwatch_feed","arguments":{"feed_url":"<RSS feed URL>"}}'
+    usage = '{"function":"rss_unwatch","arguments":{"feed_url":"<RSS feed URL>"}}'
     description = "Removes an RSS feed provided by the user from the RSS watch list."
     plugin_dec = "Remove an RSS feed from the watch list."
-    pretty_name = "Unwatch RSS Feed"
+    pretty_name = "RSS Unwatch Feed"
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you are removing the feed from the watch list now. "
         "Only output that message."
@@ -114,4 +114,4 @@ class UnwatchFeedPlugin(ToolPlugin):
         return await self._unwatch_feed(feed_url)
 
 
-plugin = UnwatchFeedPlugin()
+plugin = RssUnwatchPlugin()
