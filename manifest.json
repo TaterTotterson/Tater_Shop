@@ -4,7 +4,7 @@
     {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Generate an image from a text prompt using your Automatic1111 server.",
       "platforms": [
@@ -16,12 +16,12 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "plugins/automatic_plugin.py",
-      "sha256": "bad1ee2631027f1fe3d69eeb7bc6e91310fb3850453e64fbfce8ec05ec58bb44"
+      "sha256": "a8e9a4d07424ccaf5fdcb2ea565bdcdd3b416c0b16e1e2343ac3935b74001897"
     },
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "50",
       "description": "Send a one-time spoken announcement to your Home Assistant media players.",
       "platforms": [
@@ -38,7 +38,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "plugins/broadcast.py",
-      "sha256": "e1c4ee0a84902ce168d474d6231e2ffef6abfaa2c0bc42e006d62177f0192aab"
+      "sha256": "767445046456fcce1f7be8b8877caf712ff25f8f208c2dfe2c8b81940a4500fb"
     },
     {
       "id": "camera_event",
@@ -77,7 +77,7 @@
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "platforms": [
@@ -90,7 +90,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "plugins/comfyui_image_plugin.py",
-      "sha256": "6abf8eee7c8977c3cd50a6a8e666244a3ebc23a94f6bb08bb4cd4a77c578bbf8"
+      "sha256": "e14d2ab897f0c2926c3bfb4e4e662703a01882a3c6693b39390c6aae0ef61dcb"
     },
     {
       "id": "comfyui_image_video",
@@ -209,7 +209,7 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "platforms": [
@@ -226,12 +226,12 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "plugins/find_my_phone.py",
-      "sha256": "479dfd776780545e51641474eb349dfc74d2d94c9009e7593bbfe073822fa12f"
+      "sha256": "fb223e2c09303fcf0971c5f43280c73593d3506121a9448aa8cfd3f58ddd1c11"
     },
     {
       "id": "ftp_browser",
       "name": "FTP Browser",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Browse and download files from the configured FTP server.",
       "platforms": [
@@ -241,12 +241,12 @@
       "settings_category": "FTPBrowser",
       "tags": [],
       "entry": "plugins/ftp_browser.py",
-      "sha256": "6195f3078c47899e7a9f9ccdb1e9f1cf63aee3b6c1d9180505e07c91e34f9506"
+      "sha256": "4fe2e008054cbe565998e472141cd6a33e3346a58653487674e0a994f94d55d0"
     },
     {
       "id": "get_notifications",
       "name": "Get Notifications",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Fetch queued notifications from the Home Assistant bridge.",
       "platforms": [
@@ -261,12 +261,12 @@
       "settings_category": "Notifications",
       "tags": [],
       "entry": "plugins/get_notifications.py",
-      "sha256": "04ac096e3d9b15705383d2b3777eb7eb8119e4fbf4131b958effe260ded953be"
+      "sha256": "6c24acb5d2f5e1954ce3d74b340c1800a407c8ec94a518ddb78856738eef686f"
     },
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "50",
       "description": "Control Home Assistant devices.",
       "platforms": [
@@ -283,32 +283,13 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "909f6d3c757a840012100f0136d4172028540795f251bc6c9511c1b3bc71e72e"
-    },
-    {
-      "id": "rss_list",
-      "name": "RSS List",
-      "version": "1.1.0",
-      "min_tater_version": "50",
-      "description": "Show the RSS feeds currently being watched.",
-      "platforms": [
-        "discord",
-        "webui",
-        "irc",
-        "matrix",
-        "telegram"
-      ],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [],
-      "entry": "plugins/list_feeds.py",
-      "sha256": "0263b0a52f7c0e3c23050b7920a5cf4d3d6648b6b084011a147cfd2782bbc3a9"
+      "sha256": "98435dd547ec17e02c84aa31fcc41160a2e8312358fa05059bef4c00365569b3"
     },
     {
       "id": "lowfi_video",
       "name": "Lofi Video",
-      "version": "1.1.0",
-      "min_tater_version": "50",
+      "version": "1.1.1",
+      "min_tater_version": "56",
       "description": "Create a cozy lofi video by generating music and looping a matching animation.",
       "platforms": [
         "webui"
@@ -317,12 +298,12 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/lowfi_video.py",
-      "sha256": "a1f38e07be09f7eb2ec86e6984b5491d583d575a6ae673b1ac4bc0cd933e731d"
+      "sha256": "a90412f0b52ab2ed2a90e40f4e888331c47b10b6d06e3e57f1b368b52a6a8b07"
     },
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "50",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -338,12 +319,12 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "b1a08b38a09a9459f65504a0d8a7dade0e1d4fa9b2ae5289048cf164cfa1fd07"
+      "sha256": "7397a31b462638039735dfad6c79f7f80eb33e378ec013573c8370f741d82a14"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "50",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "platforms": [
@@ -360,12 +341,12 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "plugins/music_assistant.py",
-      "sha256": "a8277e29bcca64d0a3dc1376cc022b118360f6c0bd66b2ea1960b2c8440d6cfa"
+      "sha256": "a3657310d175ad11b9799be82725eb0b1185e098f56c5d2f67950942e401d803"
     },
     {
       "id": "obsidian_note",
       "name": "Obsidian Note",
-      "version": "3.0.0",
+      "version": "3.0.1",
       "min_tater_version": "50",
       "description": "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags.",
       "platforms": [
@@ -375,12 +356,12 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_note.py",
-      "sha256": "3c6b0be71500e1ef214d9c5b56ab93ea92a0bc280f7b742937d276571500049f"
+      "sha256": "95107a6b6e0eda022f2ffc88084acbc10a7d3bcd785c075b0bb9a684f2279b1b"
     },
     {
       "id": "obsidian_search",
       "name": "Obsidian Search",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "50",
       "description": "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis.",
       "platforms": [
@@ -390,7 +371,7 @@
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "plugins/obsidian_search.py",
-      "sha256": "1334c7fc2e02c1813ebe0dfdefb705fd0872b6eb341f6ee628d05130d8033966"
+      "sha256": "b60a2029afa6d65fdd8143960d187887237f492b7383eacb1887b2d89b49f908"
     },
     {
       "id": "overseerr_details",
@@ -491,6 +472,63 @@
       "sha256": "18004fbdfc25c9fd49544a44fa5dd4ad603914d366e1986f0f18ba107f235953"
     },
     {
+      "id": "rss_list",
+      "name": "RSS List",
+      "version": "1.1.0",
+      "min_tater_version": "50",
+      "description": "Show the RSS feeds currently being watched.",
+      "platforms": [
+        "discord",
+        "webui",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/rss_list.py",
+      "sha256": "87ad1de42d7aa3aeb70f18fad78d73fac08afb9b13d0176b24665c9c41041ab3"
+    },
+    {
+      "id": "rss_unwatch",
+      "name": "RSS Unwatch",
+      "version": "1.1.0",
+      "min_tater_version": "50",
+      "description": "Remove an RSS feed from the watch list.",
+      "platforms": [
+        "discord",
+        "webui",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/rss_unwatch.py",
+      "sha256": "bf31767567fe6ac3c1eaf01050179aa44de6ecbc339340497b68c9f822942ed9"
+    },
+    {
+      "id": "rss_watch",
+      "name": "RSS Watch",
+      "version": "1.1.0",
+      "min_tater_version": "50",
+      "description": "Add an RSS/Atom feed to the watch list and post only the newest item once.",
+      "platforms": [
+        "discord",
+        "webui",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/rss_watch.py",
+      "sha256": "64715aeb47979aa27cf42f798acd9100e970aedcb8a607314a589addf4f9c82e"
+    },
+    {
       "id": "sftpgo_account",
       "name": "SFTPGo Account",
       "version": "1.0.0",
@@ -572,7 +610,7 @@
     {
       "id": "unifi_protect",
       "name": "UniFi Protect",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "50",
       "description": "Get UniFi Protect sensor status and camera snapshot vision summaries.",
       "platforms": [
@@ -589,26 +627,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "bc896dccd9bab9dcccf30aae86ccdc1a74a75f04a7a799aa298d2f9f263b1cd3"
-    },
-    {
-      "id": "rss_unwatch",
-      "name": "RSS Unwatch",
-      "version": "1.1.0",
-      "min_tater_version": "50",
-      "description": "Remove an RSS feed from the watch list.",
-      "platforms": [
-        "discord",
-        "webui",
-        "irc",
-        "matrix",
-        "telegram"
-      ],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [],
-      "entry": "plugins/unwatch_feed.py",
-      "sha256": "fcba538c92b7c0a8d3ebee4d030d4949bb160f72c06dee6dcb65cbca07a18e29"
+      "sha256": "3b90ccbdd5818b439a9ff0fb8ad915d656666fce7be0cf5d61e00329a98b23d5"
     },
     {
       "id": "voicepe_remote_timer",
@@ -633,25 +652,6 @@
       "sha256": "a72b5b291ba525c0c991e5495dca3cf069683948b247eaf9006e5ad592e4cf8d"
     },
     {
-      "id": "rss_watch",
-      "name": "RSS Watch",
-      "version": "1.1.0",
-      "min_tater_version": "50",
-      "description": "Add an RSS/Atom feed to the watch list and post only the newest item once.",
-      "platforms": [
-        "discord",
-        "webui",
-        "irc",
-        "matrix",
-        "telegram"
-      ],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [],
-      "entry": "plugins/watch_feed.py",
-      "sha256": "ee9391ca133712e4f2e0d8d47a03cb96b72a4ef106eae219e1b0afe1d0a56f72"
-    },
-    {
       "id": "weather_brief",
       "name": "Weather Brief",
       "version": "1.0.2",
@@ -669,7 +669,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.0.9",
+      "version": "1.1.0",
       "min_tater_version": "50",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "platforms": [
@@ -686,7 +686,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "dfbd2df5ac105f15a3f6561942e3cdeb8fe0402327c469f26def8d17ea0e2ccf"
+      "sha256": "cbf8b9439974dcc2aa5706fb3dff78152f5cfe3dfbd693cc9fae330ac324efa1"
     },
     {
       "id": "web_summary",
@@ -710,7 +710,7 @@
     {
       "id": "webdav_browser",
       "name": "WebDAV Browser",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "50",
       "description": "Browse and download files from the configured WebDAV server.",
       "platforms": [
@@ -720,7 +720,7 @@
       "settings_category": "WebDAV Browser",
       "tags": [],
       "entry": "plugins/webdav_browser.py",
-      "sha256": "ea2b57a43564ba296f47452e186faccb474d12251017578c200e3dca58797655"
+      "sha256": "700c7820f599fd0bbb1adf95a17f3762964254e98dff004353835f4c5e02e24c"
     },
     {
       "id": "youtube_summary",
