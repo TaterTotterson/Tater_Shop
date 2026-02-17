@@ -52,9 +52,10 @@ _WEEKDAY_TOKEN_MAP = {
 
 class AITasksPlugin(ToolPlugin):
     name = "ai_tasks"
-    required_args = ["message"]
+    required_args = ["task_prompt"]
     optional_args = [
         "task_prompt",
+        "request",
         "title",
         "platform",
         "targets",
@@ -81,8 +82,8 @@ class AITasksPlugin(ToolPlugin):
         "device_service",
         "chat_id",
     ]
-    version = "1.0.5"
-    usage = '{"function":"ai_tasks","arguments":{"message":"Required task prompt","task_prompt":"Optional explicit scheduled task prompt","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel","room_id":"matrix room id/alias","chat_id":"telegram chat id","device_service":"home assistant notify service"},"channel":"optional shortcut for discord/irc channel","room":"optional shortcut for matrix room (alias for room_id)","chat_id":"optional shortcut for telegram target","when_ts":1730000000.0,"when":"2026-02-03 15:04:05 or 10am (local time)","in_seconds":3600,"every_seconds":0,"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
+    version = "1.0.8"
+    usage = '{"function":"ai_tasks","arguments":{"task_prompt":"Required instructions for what to do when the task runs (do not pre-generate final content now)","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel","room_id":"matrix room id/alias","chat_id":"telegram chat id","device_service":"home assistant notify service"},"channel":"optional shortcut for discord/irc channel","room":"optional shortcut for matrix room (alias for room_id)","chat_id":"optional shortcut for telegram target","when_ts":1730000000.0,"when":"2026-02-03 15:04:05 or 10am (local time)","in_seconds":3600,"every_seconds":0,"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
     description = (
         "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. "
         "At run time, AI can answer directly or call one tool before sending the final response."
@@ -95,6 +96,7 @@ class AITasksPlugin(ToolPlugin):
         "destination (optional; defaults to current channel/room)",
     ]
     missing_info_prompts = [
+        "What should this task do each time it runs? Put that in `task_prompt`.",
         "When should this run? You can use `when` (like `6:10am`), `in_seconds`, `every_seconds`, or cron (`0 10 6 * *` / `0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
     ]
 
@@ -103,6 +105,18 @@ class AITasksPlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} you’re scheduling the task now. "
         "Only output that message."
     )
+
+    _CURRENT_TARGET_ALIASES = {
+        "current",
+        "here",
+        "this",
+        "this chat",
+        "this channel",
+        "same chat",
+        "same channel",
+        "current chat",
+        "current channel",
+    }
 
     # ----------------------------
     # NEW: build a runtime prompt
@@ -197,6 +211,76 @@ class AITasksPlugin(ToolPlugin):
 
         return {"channel": ref}
 
+    @classmethod
+    def _is_current_target_alias(cls, value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        text = " ".join(text.replace("_", " ").split())
+        return text in cls._CURRENT_TARGET_ALIASES
+
+    @staticmethod
+    def _extract_time_hint(text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        m12 = re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", raw, flags=re.IGNORECASE)
+        if m12:
+            hour = int(m12.group(1))
+            minute = int(m12.group(2) or 0)
+            mer = str(m12.group(3) or "").lower()
+            if 1 <= hour <= 12 and 0 <= minute <= 59 and mer in {"am", "pm"}:
+                return f"{hour}:{minute:02d}{mer}"
+
+        m24 = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", raw)
+        if m24:
+            hour = int(m24.group(1))
+            minute = int(m24.group(2))
+            return f"{hour:02d}:{minute:02d}"
+        return ""
+
+    @classmethod
+    def _infer_schedule_from_text(cls, text: Any) -> Dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        lowered = " ".join(raw.lower().split())
+
+        # Support direct cron snippets.
+        cron_match = re.search(
+            r"\b(?:\d{1,2}|\*)\s+(?:\d{1,2}|\*)\s+(?:\d{1,2}|\*)\s+\*\s+\*(?:\s+(?:\*|[0-7]|sun|mon|tue|wed|thu|fri|sat))?\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        if cron_match:
+            cron_text = " ".join(str(cron_match.group(0) or "").strip().split())
+            parts = cron_text.split()
+            if len(parts) in {5, 6}:
+                return {"when_ts": cron_text}
+
+        rel = re.search(r"\b(?:in|after)\s+(\d+)\s*(seconds?|minutes?|hours?)\b", lowered)
+        if rel:
+            amount = int(rel.group(1))
+            unit = str(rel.group(2) or "").lower()
+            factor = 1
+            if unit.startswith("minute"):
+                factor = 60
+            elif unit.startswith("hour"):
+                factor = 3600
+            return {"in_seconds": max(1, amount * factor)}
+
+        time_hint = cls._extract_time_hint(raw)
+        daily = bool(re.search(r"\b(every day|everyday|daily|each day)\b", lowered))
+        weekly = bool(re.search(r"\b(every week|weekly)\b", lowered))
+        if daily or weekly:
+            out: Dict[str, Any] = {
+                "every_seconds": 7 * 24 * 60 * 60 if weekly else 24 * 60 * 60,
+            }
+            if time_hint:
+                out["when"] = time_hint
+            return out
+        return {}
+
     @staticmethod
     def _extract_target_hint(raw: Any) -> str:
         text = str(raw or "").strip()
@@ -278,22 +362,33 @@ class AITasksPlugin(ToolPlugin):
     def _extract_args(self, args: Dict[str, Any]):
         args = args or {}
         title = args.get("title")
-        message = args.get("message") or args.get("content")
+        platform = args.get("platform")
+        origin = args.get("origin")
+
+        request_text = str(args.get("request") or "").strip()
+        if isinstance(origin, dict):
+            origin_request_text = str(origin.get("request_text") or "").strip()
+            if origin_request_text:
+                request_text = origin_request_text or request_text
 
         task_prompt = args.get("task_prompt")
-        # NEW: if not provided, generate a runtime prompt from what the user said
+        # If task_prompt is missing, synthesize from request context.
         if task_prompt is None:
-            task_prompt = self._build_runtime_prompt(message)
-
-        platform = args.get("platform")
+            task_prompt = self._build_runtime_prompt(request_text)
 
         targets = self._coerce_targets(args.get("targets"))
         for alias_key in ("target", "destination", "to"):
             if alias_key in args:
                 targets = self._merge_target_aliases(targets, args.get(alias_key))
         for key in ("channel", "channel_id", "room", "room_id", "device_service", "chat_id"):
-            if args.get(key) and key not in targets:
-                targets[key] = args.get(key)
+            value = args.get(key)
+            if value and key not in targets:
+                targets[key] = value
+
+        # "current"/"here"/"this channel" should mean "use origin context", not a literal destination.
+        for key in ("channel", "channel_id", "room", "room_id", "chat_id", "target", "destination", "to"):
+            if key in targets and self._is_current_target_alias(targets.get(key)):
+                targets.pop(key, None)
 
         when_ts = args.get("when_ts")
         when_txt = args.get("when")
@@ -315,10 +410,34 @@ class AITasksPlugin(ToolPlugin):
             "tags": args.get("tags"),
             "ttl_sec": args.get("ttl_sec"),
         }
-        origin = args.get("origin")
+
+        # Self-heal missing time fields from user request context.
+        has_time_hint = any(
+            value not in (None, "")
+            for value in (when_ts, when_txt, in_seconds, every_seconds)
+        )
+        if not has_time_hint:
+            candidates: list[Any] = []
+            if isinstance(origin, dict):
+                candidates.append(origin.get("request_text"))
+            candidates.extend([args.get("request"), request_text, task_prompt])
+            inferred: Dict[str, Any] = {}
+            for candidate in candidates:
+                inferred = self._infer_schedule_from_text(candidate)
+                if inferred:
+                    break
+            if inferred:
+                if when_ts in (None, "") and inferred.get("when_ts") not in (None, ""):
+                    when_ts = inferred.get("when_ts")
+                if when_txt in (None, "") and inferred.get("when") not in (None, ""):
+                    when_txt = inferred.get("when")
+                if in_seconds in (None, "") and inferred.get("in_seconds") not in (None, ""):
+                    in_seconds = inferred.get("in_seconds")
+                if every_seconds in (None, "") and inferred.get("every_seconds") not in (None, ""):
+                    every_seconds = inferred.get("every_seconds")
+
         return (
             title,
-            message,
             task_prompt,
             platform,
             targets,
@@ -546,7 +665,6 @@ class AITasksPlugin(ToolPlugin):
     async def _schedule(self, args: Dict[str, Any]):
         (
             title,
-            message,
             task_prompt,
             platform,
             targets,
@@ -558,17 +676,10 @@ class AITasksPlugin(ToolPlugin):
             meta,
         ) = self._extract_args(args)
 
-        message = (message or "").strip()
         task_prompt = (task_prompt or "").strip()
 
         if not task_prompt:
-            task_prompt = self._build_runtime_prompt(message)
-
-        if not task_prompt:
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
-
-        if not message:
-            message = task_prompt
 
         dest = normalize_platform(platform)
         if not dest:
@@ -639,7 +750,6 @@ class AITasksPlugin(ToolPlugin):
             "created_at": float(now),
             "platform": dest,
             "title": title,
-            "message": message,  # what the user said
             "task_prompt": task_prompt,  # what to do at runtime
             "targets": resolved_targets or {},
             "origin": normalize_origin(origin),
