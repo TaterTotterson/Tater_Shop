@@ -58,7 +58,7 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "50",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "platforms": [
@@ -72,7 +72,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "plugins/comfyui_audio_ace.py",
-      "sha256": "8e02479b34ead91b7148fc784ab0869b5996f9dbdfcf145f258e7ed9b7c5e02a"
+      "sha256": "4abd9c063c458ba015f1fa8a01df494647131c37b1b7dadbb7a32db5dbc813ac"
     },
     {
       "id": "comfyui_image_plugin",
