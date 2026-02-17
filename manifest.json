@@ -4,7 +4,7 @@
     {
       "id": "ai_tasks",
       "name": "AI Tasks",
-      "version": "1.0.3",
+      "version": "1.0.5",
       "min_tater_version": "0.0.0",
       "description": "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response.",
       "platforms": [
@@ -19,7 +19,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "7a7e09cb37862edd321655415acf47b13c2fa17f540824831456ed4f3e6bb8ec"
+      "sha256": "824c6007f08c0e5a2f81b146ac5de320f113eba285e5f8c70dbc0bbcc35be4f3"
     },
     {
       "id": "automatic_plugin",
