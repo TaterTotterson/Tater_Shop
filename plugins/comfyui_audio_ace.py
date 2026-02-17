@@ -31,7 +31,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "50"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Generates music using ComfyUI Audio Ace."
@@ -259,12 +259,27 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
         workflow["14"]["inputs"]["tags"] = tags
         workflow["14"]["inputs"]["lyrics"] = lyrics
 
-        # Estimate duration from lyric lines
-        lines = lyrics.strip().splitlines()
-        line_count = sum(1 for l in lines if l.strip() and not l.strip().startswith("["))
-        estimated_duration = int(line_count * 5.0) + 20
+        # Estimate duration from WORD count (more stable than line counting)
+        # Normalize common JSON-escaped newline style first
+        if "\\n" in lyrics and "\n" not in lyrics:
+            lyrics = lyrics.replace("\\n", "\n")
+        lyrics = lyrics.replace("\r\n", "\n")
+
+        # Count words (ignore section headers as best we can)
+        # Remove bracketed headers like [verse], [chorus]
+        lyrics_for_count = re.sub(r"\[[^\]]+\]", " ", lyrics)
+        # Remove plain headers like "Verse", "Chorus", "Bridge", "Outro" on their own lines
+        lyrics_for_count = re.sub(r"(?im)^\s*(verse|chorus|bridge|outro|inst)\s*$", " ", lyrics_for_count)
+
+        words = re.findall(r"\b[\w']+\b", lyrics_for_count)
+        word_count = len(words)
+
+        # Rough pacing: ~2.2 words/sec + padding for intro/outro
+        estimated_duration = int(word_count / 2.2) + 15
         duration = max(30, min(300, estimated_duration))
         workflow["17"]["inputs"]["seconds"] = duration
+
+        logger.info("Audio duration calc: words=%s estimated=%ss final=%ss", word_count, estimated_duration, duration)
 
         # Randomize seeds for uniqueness
         for node in workflow.values():
