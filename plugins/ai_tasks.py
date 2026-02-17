@@ -50,7 +50,7 @@ class AITasksPlugin(ToolPlugin):
         "device_service",
         "chat_id",
     ]
-    version = "1.0.1"
+    version = "1.0.3"
     usage = '{"function":"ai_tasks","arguments":{"message":"Required task prompt","task_prompt":"Optional explicit scheduled task prompt","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"optional destination (discord/irc channel, matrix room/alias, or HA notify service). If omitted, uses the current channel/room from origin","chat_id":"optional telegram destination chat id"},"when_ts":1730000000.0,"when":"2026-02-03 15:04:05 or 10am (local time)","in_seconds":3600,"every_seconds":0,"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
     description = (
         "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. "
@@ -69,6 +69,53 @@ class AITasksPlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} you’re scheduling the task now. "
         "Only output that message."
     )
+
+    # ----------------------------
+    # NEW: build a runtime prompt
+    # ----------------------------
+    @staticmethod
+    def _build_runtime_prompt(user_message: str) -> str:
+        raw = (user_message or "").strip()
+        if not raw:
+            return ""
+
+        # Strip common "scheduling" lead-ins so the runtime prompt becomes "do the thing"
+        text = raw
+
+        # remove "add/create/set a task/reminder ..."
+        text = re.sub(
+            r"^(?:please\s+)?(?:add|create|set|schedule)\s+(?:a\s+)?(?:task|reminder)\s+(?:to\s+)?",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # remove trailing scheduling phrases like "every morning at 6am", "daily at 06:00", etc.
+        text = re.sub(
+            r"\b(?:every|each)\s+(?:day|morning|night|weekday|weekend|week)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r"\b(?:daily|weekly|monthly)\b.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:at|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bin\s+\d+\s*(?:seconds?|minutes?|hours?|days?)\b.*$", "", text, flags=re.IGNORECASE)
+
+        text = text.strip(" .\n\t")
+
+        # If we stripped too aggressively, fall back to original.
+        if not text:
+            text = raw
+
+        # Guardrails: scheduled runs must NEVER try to schedule more tasks.
+        # Also: encourage a single tool call, then produce final message.
+        return (
+            "You are running a previously scheduled task.\n"
+            "IMPORTANT: Do NOT create/schedule/modify tasks or reminders. The schedule already exists.\n"
+            "Do the requested work NOW. You may call at most ONE tool if needed, then write the final user-facing result.\n"
+            f"User originally asked: {raw}\n"
+            f"Task to perform now: {text}\n"
+        )
 
     @staticmethod
     def _normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,7 +179,6 @@ class AITasksPlugin(ToolPlugin):
     def _coerce_targets(payload: Any) -> Dict[str, Any]:
         if isinstance(payload, dict):
             return dict(payload)
-        # Allow a shorthand string target like "#alerts" for scheduler calls.
         if isinstance(payload, str):
             hint = AITasksPlugin._extract_target_hint(payload)
             if hint:
@@ -143,9 +189,11 @@ class AITasksPlugin(ToolPlugin):
         args = args or {}
         title = args.get("title")
         message = args.get("message") or args.get("content")
+
         task_prompt = args.get("task_prompt")
+        # NEW: if not provided, generate a runtime prompt from what the user said
         if task_prompt is None:
-            task_prompt = message
+            task_prompt = self._build_runtime_prompt(message)
 
         platform = args.get("platform")
 
@@ -159,7 +207,6 @@ class AITasksPlugin(ToolPlugin):
         in_seconds = args.get("in_seconds")
         every_seconds = args.get("every_seconds")
 
-        # Optional convenience fields
         if in_seconds is None and args.get("in_minutes") is not None:
             in_seconds = float(args.get("in_minutes")) * 60
         if in_seconds is None and args.get("in_hours") is not None:
@@ -208,14 +255,12 @@ class AITasksPlugin(ToolPlugin):
         if isinstance(when_txt, str) and when_txt.strip():
             text = when_txt.strip()
             text_lower = text.lower()
-            # numeric string -> epoch
             if text.isdigit():
                 try:
                     return float(text)
                 except Exception:
                     return None
 
-            # ISO-ish string
             try:
                 if text.endswith("Z"):
                     text = text[:-1] + "+00:00"
@@ -224,7 +269,6 @@ class AITasksPlugin(ToolPlugin):
                 dt = None
 
             if dt is None:
-                # try a common fallback format
                 for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
                     try:
                         dt = datetime.strptime(text, fmt)
@@ -233,7 +277,6 @@ class AITasksPlugin(ToolPlugin):
                         dt = None
 
             if dt is None:
-                # time-only formats like "10am", "10:30 pm", "at 22:15"
                 m = re.match(r"^(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*$", text_lower)
                 if m:
                     hour = int(m.group(1))
@@ -290,9 +333,11 @@ class AITasksPlugin(ToolPlugin):
         task_prompt = (task_prompt or "").strip()
 
         if not task_prompt:
-            task_prompt = message
+            task_prompt = self._build_runtime_prompt(message)
+
         if not task_prompt:
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
+
         if not message:
             message = task_prompt
 
@@ -336,8 +381,8 @@ class AITasksPlugin(ToolPlugin):
             "created_at": float(now),
             "platform": dest,
             "title": title,
-            "message": message,
-            "task_prompt": (task_prompt or "").strip(),
+            "message": message,  # what the user said
+            "task_prompt": task_prompt,  # what to do at runtime
             "targets": resolved_targets or {},
             "origin": normalize_origin(origin),
             "meta": meta or {},
