@@ -306,6 +306,25 @@
       "sha256": "98435dd547ec17e02c84aa31fcc41160a2e8312358fa05059bef4c00365569b3"
     },
     {
+      "id": "image_describe",
+      "name": "Image Describe",
+      "version": "2.0.0",
+      "min_tater_version": "50",
+      "description": "Describe an image from chat history or explicit image reference.",
+      "platforms": [
+        "discord",
+        "webui",
+        "matrix",
+        "telegram",
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Vision",
+      "tags": [],
+      "entry": "plugins/image_describe.py",
+      "sha256": "12fe688c89d5b5514ff8e8a4acba40ae6a7150fc28e5319965fcdabf754aab34"
+    },
+    {
       "id": "lowfi_video",
       "name": "Lofi Video",
       "version": "1.1.1",

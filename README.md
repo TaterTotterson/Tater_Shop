@@ -59,6 +59,7 @@
 | `camera_event` | Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier. | automation |
 | `doorbell_alert` | Handle doorbell events: snapshot, describe with vision, announce, and log notifications. | automation |
 | `events_query_brief` | Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant. | automation |
+| `image_describe` | Describe an image from chat history or explicit image reference. | discord, webui, matrix, telegram, automation |
 | `weather_brief` | Give a short automation-friendly recap of recent weather conditions. | automation |
 | `zen_greeting` | Generate a calming daily greeting and message for dashboards. | automation |
 
