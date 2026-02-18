@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "50"
     pretty_name = "MiSTer Remote"
     description = (
@@ -629,7 +629,7 @@ class MisterRemotePlugin(ToolPlugin):
             },
             summary_for_user=f"Launching {game_name} on {sys_name}.",
             flair=follow or "",
-            say_hint="Confirm the MiSTer launch result with the selected game and system.",
+            say_hint=f"Share 1–2 fun tidbits about {game_name} on {sys_name} only if you're confident; otherwise keep it upbeat and general.",
         )
 
     def _capture_screenshot(self):
