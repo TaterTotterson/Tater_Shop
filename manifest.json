@@ -286,7 +286,7 @@
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "min_tater_version": "50",
       "description": "Control Home Assistant devices.",
       "platforms": [
@@ -303,7 +303,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "98435dd547ec17e02c84aa31fcc41160a2e8312358fa05059bef4c00365569b3"
+      "sha256": "50b40bf010bbb3659169192f1d93719f603a72e39739cd05e65dee0cc3376ac0"
     },
     {
       "id": "image_describe",
