@@ -13,7 +13,7 @@
 
 | Plugin Name | Description | Platform |
 |------------|-------------|----------|
-| `ai_tasks` | Schedule an AI task. Supports one-shot or recurring runs via every_seconds. At run time, AI can answer directly or call one tool before sending the final response. | discord, irc, matrix, homeassistant, telegram, webui |
+| `ai_tasks` | Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. At run time, AI can answer directly or call one tool before sending the final response. | discord, irc, matrix, homeassistant, telegram, webui |
 | `automatic_plugin` | Generate an image from a text prompt using your Automatic1111 server. | discord, webui, telegram |
 | `broadcast` | Send a one-time spoken announcement to your Home Assistant media players. | homeassistant, homekit, xbmc, webui, discord, telegram, matrix, irc |
 | `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, homeassistant, matrix, telegram |
