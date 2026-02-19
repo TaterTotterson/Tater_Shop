@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 import re
+from bisect import bisect_left
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -62,14 +63,12 @@ class AITasksPlugin(ToolPlugin):
         "target",
         "destination",
         "to",
+        "cron",
         "when_ts",
         "when",
         "in_seconds",
         "in_minutes",
         "in_hours",
-        "every_seconds",
-        "every_minutes",
-        "every_hours",
         "priority",
         "tags",
         "ttl_sec",
@@ -82,22 +81,22 @@ class AITasksPlugin(ToolPlugin):
         "device_service",
         "chat_id",
     ]
-    version = "1.0.8"
-    usage = '{"function":"ai_tasks","arguments":{"task_prompt":"Required instructions for what to do when the task runs (do not pre-generate final content now)","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel","room_id":"matrix room id/alias","chat_id":"telegram chat id","device_service":"home assistant notify service"},"channel":"optional shortcut for discord/irc channel","room":"optional shortcut for matrix room (alias for room_id)","chat_id":"optional shortcut for telegram target","when_ts":1730000000.0,"when":"2026-02-03 15:04:05 or 10am (local time)","in_seconds":3600,"every_seconds":0,"priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
+    version = "1.2.1"
+    usage = '{"function":"ai_tasks","arguments":{"task_prompt":"Required instructions for what to do when the task runs (do not pre-generate final content now)","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel","room_id":"matrix room id/alias","chat_id":"telegram chat id","device_service":"home assistant notify service"},"channel":"optional shortcut for discord/irc channel","room":"optional shortcut for matrix room (alias for room_id)","chat_id":"optional shortcut for telegram target","cron":"Optional cron schedule in local time (e.g. 0 0 6 * * *).","when":"Natural schedule phrase or cron (e.g. everyday at 6am, every hour, every second, 0 0 6 * * *).","priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
     description = (
-        "Schedule an AI task. Supports one-shot or recurring runs via every_seconds. "
+        "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
         "At run time, AI can answer directly or call one tool before sending the final response."
     )
     pretty_name = "AI Tasks"
-    when_to_use = "Schedule one-off or recurring tasks (daily/weekly/every N seconds) that run later."
+    when_to_use = "Schedule recurring tasks (everyday, hourly, secondly, weekly, or explicit cron)."
     common_needs = [
         "task to run",
-        "when to run (time or interval)",
+        "when to run (natural phrase or cron)",
         "destination (optional; defaults to current channel/room)",
     ]
     missing_info_prompts = [
         "What should this task do each time it runs? Put that in `task_prompt`.",
-        "When should this run? You can use `when` (like `6:10am`), `in_seconds`, `every_seconds`, or cron (`0 10 6 * *` / `0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
+        "When should this run? You can say `everyday at 6am`, `every hour`, `every second`, or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
     ]
 
     platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
@@ -220,68 +219,6 @@ class AITasksPlugin(ToolPlugin):
         return text in cls._CURRENT_TARGET_ALIASES
 
     @staticmethod
-    def _extract_time_hint(text: Any) -> str:
-        raw = str(text or "").strip()
-        if not raw:
-            return ""
-        m12 = re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", raw, flags=re.IGNORECASE)
-        if m12:
-            hour = int(m12.group(1))
-            minute = int(m12.group(2) or 0)
-            mer = str(m12.group(3) or "").lower()
-            if 1 <= hour <= 12 and 0 <= minute <= 59 and mer in {"am", "pm"}:
-                return f"{hour}:{minute:02d}{mer}"
-
-        m24 = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", raw)
-        if m24:
-            hour = int(m24.group(1))
-            minute = int(m24.group(2))
-            return f"{hour:02d}:{minute:02d}"
-        return ""
-
-    @classmethod
-    def _infer_schedule_from_text(cls, text: Any) -> Dict[str, Any]:
-        raw = str(text or "").strip()
-        if not raw:
-            return {}
-        lowered = " ".join(raw.lower().split())
-
-        # Support direct cron snippets.
-        cron_match = re.search(
-            r"\b(?:\d{1,2}|\*)\s+(?:\d{1,2}|\*)\s+(?:\d{1,2}|\*)\s+\*\s+\*(?:\s+(?:\*|[0-7]|sun|mon|tue|wed|thu|fri|sat))?\b",
-            lowered,
-            flags=re.IGNORECASE,
-        )
-        if cron_match:
-            cron_text = " ".join(str(cron_match.group(0) or "").strip().split())
-            parts = cron_text.split()
-            if len(parts) in {5, 6}:
-                return {"when_ts": cron_text}
-
-        rel = re.search(r"\b(?:in|after)\s+(\d+)\s*(seconds?|minutes?|hours?)\b", lowered)
-        if rel:
-            amount = int(rel.group(1))
-            unit = str(rel.group(2) or "").lower()
-            factor = 1
-            if unit.startswith("minute"):
-                factor = 60
-            elif unit.startswith("hour"):
-                factor = 3600
-            return {"in_seconds": max(1, amount * factor)}
-
-        time_hint = cls._extract_time_hint(raw)
-        daily = bool(re.search(r"\b(every day|everyday|daily|each day)\b", lowered))
-        weekly = bool(re.search(r"\b(every week|weekly)\b", lowered))
-        if daily or weekly:
-            out: Dict[str, Any] = {
-                "every_seconds": 7 * 24 * 60 * 60 if weekly else 24 * 60 * 60,
-            }
-            if time_hint:
-                out["when"] = time_hint
-            return out
-        return {}
-
-    @staticmethod
     def _extract_target_hint(raw: Any) -> str:
         text = str(raw or "").strip()
         if not text:
@@ -390,20 +327,9 @@ class AITasksPlugin(ToolPlugin):
             if key in targets and self._is_current_target_alias(targets.get(key)):
                 targets.pop(key, None)
 
+        cron_expr = args.get("cron")
         when_ts = args.get("when_ts")
         when_txt = args.get("when")
-        in_seconds = args.get("in_seconds")
-        every_seconds = args.get("every_seconds")
-
-        if in_seconds is None and args.get("in_minutes") is not None:
-            in_seconds = float(args.get("in_minutes")) * 60
-        if in_seconds is None and args.get("in_hours") is not None:
-            in_seconds = float(args.get("in_hours")) * 3600
-
-        if every_seconds is None and args.get("every_minutes") is not None:
-            every_seconds = float(args.get("every_minutes")) * 60
-        if every_seconds is None and args.get("every_hours") is not None:
-            every_seconds = float(args.get("every_hours")) * 3600
 
         meta = {
             "priority": args.get("priority"),
@@ -411,120 +337,17 @@ class AITasksPlugin(ToolPlugin):
             "ttl_sec": args.get("ttl_sec"),
         }
 
-        # Self-heal missing time fields from user request context.
-        has_time_hint = any(
-            value not in (None, "")
-            for value in (when_ts, when_txt, in_seconds, every_seconds)
-        )
-        if not has_time_hint:
-            candidates: list[Any] = []
-            if isinstance(origin, dict):
-                candidates.append(origin.get("request_text"))
-            candidates.extend([args.get("request"), request_text, task_prompt])
-            inferred: Dict[str, Any] = {}
-            for candidate in candidates:
-                inferred = self._infer_schedule_from_text(candidate)
-                if inferred:
-                    break
-            if inferred:
-                if when_ts in (None, "") and inferred.get("when_ts") not in (None, ""):
-                    when_ts = inferred.get("when_ts")
-                if when_txt in (None, "") and inferred.get("when") not in (None, ""):
-                    when_txt = inferred.get("when")
-                if in_seconds in (None, "") and inferred.get("in_seconds") not in (None, ""):
-                    in_seconds = inferred.get("in_seconds")
-                if every_seconds in (None, "") and inferred.get("every_seconds") not in (None, ""):
-                    every_seconds = inferred.get("every_seconds")
-
         return (
             title,
             task_prompt,
             platform,
             targets,
+            cron_expr,
             when_ts,
             when_txt,
-            in_seconds,
-            every_seconds,
             origin,
             meta,
         )
-
-    def _parse_when(self, when_ts, when_txt, in_seconds) -> float | None:
-        now = time.time()
-
-        if when_ts is not None:
-            try:
-                return float(when_ts)
-            except Exception:
-                pass
-
-        if in_seconds is not None:
-            try:
-                return now + float(in_seconds)
-            except Exception:
-                pass
-
-        if isinstance(when_txt, str) and when_txt.strip():
-            text = when_txt.strip()
-            text_lower = text.lower()
-            if text.isdigit():
-                try:
-                    return float(text)
-                except Exception:
-                    return None
-
-            try:
-                if text.endswith("Z"):
-                    text = text[:-1] + "+00:00"
-                dt = datetime.fromisoformat(text)
-            except Exception:
-                dt = None
-
-            if dt is None:
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-                    try:
-                        dt = datetime.strptime(text, fmt)
-                        break
-                    except Exception:
-                        dt = None
-
-            if dt is None:
-                m = re.match(r"^(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*$", text_lower)
-                if m:
-                    hour = int(m.group(1))
-                    minute = int(m.group(2) or 0)
-                    mer = m.group(3)
-                    if hour < 1 or hour > 12 or minute > 59:
-                        return None
-                    if mer == "am":
-                        hour = 0 if hour == 12 else hour
-                    else:
-                        hour = 12 if hour == 12 else hour + 12
-                    now_dt = datetime.now().astimezone()
-                    dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                    if dt.timestamp() <= now_dt.timestamp():
-                        dt = dt + timedelta(days=1)
-                else:
-                    m24 = re.match(r"^(?:at\s+)?(\d{1,2})(?::(\d{2}))\s*$", text_lower)
-                    if m24:
-                        hour = int(m24.group(1))
-                        minute = int(m24.group(2))
-                        if hour < 0 or hour > 23 or minute > 59:
-                            return None
-                        now_dt = datetime.now().astimezone()
-                        dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                        if dt.timestamp() <= now_dt.timestamp():
-                            dt = dt + timedelta(days=1)
-
-            if dt is None:
-                return None
-
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
-
-            return dt.timestamp()
-
-        return None
 
     @staticmethod
     def _next_local_time_occurrence(
@@ -572,6 +395,399 @@ class AITasksPlugin(ToolPlugin):
                 out.append(mapped)
         return sorted(out), ""
 
+    @staticmethod
+    def _expand_numeric_field(
+        value: Any,
+        *,
+        minimum: int,
+        maximum: int,
+        field_name: str,
+    ) -> tuple[list[int] | None, str]:
+        text = str(value or "").strip().lower()
+        if not text or text in {"*", "?"}:
+            return list(range(minimum, maximum + 1)), ""
+
+        out: list[int] = []
+        for token in text.split(","):
+            part = token.strip().lower()
+            if not part:
+                continue
+            if part in {"*", "?"}:
+                out.extend(range(minimum, maximum + 1))
+                continue
+            if part.startswith("*/"):
+                step_txt = part[2:].strip()
+                if not re.fullmatch(r"\d{1,3}", step_txt):
+                    return None, f"Invalid cron {field_name} step: {part}"
+                step = int(step_txt)
+                if step <= 0:
+                    return None, f"Cron {field_name} step must be > 0."
+                out.extend(range(minimum, maximum + 1, step))
+                continue
+            if not re.fullmatch(r"\d{1,3}", part):
+                return None, f"Invalid cron {field_name}: {part}"
+            number = int(part)
+            if number < minimum or number > maximum:
+                return None, f"Cron {field_name} must be in {minimum}-{maximum}."
+            out.append(number)
+
+        unique = sorted(set(out))
+        if not unique:
+            return None, f"Cron {field_name} produced no values."
+        return unique, ""
+
+    @classmethod
+    def _next_cron_occurrence(
+        cls,
+        *,
+        now_ts: float,
+        hours: list[int],
+        minutes: list[int],
+        seconds: list[int],
+        weekdays: list[int] | None = None,
+    ) -> float:
+        valid_hours = sorted(set(int(v) for v in (hours or []) if 0 <= int(v) <= 23))
+        valid_minutes = sorted(set(int(v) for v in (minutes or []) if 0 <= int(v) <= 59))
+        valid_seconds = sorted(set(int(v) for v in (seconds or []) if 0 <= int(v) <= 59))
+        valid_weekdays = sorted(set(int(v) for v in (weekdays or []) if 0 <= int(v) <= 6))
+        if not valid_hours or not valid_minutes or not valid_seconds:
+            return 0.0
+
+        base = datetime.fromtimestamp(float(now_ts)).astimezone().replace(microsecond=0) + timedelta(seconds=1)
+        day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        for day_offset in range(0, 370):
+            day = day_start + timedelta(days=day_offset)
+            if valid_weekdays and day.weekday() not in valid_weekdays:
+                continue
+
+            h_start = base.hour if day_offset == 0 else 0
+            h_idx = bisect_left(valid_hours, h_start)
+            while h_idx < len(valid_hours):
+                hour = valid_hours[h_idx]
+                m_start = base.minute if (day_offset == 0 and hour == base.hour) else 0
+                m_idx = bisect_left(valid_minutes, m_start)
+                while m_idx < len(valid_minutes):
+                    minute = valid_minutes[m_idx]
+                    s_start = base.second if (day_offset == 0 and hour == base.hour and minute == base.minute) else 0
+                    s_idx = bisect_left(valid_seconds, s_start)
+                    if s_idx < len(valid_seconds):
+                        second = valid_seconds[s_idx]
+                        candidate = day.replace(hour=hour, minute=minute, second=second, microsecond=0)
+                        if candidate.timestamp() > now_ts:
+                            return candidate.timestamp()
+                    m_idx += 1
+                h_idx += 1
+        return 0.0
+
+    @staticmethod
+    def _parse_time_of_day(text: Any) -> tuple[int, int, int] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+
+        m12 = re.search(r"\b(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm)\b", raw, flags=re.IGNORECASE)
+        if m12:
+            hour = int(m12.group(1))
+            minute = int(m12.group(2) or 0)
+            second = int(m12.group(3) or 0)
+            mer = str(m12.group(4) or "").lower()
+            if hour < 1 or hour > 12 or minute > 59 or second > 59:
+                return None
+            if mer == "am":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+            return hour, minute, second
+
+        m24 = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?\b", raw)
+        if m24:
+            hour = int(m24.group(1))
+            minute = int(m24.group(2))
+            second = int(m24.group(3) or 0)
+            return hour, minute, second
+        return None
+
+    @staticmethod
+    def _extract_weekdays_from_text(value: Any) -> list[int]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return []
+        if "weekdays" in text:
+            return [0, 1, 2, 3, 4]
+        if "weekends" in text or "weekend" in text:
+            return [5, 6]
+        out: list[int] = []
+        for token, mapped in _WEEKDAY_TOKEN_MAP.items():
+            if token.isdigit():
+                continue
+            if re.search(rf"\b{re.escape(token)}\b", text):
+                if mapped not in out:
+                    out.append(mapped)
+        return sorted(out)
+
+    @classmethod
+    def _build_cron_simple_schedule(
+        cls,
+        *,
+        now_ts: float,
+        hours: list[int],
+        minutes: list[int],
+        seconds: list[int],
+        weekdays: list[int] | None = None,
+        cron: str = "",
+    ) -> Dict[str, Any] | None:
+        next_run = cls._next_cron_occurrence(
+            now_ts=now_ts,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            weekdays=weekdays or [],
+        )
+        if next_run <= 0:
+            return None
+
+        recurrence: Dict[str, Any] = {
+            "kind": "cron_simple",
+            "hours": sorted(set(int(v) for v in (hours or []) if 0 <= int(v) <= 23)),
+            "minutes": sorted(set(int(v) for v in (minutes or []) if 0 <= int(v) <= 59)),
+            "seconds": sorted(set(int(v) for v in (seconds or []) if 0 <= int(v) <= 59)),
+        }
+        weekday_list = sorted(set(int(v) for v in (weekdays or []) if 0 <= int(v) <= 6))
+        if weekday_list:
+            recurrence["weekdays"] = weekday_list
+
+        interval_estimate = 0.0
+        if not weekday_list and len(recurrence["hours"]) == 24 and len(recurrence["minutes"]) == 60 and len(recurrence["seconds"]) == 60:
+            interval_estimate = 1.0
+        elif not weekday_list and len(recurrence["hours"]) == 24 and len(recurrence["minutes"]) == 60 and recurrence["seconds"] == [0]:
+            interval_estimate = 60.0
+        elif not weekday_list and len(recurrence["hours"]) == 24 and recurrence["minutes"] == [0] and recurrence["seconds"] == [0]:
+            interval_estimate = 3600.0
+        elif not weekday_list and len(recurrence["hours"]) == 1 and len(recurrence["minutes"]) == 1 and len(recurrence["seconds"]) == 1:
+            interval_estimate = 24 * 60 * 60.0
+
+        out: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": float(interval_estimate),
+            "recurrence": recurrence,
+        }
+        if cron:
+            out["cron"] = str(cron).strip()
+        return out
+
+    def _parse_human_schedule(
+        self,
+        raw_value: Any,
+        *,
+        now_ts: float,
+    ) -> tuple[Dict[str, Any] | None, str]:
+        text = " ".join(str(raw_value or "").strip().lower().split())
+        if not text:
+            return None, ""
+
+        if re.search(r"\b(every|each)\s+second\b|\bsecondly\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=list(range(60)),
+                cron="* * * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-second schedule."
+
+        m_every_seconds = re.search(r"\bevery\s+(\d+)\s+seconds?\b", text)
+        if m_every_seconds:
+            step = int(m_every_seconds.group(1))
+            if step <= 0:
+                return None, "Every-seconds value must be > 0."
+            if step == 1:
+                seconds = list(range(60))
+            elif step <= 59:
+                seconds = list(range(0, 60, step))
+            elif step % 60 == 0:
+                minute_step = step // 60
+                if minute_step > 59:
+                    return None, "Every-seconds value is too large for cron-like conversion."
+                schedule = self._build_cron_simple_schedule(
+                    now_ts=now_ts,
+                    hours=list(range(24)),
+                    minutes=list(range(0, 60, minute_step)),
+                    seconds=[0],
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for every-seconds schedule."
+            else:
+                return None, "Every-seconds value must be 1-59 or a multiple of 60."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=seconds,
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-seconds schedule."
+
+        if re.search(r"\b(every|each)\s+minute\b|\bminutely\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=[0],
+                cron="0 * * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-minute schedule."
+
+        m_every_minutes = re.search(r"\bevery\s+(\d+)\s+minutes?\b", text)
+        if m_every_minutes:
+            step = int(m_every_minutes.group(1))
+            if step <= 0 or step > 59:
+                return None, "Every-minutes value must be between 1 and 59."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(0, 60, step)),
+                seconds=[0],
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-minutes schedule."
+
+        if re.search(r"\b(every|each)\s+hour\b|\bhourly\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=[0],
+                seconds=[0],
+                cron="0 0 * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-hour schedule."
+
+        m_every_hours = re.search(r"\bevery\s+(\d+)\s+hours?\b", text)
+        if m_every_hours:
+            step = int(m_every_hours.group(1))
+            if step <= 0 or step > 23:
+                return None, "Every-hours value must be between 1 and 23."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(0, 24, step)),
+                minutes=[0],
+                seconds=[0],
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-hours schedule."
+
+        daily = bool(re.search(r"\b(every day|everyday|daily|each day)\b", text))
+        weekly = bool(re.search(r"\b(every week|weekly)\b", text))
+        weekdays = self._extract_weekdays_from_text(text)
+        if daily or weekly or weekdays:
+            time_parts = self._parse_time_of_day(text)
+            if not time_parts:
+                return None, "Natural schedule is missing a time (for example: everyday at 6am)."
+            hour, minute, second = time_parts
+            cron_text = f"{int(second)} {int(minute)} {int(hour)} * * *"
+            if weekdays or weekly:
+                chosen_weekdays = weekdays or [datetime.fromtimestamp(float(now_ts)).astimezone().weekday()]
+                day_tokens = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                dow_tokens = [day_tokens[int(d)] for d in sorted(set(chosen_weekdays)) if 0 <= int(d) <= 6]
+                if dow_tokens:
+                    cron_text = f"{int(second)} {int(minute)} {int(hour)} * * {','.join(dow_tokens)}"
+                schedule = self._build_cron_simple_schedule(
+                    now_ts=now_ts,
+                    hours=[hour],
+                    minutes=[minute],
+                    seconds=[second],
+                    weekdays=chosen_weekdays,
+                    cron=cron_text,
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for weekly schedule."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=[hour],
+                minutes=[minute],
+                seconds=[second],
+                cron=cron_text,
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for daily schedule."
+
+        return None, ""
+
+    @staticmethod
+    def _recurrence_label(recurrence: Dict[str, Any]) -> str:
+        recurrence = recurrence if isinstance(recurrence, dict) else {}
+        kind = str(recurrence.get("kind") or "").strip().lower()
+        hour = int(recurrence.get("hour") or 0)
+        minute = int(recurrence.get("minute") or 0)
+        second = int(recurrence.get("second") or 0)
+        time_part = f"{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+
+        if kind == "daily_local_time":
+            return f"daily at {time_part}"
+        if kind == "weekly_local_time":
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            days = recurrence.get("weekdays") if isinstance(recurrence.get("weekdays"), list) else []
+            day_labels: list[str] = []
+            for day in days:
+                try:
+                    day_i = int(day)
+                except Exception:
+                    continue
+                if 0 <= day_i <= 6:
+                    name = day_names[day_i]
+                    if name not in day_labels:
+                        day_labels.append(name)
+            if day_labels:
+                return f"weekly ({', '.join(day_labels)}) at {time_part}"
+            return f"weekly at {time_part}"
+        if kind == "cron_simple":
+            hours = recurrence.get("hours") if isinstance(recurrence.get("hours"), list) else []
+            minutes = recurrence.get("minutes") if isinstance(recurrence.get("minutes"), list) else []
+            seconds = recurrence.get("seconds") if isinstance(recurrence.get("seconds"), list) else []
+            weekdays = recurrence.get("weekdays") if isinstance(recurrence.get("weekdays"), list) else []
+            if len(hours) == 24 and len(minutes) == 60 and len(seconds) == 60 and not weekdays:
+                return "every second"
+            if len(hours) == 24 and len(minutes) == 60 and seconds == [0] and not weekdays:
+                return "every minute"
+            if len(hours) == 24 and minutes == [0] and seconds == [0] and not weekdays:
+                return "every hour"
+            if len(hours) == 1 and len(minutes) == 1 and len(seconds) == 1:
+                time_part = f"{int(hours[0]):02d}:{int(minutes[0]):02d}" + (
+                    f":{int(seconds[0]):02d}" if int(seconds[0]) else ""
+                )
+                if weekdays:
+                    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    day_labels: list[str] = []
+                    for day in weekdays:
+                        try:
+                            day_i = int(day)
+                        except Exception:
+                            continue
+                        if 0 <= day_i <= 6:
+                            name = day_names[day_i]
+                            if name not in day_labels:
+                                day_labels.append(name)
+                    if day_labels:
+                        return f"weekly ({', '.join(day_labels)}) at {time_part}"
+                return f"daily at {time_part}"
+            cron_text = str(recurrence.get("cron") or "").strip()
+            if cron_text:
+                return f"cron ({cron_text})"
+            return "cron schedule"
+        return "recurring"
+
     def _parse_cron_schedule(
         self,
         raw_value: Any,
@@ -587,40 +803,10 @@ class AITasksPlugin(ToolPlugin):
             return None, ""
 
         if len(parts) == 5:
-            # Compatibility shorthand: "0 10 6 * *" -> "0 10 6 * * *"
-            # Some models drop the trailing day-of-week wildcard from 6-field cron.
-            if (
-                parts[3] in {"*", "?"}
-                and parts[4] in {"*", "?"}
-                and all(re.fullmatch(r"\d{1,2}", p) for p in parts[:3])
-            ):
-                sec_raw, minute_raw, hour_raw = parts[:3]
-                day_raw = "*"
-                month_raw = "*"
-                dow_raw = "*"
-            else:
-                sec_raw = "0"
-                minute_raw, hour_raw, day_raw, month_raw, dow_raw = parts
+            sec_raw = "0"
+            minute_raw, hour_raw, day_raw, month_raw, dow_raw = parts
         else:
             sec_raw, minute_raw, hour_raw, day_raw, month_raw, dow_raw = parts
-
-        for field_name, field_value in (
-            ("second", sec_raw),
-            ("minute", minute_raw),
-            ("hour", hour_raw),
-        ):
-            if field_value in {"*", "?"}:
-                return None, f"Cron {field_name} cannot be wildcard for ai_tasks."
-            if any(ch in field_value for ch in ("/", "-", ",")):
-                return None, f"Cron {field_name} supports only one numeric value for ai_tasks."
-            if not re.fullmatch(r"\d{1,2}", field_value):
-                return None, f"Invalid cron {field_name}: {field_value}"
-
-        second = int(sec_raw)
-        minute = int(minute_raw)
-        hour = int(hour_raw)
-        if second < 0 or second > 59 or minute < 0 or minute > 59 or hour < 0 or hour > 23:
-            return None, "Cron time fields are out of range."
 
         if day_raw not in {"*", "?"} or month_raw not in {"*", "?"}:
             return None, "Cron day-of-month and month must be '*' or '?' for ai_tasks."
@@ -631,36 +817,32 @@ class AITasksPlugin(ToolPlugin):
         if weekdays is None:
             return None, "Invalid cron day-of-week field."
 
-        next_run_ts = self._next_local_time_occurrence(
-            now_ts=now_ts,
-            hour=hour,
-            minute=minute,
-            second=second,
-            weekdays=weekdays,
-        )
-        if weekdays:
-            recurrence = {
-                "kind": "weekly_local_time",
-                "hour": int(hour),
-                "minute": int(minute),
-                "second": int(second),
-                "weekdays": weekdays,
-            }
-            interval_sec = float(7 * 24 * 60 * 60)
-        else:
-            recurrence = {
-                "kind": "daily_local_time",
-                "hour": int(hour),
-                "minute": int(minute),
-                "second": int(second),
-            }
-            interval_sec = float(24 * 60 * 60)
+        seconds, sec_err = self._expand_numeric_field(sec_raw, minimum=0, maximum=59, field_name="second")
+        if sec_err:
+            return None, sec_err
+        minutes, min_err = self._expand_numeric_field(minute_raw, minimum=0, maximum=59, field_name="minute")
+        if min_err:
+            return None, min_err
+        hours, hour_err = self._expand_numeric_field(hour_raw, minimum=0, maximum=23, field_name="hour")
+        if hour_err:
+            return None, hour_err
 
-        return {
-            "next_run_ts": float(next_run_ts),
-            "interval_sec": float(interval_sec),
-            "recurrence": recurrence,
-        }, ""
+        cron_text = " ".join(parts)
+        schedule = self._build_cron_simple_schedule(
+            now_ts=now_ts,
+            hours=hours or [],
+            minutes=minutes or [],
+            seconds=seconds or [],
+            weekdays=weekdays or [],
+            cron=cron_text,
+        )
+        if not isinstance(schedule, dict):
+            return None, "Could not compute next run for cron schedule."
+        recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
+        if isinstance(recurrence, dict) and cron_text:
+            recurrence["cron"] = cron_text
+            schedule["recurrence"] = recurrence
+        return schedule, ""
 
     async def _schedule(self, args: Dict[str, Any]):
         (
@@ -668,10 +850,9 @@ class AITasksPlugin(ToolPlugin):
             task_prompt,
             platform,
             targets,
+            cron_expr,
             when_ts,
             when_txt,
-            in_seconds,
-            every_seconds,
             origin,
             meta,
         ) = self._extract_args(args)
@@ -691,40 +872,105 @@ class AITasksPlugin(ToolPlugin):
         if dest not in ALLOWED_PLATFORMS:
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing destination platform"}
 
+        def _is_set(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                text = value.strip().lower()
+                return text not in {"", "0", "0.0", "false", "none", "null"}
+            if isinstance(value, (int, float)):
+                return float(value) != 0.0
+            return True
+
+        one_shot_time_fields = (
+            "in_seconds",
+            "in_minutes",
+            "in_hours",
+            "every_seconds",
+            "every_minutes",
+            "every_hours",
+        )
+        for key in one_shot_time_fields:
+            if _is_set((args or {}).get(key)):
+                return {
+                    "tool": "ai_tasks",
+                    "ok": False,
+                    "error": (
+                        f"`{key}` is no longer supported. "
+                        "Use `when`/`cron` (for example: `everyday at 6am`, `every hour`, "
+                        "`every second`, or `0 0 6 * * *`)."
+                    ),
+                }
+
         now = time.time()
 
-        try:
-            interval = float(every_seconds) if every_seconds is not None else 0.0
-        except Exception:
-            interval = 0.0
-        if interval < 0:
-            interval = 0.0
+        schedule_result: Dict[str, Any] | None = None
+        cron_source = ""
+        parse_error = ""
 
-        cron_schedule: Dict[str, Any] | None = None
-        cron_error = ""
-        if interval <= 0:
-            for candidate in (when_ts, when_txt):
-                parsed, err = self._parse_cron_schedule(candidate, now_ts=now)
+        schedule_candidates: list[Any] = []
+        seen_candidates: set[str] = set()
+
+        def _add_candidate(raw_value: Any) -> None:
+            if raw_value in (None, ""):
+                return
+            text = " ".join(str(raw_value).strip().split())
+            if not text or text in seen_candidates:
+                return
+            seen_candidates.add(text)
+            schedule_candidates.append(raw_value)
+
+        _add_candidate(cron_expr)
+        _add_candidate(when_ts)
+        _add_candidate(when_txt)
+        _add_candidate((args or {}).get("request"))
+        if isinstance(origin, dict):
+            _add_candidate(origin.get("request_text"))
+
+        for candidate in schedule_candidates:
+            parsed, err = self._parse_cron_schedule(candidate, now_ts=now)
+            if isinstance(parsed, dict):
+                schedule_result = parsed
+                cron_source = str(parsed.get("cron") or "").strip() or " ".join(str(candidate).strip().split())
+                break
+            if err:
+                parse_error = err
+
+        if not isinstance(schedule_result, dict):
+            for candidate in schedule_candidates:
+                parsed, err = self._parse_human_schedule(candidate, now_ts=now)
                 if isinstance(parsed, dict):
-                    cron_schedule = parsed
+                    schedule_result = parsed
+                    cron_source = str(parsed.get("cron") or "").strip()
                     break
                 if err:
-                    cron_error = err
+                    parse_error = err
 
-        next_run = self._parse_when(when_ts, when_txt, in_seconds)
-        if next_run is None and isinstance(cron_schedule, dict):
-            next_run = float(cron_schedule.get("next_run_ts") or 0.0)
-            interval = max(float(interval), float(cron_schedule.get("interval_sec") or 0.0))
+        if not isinstance(schedule_result, dict):
+            guidance = (
+                "Use `when`/`cron` in local time, for example `everyday at 6am`, "
+                "`every hour`, `every second`, or `0 0 6 * * *`."
+            )
+            if parse_error:
+                return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {parse_error} {guidance}"}
+            return {
+                "tool": "ai_tasks",
+                "ok": False,
+                "error": f"Cannot schedule: missing schedule details. {guidance}",
+            }
 
-        if next_run is None and interval > 0:
-            next_run = now + max(1.0, interval)
-        if next_run is None:
-            if cron_error:
-                return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {cron_error}"}
-            return {"tool": "ai_tasks", "ok": False, "error": "Cannot schedule: missing or invalid time"}
+        next_run = float(schedule_result.get("next_run_ts") or 0.0)
+        recurrence = schedule_result.get("recurrence") if isinstance(schedule_result.get("recurrence"), dict) else {}
+        interval = float(schedule_result.get("interval_sec") or 0.0)
+        if next_run <= 0 or not recurrence:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot schedule: invalid recurrence."}
 
-        if next_run < now:
-            next_run = now
+        recurrence_cron = str(recurrence.get("cron") or "").strip()
+        if recurrence_cron and not cron_source:
+            cron_source = recurrence_cron
+
+        if cron_source and isinstance(recurrence, dict):
+            recurrence["cron"] = cron_source
 
         normalized_targets = self._normalize_channel_targets(dest, targets)
         defaults = load_default_targets(dest, redis_client)
@@ -745,6 +991,15 @@ class AITasksPlugin(ToolPlugin):
             return {"tool": "ai_tasks", "ok": False, "error": err_text}
 
         reminder_id = str(uuid.uuid4())
+        schedule_payload: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": float(interval),
+            "anchor_ts": float(next_run),
+            "recurrence": dict(recurrence),
+        }
+        if cron_source:
+            schedule_payload["cron"] = cron_source
+
         reminder = {
             "id": reminder_id,
             "created_at": float(now),
@@ -754,23 +1009,15 @@ class AITasksPlugin(ToolPlugin):
             "targets": resolved_targets or {},
             "origin": normalize_origin(origin),
             "meta": meta or {},
-            "schedule": {
-                "next_run_ts": float(next_run),
-                "interval_sec": float(interval),
-                "anchor_ts": float(next_run) if interval > 0 else 0.0,
-            },
+            "schedule": schedule_payload,
         }
-        if isinstance(cron_schedule, dict) and isinstance(cron_schedule.get("recurrence"), dict):
-            reminder["schedule"]["recurrence"] = dict(cron_schedule.get("recurrence") or {})
 
         redis_client.set(f"{REMINDER_KEY_PREFIX}{reminder_id}", json.dumps(reminder))
         redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: float(next_run)})
 
         human = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M:%S")
-        if interval > 0:
-            result_text = f"Recurring AI task scheduled every {int(interval)}s (next at {human})."
-        else:
-            result_text = f"AI task scheduled for {human}."
+        cadence = self._recurrence_label(recurrence)
+        result_text = f"Recurring AI task scheduled {cadence} (next at {human})."
 
         return {
             "tool": "ai_tasks",
