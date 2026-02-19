@@ -53,46 +53,36 @@ _WEEKDAY_TOKEN_MAP = {
 
 class AITasksPlugin(ToolPlugin):
     name = "ai_tasks"
-    required_args = ["task_prompt"]
+    required_args = []
     optional_args = [
-        "task_prompt",
         "request",
+        "task_prompt",
+        "when",
+        "cron",
         "title",
         "platform",
-        "targets",
         "target",
-        "destination",
-        "to",
-        "cron",
-        "when_ts",
-        "when",
-        "in_seconds",
-        "in_minutes",
-        "in_hours",
+        "targets",
+        "channel",
+        "room",
+        "chat_id",
         "priority",
         "tags",
         "ttl_sec",
         "origin",
-        "channel_id",
-        "channel",
-        "guild_id",
-        "room",
-        "room_id",
-        "device_service",
-        "chat_id",
     ]
-    version = "1.2.1"
-    usage = '{"function":"ai_tasks","arguments":{"task_prompt":"Required instructions for what to do when the task runs (do not pre-generate final content now)","title":"Optional short title","platform":"discord|irc|matrix|homeassistant|ntfy|telegram (optional; defaults to origin)","targets":{"channel":"discord/irc channel","room_id":"matrix room id/alias","chat_id":"telegram chat id","device_service":"home assistant notify service"},"channel":"optional shortcut for discord/irc channel","room":"optional shortcut for matrix room (alias for room_id)","chat_id":"optional shortcut for telegram target","cron":"Optional cron schedule in local time (e.g. 0 0 6 * * *).","when":"Natural schedule phrase or cron (e.g. everyday at 6am, every hour, every second, 0 0 6 * * *).","priority":"normal|high","tags":["optional","strings"],"ttl_sec":0}}'
+    version = "1.2.4"
+    usage = '{"function":"ai_tasks","arguments":{"request":"User request in plain language. Example: everyday at 6am turn on living room lights to 50% and send weather forecast."}}'
     description = (
         "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
-        "At run time, AI can answer directly or call one tool before sending the final response."
+        "You can pass just `request`; the plugin derives schedule, action, and destination defaults."
     )
     pretty_name = "AI Tasks"
     when_to_use = "Schedule recurring tasks (everyday, hourly, secondly, weekly, or explicit cron)."
     common_needs = [
-        "task to run",
-        "when to run (natural phrase or cron)",
-        "destination (optional; defaults to current channel/room)",
+        "what the user wants (request/task_prompt)",
+        "when to run (optional; can be inferred from request)",
+        "destination (optional; defaults to current channel/room or platform defaults)",
     ]
     missing_info_prompts = [
         "What should this task do each time it runs? Put that in `task_prompt`.",
@@ -163,6 +153,109 @@ class AITasksPlugin(ToolPlugin):
             f"User originally asked: {raw}\n"
             f"Task to perform now: {text}\n"
         )
+
+    @staticmethod
+    def _clean_task_prompt(task_text: Any) -> str:
+        raw = str(task_text or "").strip()
+        if not raw:
+            return ""
+        cleaned = raw
+        try:
+            from kernel_tools import _ai_tasks_clean_task_prompt
+
+            kernel_cleaned = str(_ai_tasks_clean_task_prompt(raw) or "").strip()
+            if kernel_cleaned:
+                cleaned = kernel_cleaned
+        except Exception:
+            cleaned = raw
+
+        # Plugin-local cleanup for request-only calls where schedule phrasing may
+        # still be present at the front of the sentence.
+        cleaned = re.sub(r"^\s*(?:hey\s+)?tater[\s,:-]+", "", cleaned, flags=re.IGNORECASE).strip()
+        schedule_prefixes = (
+            r"^\s*(?:every|each)\s+(?:second|minute|hour)\b\s*(?:,|:|-)?\s*",
+            r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+            r"^\s*(?:at|@)\s*\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
+        )
+        for pattern in schedule_prefixes:
+            candidate = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+            if candidate:
+                cleaned = candidate
+        cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+        return cleaned or raw
+
+    @staticmethod
+    def _default_title(
+        *,
+        task_prompt: Any,
+        recurrence: Dict[str, Any] | None,
+        interval: float,
+        request_text: Any = "",
+    ) -> str:
+        seed = str(task_prompt or "").strip() or str(request_text or "").strip()
+        try:
+            from kernel_tools import _ai_tasks_default_title
+
+            inferred = str(_ai_tasks_default_title(seed, recurrence or {}, float(interval or 0.0)) or "").strip()
+            if inferred:
+                return inferred
+        except Exception:
+            pass
+
+        fallback = re.sub(r"\s+", " ", seed).strip(" .")
+        if fallback:
+            if len(fallback) > 80:
+                fallback = fallback[:77].rstrip() + "..."
+            return fallback
+        return "Scheduled AI task"
+
+    @staticmethod
+    def _infer_platform_from_text(raw_text: Any) -> str:
+        text = " ".join(str(raw_text or "").strip().lower().split())
+        if not text:
+            return ""
+        candidates = (
+            ("homeassistant", r"\bhome\s*assistant\b|\bhomeassistant\b"),
+            ("telegram", r"\btelegram\b"),
+            ("discord", r"\bdiscord\b"),
+            ("matrix", r"\bmatrix\b"),
+            ("irc", r"\birc\b"),
+            ("ntfy", r"\bntfy\b"),
+        )
+        for platform_key, pattern in candidates:
+            if re.search(pattern, text):
+                return platform_key
+        return ""
+
+    @staticmethod
+    def _extract_request_target_hint(raw_text: Any) -> str:
+        text = str(raw_text or "").strip()
+        if not text:
+            return ""
+
+        explicit = re.search(
+            r"\b(?:in|to|on)\s+(?:the\s+)?(?:(?:channel|room|chat)\s+)?(#[A-Za-z0-9][A-Za-z0-9._:-]*|![^\s]+|@[A-Za-z0-9_]+)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if explicit:
+            return str(explicit.group(1) or "").strip()
+
+        matrix_ref = re.search(r"([!#][A-Za-z0-9._:-]+:[A-Za-z0-9._:-]+)", text)
+        if matrix_ref:
+            return str(matrix_ref.group(1) or "").strip()
+
+        named = re.search(
+            r"(?:^|\b(?:in|to|on)\s+)(?:the\s+)?(?:channel|room|chat)\s+([#@!]?[A-Za-z0-9][A-Za-z0-9._:-]*)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if named:
+            return str(named.group(1) or "").strip()
+        return ""
 
     @staticmethod
     def _normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -308,9 +401,10 @@ class AITasksPlugin(ToolPlugin):
             if origin_request_text:
                 request_text = origin_request_text or request_text
 
-        task_prompt = args.get("task_prompt")
-        # If task_prompt is missing, synthesize from request context.
-        if task_prompt is None:
+        task_prompt = self._clean_task_prompt(args.get("task_prompt"))
+        if not task_prompt and request_text:
+            task_prompt = self._clean_task_prompt(request_text)
+        if not task_prompt and request_text:
             task_prompt = self._build_runtime_prompt(request_text)
 
         targets = self._coerce_targets(args.get("targets"))
@@ -321,6 +415,11 @@ class AITasksPlugin(ToolPlugin):
             value = args.get(key)
             if value and key not in targets:
                 targets[key] = value
+
+        if request_text and not targets:
+            hint = self._extract_request_target_hint(request_text)
+            if hint:
+                targets = self._merge_target_aliases(targets, hint)
 
         # "current"/"here"/"this channel" should mean "use origin context", not a literal destination.
         for key in ("channel", "channel_id", "room", "room_id", "chat_id", "target", "destination", "to"):
@@ -346,6 +445,7 @@ class AITasksPlugin(ToolPlugin):
             when_ts,
             when_txt,
             origin,
+            request_text,
             meta,
         )
 
@@ -854,6 +954,7 @@ class AITasksPlugin(ToolPlugin):
             when_ts,
             when_txt,
             origin,
+            request_text,
             meta,
         ) = self._extract_args(args)
 
@@ -863,6 +964,10 @@ class AITasksPlugin(ToolPlugin):
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
 
         dest = normalize_platform(platform)
+        if not dest and request_text:
+            inferred_dest = normalize_platform(self._infer_platform_from_text(request_text))
+            if inferred_dest in ALLOWED_PLATFORMS:
+                dest = inferred_dest
         if not dest:
             if isinstance(origin, dict):
                 origin_platform = normalize_platform(origin.get("platform"))
@@ -964,6 +1069,14 @@ class AITasksPlugin(ToolPlugin):
         interval = float(schedule_result.get("interval_sec") or 0.0)
         if next_run <= 0 or not recurrence:
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot schedule: invalid recurrence."}
+
+        if not str(title or "").strip():
+            title = self._default_title(
+                task_prompt=task_prompt,
+                recurrence=recurrence if isinstance(recurrence, dict) else {},
+                interval=interval,
+                request_text=request_text,
+            )
 
         recurrence_cron = str(recurrence.get("cron") or "").strip()
         if recurrence_cron and not cron_source:
