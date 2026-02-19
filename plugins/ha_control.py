@@ -62,25 +62,77 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.5"
+    version = "1.1.6"
     min_tater_version = "50"
     pretty_name = "Home Assistant Control"
 
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"ha_control","arguments":{"query":"Single Home Assistant command in natural language. Always pass the FULL original user request text here. If the user asked multiple things, include only the Home Assistant part and resolve pronouns to explicit devices or areas."}}'
+    usage = '{"function":"ha_control","arguments":{"query":"Home Assistant request in natural language (single or multiple actions). Rewording for clarity is allowed, but preserve the same intent, targets, and constraints."}}'
 
     description = (
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
         "remotes for TVs/streaming devices, temperatures, and sensors."
     )
     plugin_dec = "Control Home Assistant devices."
-    when_to_use = "Use to control or query Home Assistant devices based on a single natural-language command."
+    when_to_use = "Use to control or query Home Assistant devices from natural-language commands, including multi-action requests."
     common_needs = ["device/area and action (e.g., \"office lights\" + \"turn off\")"]
     required_args = []
     optional_args = []
     missing_info_prompts = []
+    _MULTI_ACTION_MAX_COMMANDS = 6
+    _MULTI_ACTION_VERBS = (
+        "turn on",
+        "turn off",
+        "open",
+        "close",
+        "lock",
+        "unlock",
+        "set",
+        "dim",
+        "brighten",
+        "check",
+        "get",
+        "show",
+        "tell",
+        "start",
+        "stop",
+        "pause",
+        "play",
+        "mute",
+        "unmute",
+        "enable",
+        "disable",
+    )
+    _MULTI_ACTION_DOMAIN_SUFFIXES = (
+        "garage door",
+        "front door",
+        "back door",
+        "lights",
+        "light",
+        "lamps",
+        "lamp",
+        "bulbs",
+        "bulb",
+        "switches",
+        "switch",
+        "fans",
+        "fan",
+        "doors",
+        "door",
+        "locks",
+        "lock",
+        "covers",
+        "cover",
+        "blinds",
+        "blind",
+        "shades",
+        "shade",
+        "thermostats",
+        "thermostat",
+        "garage",
+    )
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re accessing Home Assistant devices now! "
@@ -207,6 +259,265 @@ class HAControlPlugin(ToolPlugin):
     def _contains_any(text: str, words: List[str]) -> bool:
         t = (text or "").lower()
         return any(w in t for w in words)
+
+    @staticmethod
+    def _clean_command_text(text: str) -> str:
+        compact = " ".join(str(text or "").strip().split())
+        return compact.strip(" ,.;")
+
+    def _multi_action_verb_pattern(self) -> str:
+        escaped = [re.escape(v) for v in sorted(self._MULTI_ACTION_VERBS, key=len, reverse=True)]
+        return "|".join(escaped)
+
+    def _trailing_domain_suffix(self, phrase: str) -> str:
+        cleaned = self._clean_command_text(phrase).lower()
+        if not cleaned:
+            return ""
+        for suffix in sorted(self._MULTI_ACTION_DOMAIN_SUFFIXES, key=len, reverse=True):
+            if cleaned.endswith(suffix):
+                return suffix
+        return ""
+
+    def _split_shared_action_objects(self, query: str) -> List[str]:
+        cleaned = self._clean_command_text(query)
+        if not cleaned or " and " not in cleaned.lower():
+            return [cleaned] if cleaned else []
+
+        verb_pattern = self._multi_action_verb_pattern()
+        match = re.match(rf"^(?P<action>{verb_pattern})\s+(?P<body>.+)$", cleaned, flags=re.IGNORECASE)
+        if not match:
+            return [cleaned]
+
+        action = self._clean_command_text(match.group("action"))
+        body = self._clean_command_text(match.group("body"))
+        if not body:
+            return [cleaned]
+
+        # If the right-hand side starts with another explicit action, this is not a shared-action list.
+        if re.search(rf"\band\s+(?:{verb_pattern})\b", body, flags=re.IGNORECASE):
+            return [cleaned]
+
+        left_raw, right_raw = body.split(" and ", 1)
+        left = self._clean_command_text(left_raw)
+        right = self._clean_command_text(right_raw)
+        if not left or not right:
+            return [cleaned]
+
+        left_suffix = self._trailing_domain_suffix(left)
+        right_suffix = self._trailing_domain_suffix(right)
+        if left_suffix and not right_suffix:
+            right = self._clean_command_text(f"{right} {left_suffix}")
+        elif right_suffix and not left_suffix:
+            left = self._clean_command_text(f"{left} {right_suffix}")
+
+        expanded = [
+            self._clean_command_text(f"{action} {left}"),
+            self._clean_command_text(f"{action} {right}"),
+        ]
+        return [cmd for cmd in expanded if cmd]
+
+    def _fallback_split_multi_query(self, query: str) -> List[str]:
+        cleaned = self._clean_command_text(query)
+        if not cleaned:
+            return []
+
+        verb_pattern = self._multi_action_verb_pattern()
+        parts: List[str] = []
+        primary_segments = re.split(r"\s*(?:;|(?:,\s*)?\b(?:and then|then|also|plus)\b)\s*", cleaned, flags=re.IGNORECASE)
+        for segment in primary_segments:
+            chunk = self._clean_command_text(segment)
+            if not chunk:
+                continue
+            split_chunk = re.split(
+                rf"\s+\band\b\s+(?=(?:{verb_pattern})\b)",
+                chunk,
+                flags=re.IGNORECASE,
+            )
+            for item in split_chunk:
+                line = self._clean_command_text(item)
+                if not line:
+                    continue
+                expanded = self._split_shared_action_objects(line)
+                if expanded:
+                    parts.extend(expanded)
+                else:
+                    parts.append(line)
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for item in parts:
+            text = self._clean_command_text(item)
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(text)
+            if len(deduped) >= self._MULTI_ACTION_MAX_COMMANDS:
+                break
+
+        return deduped or [cleaned]
+
+    def _looks_like_multi_action_query(self, query: str) -> bool:
+        cleaned = self._clean_command_text(query).lower()
+        if not cleaned:
+            return False
+        if ";" in cleaned:
+            return True
+        if re.search(r"\b(and then|then|also|plus)\b", cleaned):
+            return True
+        if not re.search(r"\band\b", cleaned):
+            return False
+        if re.search(rf"\band\s+(?:{self._multi_action_verb_pattern()})\b", cleaned, flags=re.IGNORECASE):
+            return True
+        shared = self._split_shared_action_objects(cleaned)
+        if len(shared) > 1:
+            return True
+        return False
+
+    async def _split_query_into_commands(self, query: str, llm_client) -> List[str]:
+        cleaned = self._clean_command_text(query)
+        if not cleaned:
+            return []
+        if not self._looks_like_multi_action_query(cleaned):
+            return [cleaned]
+
+        fallback = self._fallback_split_multi_query(cleaned)
+        if not llm_client:
+            return fallback
+
+        prompt = (
+            "Split the Home Assistant request into atomic commands.\n"
+            "Return strict JSON only: {\"commands\":[\"...\"]}\n"
+            "Rules:\n"
+            "- Keep only Home Assistant actions.\n"
+            "- Expand shared action lists (example: 'turn on office and kitchen lights' -> two commands).\n"
+            "- Preserve original intent and target nouns.\n"
+            "- Do not invent devices or rooms.\n"
+            f"- Return 1 to {self._MULTI_ACTION_MAX_COMMANDS} commands.\n"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": cleaned},
+                ]
+            )
+            content = (resp.get("message", {}) or {}).get("content", "").strip()
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
+            parsed = _json.loads(content)
+            items = parsed.get("commands") if isinstance(parsed, dict) else None
+            if isinstance(items, list):
+                out: List[str] = []
+                seen: set[str] = set()
+                for item in items:
+                    text = self._clean_command_text(item)
+                    if not text:
+                        continue
+                    key = text.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(text)
+                    if len(out) >= self._MULTI_ACTION_MAX_COMMANDS:
+                        break
+                if len(out) >= 2:
+                    return out
+        except Exception:
+            pass
+
+        return fallback
+
+    @staticmethod
+    def _summary_from_structured_result(result: dict) -> str:
+        if not isinstance(result, dict):
+            return ""
+        summary = str(result.get("summary_for_user") or "").strip()
+        if summary:
+            return summary
+        facts = result.get("facts") if isinstance(result.get("facts"), dict) else {}
+        for key in ("result", "friendly_name", "action"):
+            text = str(facts.get(key) or "").strip()
+            if text:
+                return text
+        err = result.get("error") if isinstance(result.get("error"), dict) else {}
+        return str(err.get("message") or "").strip()
+
+    def _aggregate_multi_results(self, original_query: str, commands: List[str], results: List[dict]) -> dict:
+        success_rows: List[dict] = []
+        failed_rows: List[dict] = []
+        artifacts: List[dict] = []
+        combined_needs: List[str] = []
+        failure_diag: dict = {}
+        for index, command in enumerate(commands):
+            result = results[index] if index < len(results) and isinstance(results[index], dict) else {}
+            summary = self._summary_from_structured_result(result) or "Completed."
+            if bool(result.get("ok")):
+                success_rows.append({"command": command, "summary": summary})
+                raw_artifacts = result.get("artifacts")
+                if isinstance(raw_artifacts, list):
+                    for item in raw_artifacts:
+                        if isinstance(item, dict):
+                            artifacts.append(item)
+            else:
+                error_obj = result.get("error") if isinstance(result.get("error"), dict) else {}
+                error_message = str(error_obj.get("message") or summary or "Failed.").strip()
+                failed_rows.append({"command": command, "message": error_message})
+                diagnosis = result.get("diagnosis") if isinstance(result.get("diagnosis"), dict) else {}
+                if diagnosis:
+                    failure_diag = combine_diagnosis(failure_diag, diagnosis)
+                needs = result.get("needs")
+                if isinstance(needs, list):
+                    for item in needs:
+                        line = str(item or "").strip()
+                        if line and line not in combined_needs:
+                            combined_needs.append(line)
+
+        if failed_rows and not success_rows:
+            failed_text = "; ".join(f"{row['command']}: {row['message']}" for row in failed_rows[:3])
+            return action_failure(
+                code="ha_multi_failed",
+                message=failed_text or "I couldn't complete those Home Assistant actions.",
+                diagnosis=failure_diag,
+                needs=combined_needs[:4],
+                say_hint="Explain that the grouped Home Assistant actions failed and ask only for the missing details needed to retry.",
+            )
+
+        success_text = "; ".join(f"{row['command']}: {row['summary']}" for row in success_rows[:4])
+        failure_text = "; ".join(f"{row['command']}: {row['message']}" for row in failed_rows[:3])
+        summary = f"Completed {len(success_rows)} of {len(commands)} Home Assistant actions."
+        if failure_text:
+            summary = f"{summary} Failed: {failure_text}"
+
+        facts = {
+            "query": original_query,
+            "requested_count": len(commands),
+            "completed_count": len(success_rows),
+            "failed_count": len(failed_rows),
+            "completed_commands": [row["command"] for row in success_rows],
+            "failed_commands": [row["command"] for row in failed_rows],
+            "results": success_text,
+        }
+        if failure_text:
+            facts["failed_results"] = failure_text
+
+        followups = (
+            ["Want me to retry the failed Home Assistant actions?"]
+            if failed_rows
+            else ["Want me to adjust anything else in Home Assistant?"]
+        )
+
+        return action_success(
+            facts=facts,
+            summary_for_user=summary,
+            say_hint=(
+                "Summarize each completed Home Assistant action. "
+                "If any actions failed, mention exactly which ones failed and why using only returned facts."
+            ),
+            suggested_followups=followups,
+            artifacts=artifacts[:12],
+        )
 
     # ---- CRITICAL FIX: hard guard so "lights to blue" never routes to thermostat temperature ----
     def _is_light_color_command(self, text: str) -> bool:
@@ -1165,10 +1476,28 @@ class HAControlPlugin(ToolPlugin):
     async def _handle_structured(self, args, llm_client):
         args = args or {}
         query = (args.get("query") or "").strip()
-        out = await self._handle(args, llm_client)
-        if isinstance(out, dict) and "ok" in out:
-            return out
-        return self._structured_from_text(str(out), query, {"query": query})
+        commands = await self._split_query_into_commands(query, llm_client)
+        if len(commands) <= 1:
+            out = await self._handle(args, llm_client)
+            if isinstance(out, dict) and "ok" in out:
+                return out
+            return self._structured_from_text(str(out), query, {"query": query})
+
+        structured_results: List[dict] = []
+        base_args = dict(args)
+        for key in ("intent", "action", "domain_hint", "desired", "scope", "entity_id"):
+            base_args.pop(key, None)
+
+        for command in commands:
+            cmd_args = dict(base_args)
+            cmd_args["query"] = command
+            out = await self._handle(cmd_args, llm_client)
+            if isinstance(out, dict) and "ok" in out:
+                structured_results.append(out)
+            else:
+                structured_results.append(self._structured_from_text(str(out), command, {"query": command}))
+
+        return self._aggregate_multi_results(query, commands, structured_results)
 
     # ----------------------------
     # Handlers
