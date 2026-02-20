@@ -71,7 +71,7 @@ class AITasksPlugin(ToolPlugin):
         "ttl_sec",
         "origin",
     ]
-    version = "1.2.4"
+    version = "1.2.5"
     usage = '{"function":"ai_tasks","arguments":{"request":"User request in plain language. Example: everyday at 6am turn on living room lights to 50% and send weather forecast."}}'
     description = (
         "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
@@ -105,6 +105,22 @@ class AITasksPlugin(ToolPlugin):
         "same channel",
         "current chat",
         "current channel",
+    }
+    _TITLE_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
     }
 
     # ----------------------------
@@ -187,8 +203,142 @@ class AITasksPlugin(ToolPlugin):
         cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
         return cleaned or raw
 
-    @staticmethod
+    @classmethod
+    def _polish_task_prompt(cls, task_text: Any, request_text: Any = "") -> str:
+        seed = str(task_text or "").strip() or str(request_text or "").strip()
+        if not seed:
+            return ""
+
+        text = cls._clean_task_prompt(seed) or seed
+        text = re.sub(r"^\s*(?:hey\s+)?tater[\s,:-]+", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(
+            r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\s+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"^\s*(?:please\s+)?i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r"^\s*(?:please\s+)?(?:let(?:'|’)s|let us)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\btell me\b", "tell", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bgive me\b", "give", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bsend me\b", "send", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bshow me\b", "show", text, flags=re.IGNORECASE)
+        text = re.sub(r"\band also\b", "and", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ,.-")
+        if not text:
+            return ""
+        text = text[0].upper() + text[1:] if text and text[0].islower() else text
+        if text and not re.search(r"[.!?]$", text):
+            text += "."
+        return text
+
+    @classmethod
+    def _title_case(cls, text: str) -> str:
+        words = [w for w in re.split(r"\s+", str(text or "").strip()) if w]
+        if not words:
+            return ""
+        out: list[str] = []
+        for idx, word in enumerate(words):
+            lead = re.match(r"^[^A-Za-z0-9']*", word)
+            trail = re.search(r"[^A-Za-z0-9']*$", word)
+            lead_txt = lead.group(0) if lead else ""
+            trail_txt = trail.group(0) if trail else ""
+            core = word[len(lead_txt) : len(word) - len(trail_txt) if trail_txt else len(word)]
+            if not core:
+                out.append(word)
+                continue
+            lower = core.lower()
+            if idx > 0 and lower in cls._TITLE_STOPWORDS:
+                cooked = lower
+            else:
+                cooked = core[0].upper() + core[1:]
+            out.append(f"{lead_txt}{cooked}{trail_txt}")
+        return " ".join(out).strip()
+
+    @classmethod
+    def _title_cadence_prefix(cls, recurrence: Dict[str, Any] | None, interval: float) -> str:
+        rec = recurrence if isinstance(recurrence, dict) else {}
+        kind = str(rec.get("kind") or "").strip().lower()
+        if kind == "daily_local_time":
+            return "Daily"
+        if kind == "weekly_local_time":
+            return "Weekly"
+        if kind == "cron_simple":
+            hours = rec.get("hours") if isinstance(rec.get("hours"), list) else []
+            minutes = rec.get("minutes") if isinstance(rec.get("minutes"), list) else []
+            seconds = rec.get("seconds") if isinstance(rec.get("seconds"), list) else []
+            weekdays = rec.get("weekdays") if isinstance(rec.get("weekdays"), list) else []
+            if len(hours) == 24 and len(minutes) == 60 and len(seconds) == 60 and not weekdays:
+                return "Secondly"
+            if len(hours) == 24 and len(minutes) == 60 and seconds == [0] and not weekdays:
+                return "Minutely"
+            if len(hours) == 24 and minutes == [0] and seconds == [0] and not weekdays:
+                return "Hourly"
+            if len(hours) == 1 and len(minutes) == 1 and len(seconds) == 1:
+                return "Weekly" if weekdays else "Daily"
+
+        iv = float(interval or 0.0)
+        if iv <= 0:
+            return ""
+        if iv <= 1.5:
+            return "Secondly"
+        if iv <= 60.5:
+            return "Minutely"
+        if iv <= 3600.5:
+            return "Hourly"
+        if iv <= (24 * 3600.5):
+            return "Daily"
+        return "Recurring"
+
+    @classmethod
+    def _smart_title_core(cls, task_prompt: Any, request_text: Any = "") -> str:
+        base = cls._polish_task_prompt(task_prompt, request_text=request_text).strip()
+        if not base:
+            return ""
+        base = re.sub(r"[.!?]+$", "", base).strip()
+        lowered = base.lower()
+
+        if "lights" in lowered and any(token in lowered for token in ("weather", "forecast")):
+            return "Lights + Forecast"
+
+        if any(token in lowered for token in ("weather", "forecast", "rain chance", "rain chances")):
+            return "Weather Forecast"
+
+        if "joke" in lowered:
+            subject = ""
+            m_nemesis = re.search(r"arch\s+nemesis[,:\s]+([A-Za-z0-9'_-]+)", base, flags=re.IGNORECASE)
+            if m_nemesis:
+                subject = str(m_nemesis.group(1) or "").strip()
+            if not subject:
+                m_about = re.search(r"\b(?:about|on)\s+(.+)$", base, flags=re.IGNORECASE)
+                if m_about:
+                    phrase = str(m_about.group(1) or "")
+                    phrase = re.sub(r"[^A-Za-z0-9' ]+", " ", phrase)
+                    tokens = [tok for tok in phrase.split() if tok]
+                    if tokens:
+                        subject = tokens[-1]
+            if subject:
+                return f"{cls._title_case(subject)} Joke"
+            return "Joke"
+
+        generic = re.sub(
+            r"^(?:tell|send|post|give|show|check|run|turn on|turn off|turn|set|open|close|lock|unlock|start|stop|notify|remind|fetch|get|play|pause)\s+",
+            "",
+            base,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not generic:
+            generic = base
+        return cls._title_case(generic)
+
+    @classmethod
     def _default_title(
+        cls,
         *,
         task_prompt: Any,
         recurrence: Dict[str, Any] | None,
@@ -196,6 +346,17 @@ class AITasksPlugin(ToolPlugin):
         request_text: Any = "",
     ) -> str:
         seed = str(task_prompt or "").strip() or str(request_text or "").strip()
+        cadence_prefix = cls._title_cadence_prefix(recurrence, interval)
+
+        core = cls._smart_title_core(seed, request_text=request_text)
+        if core:
+            title = core
+            if cadence_prefix and not title.lower().startswith(cadence_prefix.lower() + " "):
+                title = f"{cadence_prefix} {title}".strip()
+            if len(title) > 80:
+                title = title[:77].rstrip() + "..."
+            return title
+
         try:
             from kernel_tools import _ai_tasks_default_title
 
@@ -205,8 +366,10 @@ class AITasksPlugin(ToolPlugin):
         except Exception:
             pass
 
-        fallback = re.sub(r"\s+", " ", seed).strip(" .")
+        fallback = cls._title_case(re.sub(r"\s+", " ", seed).strip(" ."))
         if fallback:
+            if cadence_prefix and not fallback.lower().startswith(cadence_prefix.lower() + " "):
+                fallback = f"{cadence_prefix} {fallback}".strip()
             if len(fallback) > 80:
                 fallback = fallback[:77].rstrip() + "..."
             return fallback
@@ -405,7 +568,8 @@ class AITasksPlugin(ToolPlugin):
         if not task_prompt and request_text:
             task_prompt = self._clean_task_prompt(request_text)
         if not task_prompt and request_text:
-            task_prompt = self._build_runtime_prompt(request_text)
+            task_prompt = str(request_text).strip()
+        task_prompt = self._polish_task_prompt(task_prompt, request_text=request_text)
 
         targets = self._coerce_targets(args.get("targets"))
         for alias_key in ("target", "destination", "to"):
