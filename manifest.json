@@ -4,7 +4,7 @@
     {
       "id": "ai_tasks",
       "name": "AI Tasks",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "min_tater_version": "0.0.0",
       "description": "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. You can pass just `request`; the plugin derives schedule, action, and destination defaults.",
       "platforms": [
@@ -19,7 +19,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "762b986ffa884fbd0191d326a7768480b5cb0195569f95e4af4321b44c8fd8a9"
+      "sha256": "d40cd063566b928dd3925671fa448a4d44301285f56b0a07f7043d77a4810239"
     },
     {
       "id": "automatic_plugin",
