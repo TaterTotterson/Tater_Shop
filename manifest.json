@@ -415,7 +415,7 @@
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "50",
       "description": "Fetch details for a specific title from Overseerr.",
       "platforms": [
@@ -431,7 +431,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "plugins/overseerr_details.py",
-      "sha256": "820c136a3ffbb1560178b623902e604ddf52e87d3a341452777a7895451bc52c"
+      "sha256": "6ffb7e6bf1fd102436a7b60573cb3137b5999ae767547386ef0b24be9b44648a"
     },
     {
       "id": "overseerr_request",
