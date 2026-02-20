@@ -4,6 +4,7 @@ import asyncio
 import logging
 import requests
 import re
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
@@ -18,7 +19,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolPlugin):
     name = "overseerr_details"
     plugin_name = "Overseerr Details"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "50"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -71,17 +72,24 @@ class OverseerrDetailsPlugin(ToolPlugin):
         if not api_key:
             return {"error": "Overseerr is not configured. Set OVERSEERR_API_KEY in plugin settings."}
 
-        url = f"{base}/api/v1/search"
+        raw_title = re.sub(r"\s+", " ", str(title or "").strip())
+        if not raw_title:
+            return {"error": "No title provided for search."}
+
+        # Overseerr can return HTTP 400 on unescaped search strings; always encode.
+        encoded_query = quote(raw_title, safe="")
+        url = f"{base}/api/v1/search?query={encoded_query}"
         headers = {"X-Api-Key": api_key, "Accept": "application/json"}
 
-        raw_title = (title or "").strip()
-
         try:
-            resp = requests.get(url, params={"query": raw_title, "page": 1}, headers=headers, timeout=12)
+            resp = requests.get(url, headers=headers, timeout=12)
             if resp.status_code != 200:
                 logger.error(f"[Overseerr search] HTTP {resp.status_code} :: {resp.text}")
                 return {"error": f"Overseerr returned HTTP {resp.status_code} for search."}
-            return resp.json() or {}
+            payload = resp.json() or {}
+            if isinstance(payload, dict):
+                return {"results": payload.get("results") or []}
+            return {"results": []}
         except Exception as e:
             logger.exception("[Overseerr search error] %s", e)
             return {"error": f"Failed to search Overseerr: {e}"}
