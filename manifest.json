@@ -647,9 +647,9 @@
     {
       "id": "unifi_network",
       "name": "UniFi Network",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "50",
-      "description": "Fetch UniFi Network sites/clients/devices via the official API and let the LLM answer questions from computed facts + compact lists.",
+      "description": "Fetch UniFi Network sites/clients/devices via the official API and answer network-health questions.",
       "platforms": [
         "webui",
         "homeassistant",
@@ -664,7 +664,7 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "9a6cff38b18bd03b3f36caf0055c54a4a6f760211c080a49b01380f3fb9a8ce0"
+      "sha256": "7648fc313912aecb944daeb760719432822ab181c28497784792d835927befea"
     },
     {
       "id": "unifi_protect",
