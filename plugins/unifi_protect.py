@@ -355,7 +355,7 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "50"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
@@ -365,13 +365,18 @@ class UniFiProtectPlugin(ToolPlugin):
     usage = '{"function":"unifi_protect","arguments":{"query":"User request about UniFi Protect (sensors status, list cameras, or describe a camera/area)."}}'
 
     description = (
-        "Query UniFi Protect sensors (door/motion/temp/humidity/battery) and cameras "
-        "(list + snapshot vision summaries). Uses the UniFi Protect Integration API via your console proxy."
+        "Query UniFi Protect sensors and camera snapshots (with vision summaries) via the UniFi Protect Integration API. "
+        "Use this for visual scene questions like who/what is in the yard, driveway, porch, or garage."
     )
-    plugin_dec = "Get UniFi Protect sensor status and camera snapshot vision summaries."
+    plugin_dec = (
+        "Get UniFi Protect camera snapshot descriptions and sensor status. "
+        "Preferred for 'what do you see' or 'what is happening' camera questions."
+    )
     when_to_use = (
-        "Use for UniFi Protect camera snapshots or descriptions (e.g., 'what does the front yard look like', "
-        "'what's happening in the back yard', 'describe the porch/driveway/garage'), plus sensor status or camera lists."
+        "Use for camera/scene questions and snapshot descriptions (for example: "
+        "'what are my dogs doing in the backyard', 'what does the driveway look like', "
+        "'describe the porch camera'), plus Protect sensor status and camera lists. "
+        "If a request is about viewing/describing a scene, prefer this over unifi_network."
     )
     common_needs = ["camera or area name (optional if already in the request)"]
     required_args = []
