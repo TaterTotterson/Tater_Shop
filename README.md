@@ -45,7 +45,7 @@
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, discord, irc, matrix, telegram |
 | `unifi_network` | Fetch UniFi Network sites/clients/devices via the official API and answer network-health questions. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `unifi_protect` | Get UniFi Protect sensor status and camera snapshot vision summaries. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_protect` | Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui, discord, telegram, matrix, irc |
 | `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, irc, homeassistant, matrix, homekit, xbmc, telegram |
 | `web_summary` | Summarize the main points of a webpage from its URL. | discord, webui, irc, matrix, telegram |

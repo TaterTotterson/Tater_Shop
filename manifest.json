@@ -669,9 +669,9 @@
     {
       "id": "unifi_protect",
       "name": "UniFi Protect",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "50",
-      "description": "Get UniFi Protect sensor status and camera snapshot vision summaries.",
+      "description": "Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions.",
       "platforms": [
         "webui",
         "homeassistant",
@@ -686,7 +686,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "3b90ccbdd5818b439a9ff0fb8ad915d656666fce7be0cf5d61e00329a98b23d5"
+      "sha256": "9eb5579765d827261f497b47bb3f60d02dc22dcdb01b01dff572ccb357f726fa"
     },
     {
       "id": "voicepe_remote_timer",
