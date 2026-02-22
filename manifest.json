@@ -178,8 +178,8 @@
     {
       "id": "discord_admin",
       "name": "Discord Admin",
-      "version": "1.0.6",
-      "min_tater_version": "58.3",
+      "version": "1.0.8",
+      "min_tater_version": "59",
       "description": "AI-driven Discord server administration and response-channel control.",
       "platforms": [
         "discord"
@@ -188,7 +188,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "a929a7ba8268693da45b5cba97aaeafe360d64e890057e634892556898c1f376"
+      "sha256": "5d5335a09c1a4f705e045edd69529645f03e8b0dabbb26bb327d39d72a679209"
     },
     {
       "id": "doorbell_alert",
@@ -301,8 +301,8 @@
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.1.6",
-      "min_tater_version": "50",
+      "version": "1.1.8",
+      "min_tater_version": "59",
       "description": "Control Home Assistant devices.",
       "platforms": [
         "homeassistant",
@@ -318,7 +318,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "50b40bf010bbb3659169192f1d93719f603a72e39739cd05e65dee0cc3376ac0"
+      "sha256": "ff7a9050419aba6ed14611c3c61950a1ff6de09787c06428d57bd588b91ae2bf"
     },
     {
       "id": "image_describe",
@@ -357,8 +357,8 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.4",
-      "min_tater_version": "50",
+      "version": "1.1.5",
+      "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
         "discord",
@@ -373,7 +373,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "153e6a27c7fd82abf23f3db0c3e53fff20d41b863e23431138897cb8b9a53643"
+      "sha256": "5be73ba8af19ef4b2b90367db0c0c9cabb25283c1a9a6e5d099a57b3be41371e"
     },
     {
       "id": "music_assistant",
@@ -743,8 +743,8 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.0",
-      "min_tater_version": "50",
+      "version": "1.1.1",
+      "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "platforms": [
         "discord",
@@ -760,7 +760,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "cbf8b9439974dcc2aa5706fb3dff78152f5cfe3dfbd693cc9fae330ac324efa1"
+      "sha256": "372199de2656e1fb724187dc948f866dd06031190a5d4eeef8a3aa2ed67d863c"
     },
     {
       "id": "web_summary",
