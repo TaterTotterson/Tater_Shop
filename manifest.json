@@ -743,7 +743,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "platforms": [
@@ -760,7 +760,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "372199de2656e1fb724187dc948f866dd06031190a5d4eeef8a3aa2ed67d863c"
+      "sha256": "399c9aaca5f9815b7dbf34728210c518b035642bbef6c5b7a39d79b8e6e650d1"
     },
     {
       "id": "web_summary",
