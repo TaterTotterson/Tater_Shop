@@ -36,8 +36,24 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.1.0"
-    min_tater_version = "50"
+    version = "1.1.1"
+    min_tater_version = "59"
+    argument_mode = "raw_user_request"
+    raw_user_arg = "request"
+    raw_user_policy = "verbatim"
+    routing_keywords = [
+        "weather",
+        "forecast",
+        "temperature",
+        "temp",
+        "humidity",
+        "wind",
+        "rain",
+        "snow",
+        "storm",
+        "aqi",
+        "pollen",
+    ]
     description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com; always uses the default location if none is specified."
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
     when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."

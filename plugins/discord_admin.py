@@ -145,27 +145,53 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.6"
-    min_tater_version = "58.3"
+    version = "1.0.8"
+    min_tater_version = "59"
     platforms = ["discord"]
+    argument_mode = "raw_user_request"
+    raw_user_arg = "request"
+    raw_user_policy = "verbatim"
+    routing_keywords = [
+        "discord",
+        "server",
+        "guild",
+        "channel",
+        "channels",
+        "category",
+        "categories",
+        "role",
+        "roles",
+        "permission",
+        "permissions",
+        "response channel",
+        "always talk",
+        "ping only",
+        "admin",
+    ]
 
     usage = (
-        '{"function":"discord_admin","arguments":{"request":"One Discord admin request in natural language '
-        '(for example: setup this discord for gaming, always talk in this room, only respond to ping here)."}}'
+        '{"function":"discord_admin","arguments":{"request":"Full user\'s request text in natural language '
+        '(pass exactly what the user said; for example: setup this discord for gaming, always talk in this room, '
+        'only respond to ping here)."}}'
     )
     description = (
         "Configure Discord servers from natural language: create themed channel/category layouts, create roles, "
         "set channel permission overwrites, optionally update guild icon from an attached image, and manage which "
-        "channels are set to 'always talk here' versus '@ mention only'."
+        "channels are set to 'always talk here' versus '@ mention only'. "
+        "Cerberus should pass the user's full request directly; this plugin infers structure from intent."
     )
     when_to_use = (
         "Use for Discord server administration requests like setting up a themed server, creating rooms/roles, "
-        "editing permissions, setting guild icon, or changing response behavior for the current room."
+        "editing permissions, setting guild icon, or changing response behavior for the current room. "
+        "Pass the full user request text and let the plugin decide the plan."
     )
     plugin_dec = "AI-driven Discord server administration and response-channel control."
     required_args = ["request"]
     optional_args = ["dry_run", "response_channel_action", "theme", "server_name"]
-    common_needs = ["A clear Discord admin request, optionally including a theme (gaming, study, etc.)."]
+    common_needs = [
+        "A single natural-language Discord admin request. Detailed channel/role lists are optional; AI can infer.",
+        "Only ask follow-up when destructive delete-all actions need explicit confirmation.",
+    ]
     missing_info_prompts = []
 
     waiting_prompt_template = (
@@ -326,6 +352,8 @@ class DiscordAdminPlugin(ToolPlugin):
             "or create a themed server layout).\n\n"
             "Rules:\n"
             "- If the request is mainly server setup/theme/roles/channels/permissions, choose none and setup_requested=true.\n"
+            "- Requests like 'setup this discord for us', 'set this server up', 'build our HQ', "
+            "or channel/category create/remove requests are setup_requested=true.\n"
             "- If the user asks to respond to all messages here or make this room a response channel, choose add_current.\n"
             "- If the user asks only respond to ping here, choose remove_current.\n"
             "- Handle misspellings and casual phrasing.\n\n"
@@ -403,17 +431,25 @@ class DiscordAdminPlugin(ToolPlugin):
             '"slowmode_seconds":0,"nsfw":false,'
             '"apply_mode":"create_only|create_or_update",'
             '"permissions":[{"role":"@everyone","allow":["view_channel"],"deny":["send_messages"]}]}]}],\n'
+            '  "delete_channels":[{"ref":"channel ref (name,#name,<#id>,id,current)","kind":"text|voice|any"}],\n'
+            '  "delete_categories":["category refs to delete; name, id, or current"],\n'
             '  "delete_all_channels_except":["channel refs to keep; name, #name, <#id>, or numeric id"],\n'
+            '  "confirm_delete_all_channels":false,\n'
             '  "delete_all_categories_except":["category refs to keep; name, id, or current"],\n'
+            '  "confirm_delete_all_categories":false,\n'
             '  "notes":"short optional notes"\n'
             "}\n"
             "Rules:\n"
             "- Do NOT output boilerplate/default rooms. Generate only changes inferred from the user request.\n"
             "- Choose minimal change set. If no server-structure changes are needed, return empty roles/categories and blank server_name.\n"
+            "- If user asks broad setup ('setup this discord', 'however you think'), provide a concrete plan instead of asking follow-up questions.\n"
             "- Default apply_mode should be create_only. Use create_or_update only when user explicitly asks to modify an existing role/channel/category.\n"
             "- Deletion is allowed only when user explicitly asks to delete/remove/clear channels/categories.\n"
+            "- For targeted removal (e.g., remove voice channel(s), remove #off-topic), use delete_channels/delete_categories.\n"
             "- For delete-all requests, fill delete_all_channels_except with channels to preserve.\n"
+            "- Set confirm_delete_all_channels=true ONLY when user explicitly requested deleting almost all channels.\n"
             "- For category deletion requests, fill delete_all_categories_except with categories to preserve.\n"
+            "- Set confirm_delete_all_categories=true ONLY when user explicitly requested deleting almost all categories.\n"
             "- Never include @everyone role deletion or destructive role deletion (roles can only be created/updated).\n"
             f"- Max {MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels per category.\n"
             "- Use channel kind text or voice only.\n"
@@ -507,6 +543,115 @@ class DiscordAdminPlugin(ToolPlugin):
             "delete_all_categories_except_names": sorted(keep_names),
         }
 
+    @staticmethod
+    def _normalize_delete_channel_targets(raw_targets: Any) -> list[Dict[str, Any]]:
+        targets = raw_targets if isinstance(raw_targets, list) else []
+        out: list[Dict[str, Any]] = []
+        seen: set[tuple[int, str, str]] = set()
+        for item in targets:
+            ref_raw: Any = item
+            kind_raw: Any = ""
+            if isinstance(item, dict):
+                ref_raw = item.get("ref")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("channel")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("name")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("id")
+                kind_raw = item.get("kind")
+
+            kind_token = str(kind_raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if kind_token in {"voice", "vc", "voice_channel", "voice_channels"}:
+                kind = "voice"
+            elif kind_token in {"text", "txt", "text_channel", "text_channels"}:
+                kind = "text"
+            else:
+                kind = "any"
+
+            ref = str(ref_raw or "").strip()
+            rid = 0
+            name = ""
+            if ref:
+                lowered = ref.lower()
+                if lowered in {"voice", "all_voice", "allvoice", "voice_channels"}:
+                    kind = "voice"
+                    ref = ""
+                elif lowered in {"text", "all_text", "alltext", "text_channels"}:
+                    kind = "text"
+                    ref = ""
+                elif lowered in {"this", "here", "current", "current_channel", "this_channel"}:
+                    name = "__current__"
+                else:
+                    token = ref
+                    if token.startswith("<#") and token.endswith(">"):
+                        token = token[2:-1].strip()
+                    token = token.lstrip("#").strip()
+                    try:
+                        parsed = int(token)
+                    except Exception:
+                        parsed = 0
+                    if parsed > 0:
+                        rid = parsed
+                    else:
+                        cleaned = str(token or "").strip().lower()
+                        if cleaned:
+                            name = cleaned
+
+            if rid <= 0 and not name and kind == "any":
+                continue
+            key = (rid, name, kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"id": rid, "name": name, "kind": kind})
+        return out
+
+    @staticmethod
+    def _normalize_delete_category_targets(raw_targets: Any) -> list[Dict[str, Any]]:
+        targets = raw_targets if isinstance(raw_targets, list) else []
+        out: list[Dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+        for item in targets:
+            ref_raw: Any = item
+            if isinstance(item, dict):
+                ref_raw = item.get("ref")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("name")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("id")
+                if ref_raw in (None, ""):
+                    ref_raw = item.get("category")
+
+            ref = str(ref_raw or "").strip()
+            rid = 0
+            name = ""
+            if not ref:
+                continue
+            lowered = ref.lower()
+            if lowered in {"this", "here", "current", "current_category", "this_category"}:
+                name = "__current__"
+            else:
+                token = ref.strip()
+                try:
+                    parsed = int(token)
+                except Exception:
+                    parsed = 0
+                if parsed > 0:
+                    rid = parsed
+                else:
+                    cleaned = str(token or "").strip().lower()
+                    if cleaned:
+                        name = cleaned
+            if rid <= 0 and not name:
+                continue
+            key = (rid, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"id": rid, "name": name})
+        return out
+
     def _normalize_plan(self, raw_plan: Dict[str, Any]) -> Dict[str, Any]:
         plan = raw_plan if isinstance(raw_plan, dict) else {}
         response_action = str(plan.get("response_channel_action") or "none").strip().lower()
@@ -589,6 +734,10 @@ class DiscordAdminPlugin(ToolPlugin):
 
         keep_meta = self._normalize_keep_channel_refs(plan.get("delete_all_channels_except"))
         keep_category_meta = self._normalize_keep_category_refs(plan.get("delete_all_categories_except"))
+        delete_channels = self._normalize_delete_channel_targets(plan.get("delete_channels"))
+        delete_categories = self._normalize_delete_category_targets(plan.get("delete_categories"))
+        confirm_delete_all_channels = _coerce_bool(plan.get("confirm_delete_all_channels"), False)
+        confirm_delete_all_categories = _coerce_bool(plan.get("confirm_delete_all_categories"), False)
 
         return {
             "response_channel_action": response_action,
@@ -596,10 +745,14 @@ class DiscordAdminPlugin(ToolPlugin):
             "set_guild_icon_from_attachment": set_guild_icon,
             "roles": roles,
             "categories": categories,
+            "delete_channels": delete_channels,
+            "delete_categories": delete_categories,
             "delete_all_channels_except_ids": keep_meta.get("delete_all_channels_except_ids") or [],
             "delete_all_channels_except_names": keep_meta.get("delete_all_channels_except_names") or [],
+            "confirm_delete_all_channels": confirm_delete_all_channels,
             "delete_all_categories_except_ids": keep_category_meta.get("delete_all_categories_except_ids") or [],
             "delete_all_categories_except_names": keep_category_meta.get("delete_all_categories_except_names") or [],
+            "confirm_delete_all_categories": confirm_delete_all_categories,
             "notes": str(plan.get("notes") or "").strip(),
         }
 
@@ -884,29 +1037,109 @@ class DiscordAdminPlugin(ToolPlugin):
             return True
         return False
 
+    @staticmethod
+    def _channel_kind(channel: Any) -> str:
+        explicit = str(getattr(channel, "kind", "") or "").strip().lower()
+        if explicit in {"voice", "text"}:
+            return explicit
+        if isinstance(channel, discord.VoiceChannel):
+            return "voice"
+        if isinstance(channel, discord.TextChannel):
+            return "text"
+        return "other"
+
+    @classmethod
+    def _channel_matches_delete_target(cls, channel: Any, target: Dict[str, Any], current_channel_id: int) -> bool:
+        target_kind = str(target.get("kind") or "any").strip().lower()
+        channel_kind = cls._channel_kind(channel)
+        if target_kind in {"text", "voice"} and channel_kind != target_kind:
+            return False
+
+        target_id = int(target.get("id") or 0)
+        if target_id > 0:
+            return int(getattr(channel, "id", 0) or 0) == target_id
+
+        target_name = str(target.get("name") or "").strip().lower()
+        if not target_name:
+            return target_kind in {"text", "voice"}
+        if target_name == "__current__":
+            return int(getattr(channel, "id", 0) or 0) == int(current_channel_id or 0)
+
+        channel_name = str(getattr(channel, "name", "") or "").strip().lower()
+        if not channel_name:
+            return False
+        return channel_name == target_name or f"#{channel_name}" == target_name
+
+    @staticmethod
+    def _category_matches_delete_target(category: Any, target: Dict[str, Any], current_category_id: int) -> bool:
+        target_id = int(target.get("id") or 0)
+        if target_id > 0:
+            return int(getattr(category, "id", 0) or 0) == target_id
+
+        target_name = str(target.get("name") or "").strip().lower()
+        if not target_name:
+            return False
+        if target_name == "__current__":
+            return int(getattr(category, "id", 0) or 0) == int(current_category_id or 0)
+        category_name = str(getattr(category, "name", "") or "").strip().lower()
+        return bool(category_name and category_name == target_name)
+
     async def _apply_channel_deletions(self, message, plan: Dict[str, Any], stats: Dict[str, Any]) -> None:
         guild = getattr(message, "guild", None)
         if guild is None:
             return
 
+        delete_targets = list(plan.get("delete_channels") or [])
         plan_keep_ids = {int(x) for x in (plan.get("delete_all_channels_except_ids") or []) if int(x) > 0}
         plan_keep_names = {
             str(x).strip().lower()
             for x in (plan.get("delete_all_channels_except_names") or [])
             if str(x).strip()
         }
-        has_delete_request = bool(plan_keep_ids or plan_keep_names)
-        if not has_delete_request:
+        has_delete_all_request = bool(plan_keep_ids or plan_keep_names)
+        has_target_request = bool(delete_targets)
+        if not has_target_request and not has_delete_all_request:
+            return
+
+        current_channel = getattr(message, "channel", None)
+        current_channel_id = int(getattr(current_channel, "id", 0) or 0)
+        deleted_ids: set[int] = set()
+
+        if has_target_request:
+            for channel in list(getattr(guild, "channels", []) or []):
+                if isinstance(channel, discord.CategoryChannel):
+                    continue
+                if not hasattr(channel, "delete"):
+                    continue
+                cid = int(getattr(channel, "id", 0) or 0)
+                if cid > 0 and cid in deleted_ids:
+                    continue
+                if not any(self._channel_matches_delete_target(channel, target, current_channel_id) for target in delete_targets):
+                    continue
+                try:
+                    label = f"#{getattr(channel, 'name', cid)}"
+                    await channel.delete(reason="Tater Discord admin setup")
+                    stats["deleted_channels"].append(label)
+                    if cid > 0:
+                        deleted_ids.add(cid)
+                except Exception as exc:
+                    stats["warnings"].append(
+                        f"Channel '{getattr(channel, 'name', cid)}' delete skipped: {exc}"
+                    )
+
+        if not has_delete_all_request:
+            return
+        if not _coerce_bool(plan.get("confirm_delete_all_channels"), False):
+            stats["warnings"].append(
+                "Skipped delete-all-channels action because the request was not explicit enough."
+            )
             return
 
         keep_ids = set(plan_keep_ids)
         keep_names = {name for name in plan_keep_names if name != "__current__"}
-
-        current_channel = getattr(message, "channel", None)
         try:
-            current_id = int(getattr(current_channel, "id", 0) or 0)
-            if current_id > 0:
-                keep_ids.add(current_id)
+            if current_channel_id > 0:
+                keep_ids.add(current_channel_id)
         except Exception:
             pass
         parent = getattr(current_channel, "parent", None)
@@ -921,6 +1154,8 @@ class DiscordAdminPlugin(ToolPlugin):
             if isinstance(channel, discord.CategoryChannel):
                 continue
             cid = int(getattr(channel, "id", 0) or 0)
+            if cid > 0 and cid in deleted_ids:
+                continue
             if cid > 0 and cid in keep_ids:
                 continue
             if self._channel_matches_keep_name(channel, keep_names):
@@ -941,6 +1176,7 @@ class DiscordAdminPlugin(ToolPlugin):
         if guild is None:
             return
 
+        delete_targets = list(plan.get("delete_categories") or [])
         plan_keep_ids = {
             int(x)
             for x in (plan.get("delete_all_categories_except_ids") or [])
@@ -951,17 +1187,50 @@ class DiscordAdminPlugin(ToolPlugin):
             for x in (plan.get("delete_all_categories_except_names") or [])
             if str(x).strip()
         }
-        has_delete_request = bool(plan_keep_ids or plan_keep_names)
-        if not has_delete_request:
+        has_delete_all_request = bool(plan_keep_ids or plan_keep_names)
+        has_target_request = bool(delete_targets)
+        if not has_target_request and not has_delete_all_request:
+            return
+
+        current_channel = getattr(message, "channel", None)
+        current_category = getattr(current_channel, "category", None)
+        current_category_id = int(getattr(current_category, "id", 0) or 0)
+        deleted_ids: set[int] = set()
+
+        if has_target_request:
+            for category in list(getattr(guild, "categories", []) or []):
+                if not hasattr(category, "delete"):
+                    continue
+                cid = int(getattr(category, "id", 0) or 0)
+                if cid > 0 and cid in deleted_ids:
+                    continue
+                if not any(
+                    self._category_matches_delete_target(category, target, current_category_id)
+                    for target in delete_targets
+                ):
+                    continue
+                try:
+                    label = str(getattr(category, "name", cid) or cid)
+                    await category.delete(reason="Tater Discord admin setup")
+                    stats["deleted_categories"].append(label)
+                    if cid > 0:
+                        deleted_ids.add(cid)
+                except Exception as exc:
+                    stats["warnings"].append(
+                        f"Category '{getattr(category, 'name', cid)}' delete skipped: {exc}"
+                    )
+
+        if not has_delete_all_request:
+            return
+        if not _coerce_bool(plan.get("confirm_delete_all_categories"), False):
+            stats["warnings"].append(
+                "Skipped delete-all-categories action because the request was not explicit enough."
+            )
             return
 
         keep_ids = set(plan_keep_ids)
         keep_names = {name for name in plan_keep_names if name != "__current__"}
-
-        current_channel = getattr(message, "channel", None)
-        current_category = getattr(current_channel, "category", None)
         try:
-            current_category_id = int(getattr(current_category, "id", 0) or 0)
             if current_category_id > 0:
                 keep_ids.add(current_category_id)
         except Exception:
@@ -971,6 +1240,8 @@ class DiscordAdminPlugin(ToolPlugin):
 
         for category in list(getattr(guild, "categories", []) or []):
             cid = int(getattr(category, "id", 0) or 0)
+            if cid > 0 and cid in deleted_ids:
+                continue
             if cid > 0 and cid in keep_ids:
                 continue
             if self._category_matches_keep_name(category, keep_names):
@@ -1066,6 +1337,10 @@ class DiscordAdminPlugin(ToolPlugin):
         if list(plan.get("roles") or []):
             return True
         if list(plan.get("categories") or []):
+            return True
+        if list(plan.get("delete_channels") or []):
+            return True
+        if list(plan.get("delete_categories") or []):
             return True
         if list(plan.get("delete_all_channels_except_ids") or []):
             return True
@@ -1173,7 +1448,8 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Confirm the response channel mode update in plain language.",
             )
 
-        llm_plan = await self._llm_plan(request_text, message.guild, llm_client) if should_setup else {}
+        should_plan = bool(should_setup or direct_action == "none")
+        llm_plan = await self._llm_plan(request_text, message.guild, llm_client) if should_plan else {}
         plan = self._normalize_plan(llm_plan)
         if direct_action != "none":
             plan["response_channel_action"] = direct_action
@@ -1207,10 +1483,25 @@ class DiscordAdminPlugin(ToolPlugin):
             planned_roles = len(plan.get("roles") or [])
             planned_categories = len(plan.get("categories") or [])
             planned_channels = sum(len(cat.get("channels") or []) for cat in list(plan.get("categories") or []))
+            planned_delete_channels = len(plan.get("delete_channels") or [])
+            planned_delete_categories = len(plan.get("delete_categories") or [])
+            planned_delete_all_channels = bool(
+                (plan.get("delete_all_channels_except_ids") or [])
+                or (plan.get("delete_all_channels_except_names") or [])
+            )
+            planned_delete_all_categories = bool(
+                (plan.get("delete_all_categories_except_ids") or [])
+                or (plan.get("delete_all_categories_except_names") or [])
+            )
             summary = (
                 f"[Dry run] Planned {planned_roles} role(s), {planned_categories} category(ies), "
-                f"and {planned_channels} channel(s)."
+                f"{planned_channels} channel(s), {planned_delete_channels} targeted channel delete(s), "
+                f"and {planned_delete_categories} targeted category delete(s)."
             )
+            if planned_delete_all_channels:
+                summary += " Includes a delete-all-except-channels action."
+            if planned_delete_all_categories:
+                summary += " Includes a delete-all-except-categories action."
             if response_summary:
                 summary = f"{response_summary} {summary}"
             return action_success(
@@ -1220,6 +1511,10 @@ class DiscordAdminPlugin(ToolPlugin):
                     "planned_roles": planned_roles,
                     "planned_categories": planned_categories,
                     "planned_channels": planned_channels,
+                    "planned_delete_channels": planned_delete_channels,
+                    "planned_delete_categories": planned_delete_categories,
+                    "planned_delete_all_channels": planned_delete_all_channels,
+                    "planned_delete_all_categories": planned_delete_all_categories,
                     "response_channel_action": plan.get("response_channel_action"),
                 },
                 data={"plan": plan},

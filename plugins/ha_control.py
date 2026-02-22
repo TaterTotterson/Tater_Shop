@@ -62,21 +62,44 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.6"
-    min_tater_version = "50"
+    version = "1.1.8"
+    min_tater_version = "59"
     pretty_name = "Home Assistant Control"
+    argument_mode = "raw_user_request"
+    raw_user_arg = "query"
+    raw_user_policy = "verbatim"
+    routing_keywords = [
+        "home assistant",
+        "hass",
+        "ha",
+        "light",
+        "lights",
+        "switch",
+        "switches",
+        "thermostat",
+        "temperature",
+        "garage door",
+        "lock",
+        "unlock",
+        "fan",
+        "fans",
+        "cover",
+        "blinds",
+        "scene",
+        "entity",
+    ]
 
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"ha_control","arguments":{"query":"Home Assistant request in natural language (single or multiple actions). Rewording for clarity is allowed, but preserve the same intent, targets, and constraints."}}'
+    usage = '{"function":"ha_control","arguments":{"query":"ONE consolidated Home Assistant request in natural language. Pass the user\'s exact request text in this field (verbatim). Include all Home Assistant actions for this turn in this single query (for example: turn on living room and kitchen lights to 50% and open garage)."}}'
 
     description = (
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
         "remotes for TVs/streaming devices, temperatures, and sensors."
     )
     plugin_dec = "Control Home Assistant devices."
-    when_to_use = "Use to control or query Home Assistant devices from natural-language commands, including multi-action requests."
+    when_to_use = "Use to control or query Home Assistant devices from natural-language commands. Prefer a single consolidated ha_control call per turn, even for multi-action Home Assistant requests."
     common_needs = ["device/area and action (e.g., \"office lights\" + \"turn off\")"]
     required_args = []
     optional_args = []
