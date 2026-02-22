@@ -188,7 +188,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "e739d3b37579d1d4a60c848cbb68b0f518b3b4dc46b6ef9a640b7005387d102e"
+      "sha256": "33869260ac04037c98dbe6039aa4c9b187d5f042ba496679a8c4ec01df3a1986"
     },
     {
       "id": "doorbell_alert",
