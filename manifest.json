@@ -176,6 +176,21 @@
       "sha256": "cdb2bc04ab06eea3471f171e478db52ffe89e4e587c007f6a77820d9bb6818f1"
     },
     {
+      "id": "discord_admin",
+      "name": "Discord Admin",
+      "version": "1.0.0",
+      "min_tater_version": "50",
+      "description": "AI-driven Discord server administration and response-channel control.",
+      "platforms": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "plugins/discord_admin.py",
+      "sha256": "e739d3b37579d1d4a60c848cbb68b0f518b3b4dc46b6ef9a640b7005387d102e"
+    },
+    {
       "id": "doorbell_alert",
       "name": "Doorbell Alert",
       "version": "1.0.4",
