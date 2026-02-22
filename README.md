@@ -22,6 +22,7 @@
 | `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui |
 | `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui |
 | `device_compare` | Compare two devices with spec tables and per-game FPS benchmarks. | discord, webui, matrix, telegram |
+| `discord_admin` | AI-driven Discord server administration and response-channel control. | discord |
 | `events_query` | Answer questions about stored household events by area and timeframe. | webui, homeassistant, homekit, discord, telegram, matrix, irc |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
