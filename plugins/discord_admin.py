@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, Iterable, Optional
 
 import discord
+import redis
 
 from plugin_base import ToolPlugin
 from helpers import extract_json, redis_client
@@ -145,7 +147,7 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     platforms = ["discord"]
     argument_mode = "raw_user_request"
@@ -176,7 +178,7 @@ class DiscordAdminPlugin(ToolPlugin):
     )
     description = (
         "Configure Discord servers from natural language: create themed channel/category layouts, create roles, "
-        "set channel permission overwrites, optionally update guild icon from an attached image, and manage which "
+        "set channel permission overwrites, optionally update guild icon from an attached image or recent media ref, and manage which "
         "channels are set to 'always talk here' versus '@ mention only'. "
         "Cerberus should pass the user's full request directly; this plugin infers structure from intent."
     )
@@ -187,7 +189,7 @@ class DiscordAdminPlugin(ToolPlugin):
     )
     plugin_dec = "AI-driven Discord server administration and response-channel control."
     required_args = ["request"]
-    optional_args = ["dry_run", "response_channel_action", "theme", "server_name"]
+    optional_args = ["dry_run", "response_channel_action", "theme", "server_name", "icon_blob_key"]
     common_needs = [
         "A single natural-language Discord admin request. Detailed channel/role lists are optional; AI can infer.",
         "Only ask follow-up when destructive delete-all actions need explicit confirmation.",
@@ -316,6 +318,73 @@ class DiscordAdminPlugin(ToolPlugin):
                 return value.strip()
         content = getattr(message, "content", "")
         return str(content or "").strip()
+
+    @staticmethod
+    def _blob_client():
+        return redis.Redis(
+            host=os.getenv("REDIS_HOST", "127.0.0.1"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            db=0,
+            decode_responses=False,
+        )
+
+    @classmethod
+    def _read_blob_bytes(cls, blob_key: str) -> bytes:
+        key = str(blob_key or "").strip()
+        if not key:
+            return b""
+        try:
+            raw = cls._blob_client().get(key.encode("utf-8"))
+        except Exception:
+            return b""
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        return b""
+
+    @staticmethod
+    def _media_ref_is_image(ref: Dict[str, Any]) -> bool:
+        kind = str(ref.get("type") or "").strip().lower()
+        if kind == "image":
+            return True
+        mimetype = str(ref.get("mimetype") or "").strip().lower()
+        if mimetype.startswith("image/"):
+            return True
+        name = str(ref.get("name") or "").strip().lower()
+        if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            return True
+        return False
+
+    @classmethod
+    def _extract_icon_bytes_from_args(cls, args: Dict[str, Any], stats: Dict[str, Any]) -> bytes:
+        payload = args if isinstance(args, dict) else {}
+        explicit_blob_key = str(payload.get("icon_blob_key") or "").strip()
+        if explicit_blob_key:
+            raw = cls._read_blob_bytes(explicit_blob_key)
+            if raw:
+                return raw
+            stats["warnings"].append("Icon blob key was provided, but no image data was found for it.")
+
+        refs: list[Dict[str, Any]] = []
+        direct_refs = payload.get("media_refs")
+        if isinstance(direct_refs, list):
+            refs.extend([item for item in direct_refs if isinstance(item, dict)])
+
+        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        origin_refs = origin.get("media_refs") if isinstance(origin, dict) else None
+        if isinstance(origin_refs, list):
+            refs.extend([item for item in origin_refs if isinstance(item, dict)])
+
+        for ref in refs:
+            if not cls._media_ref_is_image(ref):
+                continue
+            blob_key = str(ref.get("blob_key") or "").strip()
+            if not blob_key:
+                continue
+            raw = cls._read_blob_bytes(blob_key)
+            if raw:
+                return raw
+
+        return b""
 
     def _admin_allowed(self, message) -> tuple[bool, str]:
         settings = self._load_discord_settings()
@@ -979,13 +1048,16 @@ class DiscordAdminPlugin(ToolPlugin):
         await existing.edit(**edit_kwargs)
         stats["updated_channels"].append(str(getattr(existing, "name", name)))
 
-    async def _apply_icon_if_requested(self, message, plan: Dict[str, Any], stats: Dict[str, Any]) -> None:
+    async def _apply_icon_if_requested(
+        self,
+        message,
+        args: Dict[str, Any],
+        plan: Dict[str, Any],
+        stats: Dict[str, Any],
+    ) -> None:
         if not plan.get("set_guild_icon_from_attachment"):
             return
         attachments = list(getattr(message, "attachments", []) or [])
-        if not attachments:
-            stats["warnings"].append("Icon update requested, but no image attachment was provided.")
-            return
 
         image_attachment = None
         for attachment in attachments:
@@ -994,13 +1066,15 @@ class DiscordAdminPlugin(ToolPlugin):
             if content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
                 image_attachment = attachment
                 break
-        if image_attachment is None:
-            stats["warnings"].append("Icon update requested, but no image attachment was found.")
-            return
-
-        raw = await image_attachment.read()
+        raw = b""
+        if image_attachment is not None:
+            raw = await image_attachment.read()
         if not raw:
-            stats["warnings"].append("Icon update requested, but the image attachment was empty.")
+            raw = self._extract_icon_bytes_from_args(args, stats)
+        if not raw:
+            stats["warnings"].append(
+                "Icon update requested, but no image attachment or media reference was found."
+            )
             return
         if len(raw) > ICON_MAX_BYTES:
             stats["warnings"].append("Icon update skipped because the attached image is too large.")
@@ -1257,8 +1331,9 @@ class DiscordAdminPlugin(ToolPlugin):
                     f"Category '{getattr(category, 'name', cid)}' delete skipped: {exc}"
                 )
 
-    async def _apply_plan(self, message, plan: Dict[str, Any]) -> Dict[str, Any]:
+    async def _apply_plan(self, message, plan: Dict[str, Any], args: Dict[str, Any] | None = None) -> Dict[str, Any]:
         guild = getattr(message, "guild", None)
+        payload_args = args if isinstance(args, dict) else {}
         stats: Dict[str, Any] = {
             "created_roles": [],
             "updated_roles": [],
@@ -1312,7 +1387,7 @@ class DiscordAdminPlugin(ToolPlugin):
                     stats["warnings"].append(f"Channel '{channel_spec.get('name', 'unknown')}' skipped: {exc}")
 
         try:
-            await self._apply_icon_if_requested(message, plan, stats)
+            await self._apply_icon_if_requested(message, payload_args, plan, stats)
         except Exception as exc:
             stats["warnings"].append(f"Guild icon update skipped: {exc}")
 
@@ -1522,7 +1597,7 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Summarize the dry-run plan and ask if the user wants it applied.",
             )
 
-        stats = await self._apply_plan(message, plan) if self._has_setup_work(plan) else {
+        stats = await self._apply_plan(message, plan, args=args) if self._has_setup_work(plan) else {
             "created_roles": [],
             "updated_roles": [],
             "skipped_existing_roles": [],
