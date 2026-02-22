@@ -145,19 +145,18 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.1"
-    min_tater_version = "58.3"
+    version = "1.0.3"
+    min_tater_version = "50"
     platforms = ["discord"]
 
     usage = (
         '{"function":"discord_admin","arguments":{"request":"One Discord admin request in natural language '
-        '(for example: setup this discord for gaming, always talk in this room, only respond to ping here).",'
-        '"dry_run":false}}'
+        '(for example: setup this discord for gaming, always talk in this room, only respond to ping here)."}}'
     )
     description = (
         "Configure Discord servers from natural language: create themed channel/category layouts, create roles, "
         "set channel permission overwrites, optionally update guild icon from an attached image, and manage which "
-        "channels are always-response channels versus ping-only."
+        "channels are set to 'always talk here' versus '@ mention only'."
     )
     when_to_use = (
         "Use for Discord server administration requests like setting up a themed server, creating rooms/roles, "
@@ -306,32 +305,55 @@ class DiscordAdminPlugin(ToolPlugin):
             return False, "This tool is restricted to the configured Discord admin user."
         return True, ""
 
-    @staticmethod
-    def _detect_response_action(text: str) -> str:
-        t = str(text or "").strip().lower()
-        if not t:
+    async def _detect_response_action_with_llm(self, text: str, llm_client) -> str:
+        request_text = str(text or "").strip()
+        if not request_text or llm_client is None:
             return "none"
 
-        if re.search(
-            r"\b(only\s+respond\s+to\s+pings?|only\s+reply\s+to\s+pings?|respond\s+only\s+when\s+pinged)\b.*\b(here|this\s+(room|channel|chat))\b",
-            t,
-        ):
-            return "remove_current"
-        if re.search(
-            r"\b(stop\s+(always\s+)?(talking|responding|replying)\s+here|do\s+not\s+always\s+respond\s+here)\b",
-            t,
-        ):
-            return "remove_current"
-        if re.search(
-            r"\b(respond|reply|talk)\s+only\s+in\s+this\s+(room|channel|chat)\b",
-            t,
-        ):
-            return "set_only_current"
-        if re.search(
-            r"\b(always\s+(talk|respond|reply)|auto\s+respond)\b.*\b(here|this\s+(room|channel|chat))\b",
-            t,
-        ):
-            return "add_current"
+        prompt = (
+            "Classify this Discord admin request for response-channel behavior in the CURRENT room.\n"
+            "Return strict JSON only: {\"response_channel_action\":\"none|add_current|remove_current|set_only_current|clear_all\"}\n\n"
+            "Meaning:\n"
+            "- add_current: make this room always-response (bot replies to all messages here without ping).\n"
+            "- remove_current: remove this room from always-response (ping-only here).\n"
+            "- set_only_current: this room should be the only always-response room in this server.\n"
+            "- clear_all: remove all always-response rooms in this server.\n"
+            "- none: request is not about response-channel behavior.\n\n"
+            "Rules:\n"
+            "- If the request is mainly server setup/theme/roles/channels/permissions, choose none.\n"
+            "- If the user asks to respond to all messages here or make this room a response channel, choose add_current.\n"
+            "- If the user asks only respond to ping here, choose remove_current.\n"
+            "- Handle misspellings and casual phrasing.\n\n"
+            f"Request: {request_text}"
+        )
+
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You return only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            candidate = raw
+            if blob:
+                try:
+                    parsed = json.loads(blob)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    candidate = str(parsed.get("response_channel_action") or "").strip().lower()
+            candidate = str(candidate or "").strip().lower()
+            if candidate in VALID_RESPONSE_ACTIONS:
+                return candidate
+            if candidate.startswith("{") and candidate.endswith("}"):
+                return "none"
+            token = re.sub(r"[^a-z_]", "", candidate)
+            if token in VALID_RESPONSE_ACTIONS:
+                return token
+        except Exception as exc:
+            logger.debug(f"[discord_admin] response-action LLM classification failed: {exc}")
         return "none"
 
     @staticmethod
@@ -963,7 +985,7 @@ class DiscordAdminPlugin(ToolPlugin):
         args = args or {}
         dry_run = _coerce_bool(args.get("dry_run"), False)
 
-        direct_action = self._detect_response_action(request_text)
+        direct_action = await self._detect_response_action_with_llm(request_text, llm_client)
         action_hint = str(args.get("response_channel_action") or "").strip().lower()
         if action_hint in VALID_RESPONSE_ACTIONS:
             direct_action = action_hint
