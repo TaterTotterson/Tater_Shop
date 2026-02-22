@@ -145,7 +145,7 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "58.3"
     platforms = ["discord"]
 
@@ -403,13 +403,16 @@ class DiscordAdminPlugin(ToolPlugin):
             '"slowmode_seconds":0,"nsfw":false,'
             '"apply_mode":"create_only|create_or_update",'
             '"permissions":[{"role":"@everyone","allow":["view_channel"],"deny":["send_messages"]}]}]}],\n'
+            '  "delete_all_channels_except":["channel refs to keep; name, #name, <#id>, or numeric id"],\n'
             '  "notes":"short optional notes"\n'
             "}\n"
             "Rules:\n"
-            "- Non-destructive only (never delete existing channels/roles).\n"
             "- Do NOT output boilerplate/default rooms. Generate only changes inferred from the user request.\n"
             "- Choose minimal change set. If no server-structure changes are needed, return empty roles/categories and blank server_name.\n"
             "- Default apply_mode should be create_only. Use create_or_update only when user explicitly asks to modify an existing role/channel.\n"
+            "- Deletion is allowed only when user explicitly asks to delete/remove/clear channels.\n"
+            "- For delete-all requests, fill delete_all_channels_except with channels to preserve.\n"
+            "- Never include @everyone role deletion or destructive role deletion (roles can only be created/updated).\n"
             f"- Max {MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels per category.\n"
             "- Use channel kind text or voice only.\n"
             "- If user only asks about response behavior, leave roles/categories empty.\n"
@@ -441,6 +444,37 @@ class DiscordAdminPlugin(ToolPlugin):
         if token in {"create_or_update", "upsert", "update_existing", "update"}:
             return "create_or_update"
         return "create_only"
+
+    @staticmethod
+    def _normalize_keep_channel_refs(raw_refs: Any) -> Dict[str, Any]:
+        refs = raw_refs if isinstance(raw_refs, list) else []
+        keep_ids: set[int] = set()
+        keep_names: set[str] = set()
+        for item in refs:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered in {"this", "here", "current", "current_channel", "this_channel"}:
+                keep_names.add("__current__")
+                continue
+            if token.startswith("<#") and token.endswith(">"):
+                token = token[2:-1].strip()
+            token = token.lstrip("#").strip()
+            try:
+                parsed = int(token)
+                if parsed > 0:
+                    keep_ids.add(parsed)
+                    continue
+            except Exception:
+                pass
+            cleaned = str(token or "").strip().lower()
+            if cleaned:
+                keep_names.add(cleaned)
+        return {
+            "delete_all_channels_except_ids": sorted(keep_ids),
+            "delete_all_channels_except_names": sorted(keep_names),
+        }
 
     def _normalize_plan(self, raw_plan: Dict[str, Any]) -> Dict[str, Any]:
         plan = raw_plan if isinstance(raw_plan, dict) else {}
@@ -517,12 +551,16 @@ class DiscordAdminPlugin(ToolPlugin):
             if normalized_channels:
                 categories.append({"name": category_name, "channels": normalized_channels})
 
+        keep_meta = self._normalize_keep_channel_refs(plan.get("delete_all_channels_except"))
+
         return {
             "response_channel_action": response_action,
             "server_name": server_name,
             "set_guild_icon_from_attachment": set_guild_icon,
             "roles": roles,
             "categories": categories,
+            "delete_all_channels_except_ids": keep_meta.get("delete_all_channels_except_ids") or [],
+            "delete_all_channels_except_names": keep_meta.get("delete_all_channels_except_names") or [],
             "notes": str(plan.get("notes") or "").strip(),
         }
 
@@ -775,6 +813,71 @@ class DiscordAdminPlugin(ToolPlugin):
         await guild.edit(icon=raw, reason="Tater Discord admin setup")
         stats["updated_icon"] = True
 
+    @staticmethod
+    def _channel_matches_keep_name(channel: Any, keep_names: set[str]) -> bool:
+        if not keep_names:
+            return False
+        name = str(getattr(channel, "name", "") or "").strip().lower()
+        if not name:
+            return False
+        if name in keep_names:
+            return True
+        if f"#{name}" in keep_names:
+            return True
+        return False
+
+    async def _apply_channel_deletions(self, message, plan: Dict[str, Any], stats: Dict[str, Any]) -> None:
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return
+
+        plan_keep_ids = {int(x) for x in (plan.get("delete_all_channels_except_ids") or []) if int(x) > 0}
+        plan_keep_names = {
+            str(x).strip().lower()
+            for x in (plan.get("delete_all_channels_except_names") or [])
+            if str(x).strip()
+        }
+        has_delete_request = bool(plan_keep_ids or plan_keep_names)
+        if not has_delete_request:
+            return
+
+        keep_ids = set(plan_keep_ids)
+        keep_names = {name for name in plan_keep_names if name != "__current__"}
+
+        current_channel = getattr(message, "channel", None)
+        try:
+            current_id = int(getattr(current_channel, "id", 0) or 0)
+            if current_id > 0:
+                keep_ids.add(current_id)
+        except Exception:
+            pass
+        parent = getattr(current_channel, "parent", None)
+        try:
+            parent_id = int(getattr(parent, "id", 0) or 0)
+            if parent_id > 0:
+                keep_ids.add(parent_id)
+        except Exception:
+            pass
+
+        for channel in list(getattr(guild, "channels", []) or []):
+            if isinstance(channel, discord.CategoryChannel):
+                continue
+            cid = int(getattr(channel, "id", 0) or 0)
+            if cid > 0 and cid in keep_ids:
+                continue
+            if self._channel_matches_keep_name(channel, keep_names):
+                continue
+            if not hasattr(channel, "delete"):
+                continue
+            try:
+                label = f"#{getattr(channel, 'name', cid)}"
+                await channel.delete(reason="Tater Discord admin setup")
+                stats["deleted_channels"].append(label)
+            except Exception as exc:
+                stats["warnings"].append(
+                    f"Channel '{getattr(channel, 'name', cid)}' delete skipped: {exc}"
+                )
+
     async def _apply_plan(self, message, plan: Dict[str, Any]) -> Dict[str, Any]:
         guild = getattr(message, "guild", None)
         stats: Dict[str, Any] = {
@@ -784,6 +887,7 @@ class DiscordAdminPlugin(ToolPlugin):
             "created_categories": [],
             "created_channels": [],
             "updated_channels": [],
+            "deleted_channels": [],
             "skipped_existing_channels": [],
             "updated_server_name": False,
             "updated_icon": False,
@@ -828,6 +932,11 @@ class DiscordAdminPlugin(ToolPlugin):
         except Exception as exc:
             stats["warnings"].append(f"Guild icon update skipped: {exc}")
 
+        try:
+            await self._apply_channel_deletions(message, plan, stats)
+        except Exception as exc:
+            stats["warnings"].append(f"Channel deletion step skipped: {exc}")
+
         return stats
 
     @staticmethod
@@ -839,6 +948,10 @@ class DiscordAdminPlugin(ToolPlugin):
         if list(plan.get("roles") or []):
             return True
         if list(plan.get("categories") or []):
+            return True
+        if list(plan.get("delete_all_channels_except_ids") or []):
+            return True
+        if list(plan.get("delete_all_channels_except_names") or []):
             return True
         return False
 
@@ -857,6 +970,8 @@ class DiscordAdminPlugin(ToolPlugin):
             parts.append(f"created {len(stats['created_channels'])} channel(s)")
         if stats.get("updated_channels"):
             parts.append(f"updated {len(stats['updated_channels'])} channel(s)")
+        if stats.get("deleted_channels"):
+            parts.append(f"deleted {len(stats['deleted_channels'])} channel(s)")
         if stats.get("skipped_existing_channels"):
             parts.append(f"left {len(stats['skipped_existing_channels'])} existing channel(s) unchanged")
         if stats.get("updated_server_name"):
@@ -989,6 +1104,7 @@ class DiscordAdminPlugin(ToolPlugin):
             "created_categories": [],
             "created_channels": [],
             "updated_channels": [],
+            "deleted_channels": [],
             "skipped_existing_channels": [],
             "updated_server_name": False,
             "updated_icon": False,
@@ -1007,6 +1123,7 @@ class DiscordAdminPlugin(ToolPlugin):
                 "created_categories": len(stats.get("created_categories") or []),
                 "created_channels": len(stats.get("created_channels") or []),
                 "updated_channels": len(stats.get("updated_channels") or []),
+                "deleted_channels": len(stats.get("deleted_channels") or []),
                 "updated_server_name": bool(stats.get("updated_server_name")),
                 "updated_icon": bool(stats.get("updated_icon")),
                 "warnings": len(stats.get("warnings") or []),
