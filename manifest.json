@@ -178,8 +178,8 @@
     {
       "id": "discord_admin",
       "name": "Discord Admin",
-      "version": "1.0.0",
-      "min_tater_version": "50",
+      "version": "1.0.1",
+      "min_tater_version": "58.3",
       "description": "AI-driven Discord server administration and response-channel control.",
       "platforms": [
         "discord"
@@ -188,7 +188,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "33869260ac04037c98dbe6039aa4c9b187d5f042ba496679a8c4ec01df3a1986"
+      "sha256": "4fc422c0f16147c43d93b86e62c8db32745ac535aab5c2883ae43e33a81a8314"
     },
     {
       "id": "doorbell_alert",
