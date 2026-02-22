@@ -145,8 +145,8 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.3"
-    min_tater_version = "50"
+    version = "1.0.4"
+    min_tater_version = "58.3"
     platforms = ["discord"]
 
     usage = (
@@ -305,28 +305,34 @@ class DiscordAdminPlugin(ToolPlugin):
             return False, "This tool is restricted to the configured Discord admin user."
         return True, ""
 
-    async def _detect_response_action_with_llm(self, text: str, llm_client) -> str:
+    async def _classify_request_intent_with_llm(self, text: str, llm_client) -> Dict[str, Any]:
         request_text = str(text or "").strip()
         if not request_text or llm_client is None:
-            return "none"
+            return {"response_channel_action": "none", "setup_requested": False}
 
         prompt = (
-            "Classify this Discord admin request for response-channel behavior in the CURRENT room.\n"
-            "Return strict JSON only: {\"response_channel_action\":\"none|add_current|remove_current|set_only_current|clear_all\"}\n\n"
+            "Classify this Discord admin request.\n"
+            "Return strict JSON only: "
+            "{\"response_channel_action\":\"none|add_current|remove_current|set_only_current|clear_all\","
+            "\"setup_requested\":true|false}\n\n"
             "Meaning:\n"
             "- add_current: make this room always-response (bot replies to all messages here without ping).\n"
             "- remove_current: remove this room from always-response (ping-only here).\n"
             "- set_only_current: this room should be the only always-response room in this server.\n"
             "- clear_all: remove all always-response rooms in this server.\n"
             "- none: request is not about response-channel behavior.\n\n"
+            "- setup_requested: true ONLY when the user asks to change server structure/settings "
+            "(create roles/channels/categories, change permissions, set server/guild icon, rename server, "
+            "or create a themed server layout).\n\n"
             "Rules:\n"
-            "- If the request is mainly server setup/theme/roles/channels/permissions, choose none.\n"
+            "- If the request is mainly server setup/theme/roles/channels/permissions, choose none and setup_requested=true.\n"
             "- If the user asks to respond to all messages here or make this room a response channel, choose add_current.\n"
             "- If the user asks only respond to ping here, choose remove_current.\n"
             "- Handle misspellings and casual phrasing.\n\n"
             f"Request: {request_text}"
         )
 
+        out = {"response_channel_action": "none", "setup_requested": False}
         try:
             resp = await llm_client.chat(
                 messages=[
@@ -337,6 +343,7 @@ class DiscordAdminPlugin(ToolPlugin):
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
             blob = extract_json(raw) if raw else None
             candidate = raw
+            setup_requested = False
             if blob:
                 try:
                     parsed = json.loads(blob)
@@ -344,146 +351,26 @@ class DiscordAdminPlugin(ToolPlugin):
                     parsed = None
                 if isinstance(parsed, dict):
                     candidate = str(parsed.get("response_channel_action") or "").strip().lower()
+                    setup_requested = _coerce_bool(parsed.get("setup_requested"), False)
             candidate = str(candidate or "").strip().lower()
             if candidate in VALID_RESPONSE_ACTIONS:
-                return candidate
-            if candidate.startswith("{") and candidate.endswith("}"):
-                return "none"
-            token = re.sub(r"[^a-z_]", "", candidate)
-            if token in VALID_RESPONSE_ACTIONS:
-                return token
+                out["response_channel_action"] = candidate
+                out["setup_requested"] = setup_requested
+                return out
+            if not (candidate.startswith("{") and candidate.endswith("}")):
+                token = re.sub(r"[^a-z_]", "", candidate)
+                if token in VALID_RESPONSE_ACTIONS:
+                    out["response_channel_action"] = token
+                    out["setup_requested"] = setup_requested
+                    return out
         except Exception as exc:
             logger.debug(f"[discord_admin] response-action LLM classification failed: {exc}")
-        return "none"
+        return out
 
-    @staticmethod
-    def _looks_like_setup_request(text: str) -> bool:
-        t = str(text or "").strip().lower()
-        if not t:
-            return False
-        markers = (
-            "setup",
-            "set up",
-            "configure",
-            "build out",
-            "create rooms",
-            "create channels",
-            "create categories",
-            "permissions",
-            "roles",
-            "guild icon",
-            "server icon",
-            "theme",
-        )
-        return any(marker in t for marker in markers)
-
-    @staticmethod
-    def _infer_theme(text: str) -> str:
-        t = str(text or "").strip().lower()
-        if "game" in t or "gaming" in t or "esports" in t:
-            return "gaming"
-        if "study" in t or "school" in t or "class" in t:
-            return "study"
-        if "dev" in t or "coding" in t or "software" in t or "engineering" in t:
-            return "developer"
-        if "support" in t or "customer" in t:
-            return "support"
-        return "community"
-
-    def _fallback_plan(self, request_text: str) -> Dict[str, Any]:
-        theme = self._infer_theme(request_text)
-        if theme == "gaming":
-            return {
-                "response_channel_action": "none",
-                "server_name": "",
-                "set_guild_icon_from_attachment": False,
-                "roles": [
-                    {
-                        "name": "Raid Leader",
-                        "color": "#e67e22",
-                        "mentionable": True,
-                        "hoist": True,
-                        "permissions": ["manage_messages"],
-                    }
-                ],
-                "categories": [
-                    {
-                        "name": "Lobby",
-                        "channels": [
-                            {"name": "welcome", "kind": "text", "topic": "Introductions and server rules."},
-                            {"name": "announcements", "kind": "text", "topic": "Important updates only."},
-                        ],
-                    },
-                    {
-                        "name": "Find A Group",
-                        "channels": [
-                            {"name": "lfg", "kind": "text", "topic": "Find teammates and post availability."},
-                            {"name": "clips", "kind": "text", "topic": "Share highlights and screenshots."},
-                        ],
-                    },
-                    {
-                        "name": "Voice",
-                        "channels": [
-                            {"name": "Squad One", "kind": "voice"},
-                            {"name": "Squad Two", "kind": "voice"},
-                            {"name": "AFK", "kind": "voice"},
-                        ],
-                    },
-                ],
-            }
-        if theme == "study":
-            return {
-                "response_channel_action": "none",
-                "server_name": "",
-                "set_guild_icon_from_attachment": False,
-                "roles": [],
-                "categories": [
-                    {
-                        "name": "Getting Started",
-                        "channels": [
-                            {"name": "welcome", "kind": "text", "topic": "Introductions and expectations."},
-                            {"name": "announcements", "kind": "text", "topic": "Schedules and updates."},
-                        ],
-                    },
-                    {
-                        "name": "Study Rooms",
-                        "channels": [
-                            {"name": "general-study", "kind": "text", "topic": "Daily study chat."},
-                            {"name": "resources", "kind": "text", "topic": "Guides, links, and notes."},
-                        ],
-                    },
-                    {
-                        "name": "Voice",
-                        "channels": [
-                            {"name": "Focus Room", "kind": "voice"},
-                            {"name": "Group Session", "kind": "voice"},
-                        ],
-                    },
-                ],
-            }
-        return {
-            "response_channel_action": "none",
-            "server_name": "",
-            "set_guild_icon_from_attachment": False,
-            "roles": [],
-            "categories": [
-                {
-                    "name": "Community",
-                    "channels": [
-                        {"name": "welcome", "kind": "text", "topic": "Introductions and community guidelines."},
-                        {"name": "general", "kind": "text", "topic": "General discussion."},
-                        {"name": "help", "kind": "text", "topic": "Questions and support."},
-                    ],
-                },
-                {
-                    "name": "Voice",
-                    "channels": [
-                        {"name": "General Voice", "kind": "voice"},
-                        {"name": "AFK", "kind": "voice"},
-                    ],
-                },
-            ],
-        }
+    async def _detect_response_action_with_llm(self, text: str, llm_client) -> str:
+        intent = await self._classify_request_intent_with_llm(text, llm_client)
+        action = str((intent or {}).get("response_channel_action") or "none").strip().lower()
+        return action if action in VALID_RESPONSE_ACTIONS else "none"
 
     async def _llm_plan(self, request_text: str, guild, llm_client) -> Dict[str, Any]:
         if llm_client is None:
@@ -511,14 +398,18 @@ class DiscordAdminPlugin(ToolPlugin):
             '  "response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",\n'
             '  "server_name":"optional server name",\n'
             '  "set_guild_icon_from_attachment":false,\n'
-            '  "roles":[{"name":"Role","color":"#RRGGBB","mentionable":false,"hoist":false,"permissions":["manage_messages"]}],\n'
+            '  "roles":[{"name":"Role","apply_mode":"create_only|create_or_update","color":"#RRGGBB","mentionable":false,"hoist":false,"permissions":["manage_messages"]}],\n'
             '  "categories":[{"name":"Category","channels":[{"name":"general","kind":"text|voice","topic":"optional",'
             '"slowmode_seconds":0,"nsfw":false,'
+            '"apply_mode":"create_only|create_or_update",'
             '"permissions":[{"role":"@everyone","allow":["view_channel"],"deny":["send_messages"]}]}]}],\n'
             '  "notes":"short optional notes"\n'
             "}\n"
             "Rules:\n"
-            "- Non-destructive only (create/update; do not delete existing channels/roles).\n"
+            "- Non-destructive only (never delete existing channels/roles).\n"
+            "- Do NOT output boilerplate/default rooms. Generate only changes inferred from the user request.\n"
+            "- Choose minimal change set. If no server-structure changes are needed, return empty roles/categories and blank server_name.\n"
+            "- Default apply_mode should be create_only. Use create_or_update only when user explicitly asks to modify an existing role/channel.\n"
             f"- Max {MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels per category.\n"
             "- Use channel kind text or voice only.\n"
             "- If user only asks about response behavior, leave roles/categories empty.\n"
@@ -544,7 +435,14 @@ class DiscordAdminPlugin(ToolPlugin):
             logger.warning(f"[discord_admin] LLM planning failed: {exc}")
             return {}
 
-    def _normalize_plan(self, raw_plan: Dict[str, Any], request_text: str) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_apply_mode(value: Any) -> str:
+        token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if token in {"create_or_update", "upsert", "update_existing", "update"}:
+            return "create_or_update"
+        return "create_only"
+
+    def _normalize_plan(self, raw_plan: Dict[str, Any]) -> Dict[str, Any]:
         plan = raw_plan if isinstance(raw_plan, dict) else {}
         response_action = str(plan.get("response_channel_action") or "none").strip().lower()
         if response_action not in VALID_RESPONSE_ACTIONS:
@@ -566,6 +464,7 @@ class DiscordAdminPlugin(ToolPlugin):
             roles.append(
                 {
                     "name": name,
+                    "apply_mode": self._normalize_apply_mode(role.get("apply_mode") or role.get("mode")),
                     "color": self._parse_color(role.get("color")),
                     "mentionable": _coerce_bool(role.get("mentionable"), False),
                     "hoist": _coerce_bool(role.get("hoist"), False),
@@ -610,16 +509,13 @@ class DiscordAdminPlugin(ToolPlugin):
                     "topic": str(ch.get("topic") or "").strip()[:900],
                     "slowmode_seconds": max(0, min(21600, int(ch.get("slowmode_seconds") or 0))),
                     "nsfw": _coerce_bool(ch.get("nsfw"), False),
+                    "apply_mode": self._normalize_apply_mode(ch.get("apply_mode") or ch.get("mode")),
                     "permissions": perms,
                 }
                 normalized_channels.append(channel_spec)
 
             if normalized_channels:
                 categories.append({"name": category_name, "channels": normalized_channels})
-
-        if not roles and not categories and self._looks_like_setup_request(request_text):
-            fallback = self._fallback_plan(request_text)
-            return self._normalize_plan(fallback, request_text="")
 
         return {
             "response_channel_action": response_action,
@@ -732,6 +628,7 @@ class DiscordAdminPlugin(ToolPlugin):
 
     async def _ensure_role(self, guild, role_spec: Dict[str, Any], stats: Dict[str, Any]) -> None:
         role_name = role_spec["name"]
+        apply_mode = str(role_spec.get("apply_mode") or "create_only").strip().lower()
         existing = None
         for role in list(getattr(guild, "roles", []) or []):
             if str(getattr(role, "name", "")).strip().lower() == role_name.lower():
@@ -756,6 +653,10 @@ class DiscordAdminPlugin(ToolPlugin):
         if existing is None:
             created = await guild.create_role(name=role_name, **edit_kwargs)
             stats["created_roles"].append(str(getattr(created, "name", role_name)))
+            return
+
+        if apply_mode != "create_or_update":
+            stats["skipped_existing_roles"].append(str(getattr(existing, "name", role_name)))
             return
 
         await existing.edit(**edit_kwargs)
@@ -791,6 +692,7 @@ class DiscordAdminPlugin(ToolPlugin):
     ) -> None:
         kind = channel_spec.get("kind", "text")
         name = channel_spec.get("name")
+        apply_mode = str(channel_spec.get("apply_mode") or "create_only").strip().lower()
         existing = self._find_channel(category, kind=kind, name=name)
         overwrites = self._build_overwrites(
             guild=guild,
@@ -815,6 +717,9 @@ class DiscordAdminPlugin(ToolPlugin):
                 created = await guild.create_text_channel(**edit_kwargs)
                 stats["created_channels"].append(f"#{getattr(created, 'name', name)}")
                 return
+            if apply_mode != "create_or_update":
+                stats["skipped_existing_channels"].append(f"#{getattr(existing, 'name', name)}")
+                return
             await existing.edit(**edit_kwargs)
             stats["updated_channels"].append(f"#{getattr(existing, 'name', name)}")
             return
@@ -829,6 +734,9 @@ class DiscordAdminPlugin(ToolPlugin):
         if existing is None:
             created = await guild.create_voice_channel(**edit_kwargs)
             stats["created_channels"].append(str(getattr(created, "name", name)))
+            return
+        if apply_mode != "create_or_update":
+            stats["skipped_existing_channels"].append(str(getattr(existing, "name", name)))
             return
         await existing.edit(**edit_kwargs)
         stats["updated_channels"].append(str(getattr(existing, "name", name)))
@@ -872,9 +780,11 @@ class DiscordAdminPlugin(ToolPlugin):
         stats: Dict[str, Any] = {
             "created_roles": [],
             "updated_roles": [],
+            "skipped_existing_roles": [],
             "created_categories": [],
             "created_channels": [],
             "updated_channels": [],
+            "skipped_existing_channels": [],
             "updated_server_name": False,
             "updated_icon": False,
             "warnings": [],
@@ -939,12 +849,16 @@ class DiscordAdminPlugin(ToolPlugin):
             parts.append(f"created {len(stats['created_roles'])} role(s)")
         if stats.get("updated_roles"):
             parts.append(f"updated {len(stats['updated_roles'])} role(s)")
+        if stats.get("skipped_existing_roles"):
+            parts.append(f"left {len(stats['skipped_existing_roles'])} existing role(s) unchanged")
         if stats.get("created_categories"):
             parts.append(f"created {len(stats['created_categories'])} categor(ies)")
         if stats.get("created_channels"):
             parts.append(f"created {len(stats['created_channels'])} channel(s)")
         if stats.get("updated_channels"):
             parts.append(f"updated {len(stats['updated_channels'])} channel(s)")
+        if stats.get("skipped_existing_channels"):
+            parts.append(f"left {len(stats['skipped_existing_channels'])} existing channel(s) unchanged")
         if stats.get("updated_server_name"):
             parts.append("updated server name")
         if stats.get("updated_icon"):
@@ -985,12 +899,16 @@ class DiscordAdminPlugin(ToolPlugin):
         args = args or {}
         dry_run = _coerce_bool(args.get("dry_run"), False)
 
-        direct_action = await self._detect_response_action_with_llm(request_text, llm_client)
+        intent = await self._classify_request_intent_with_llm(request_text, llm_client)
+        direct_action = str((intent or {}).get("response_channel_action") or "none").strip().lower()
+        if direct_action not in VALID_RESPONSE_ACTIONS:
+            direct_action = "none"
+        setup_requested = _coerce_bool((intent or {}).get("setup_requested"), False)
         action_hint = str(args.get("response_channel_action") or "").strip().lower()
         if action_hint in VALID_RESPONSE_ACTIONS:
             direct_action = action_hint
 
-        should_setup = self._looks_like_setup_request(request_text)
+        should_setup = bool(setup_requested)
         if direct_action != "none" and not should_setup:
             response_result = await self._apply_response_action(message, direct_action, dry_run=dry_run)
             if not response_result.get("ok"):
@@ -1011,7 +929,7 @@ class DiscordAdminPlugin(ToolPlugin):
             )
 
         llm_plan = await self._llm_plan(request_text, message.guild, llm_client) if should_setup else {}
-        plan = self._normalize_plan(llm_plan, request_text=request_text)
+        plan = self._normalize_plan(llm_plan)
         if direct_action != "none":
             plan["response_channel_action"] = direct_action
 
@@ -1067,9 +985,11 @@ class DiscordAdminPlugin(ToolPlugin):
         stats = await self._apply_plan(message, plan) if self._has_setup_work(plan) else {
             "created_roles": [],
             "updated_roles": [],
+            "skipped_existing_roles": [],
             "created_categories": [],
             "created_channels": [],
             "updated_channels": [],
+            "skipped_existing_channels": [],
             "updated_server_name": False,
             "updated_icon": False,
             "warnings": [],
