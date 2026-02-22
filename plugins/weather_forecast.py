@@ -36,7 +36,7 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "59"
     argument_mode = "raw_user_request"
     raw_user_arg = "request"
@@ -593,6 +593,19 @@ class WeatherForecastPlugin(ToolPlugin):
             f"Wind up to {maxwind} {wind_unit}. Rain {rain_chance}% (snow {snow_chance}%)."
         )
 
+    @staticmethod
+    def _requested_temp_focus(request_text: str) -> str:
+        req = str(request_text or "").lower()
+        asks_high = bool(re.search(r"\b(high|highs|max|maximum|hi)\b", req))
+        asks_low = bool(re.search(r"\b(low|lows|min|minimum|lo)\b", req))
+        if asks_high and asks_low:
+            return "both"
+        if asks_high:
+            return "high"
+        if asks_low:
+            return "low"
+        return "none"
+
     # -------------------- Deterministic answer builder --------------------
 
     def _deterministic_answer(
@@ -628,6 +641,40 @@ class WeatherForecastPlugin(ToolPlugin):
         ).strip()
 
         forecast_days = ((data.get("forecast") or {}).get("forecastday") or [])
+        temp_focus = self._requested_temp_focus(req)
+
+        target_day = None
+        target_label = ""
+        if wanted_date:
+            target_day = next(
+                (fd for fd in forecast_days if str(fd.get("date") or "").strip() == wanted_date.strftime("%Y-%m-%d")),
+                None,
+            )
+            target_label = wanted_date.isoformat()
+        elif "tomorrow" in req and len(forecast_days) >= 2:
+            target_day = forecast_days[1]
+            target_label = "tomorrow"
+        elif "today" in req and len(forecast_days) >= 1:
+            target_day = forecast_days[0]
+            target_label = "today"
+        elif temp_focus != "none" and len(forecast_days) >= 1:
+            target_day = forecast_days[0]
+            target_label = "today"
+
+        if temp_focus != "none" and isinstance(target_day, dict):
+            day_data = target_day.get("day") or {}
+            hi = day_data.get("maxtemp_f") if units == "us" else day_data.get("maxtemp_c")
+            lo = day_data.get("mintemp_f") if units == "us" else day_data.get("mintemp_c")
+            if temp_focus == "high" and hi is not None:
+                answer = f"The high for {target_label} in {loc_name} is {hi}{temp_unit}."
+                return re.sub(r"\s+", " ", answer).strip()[:max_chars]
+            if temp_focus == "low" and lo is not None:
+                answer = f"The low for {target_label} in {loc_name} is {lo}{temp_unit}."
+                return re.sub(r"\s+", " ", answer).strip()[:max_chars]
+            if temp_focus == "both" and hi is not None and lo is not None:
+                answer = f"For {target_label} in {loc_name}, the high is {hi}{temp_unit} and the low is {lo}{temp_unit}."
+                return re.sub(r"\s+", " ", answer).strip()[:max_chars]
+
         day_lines: List[str] = []
         for fd in forecast_days[: max(1, min(days, 3))]:
             day_lines.append(self._format_one_day_plain(fd, units))
@@ -643,6 +690,8 @@ class WeatherForecastPlugin(ToolPlugin):
                 answer = f"I could not find forecast data for {wanted_date.isoformat()} in {loc_name}."
         elif any(token in req for token in ("current", "right now", "currently", "now")):
             answer = current_line
+        elif "today" in req and len(forecast_days) >= 1:
+            answer = f"Today in {loc_name}: {self._format_one_day_plain(forecast_days[0], units)}"
         elif "tomorrow" in req and len(forecast_days) >= 2:
             answer = f"Tomorrow in {loc_name}: {self._format_one_day_plain(forecast_days[1], units)}"
         elif day_lines:
@@ -659,6 +708,77 @@ class WeatherForecastPlugin(ToolPlugin):
 
         answer = re.sub(r"\s+", " ", answer).strip()
         return answer[:max_chars]
+
+    async def _llm_guided_answer(
+        self,
+        *,
+        llm_client: Any,
+        request_text: str,
+        facts_block: str,
+        max_chars: int,
+        fallback_text: str,
+    ) -> str:
+        fallback = str(fallback_text or "").strip()
+        request = str(request_text or "").strip()
+        facts = str(facts_block or "").strip()
+        if llm_client is None or not request or not facts:
+            return fallback
+
+        prompt_payload = {
+            "user_request": request,
+            "weather_facts": facts,
+            "max_chars": max_chars,
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Answer weather questions using ONLY the provided weather_facts.\n"
+                    "Return only what the user requested.\n"
+                    "Rules:\n"
+                    "- If user asks for today's high/low, return only that value.\n"
+                    "- Do not include extra forecast days unless explicitly requested.\n"
+                    "- Keep answer concise (normally one sentence).\n"
+                    "- No markdown, no bullets, no JSON, no tool calls."
+                ),
+            },
+            {"role": "user", "content": str(prompt_payload)},
+        ]
+        try:
+            response = await llm_client.chat(
+                messages=messages,
+                max_tokens=max(80, min(260, int(max_chars // 2) + 80)),
+                temperature=0.1,
+            )
+            answer = str((response.get("message", {}) or {}).get("content", "")).strip()
+        except Exception:
+            return fallback
+
+        if not answer:
+            return fallback
+
+        if "```" in answer:
+            answer = answer.replace("```", " ").strip()
+
+        decision_match = re.match(
+            r"^\s*(FINAL[\s_-]*ANSWER|NEED[\s_-]*USER[\s_-]*INFO)\s*:\s*(.+)$",
+            answer,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if decision_match:
+            answer = str(decision_match.group(2) or "").strip()
+        elif re.match(r"^\s*RETRY[\s_-]*TOOL\s*:", answer, flags=re.IGNORECASE):
+            return fallback
+
+        if not answer:
+            return fallback
+        if answer.startswith("{") and ("function" in answer and "arguments" in answer):
+            return fallback
+
+        answer = re.sub(r"\s+", " ", answer).strip()
+        if not answer:
+            return fallback
+        return answer[: max(60, int(max_chars or 650))]
 
     # -------------------- Core execution --------------------
 
@@ -773,14 +893,20 @@ class WeatherForecastPlugin(ToolPlugin):
             request_text = f"{' and '.join(req_bits)} in {loc_label}"
         if not facts:
             return "No weather data returned."
-
-        return self._deterministic_answer(
+        deterministic = self._deterministic_answer(
             data=data,
             request_text=request_text,
             units=units,
             wanted_date=wanted_date,
             days=days,
             max_chars=max_chars,
+        )
+        return await self._llm_guided_answer(
+            llm_client=llm_client,
+            request_text=request_text,
+            facts_block=facts,
+            max_chars=max_chars,
+            fallback_text=deterministic,
         )
 
     # -------------------- Platform handlers --------------------
