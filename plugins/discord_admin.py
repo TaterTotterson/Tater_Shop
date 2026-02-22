@@ -145,8 +145,8 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.0"
-    min_tater_version = "50"
+    version = "1.0.1"
+    min_tater_version = "58.3"
     platforms = ["discord"]
 
     usage = (
