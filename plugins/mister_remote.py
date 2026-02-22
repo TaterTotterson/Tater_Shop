@@ -67,9 +67,23 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.4"
-    min_tater_version = "50"
+    version = "1.1.5"
+    min_tater_version = "59"
     pretty_name = "MiSTer Remote"
+    argument_mode = "raw_user_request"
+    raw_user_arg = "utterance"
+    raw_user_policy = "verbatim"
+    routing_keywords = [
+        "mister",
+        "mister fpga",
+        "fpga",
+        "core",
+        "rom",
+        "now playing",
+        "go to menu",
+        "screenshot",
+        "launch game",
+    ]
     description = (
         "Control MiSTer via the MiSTer Remote API.\n"
         "ALWAYS include the user's FULL original message in the `utterance` field when calling this tool.\n"
