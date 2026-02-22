@@ -14,8 +14,7 @@ logger.setLevel(logging.INFO)
 
 
 DISCORD_SETTINGS_KEY = "discord_platform_settings"
-RESPONSE_CHANNEL_IDS_KEY = "response_channel_ids"
-RESPONSE_CHANNEL_ID_LEGACY_KEY = "response_channel_id"
+RESPONSE_CHANNEL_IDS_BY_GUILD_KEY = "response_channel_ids_by_guild"
 MAX_ROLES = 10
 MAX_CATEGORIES = 8
 MAX_CHANNELS_PER_CATEGORY = 12
@@ -88,6 +87,44 @@ def _serialize_response_channel_ids(values: Iterable[int]) -> str:
         if parsed > 0:
             cleaned.add(parsed)
     return ",".join(str(item) for item in sorted(cleaned))
+
+
+def _parse_response_channel_map(raw: Any) -> dict[int, set[int]]:
+    payload = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[int, set[int]] = {}
+    for key, value in payload.items():
+        try:
+            guild_id = int(str(key).strip())
+        except Exception:
+            continue
+        if guild_id <= 0:
+            continue
+        out[guild_id] = _parse_response_channel_ids(value)
+    return out
+
+
+def _serialize_response_channel_map(values: Dict[Any, Iterable[int]] | None) -> str:
+    out: Dict[str, str] = {}
+    if isinstance(values, dict):
+        for key, item in values.items():
+            try:
+                guild_id = int(str(key).strip())
+            except Exception:
+                continue
+            if guild_id <= 0:
+                continue
+            out[str(guild_id)] = _serialize_response_channel_ids(item or [])
+    return json.dumps(out, sort_keys=True, separators=(",", ":"))
 
 
 def _text_channel_slug(name: str) -> str:
@@ -180,21 +217,33 @@ class DiscordAdminPlugin(ToolPlugin):
     def _load_discord_settings(self) -> Dict[str, str]:
         return _decode_map(redis_client.hgetall(DISCORD_SETTINGS_KEY) or {})
 
-    def _load_response_channel_ids(self) -> set[int]:
-        settings = self._load_discord_settings()
-        out = set()
-        out.update(_parse_response_channel_ids(settings.get(RESPONSE_CHANNEL_IDS_KEY)))
-        out.update(_parse_response_channel_ids(settings.get(RESPONSE_CHANNEL_ID_LEGACY_KEY)))
-        return out
+    def _load_response_channel_map(self, settings: Dict[str, str] | None = None) -> dict[int, set[int]]:
+        data = settings if isinstance(settings, dict) else self._load_discord_settings()
+        return _parse_response_channel_map(data.get(RESPONSE_CHANNEL_IDS_BY_GUILD_KEY))
 
-    def _save_response_channel_ids(self, values: set[int]) -> None:
-        payload = _serialize_response_channel_ids(values)
-        first = str(sorted(values)[0]) if values else ""
+    def _load_response_channel_ids_for_guild(
+        self,
+        guild_id: int,
+        settings: Dict[str, str] | None = None,
+    ) -> set[int]:
+        data = settings if isinstance(settings, dict) else self._load_discord_settings()
+        channel_map = self._load_response_channel_map(settings=data)
+        gid = int(guild_id or 0)
+        if gid <= 0:
+            return set()
+        return set(channel_map.get(gid) or set())
+
+    def _save_response_channel_ids_for_guild(self, guild_id: int, values: set[int]) -> None:
+        gid = int(guild_id or 0)
+        if gid <= 0:
+            return
+        settings = self._load_discord_settings()
+        channel_map = self._load_response_channel_map(settings=settings)
+        channel_map[gid] = set(values)
         redis_client.hset(
             DISCORD_SETTINGS_KEY,
             mapping={
-                RESPONSE_CHANNEL_IDS_KEY: payload,
-                RESPONSE_CHANNEL_ID_LEGACY_KEY: first,
+                RESPONSE_CHANNEL_IDS_BY_GUILD_KEY: _serialize_response_channel_map(channel_map),
             },
         )
 
@@ -217,14 +266,21 @@ class DiscordAdminPlugin(ToolPlugin):
         return ", ".join(labels)
 
     @staticmethod
-    def _refresh_runtime_response_channels(message, values: set[int]) -> None:
+    def _refresh_runtime_response_channels(message, guild_id: int, values: set[int]) -> None:
         bot = getattr(message, "client", None)
-        if bot is None or not hasattr(bot, "set_response_channels"):
+        if bot is None:
             return
-        try:
-            bot.set_response_channels(values)
-        except Exception:
-            pass
+        if hasattr(bot, "set_guild_response_channels"):
+            try:
+                bot.set_guild_response_channels(guild_id, values)
+                return
+            except Exception:
+                pass
+        if hasattr(bot, "set_response_channels"):
+            try:
+                bot.set_response_channels(values)
+            except Exception:
+                pass
 
     @staticmethod
     def _extract_request(args: Dict[str, Any] | None, message) -> str:
@@ -553,14 +609,26 @@ class DiscordAdminPlugin(ToolPlugin):
         }
 
     async def _apply_response_action(self, message, action: str, *, dry_run: bool) -> Dict[str, Any]:
-        if action not in VALID_RESPONSE_ACTIONS or action == "none":
-            return {"ok": True, "changed": False, "summary": "", "channels": self._load_response_channel_ids()}
+        guild = getattr(message, "guild", None)
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        if guild_id <= 0:
+            return {"ok": False, "error": "Guild context is unavailable.", "channels": set(), "guild_id": 0}
 
-        current = self._load_response_channel_ids()
+        settings = self._load_discord_settings()
+        if action not in VALID_RESPONSE_ACTIONS or action == "none":
+            return {
+                "ok": True,
+                "changed": False,
+                "summary": "",
+                "channels": self._load_response_channel_ids_for_guild(guild_id, settings=settings),
+                "guild_id": guild_id,
+            }
+
+        current = self._load_response_channel_ids_for_guild(guild_id, settings=settings)
         updated = set(current)
         current_channel_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
         if current_channel_id <= 0:
-            return {"ok": False, "error": "Current channel is unavailable.", "channels": current}
+            return {"ok": False, "error": "Current channel is unavailable.", "channels": current, "guild_id": guild_id}
 
         if action == "add_current":
             updated.add(current_channel_id)
@@ -573,18 +641,24 @@ class DiscordAdminPlugin(ToolPlugin):
             action_summary = "Set this room as the only always-response channel."
         elif action == "clear_all":
             updated = set()
-            action_summary = "Cleared all always-response channels (ping-only everywhere)."
+            action_summary = "Cleared always-response channels for this server (ping-only here now)."
         else:
-            return {"ok": False, "error": "Unknown response channel action.", "channels": current}
+            return {"ok": False, "error": "Unknown response channel action.", "channels": current, "guild_id": guild_id}
 
         if not dry_run:
-            self._save_response_channel_ids(updated)
-            self._refresh_runtime_response_channels(message, updated)
-        label = self._response_label(getattr(message, "guild", None), updated)
-        summary = f"{action_summary} Current always-response channels: {label}."
+            self._save_response_channel_ids_for_guild(guild_id, updated)
+            self._refresh_runtime_response_channels(message, guild_id, updated)
+        label = self._response_label(guild, updated)
+        summary = f"{action_summary} Current always-response channels for this server: {label}."
         if dry_run:
             summary = f"[Dry run] {summary}"
-        return {"ok": True, "changed": updated != current, "summary": summary, "channels": updated}
+        return {
+            "ok": True,
+            "changed": updated != current,
+            "summary": summary,
+            "channels": updated,
+            "guild_id": guild_id,
+        }
 
     @staticmethod
     def _role_lookup(guild) -> Dict[str, discord.Role]:
@@ -907,6 +981,7 @@ class DiscordAdminPlugin(ToolPlugin):
                 facts={
                     "response_channel_action": direct_action,
                     "response_channel_ids": sorted(response_result.get("channels") or []),
+                    "guild_id": int(response_result.get("guild_id") or 0),
                     "dry_run": dry_run,
                 },
                 summary_for_user=str(response_result.get("summary") or "Updated response channel settings."),
@@ -929,6 +1004,7 @@ class DiscordAdminPlugin(ToolPlugin):
             )
 
         response_summary = ""
+        response_guild_id = int(getattr(getattr(message, "guild", None), "id", 0) or 0)
         if str(plan.get("response_channel_action") or "none") != "none":
             response_result = await self._apply_response_action(
                 message, str(plan.get("response_channel_action")), dry_run=dry_run
@@ -939,6 +1015,7 @@ class DiscordAdminPlugin(ToolPlugin):
                     message=str(response_result.get("error") or "Failed to update response channel settings."),
                     say_hint="Explain the response channel update failed and why.",
                 )
+            response_guild_id = int(response_result.get("guild_id") or response_guild_id or 0)
             response_summary = str(response_result.get("summary") or "").strip()
 
         if dry_run:
@@ -954,6 +1031,7 @@ class DiscordAdminPlugin(ToolPlugin):
             return action_success(
                 facts={
                     "dry_run": True,
+                    "guild_id": response_guild_id,
                     "planned_roles": planned_roles,
                     "planned_categories": planned_categories,
                     "planned_channels": planned_channels,
@@ -980,6 +1058,7 @@ class DiscordAdminPlugin(ToolPlugin):
 
         return action_success(
             facts={
+                "guild_id": response_guild_id,
                 "response_channel_action": plan.get("response_channel_action"),
                 "created_roles": len(stats.get("created_roles") or []),
                 "updated_roles": len(stats.get("updated_roles") or []),
