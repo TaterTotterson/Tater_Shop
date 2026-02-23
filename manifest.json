@@ -662,7 +662,7 @@
     {
       "id": "unifi_network",
       "name": "UniFi Network",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "50",
       "description": "Fetch UniFi Network sites/clients/devices via the official API and answer network-health questions.",
       "platforms": [
@@ -679,12 +679,12 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "10451c722206ed8e9e5c696fb242aa0882f1485ef8a931acbec168f9b7e462a4"
+      "sha256": "6f96f2f4bd2f828cd94617ae4e78b3037ff13acc48b26f6356206a329d26aeb7"
     },
     {
       "id": "unifi_protect",
       "name": "UniFi Protect",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "50",
       "description": "Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions.",
       "platforms": [
@@ -701,7 +701,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "bb278e034d89d070e0c6422b2c14729ee6160a0b3d9db197f11390a89e0ebc70"
+      "sha256": "79a33513c691c2b20c44afb570ee7cdf15bce14caa37c999b31ac41939f49c8e"
     },
     {
       "id": "voicepe_remote_timer",
