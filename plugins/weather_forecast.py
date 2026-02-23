@@ -36,11 +36,8 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.1.2"
+    version = "1.1.4"
     min_tater_version = "59"
-    argument_mode = "raw_user_request"
-    raw_user_arg = "request"
-    raw_user_policy = "verbatim"
     routing_keywords = [
         "weather",
         "forecast",
@@ -58,7 +55,7 @@ class WeatherForecastPlugin(ToolPlugin):
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
     when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."
     common_needs = ["weather request (e.g., current, tonight, tomorrow, multi-day)"]
-    required_args = []
+    required_args = ["request"]
     optional_args = []
     missing_info_prompts = [
         "What weather do you want (current conditions, tonight, tomorrow, or multi-day forecast)?",
@@ -66,7 +63,7 @@ class WeatherForecastPlugin(ToolPlugin):
     pretty_name = "Checking the Weather"
     settings_category = "Weather Forecast"
 
-    usage = '{"function":"weather_forecast","arguments":{"request":"User weather request in natural language."}}'
+    usage = '{"function":"weather_forecast","arguments":{"request":"Weather request in natural language (what conditions or forecast details the user wants)."}}'
 
     required_settings = {
         "WEATHERAPI_KEY": {
@@ -136,8 +133,9 @@ class WeatherForecastPlugin(ToolPlugin):
     }
 
     waiting_prompt_template = (
-        "Write a friendly message telling {mention} you’re checking the weather now. "
-        "Only output that message."
+        "Write one short, natural status update to {mention} that you are checking weather now. "
+        "Use fresh wording (avoid repeating stock phrases). "
+        "Do not use markdown. Only output the message."
     )
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
@@ -606,6 +604,36 @@ class WeatherForecastPlugin(ToolPlugin):
             return "low"
         return "none"
 
+    @staticmethod
+    def _request_prefers_temp_only(request_text: str) -> bool:
+        req = str(request_text or "").lower().strip()
+        if not req:
+            return True
+        asks_temp = bool(re.search(r"\b(temp|temperature|degrees?)\b", req))
+        if not asks_temp:
+            return False
+        detail_tokens = (
+            "forecast",
+            "tomorrow",
+            "today",
+            "hourly",
+            "rain",
+            "snow",
+            "wind",
+            "humidity",
+            "aqi",
+            "pollen",
+            "alert",
+            "warning",
+            "watch",
+            "advisory",
+            "condition",
+            "feels like",
+            "next ",
+            "week",
+        )
+        return not any(token in req for token in detail_tokens)
+
     # -------------------- Deterministic answer builder --------------------
 
     def _deterministic_answer(
@@ -639,6 +667,7 @@ class WeatherForecastPlugin(ToolPlugin):
             f"Current in {loc_name}: {cond}, {temp}{temp_unit}, feels like {feels}{temp_unit}, "
             f"wind {wind} {wind_unit}, humidity {humidity}%."
         ).strip()
+        current_temp_line = f"Current temperature in {loc_name} is {temp}{temp_unit}.".strip()
 
         forecast_days = ((data.get("forecast") or {}).get("forecastday") or [])
         temp_focus = self._requested_temp_focus(req)
@@ -675,6 +704,9 @@ class WeatherForecastPlugin(ToolPlugin):
                 answer = f"For {target_label} in {loc_name}, the high is {hi}{temp_unit} and the low is {lo}{temp_unit}."
                 return re.sub(r"\s+", " ", answer).strip()[:max_chars]
 
+        if self._request_prefers_temp_only(req):
+            return re.sub(r"\s+", " ", current_temp_line).strip()[:max_chars]
+
         day_lines: List[str] = []
         for fd in forecast_days[: max(1, min(days, 3))]:
             day_lines.append(self._format_one_day_plain(fd, units))
@@ -695,9 +727,13 @@ class WeatherForecastPlugin(ToolPlugin):
         elif "tomorrow" in req and len(forecast_days) >= 2:
             answer = f"Tomorrow in {loc_name}: {self._format_one_day_plain(forecast_days[1], units)}"
         elif day_lines:
-            answer = f"{current_line} Forecast: " + " ".join(day_lines)
+            asks_forecast = any(token in req for token in ("forecast", "today", "tomorrow", "week", "next "))
+            if asks_forecast:
+                answer = f"Forecast in {loc_name}: " + " ".join(day_lines[: max(1, min(days, 2))])
+            else:
+                answer = current_temp_line
         else:
-            answer = current_line
+            answer = current_temp_line
 
         alert_list = ((data.get("alerts") or {}).get("alert") or [])
         asks_alerts = any(token in req for token in ("alert", "warning", "watch", "advisory"))
@@ -880,17 +916,20 @@ class WeatherForecastPlugin(ToolPlugin):
         )
 
         if not request_text:
-            req_bits = []
-            if wanted_date:
-                req_bits.append(f"forecast for {wanted_date.isoformat()}")
-            elif days:
-                req_bits.append(f"{days}-day forecast")
+            if not explicit_args:
+                request_text = "current temperature"
             else:
-                req_bits.append("weather forecast")
-            if hours:
-                req_bits.append(f"next {hours} hours")
-            loc_label = location if location else "default location"
-            request_text = f"{' and '.join(req_bits)} in {loc_label}"
+                req_bits = []
+                if wanted_date:
+                    req_bits.append(f"forecast for {wanted_date.isoformat()}")
+                elif days:
+                    req_bits.append(f"{days}-day forecast")
+                else:
+                    req_bits.append("weather forecast")
+                if hours:
+                    req_bits.append(f"next {hours} hours")
+                loc_label = location if location else "default location"
+                request_text = f"{' and '.join(req_bits)} in {loc_label}"
         if not facts:
             return "No weather data returned."
         deterministic = self._deterministic_answer(
@@ -901,6 +940,8 @@ class WeatherForecastPlugin(ToolPlugin):
             days=days,
             max_chars=max_chars,
         )
+        if self._request_prefers_temp_only(request_text) or self._requested_temp_focus(request_text) != "none":
+            return deterministic
         return await self._llm_guided_answer(
             llm_client=llm_client,
             request_text=request_text,
