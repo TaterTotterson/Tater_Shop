@@ -147,12 +147,9 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.10"
+    version = "1.0.13"
     min_tater_version = "59"
     platforms = ["discord"]
-    argument_mode = "raw_user_request"
-    raw_user_arg = "request"
-    raw_user_policy = "verbatim"
     routing_keywords = [
         "discord",
         "server",
@@ -163,6 +160,9 @@ class DiscordAdminPlugin(ToolPlugin):
         "categories",
         "role",
         "roles",
+        "role me",
+        "role yourself",
+        "list roles",
         "permission",
         "permissions",
         "response channel",
@@ -172,20 +172,18 @@ class DiscordAdminPlugin(ToolPlugin):
     ]
 
     usage = (
-        '{"function":"discord_admin","arguments":{"request":"Full user\'s request text in natural language '
-        '(pass exactly what the user said; for example: setup this discord for gaming, always talk in this room, '
-        'only respond to ping here)."}}'
+        '{"function":"discord_admin","arguments":{"request":"Discord admin request in natural language '
+        '(describe what to create, remove, rename, or configure; for example: setup this discord for gaming, '
+        'always talk in this room, only respond to ping here)."}}'
     )
     description = (
         "Configure Discord servers from natural language: create themed channel/category layouts, create roles, "
         "set channel permission overwrites, optionally update guild icon from an attached image or recent media ref, and manage which "
-        "channels are set to 'always talk here' versus '@ mention only'. "
-        "Cerberus should pass the user's full request directly; this plugin infers structure from intent."
+        "channels are set to 'always talk here' versus '@ mention only'."
     )
     when_to_use = (
         "Use for Discord server administration requests like setting up a themed server, creating rooms/roles, "
-        "editing permissions, setting guild icon, or changing response behavior for the current room. "
-        "Pass the full user request text and let the plugin decide the plan."
+        "editing permissions, setting guild icon, or changing response behavior for the current room."
     )
     plugin_dec = "AI-driven Discord server administration and response-channel control."
     required_args = ["request"]
@@ -197,8 +195,9 @@ class DiscordAdminPlugin(ToolPlugin):
     missing_info_prompts = []
 
     waiting_prompt_template = (
-        "Write one short message telling {mention} you're configuring the Discord server now. "
-        "Only output the message."
+        "Write one short, natural status update to {mention} that you are working on their Discord admin request now. "
+        "Use fresh wording (avoid repeating stock phrases). "
+        "Do not use markdown. Only output the message."
     )
 
     @staticmethod
@@ -318,6 +317,300 @@ class DiscordAdminPlugin(ToolPlugin):
                 return value.strip()
         content = getattr(message, "content", "")
         return str(content or "").strip()
+
+    @staticmethod
+    def _role_position(role: Any) -> int:
+        try:
+            return int(getattr(role, "position", 0) or 0)
+        except Exception:
+            return 0
+
+    def _normalize_role_command_text(self, text: str, message) -> str:
+        out = str(text or "").strip()
+        if not out:
+            return ""
+        bot_obj = getattr(getattr(message, "client", None), "user", None)
+        bot_id = int(getattr(bot_obj, "id", 0) or 0)
+        if bot_id > 0:
+            out = re.sub(rf"<@!?{bot_id}>", " ", out)
+        bot_aliases: list[str] = []
+        for attr in ("display_name", "name"):
+            value = str(getattr(bot_obj, attr, "") or "").strip()
+            if value:
+                bot_aliases.append(value)
+        for alias in bot_aliases:
+            out = re.sub(rf"^\s*{re.escape(alias)}[\s,:-]+", "", out, flags=re.IGNORECASE)
+        out = " ".join(out.split())
+        return out.strip()
+
+    async def _classify_role_command_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
+        command_text = self._normalize_role_command_text(text, message)
+        if not command_text or llm_client is None:
+            return {}
+
+        prompt = (
+            "Classify this Discord message for direct role-command handling.\n"
+            "Return strict JSON only with this shape:\n"
+            '{"action":"none|list_roles|role_me|role_self","role":"role name or empty string","role_only":true|false}\n\n'
+            "Rules:\n"
+            "- Use action=none when this is not a role command.\n"
+            "- Use action=list_roles for requests like list role/list roles/show roles.\n"
+            "- Use action=role_me when user asks to assign a role to themselves.\n"
+            "- Use action=role_self when user asks to assign a role to the bot/assistant itself.\n"
+            "- Set role only for role_me/role_self; otherwise role must be empty.\n"
+            "- Set role_only=true when the request is only a role command.\n"
+            "- Set role_only=false when the same request also asks for additional Discord admin actions.\n"
+            "- Do not invent role names.\n\n"
+            f"Request: {command_text}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You return only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            if not blob:
+                return {}
+            try:
+                parsed = json.loads(blob)
+            except Exception:
+                return {}
+            if not isinstance(parsed, dict):
+                return {}
+
+            action = str(parsed.get("action") or "").strip().lower()
+            if action not in {"list_roles", "role_me", "role_self"}:
+                return {}
+            role_only = _coerce_bool(parsed.get("role_only"), True)
+
+            role_raw = str(parsed.get("role") or "").strip()
+            role_raw = role_raw.strip(" \t\r\n.,!?")
+            if (role_raw.startswith('"') and role_raw.endswith('"')) or (
+                role_raw.startswith("'") and role_raw.endswith("'")
+            ):
+                role_raw = role_raw[1:-1].strip()
+
+            if action in {"role_me", "role_self"}:
+                if not role_raw:
+                    return {}
+                return {"action": action, "role": role_raw, "role_only": role_only}
+            return {"action": "list_roles", "role_only": role_only}
+        except Exception as exc:
+            logger.debug(f"[discord_admin] role-command LLM classification failed: {exc}")
+            return {}
+
+    @staticmethod
+    def _normalize_role_lookup_token(value: str) -> str:
+        token = str(value or "").strip()
+        if token.startswith("<@&") and token.endswith(">"):
+            token = token[3:-1].strip()
+        if token.startswith("@"):
+            token = token[1:].strip()
+        token = token.strip(" \t\r\n")
+        return token
+
+    @classmethod
+    def _resolve_role_by_text(cls, guild, role_text: str):
+        token = cls._normalize_role_lookup_token(role_text)
+        if not token:
+            return None
+
+        role_id = 0
+        try:
+            role_id = int(token)
+        except Exception:
+            role_id = 0
+        if role_id > 0:
+            getter = getattr(guild, "get_role", None)
+            if callable(getter):
+                role_obj = getter(role_id)
+                if role_obj is not None:
+                    return role_obj
+            for role_obj in list(getattr(guild, "roles", []) or []):
+                if int(getattr(role_obj, "id", 0) or 0) == role_id:
+                    return role_obj
+
+        lowered = token.lower()
+        for role_obj in list(getattr(guild, "roles", []) or []):
+            if str(getattr(role_obj, "name", "") or "").strip().lower() == lowered:
+                return role_obj
+        return None
+
+    def _bot_member(self, guild, message):
+        if guild is None:
+            return None
+        bot_member = getattr(guild, "me", None)
+        if bot_member is not None:
+            return bot_member
+        getter = getattr(guild, "get_member", None)
+        bot_id = int(getattr(getattr(getattr(message, "client", None), "user", None), "id", 0) or 0)
+        if callable(getter) and bot_id > 0:
+            try:
+                return getter(bot_id)
+            except Exception:
+                return None
+        return None
+
+    def _author_is_configured_admin(self, message) -> bool:
+        settings = self._load_discord_settings()
+        raw_admin_id = str(settings.get("admin_user_id") or "").strip()
+        if not raw_admin_id:
+            return False
+        try:
+            admin_id = int(raw_admin_id)
+        except Exception:
+            return False
+        author_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
+        return author_id > 0 and author_id == admin_id
+
+    def _author_can_manage_roles(self, message) -> bool:
+        if self._author_is_configured_admin(message):
+            return True
+        perms = getattr(getattr(message, "author", None), "guild_permissions", None)
+        if perms is None:
+            return False
+        return bool(getattr(perms, "manage_roles", False) or getattr(perms, "administrator", False))
+
+    async def _handle_direct_role_command(self, message, parsed: Dict[str, str]) -> Dict[str, Any]:
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return action_failure(
+                code="guild_required",
+                message="Role commands only work in a server channel.",
+                say_hint="Explain role commands require guild context.",
+            )
+
+        action = str(parsed.get("action") or "").strip().lower()
+        if action == "list_roles":
+            roles = [
+                role
+                for role in list(getattr(guild, "roles", []) or [])
+                if str(getattr(role, "name", "") or "").strip()
+                and str(getattr(role, "name", "") or "") != "@everyone"
+            ]
+            if not roles:
+                return action_success(
+                    facts={"action": "list_roles", "count": 0},
+                    summary_for_user="No assignable roles were found in this server.",
+                )
+            roles_sorted = sorted(
+                roles,
+                key=lambda role_obj: (
+                    -self._role_position(role_obj),
+                    str(getattr(role_obj, "name", "") or "").lower(),
+                ),
+            )
+            labels = [f"`{str(getattr(role_obj, 'name', '') or '').strip()}`" for role_obj in roles_sorted]
+            preview: list[str] = []
+            total_chars = 0
+            for label in labels:
+                projected = total_chars + len(label) + (2 if preview else 0)
+                if projected > 1700:
+                    break
+                preview.append(label)
+                total_chars = projected
+            remainder = len(labels) - len(preview)
+            suffix = f" (+{remainder} more)" if remainder > 0 else ""
+            return action_success(
+                facts={"action": "list_roles", "count": len(labels)},
+                summary_for_user="Server roles: " + ", ".join(preview) + suffix,
+            )
+
+        role_text = str(parsed.get("role") or "").strip()
+        role_obj = self._resolve_role_by_text(guild, role_text)
+        if role_obj is None:
+            return action_failure(
+                code="role_not_found",
+                message=f"I couldn't find role `{role_text}`. Try `list roles` first.",
+                say_hint="Explain the requested role was not found.",
+            )
+
+        if not self._author_can_manage_roles(message):
+            return action_failure(
+                code="insufficient_permissions",
+                message="You need `Manage Roles` permission (or be the configured admin user) to do that.",
+                say_hint="Explain the caller needs Manage Roles permission.",
+            )
+
+        bot_member = self._bot_member(guild, message)
+        if bot_member is None:
+            return action_failure(
+                code="bot_member_missing",
+                message="I couldn't resolve my bot member in this guild.",
+                say_hint="Explain the bot member could not be resolved.",
+            )
+
+        bot_perms = getattr(bot_member, "guild_permissions", None)
+        if not bool(getattr(bot_perms, "manage_roles", False)):
+            return action_failure(
+                code="bot_missing_manage_roles",
+                message="I don't have `Manage Roles` permission in this server.",
+                say_hint="Explain the bot is missing Manage Roles permission.",
+            )
+
+        if bool(getattr(role_obj, "managed", False)):
+            return action_failure(
+                code="managed_role_forbidden",
+                message=f"I can't assign managed role `{getattr(role_obj, 'name', 'unknown')}`.",
+                say_hint="Explain managed roles cannot be assigned by the bot.",
+            )
+
+        bot_top = self._role_position(getattr(bot_member, "top_role", None))
+        if self._role_position(role_obj) >= bot_top:
+            return action_failure(
+                code="role_hierarchy_blocked",
+                message=(
+                    f"I can't assign `{getattr(role_obj, 'name', 'that role')}` "
+                    "because it's above my highest role."
+                ),
+                say_hint="Explain role hierarchy prevents this assignment.",
+            )
+
+        if action == "role_self":
+            target_member = bot_member
+            target_label = "I"
+        else:
+            target_member = getattr(message, "author", None)
+            target_label = "You"
+            target_top = self._role_position(getattr(target_member, "top_role", None))
+            if target_top >= bot_top:
+                return action_failure(
+                    code="target_hierarchy_blocked",
+                    message="I can't change roles for your member because of role hierarchy.",
+                    say_hint="Explain role hierarchy prevents changing this member.",
+                )
+
+        existing_role_ids = {
+            int(getattr(item, "id", 0) or 0)
+            for item in list(getattr(target_member, "roles", []) or [])
+        }
+        role_id = int(getattr(role_obj, "id", 0) or 0)
+        role_name = str(getattr(role_obj, "name", "that role") or "that role")
+        if role_id > 0 and role_id in existing_role_ids:
+            return action_success(
+                facts={"action": action, "role": role_name, "already_had_role": True},
+                summary_for_user=f"{target_label} already have `{role_name}`.",
+            )
+
+        try:
+            await target_member.add_roles(
+                role_obj,
+                reason=f"Requested by {getattr(getattr(message, 'author', None), 'name', 'user')} via role command",
+            )
+        except Exception as exc:
+            return action_failure(
+                code="role_assignment_failed",
+                message=f"I couldn't assign `{role_name}`: {exc}",
+                say_hint="Explain the role assignment failed and include the error briefly.",
+            )
+
+        return action_success(
+            facts={"action": action, "role": role_name, "already_had_role": False},
+            summary_for_user=f"Done. {target_label} now have `{role_name}`.",
+        )
 
     @staticmethod
     def _blob_client():
@@ -1483,8 +1776,32 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Explain this tool requires a guild channel context.",
             )
 
+        role_summary_prefix = ""
+        role_action_applied = False
+        parsed_role_command = await self._classify_role_command_with_llm(request_text, message, llm_client)
+        if parsed_role_command:
+            role_result = await self._handle_direct_role_command(message, parsed_role_command)
+            if not bool(role_result.get("ok")):
+                return role_result
+            role_action_applied = True
+            role_summary_prefix = str(role_result.get("summary_for_user") or "").strip()
+            if _coerce_bool(parsed_role_command.get("role_only"), True):
+                return role_result
+
         allowed, err = self._admin_allowed(message)
         if not allowed:
+            if role_action_applied:
+                reason = err or "This tool is restricted to the configured Discord admin user."
+                summary = role_summary_prefix or "Role command applied."
+                return action_success(
+                    facts={
+                        "role_action_applied": True,
+                        "admin_actions_applied": False,
+                    },
+                    data={"warnings": [reason]},
+                    summary_for_user=f"{summary} I could not apply additional Discord admin changes: {reason}",
+                    say_hint="Confirm the role command succeeded and explain why additional admin changes were skipped.",
+                )
             return action_failure(
                 code="admin_only",
                 message=err or "This tool is restricted to the configured Discord admin user.",
@@ -1512,14 +1829,18 @@ class DiscordAdminPlugin(ToolPlugin):
                     message=str(response_result.get("error") or "Failed to update response channel settings."),
                     say_hint="Explain the response channel update failed and why.",
                 )
+            response_summary = str(response_result.get("summary") or "Updated response channel settings.").strip()
+            if role_summary_prefix:
+                response_summary = f"{role_summary_prefix} {response_summary}".strip()
             return action_success(
                 facts={
                     "response_channel_action": direct_action,
                     "response_channel_ids": sorted(response_result.get("channels") or []),
                     "guild_id": int(response_result.get("guild_id") or 0),
                     "dry_run": dry_run,
+                    "role_action_applied": role_action_applied,
                 },
-                summary_for_user=str(response_result.get("summary") or "Updated response channel settings."),
+                summary_for_user=response_summary,
                 say_hint="Confirm the response channel mode update in plain language.",
             )
 
@@ -1579,6 +1900,8 @@ class DiscordAdminPlugin(ToolPlugin):
                 summary += " Includes a delete-all-except-categories action."
             if response_summary:
                 summary = f"{response_summary} {summary}"
+            if role_summary_prefix:
+                summary = f"{role_summary_prefix} {summary}"
             return action_success(
                 facts={
                     "dry_run": True,
@@ -1616,6 +1939,8 @@ class DiscordAdminPlugin(ToolPlugin):
         summary = self._summarize_stats(stats)
         if response_summary:
             summary = f"{response_summary} {summary}"
+        if role_summary_prefix:
+            summary = f"{role_summary_prefix} {summary}"
 
         return action_success(
             facts={

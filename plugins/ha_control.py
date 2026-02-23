@@ -62,12 +62,9 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.8"
+    version = "1.1.9"
     min_tater_version = "59"
     pretty_name = "Home Assistant Control"
-    argument_mode = "raw_user_request"
-    raw_user_arg = "query"
-    raw_user_policy = "verbatim"
     routing_keywords = [
         "home assistant",
         "hass",
@@ -92,7 +89,7 @@ class HAControlPlugin(ToolPlugin):
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"ha_control","arguments":{"query":"ONE consolidated Home Assistant request in natural language. Pass the user\'s exact request text in this field (verbatim). Include all Home Assistant actions for this turn in this single query (for example: turn on living room and kitchen lights to 50% and open garage)."}}'
+    usage = '{"function":"ha_control","arguments":{"query":"ONE consolidated Home Assistant request in natural language. Include all Home Assistant actions for this turn in this single query (for example: turn on living room and kitchen lights to 50% and open garage)."}}'
 
     description = (
         "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
@@ -1563,7 +1560,7 @@ class HAControlPlugin(ToolPlugin):
         args = args or {}
         query = (args.get("query") or "").strip()
         if not query:
-            return "Please provide 'query' with the user's exact request."
+            return "Please provide a Home Assistant request in 'query'."
         explicit_entity = ""
 
         excluded = self._excluded_entities_set()

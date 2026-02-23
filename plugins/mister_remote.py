@@ -67,12 +67,9 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.5"
+    version = "1.1.6"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
-    argument_mode = "raw_user_request"
-    raw_user_arg = "utterance"
-    raw_user_policy = "verbatim"
     routing_keywords = [
         "mister",
         "mister fpga",
@@ -86,14 +83,14 @@ class MisterRemotePlugin(ToolPlugin):
     ]
     description = (
         "Control MiSTer via the MiSTer Remote API.\n"
-        "ALWAYS include the user's FULL original message in the `utterance` field when calling this tool.\n"
+        "Include the user's MiSTer request in the `utterance` field when calling this tool.\n"
         "Examples users might say: 'play super mario 3 on mister', 'what’s playing?', 'go to menu', 'take a screenshot'."
     )
     plugin_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
-    usage = '{"function":"mister_remote","arguments":{"command":"<optional: play|now_playing|go_to_menu|screenshot_take>","utterance":"<FULL original user message (authoritative)>"}}'
+    usage = '{"function":"mister_remote","arguments":{"command":"<optional: play|now_playing|go_to_menu|screenshot_take>","utterance":"<user MiSTer request text>"}}'
 
     settings_category = "MiSTer Remote"
     required_settings = {
