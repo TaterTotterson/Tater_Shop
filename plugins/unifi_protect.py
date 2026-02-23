@@ -361,6 +361,24 @@ class UniFiProtectPlugin(ToolPlugin):
     settings_category = "UniFi Protect"
 
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    routing_keywords = [
+        "unifi protect",
+        "protect",
+        "camera",
+        "cameras",
+        "doorbell",
+        "snapshot",
+        "front yard",
+        "back yard",
+        "yard",
+        "driveway",
+        "porch",
+        "patio",
+        "garage camera",
+        "sensor",
+        "sensors",
+        "motion",
+    ]
 
     usage = '{"function":"unifi_protect","arguments":{"query":"User request about UniFi Protect (sensors status, list cameras, or describe a camera/area)."}}'
 
