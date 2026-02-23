@@ -33,7 +33,7 @@ class UnifiNetworkPlugin(ToolPlugin):
 
     name = "unifi_network"
     plugin_name = "UniFi Network"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "50"
     pretty_name = "UniFi Network"
     description = (

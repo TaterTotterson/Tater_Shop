@@ -355,7 +355,7 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "50"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
