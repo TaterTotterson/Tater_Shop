@@ -679,7 +679,7 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "7648fc313912aecb944daeb760719432822ab181c28497784792d835927befea"
+      "sha256": "10451c722206ed8e9e5c696fb242aa0882f1485ef8a931acbec168f9b7e462a4"
     },
     {
       "id": "unifi_protect",
@@ -701,7 +701,7 @@
       "settings_category": "UniFi Protect",
       "tags": [],
       "entry": "plugins/unifi_protect.py",
-      "sha256": "9eb5579765d827261f497b47bb3f60d02dc22dcdb01b01dff572ccb357f726fa"
+      "sha256": "bb278e034d89d070e0c6422b2c14729ee6160a0b3d9db197f11390a89e0ebc70"
     },
     {
       "id": "voicepe_remote_timer",
