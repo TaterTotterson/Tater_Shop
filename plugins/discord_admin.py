@@ -24,6 +24,24 @@ ICON_MAX_BYTES = 10 * 1024 * 1024
 VALID_ROLE_PERMISSIONS = set(getattr(discord.Permissions, "VALID_FLAGS", {}).keys())
 VALID_CHANNEL_PERMISSIONS = set(getattr(discord.Permissions, "VALID_FLAGS", {}).keys())
 VALID_RESPONSE_ACTIONS = {"none", "add_current", "remove_current", "set_only_current", "clear_all"}
+PLAN_ROOT_KEYS = {
+    "response_channel_action",
+    "server_name",
+    "set_guild_icon_from_attachment",
+    "roles",
+    "categories",
+    "delete_channels",
+    "delete_categories",
+    "delete_all_channels_except",
+    "delete_all_channels_except_ids",
+    "delete_all_channels_except_names",
+    "confirm_delete_all_channels",
+    "delete_all_categories_except",
+    "delete_all_categories_except_ids",
+    "delete_all_categories_except_names",
+    "confirm_delete_all_categories",
+    "notes",
+}
 
 
 def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
@@ -147,7 +165,7 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.13"
+    version = "1.0.14"
     min_tater_version = "59"
     platforms = ["discord"]
     routing_keywords = [
@@ -762,24 +780,174 @@ class DiscordAdminPlugin(ToolPlugin):
         action = str((intent or {}).get("response_channel_action") or "none").strip().lower()
         return action if action in VALID_RESPONSE_ACTIONS else "none"
 
+    @staticmethod
+    def _guild_snapshot(guild) -> Dict[str, Any]:
+        if guild is None:
+            return {
+                "name": "",
+                "id": "",
+                "roles": [],
+                "categories": [],
+                "channels": [],
+            }
+        roles: list[Dict[str, Any]] = []
+        for role in list(getattr(guild, "roles", []) or [])[:80]:
+            role_name = str(getattr(role, "name", "") or "").strip()
+            if not role_name:
+                continue
+            roles.append(
+                {
+                    "id": int(getattr(role, "id", 0) or 0),
+                    "name": role_name,
+                }
+            )
+        categories: list[Dict[str, Any]] = []
+        for cat in list(getattr(guild, "categories", []) or [])[:80]:
+            cat_name = str(getattr(cat, "name", "") or "").strip()
+            if not cat_name:
+                continue
+            categories.append(
+                {
+                    "id": int(getattr(cat, "id", 0) or 0),
+                    "name": cat_name,
+                }
+            )
+        channels: list[Dict[str, Any]] = []
+        for ch in list(getattr(guild, "channels", []) or [])[:200]:
+            if isinstance(ch, discord.CategoryChannel):
+                continue
+            kind = "voice" if isinstance(ch, discord.VoiceChannel) else "text"
+            channels.append(
+                {
+                    "id": int(getattr(ch, "id", 0) or 0),
+                    "name": str(getattr(ch, "name", "") or ""),
+                    "kind": kind,
+                    "category_id": int(getattr(getattr(ch, "category", None), "id", 0) or 0),
+                    "category": str(getattr(getattr(ch, "category", None), "name", "") or ""),
+                }
+            )
+        return {
+            "name": str(getattr(guild, "name", "") or ""),
+            "id": str(getattr(guild, "id", "") or ""),
+            "roles": roles,
+            "categories": categories,
+            "channels": channels,
+        }
+
+    @staticmethod
+    def _has_destructive_delete_work(plan: Dict[str, Any]) -> bool:
+        payload = plan if isinstance(plan, dict) else {}
+        if list(payload.get("delete_channels") or []):
+            return True
+        if list(payload.get("delete_categories") or []):
+            return True
+        if list(payload.get("delete_all_channels_except_ids") or []):
+            return True
+        if list(payload.get("delete_all_channels_except_names") or []):
+            return True
+        if list(payload.get("delete_all_categories_except_ids") or []):
+            return True
+        if list(payload.get("delete_all_categories_except_names") or []):
+            return True
+        return False
+
+    async def _llm_review_plan(self, request_text: str, guild, plan: Dict[str, Any], llm_client) -> Dict[str, Any]:
+        normalized_plan = self._normalize_plan(plan if isinstance(plan, dict) else {})
+        out: Dict[str, Any] = {
+            "needs_clarification": False,
+            "clarification_question": "",
+            "review_applied": False,
+            "plan": normalized_plan,
+        }
+        if llm_client is None:
+            return out
+
+        guild_snapshot = self._guild_snapshot(guild)
+        prompt = (
+            "Review this Discord admin plan so it matches the user request exactly.\n"
+            "Return strict JSON only with this shape:\n"
+            "{\n"
+            '  "needs_clarification": false,\n'
+            '  "clarification_question": "",\n'
+            '  "plan": {\n'
+            '    "response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",\n'
+            '    "server_name":"optional",\n'
+            '    "set_guild_icon_from_attachment":false,\n'
+            '    "roles":[...],\n'
+            '    "categories":[...],\n'
+            '    "delete_channels":[{"ref":"name|#name|<#id>|id|current","kind":"text|voice|any"}],\n'
+            '    "delete_categories":["name|id|current"],\n'
+            '    "delete_all_channels_except":["name|#name|<#id>|id|current"],\n'
+            '    "confirm_delete_all_channels":false,\n'
+            '    "delete_all_categories_except":["name|id|current"],\n'
+            '    "confirm_delete_all_categories":false,\n'
+            '    "notes":"optional"\n'
+            "  }\n"
+            "}\n\n"
+            "Rules:\n"
+            "- Keep only actions explicitly requested by the user. Remove anything extra.\n"
+            "- Do not broaden scope. Minimal changes only.\n"
+            "- For deletions, use explicit channel/category refs from the snapshot. Do not use kind-only deletes.\n"
+            "- If a destructive request is ambiguous, set needs_clarification=true, provide one short question, "
+            "and clear destructive actions from plan.\n"
+            "- Set delete-all confirmation booleans true only when user explicitly requested deleting almost everything.\n"
+            "- Never invent channels/categories/roles that do not exist when deleting.\n\n"
+            f"User request: {request_text}\n"
+            f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}\n"
+            f"Candidate plan JSON: {json.dumps(normalized_plan, ensure_ascii=False)}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You output only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            if not blob:
+                return out
+            parsed = json.loads(blob)
+            if not isinstance(parsed, dict):
+                return out
+            out["review_applied"] = True
+
+            reviewed_payload: Dict[str, Any] | None = None
+            if isinstance(parsed.get("plan"), dict):
+                reviewed_payload = parsed.get("plan")
+            elif any(key in parsed for key in PLAN_ROOT_KEYS):
+                reviewed_payload = parsed
+            if isinstance(reviewed_payload, dict):
+                out["plan"] = self._normalize_plan(reviewed_payload)
+
+            needs_clarification = _coerce_bool(parsed.get("needs_clarification"), False)
+            question = str(parsed.get("clarification_question") or "").strip()
+            out["needs_clarification"] = needs_clarification
+            out["clarification_question"] = question[:240] if question else ""
+
+            if out["needs_clarification"]:
+                safe_plan = dict(out.get("plan") or {})
+                safe_plan["delete_channels"] = []
+                safe_plan["delete_categories"] = []
+                safe_plan["delete_all_channels_except_ids"] = []
+                safe_plan["delete_all_channels_except_names"] = []
+                safe_plan["confirm_delete_all_channels"] = False
+                safe_plan["delete_all_categories_except_ids"] = []
+                safe_plan["delete_all_categories_except_names"] = []
+                safe_plan["confirm_delete_all_categories"] = False
+                out["plan"] = safe_plan
+                if not out["clarification_question"]:
+                    out["clarification_question"] = (
+                        "Can you clarify exactly which channels or categories you want changed?"
+                    )
+        except Exception as exc:
+            logger.debug(f"[discord_admin] plan review failed: {exc}")
+        return out
+
     async def _llm_plan(self, request_text: str, guild, llm_client) -> Dict[str, Any]:
         if llm_client is None:
             return {}
-        guild_snapshot = {
-            "name": str(getattr(guild, "name", "") or ""),
-            "id": str(getattr(guild, "id", "") or ""),
-            "roles": [str(getattr(role, "name", "") or "") for role in list(getattr(guild, "roles", []) or [])[:40]],
-            "categories": [str(getattr(cat, "name", "") or "") for cat in list(getattr(guild, "categories", []) or [])[:30]],
-            "channels": [
-                {
-                    "name": str(getattr(ch, "name", "") or ""),
-                    "kind": "voice" if isinstance(ch, discord.VoiceChannel) else "text",
-                    "category": str(getattr(getattr(ch, "category", None), "name", "") or ""),
-                }
-                for ch in list(getattr(guild, "channels", []) or [])[:100]
-                if isinstance(ch, (discord.TextChannel, discord.VoiceChannel))
-            ],
-        }
+        guild_snapshot = self._guild_snapshot(guild)
 
         allowed_perms = ", ".join(sorted(VALID_CHANNEL_PERMISSIONS))
         prompt = (
@@ -807,7 +975,9 @@ class DiscordAdminPlugin(ToolPlugin):
             "- If user asks broad setup ('setup this discord', 'however you think'), provide a concrete plan instead of asking follow-up questions.\n"
             "- Default apply_mode should be create_only. Use create_or_update only when user explicitly asks to modify an existing role/channel/category.\n"
             "- Deletion is allowed only when user explicitly asks to delete/remove/clear channels/categories.\n"
-            "- For targeted removal (e.g., remove voice channel(s), remove #off-topic), use delete_channels/delete_categories.\n"
+            "- For targeted removal (e.g., remove #off-topic), use delete_channels/delete_categories.\n"
+            "- For delete_channels/delete_categories, use explicit refs (id/name/current) from the guild snapshot.\n"
+            "- Do not use broad kind-only delete targets. If user asked to remove all voice channels, enumerate each target channel ref.\n"
             "- For delete-all requests, fill delete_all_channels_except with channels to preserve.\n"
             "- Set confirm_delete_all_channels=true ONLY when user explicitly requested deleting almost all channels.\n"
             "- For category deletion requests, fill delete_all_categories_except with categories to preserve.\n"
@@ -960,7 +1130,8 @@ class DiscordAdminPlugin(ToolPlugin):
                         if cleaned:
                             name = cleaned
 
-            if rid <= 0 and not name and kind == "any":
+            # Require an explicit channel reference; kind-only deletes are too broad.
+            if rid <= 0 and not name:
                 continue
             key = (rid, name, kind)
             if key in seen:
@@ -1456,7 +1627,19 @@ class DiscordAdminPlugin(ToolPlugin):
         if guild is None:
             return
 
-        delete_targets = list(plan.get("delete_channels") or [])
+        raw_delete_targets = list(plan.get("delete_channels") or [])
+        delete_targets: list[Dict[str, Any]] = []
+        for target in raw_delete_targets:
+            if not isinstance(target, dict):
+                continue
+            target_id = int(target.get("id") or 0)
+            target_name = str(target.get("name") or "").strip()
+            if target_id > 0 or target_name:
+                delete_targets.append(target)
+                continue
+            stats["warnings"].append(
+                "Skipped broad channel delete target because it did not name a specific channel."
+            )
         plan_keep_ids = {int(x) for x in (plan.get("delete_all_channels_except_ids") or []) if int(x) > 0}
         plan_keep_names = {
             str(x).strip().lower()
@@ -1543,7 +1726,19 @@ class DiscordAdminPlugin(ToolPlugin):
         if guild is None:
             return
 
-        delete_targets = list(plan.get("delete_categories") or [])
+        raw_delete_targets = list(plan.get("delete_categories") or [])
+        delete_targets: list[Dict[str, Any]] = []
+        for target in raw_delete_targets:
+            if not isinstance(target, dict):
+                continue
+            target_id = int(target.get("id") or 0)
+            target_name = str(target.get("name") or "").strip()
+            if target_id > 0 or target_name:
+                delete_targets.append(target)
+                continue
+            stats["warnings"].append(
+                "Skipped broad category delete target because it did not name a specific category."
+            )
         plan_keep_ids = {
             int(x)
             for x in (plan.get("delete_all_categories_except_ids") or [])
@@ -1847,8 +2042,33 @@ class DiscordAdminPlugin(ToolPlugin):
         should_plan = bool(should_setup or direct_action == "none")
         llm_plan = await self._llm_plan(request_text, message.guild, llm_client) if should_plan else {}
         plan = self._normalize_plan(llm_plan)
+        clarification_question = ""
+        review_applied = False
+        if should_plan:
+            reviewed = await self._llm_review_plan(request_text, message.guild, plan, llm_client)
+            reviewed_plan = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else plan
+            plan = self._normalize_plan(reviewed_plan)
+            review_applied = _coerce_bool(reviewed.get("review_applied"), False)
+            if _coerce_bool(reviewed.get("needs_clarification"), False):
+                clarification_question = str(reviewed.get("clarification_question") or "").strip()
         if direct_action != "none":
             plan["response_channel_action"] = direct_action
+
+        if should_plan and self._has_destructive_delete_work(plan) and not review_applied:
+            return action_failure(
+                code="needs_clarification",
+                message="I need one detail before I can apply destructive Discord changes safely.",
+                needs=["Please repeat exactly which channels or categories should be removed."],
+                say_hint="Ask for explicit delete targets before applying destructive changes.",
+            )
+
+        if clarification_question:
+            return action_failure(
+                code="needs_clarification",
+                message="I need one detail before I can apply that safely.",
+                needs=[clarification_question],
+                say_hint="Ask one precise follow-up question, then wait for the user's answer.",
+            )
 
         if not self._has_setup_work(plan) and str(plan.get("response_channel_action") or "none") == "none":
             return action_failure(
