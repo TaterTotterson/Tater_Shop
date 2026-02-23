@@ -178,7 +178,7 @@
     {
       "id": "discord_admin",
       "name": "Discord Admin",
-      "version": "1.0.10",
+      "version": "1.0.13",
       "min_tater_version": "59",
       "description": "AI-driven Discord server administration and response-channel control.",
       "platforms": [
@@ -188,7 +188,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "c260171b154f2dc594e58a6805b9802fcf56db4690957896c7e3326a307f6054"
+      "sha256": "ea854f31556a7eab42d3a7177754033a694a7d9e93bcf64a369b181b3c844aba"
     },
     {
       "id": "doorbell_alert",
@@ -301,7 +301,7 @@
     {
       "id": "ha_control",
       "name": "Home Assistant Control",
-      "version": "1.1.8",
+      "version": "1.1.9",
       "min_tater_version": "59",
       "description": "Control Home Assistant devices.",
       "platforms": [
@@ -318,7 +318,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "ff7a9050419aba6ed14611c3c61950a1ff6de09787c06428d57bd588b91ae2bf"
+      "sha256": "95f5204b5ea937d59bb1817bdde2d293f5b64e1d0311a5462e8fbe74eced18ae"
     },
     {
       "id": "image_describe",
@@ -357,7 +357,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "platforms": [
@@ -373,7 +373,7 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "plugins/mister_remote.py",
-      "sha256": "5be73ba8af19ef4b2b90367db0c0c9cabb25283c1a9a6e5d099a57b3be41371e"
+      "sha256": "cd8bab85217f9e98185bb199084dfdb2fdd019b03364557a85a20b4489f2bacf"
     },
     {
       "id": "music_assistant",
@@ -743,7 +743,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.2",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "platforms": [
@@ -760,7 +760,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "plugins/weather_forecast.py",
-      "sha256": "399c9aaca5f9815b7dbf34728210c518b035642bbef6c5b7a39d79b8e6e650d1"
+      "sha256": "afe9ccae634f6b16c31d4466dda89086f31e147e728d65d3347394814ac57508"
     },
     {
       "id": "web_summary",
