@@ -49,6 +49,25 @@ class UnifiNetworkPlugin(ToolPlugin):
     common_needs = ["action", "name (for find_client/find_device)"]
     required_args = ["action"]
     optional_args = ["name"]
+    routing_keywords = [
+        "unifi",
+        "unifi network",
+        "network",
+        "wifi",
+        "wi-fi",
+        "access point",
+        "ap",
+        "switch",
+        "gateway",
+        "client",
+        "clients",
+        "device",
+        "devices",
+        "wired",
+        "wireless",
+        "offline",
+        "online",
+    ]
     settings_category = "UniFi Network"
     platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
