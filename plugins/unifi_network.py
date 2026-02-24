@@ -33,7 +33,7 @@ class UnifiNetworkPlugin(ToolPlugin):
     # NOTE: Tater's registry typically keys by `name` (function name).
     name = "unifi_network"
     plugin_name = "UniFi Network"
-    version = "2.0.0"
+    version = "2.0.1"
     min_tater_version = "50"
     pretty_name = "UniFi Network"
 
