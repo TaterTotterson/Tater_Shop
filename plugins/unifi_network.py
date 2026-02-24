@@ -46,6 +46,12 @@ class UnifiNetworkPlugin(ToolPlugin):
         "Use for UniFi Network status, client/device listings, lookups, counts, "
         "offline device checks, or network health snapshots."
     )
+    common_needs = ["UniFi operation (`op`) and optional site/query context"]
+    required_args = ["op"]
+    optional_args = ["site_id", "query", "offset", "limit", "max_hits"]
+    missing_info_prompts = [
+        "Which UniFi operation should I run (sites_list, health_snapshot, clients_list, devices_list, clients_all, devices_all, client_find, or device_find)?",
+    ]
 
     # Cerberus calls this with structured args; we no longer accept raw natural language as the primary API.
     # Keep it compact and explicit.
@@ -59,6 +65,53 @@ class UnifiNetworkPlugin(ToolPlugin):
         '"max_hits":10'
         '}}'
     )
+    example_calls = [
+        '{"function":"unifi_network","arguments":{"op":"health_snapshot"}}',
+        '{"function":"unifi_network","arguments":{"op":"client_find","query":"iphone"}}',
+    ]
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "op": {
+                "type": "string",
+                "enum": [
+                    "sites_list",
+                    "health_snapshot",
+                    "clients_list",
+                    "devices_list",
+                    "clients_all",
+                    "devices_all",
+                    "client_find",
+                    "device_find",
+                ],
+                "description": (
+                    "UniFi operation to execute. Use *_find operations with query, "
+                    "or list/snapshot operations for inventory and health."
+                ),
+            },
+            "site_id": {
+                "type": "string",
+                "description": "Optional UniFi site id. If omitted, the plugin uses the first available site.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Search text for client_find/device_find operations.",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Page offset for clients_list/devices_list operations (default 0).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Page size for clients_list/devices_list operations (default 200, max 500).",
+            },
+            "max_hits": {
+                "type": "integer",
+                "description": "Maximum matches to return for *_find operations (default 10, max 50).",
+            },
+        },
+        "required": ["op"],
+    }
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking the UniFi network now. "
