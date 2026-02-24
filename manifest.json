@@ -679,7 +679,7 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "2500f47e9d8abcf143958a2a7a1d1eff7b45721d441e2f1c7d4908b519e54749"
+      "sha256": "ab05f3760032d7153060e22565041bbe745959bd014744163ea849833bec0948"
     },
     {
       "id": "unifi_protect",
