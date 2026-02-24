@@ -662,9 +662,9 @@
     {
       "id": "unifi_network",
       "name": "UniFi Network",
-      "version": "1.0.4",
+      "version": "2.0.0",
       "min_tater_version": "50",
-      "description": "Fetch UniFi Network sites/clients/devices via the official API and answer network-health questions.",
+      "description": "UniFi Network toolbox that returns structured UniFi data for Cerberus to reason over.",
       "platforms": [
         "webui",
         "homeassistant",
@@ -679,7 +679,7 @@
       "settings_category": "UniFi Network",
       "tags": [],
       "entry": "plugins/unifi_network.py",
-      "sha256": "6f96f2f4bd2f828cd94617ae4e78b3037ff13acc48b26f6356206a329d26aeb7"
+      "sha256": "2500f47e9d8abcf143958a2a7a1d1eff7b45721d441e2f1c7d4908b519e54749"
     },
     {
       "id": "unifi_protect",
