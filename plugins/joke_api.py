@@ -15,29 +15,21 @@ logger.setLevel(logging.INFO)
 class JokeAPIPlugin(ToolPlugin):
     name = "joke_api"
     plugin_name = "Joke API"
-    version = "1.0.0"
+    version = "1.1.0"
     min_tater_version = "59"
     pretty_name = "Joke API"
-    usage = (
-        '{"function":"joke_api","arguments":{"query":"ONE consolidated joke request in natural language. '
-        'Include theme/count/language naturally (for example: tell me two programming jokes in spanish)."}}'
-    )
-    description = (
-        "Fetch jokes from JokeAPI from one natural-language request, including themed jokes and multi-joke asks."
-    )
-    plugin_dec = "Fetch jokes from JokeAPI."
-    when_to_use = "Use when the user asks for a joke, themed joke, or multiple jokes."
+    usage = '{"function":"joke_api","arguments":{}}'
+    description = "Fetch one joke from JokeAPI."
+    plugin_dec = "Fetch one joke from JokeAPI."
+    when_to_use = "Use when the user asks for a joke."
     how_to_use = (
-        "Pass one consolidated natural-language joke request. Include theme/count/language naturally "
-        "(for example: tell me 2 programming jokes in english)."
+        "Call the tool with no arguments to fetch one joke. "
+        "If the user wants a themed or rewritten joke, fetch the joke first and then transform it outside the plugin."
     )
-    common_needs = ["A natural-language joke request."]
+    common_needs = []
     missing_info_prompts = []
     example_calls = [
-        '{"function":"joke_api","arguments":{"query":"tell me a joke"}}',
-        '{"function":"joke_api","arguments":{"query":"tell me two programming jokes"}}',
-        '{"function":"joke_api","arguments":{"query":"give me a spooky joke about ghosts"}}',
-        '{"function":"joke_api","arguments":{"query":"tell me a clean dad joke"}}',
+        '{"function":"joke_api","arguments":{}}',
     ]
     settings_category = "Joke API"
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc", "xbmc"]
@@ -63,12 +55,6 @@ class JokeAPIPlugin(ToolPlugin):
             "default": 10,
             "description": "Timeout for JokeAPI HTTP calls.",
         },
-        "JOKEAPI_MAX_AMOUNT": {
-            "label": "Maximum Jokes Per Request",
-            "type": "number",
-            "default": 3,
-            "description": "Upper bound for amount requested from natural-language asks.",
-        },
         "JOKEAPI_DEFAULT_SAFE_MODE": {
             "label": "Default Safe Mode",
             "type": "checkbox",
@@ -83,23 +69,6 @@ class JokeAPIPlugin(ToolPlugin):
         },
     }
 
-    _CATEGORY_HINTS = {
-        "Programming": ("programming", "coding", "coder", "developer", "dev", "python", "javascript", "java", "software"),
-        "Pun": ("pun", "puns", "dad joke", "dad jokes"),
-        "Spooky": ("spooky", "halloween", "scary", "ghost", "creepy"),
-        "Christmas": ("christmas", "xmas", "holiday"),
-        "Dark": ("dark", "edgy", "morbid", "black humor", "black humour"),
-    }
-    _LANGUAGE_HINTS = {
-        "english": "en",
-        "spanish": "es",
-        "espanol": "es",
-        "español": "es",
-        "german": "de",
-        "french": "fr",
-        "portuguese": "pt",
-        "czech": "cs",
-    }
     _STRICT_SAFE_FLAGS = ["nsfw", "religious", "political", "racist", "sexist", "explicit"]
 
     @staticmethod
@@ -140,7 +109,6 @@ class JokeAPIPlugin(ToolPlugin):
             or {}
         )
         timeout = self._to_int(s.get("JOKEAPI_TIMEOUT_SECONDS"), default=10, minimum=3, maximum=30)
-        max_amount = self._to_int(s.get("JOKEAPI_MAX_AMOUNT"), default=3, minimum=1, maximum=10)
         safe_mode = self._to_bool(s.get("JOKEAPI_DEFAULT_SAFE_MODE"), default=True)
         default_lang = (self._decode_text(s.get("JOKEAPI_DEFAULT_LANGUAGE")) or "en").strip().lower()
         if len(default_lang) > 2:
@@ -149,137 +117,14 @@ class JokeAPIPlugin(ToolPlugin):
             default_lang = "en"
         return {
             "timeout_seconds": timeout,
-            "max_amount": max_amount,
             "default_safe_mode": safe_mode,
             "default_lang": default_lang,
         }
 
-    @staticmethod
-    def _query_from_args(args: Dict[str, Any]) -> str:
-        args = args or {}
-        for key in ("query", "request", "text", "content", "message"):
-            value = args.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for value in args.values():
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-
-    def _infer_categories(self, query: str) -> List[str]:
-        q = " ".join(str(query or "").strip().lower().split())
-        if not q:
-            return ["Any"]
-        out: List[str] = []
-        for category, hints in self._CATEGORY_HINTS.items():
-            if any(h in q for h in hints):
-                out.append(category)
-        if not out:
-            return ["Any"]
-        # Keep deterministic order.
-        ordered = ["Programming", "Pun", "Spooky", "Christmas", "Dark"]
-        return [c for c in ordered if c in set(out)]
-
-    @staticmethod
-    def _clean_contains(value: str) -> str:
-        text = " ".join(str(value or "").strip().split())
-        if not text:
-            return ""
-        text = re.sub(r"^[\"'`]+|[\"'`]+$", "", text).strip()
-        text = re.sub(r"(?i)\b(jokes?|theme|please|thanks?)\b", "", text).strip()
-        text = re.sub(r"\s{2,}", " ", text).strip(" .,!?:;")
-        if not text:
-            return ""
-        return text[:64]
-
-    def _infer_contains(self, query: str, args: Dict[str, Any]) -> str:
-        raw = (
-            args.get("contains")
-            or args.get("theme")
-            or args.get("topic")
-            or ""
-        )
-        explicit = self._clean_contains(str(raw))
-        if explicit:
-            return explicit
-
-        q = " ".join(str(query or "").strip().split())
-        if not q:
-            return ""
-
-        patterns = (
-            r"(?i)\b(?:about|on)\s+(.+?)(?:\s+in\s+[a-z]+)?$",
-            r"(?i)\b(?:with|using)\s+(?:a\s+)?(?:theme|topic)\s+(.+?)(?:\s+in\s+[a-z]+)?$",
-            r"(?i)\b(?:theme|topic)\s*[:\-]\s*(.+)$",
-        )
-        for pat in patterns:
-            m = re.search(pat, q)
-            if not m:
-                continue
-            candidate = self._clean_contains(m.group(1))
-            if candidate:
-                return candidate
-        return ""
-
-    def _infer_amount(self, query: str, args: Dict[str, Any], max_amount: int) -> int:
-        arg_amount = args.get("amount")
-        if arg_amount is not None:
-            return self._to_int(arg_amount, default=1, minimum=1, maximum=max_amount)
-
-        q = " ".join(str(query or "").strip().lower().split())
-        if not q:
-            return 1
-        match = re.search(r"\b(\d{1,2})\s+(?:jokes?|ones?)\b", q)
-        if match:
-            return self._to_int(match.group(1), default=1, minimum=1, maximum=max_amount)
-        if any(token in q for token in ("a few jokes", "few jokes", "some jokes", "multiple jokes", "couple jokes", "couple of jokes")):
-            return min(3, max_amount)
-        return 1
-
-    def _infer_joke_type(self, query: str, args: Dict[str, Any]) -> str:
-        raw_type = str(args.get("type") or "").strip().lower()
-        if raw_type in {"single", "twopart"}:
-            return raw_type
-        q = " ".join(str(query or "").strip().lower().split())
-        if any(t in q for t in ("one-liner", "oneliner", "single line", "short joke")):
-            return "single"
-        if any(t in q for t in ("two part", "two-part", "setup and punchline", "setup punchline")):
-            return "twopart"
-        return ""
-
-    def _infer_lang(self, query: str, args: Dict[str, Any], default_lang: str) -> str:
-        raw = str(args.get("lang") or "").strip().lower()
-        if re.fullmatch(r"[a-z]{2}", raw):
-            return raw
-        q = " ".join(str(query or "").strip().lower().split())
-        for hint, code in self._LANGUAGE_HINTS.items():
-            if re.search(rf"\bin\s+{re.escape(hint)}\b", q):
-                return code
-        return default_lang
-
-    def _infer_safe_mode(self, query: str, args: Dict[str, Any], default_safe_mode: bool) -> bool:
-        if "safe_mode" in (args or {}):
-            return self._to_bool(args.get("safe_mode"), default_safe_mode)
-        q = " ".join(str(query or "").strip().lower().split())
-        if any(t in q for t in ("clean joke", "safe joke", "family friendly", "kid friendly", "for kids")):
-            return True
-        if any(t in q for t in ("nsfw", "adult joke", "dirty joke", "offensive joke", "uncensored", "unfiltered", "18+")):
-            return False
-        return default_safe_mode
-
-    def _blacklist_flags(self, query: str, safe_mode: bool) -> List[str]:
+    def _blacklist_flags(self, safe_mode: bool) -> List[str]:
         if safe_mode:
             return list(self._STRICT_SAFE_FLAGS)
-
-        q = " ".join(str(query or "").strip().lower().split())
-        flags = ["racist", "sexist"]
-        if not any(t in q for t in ("nsfw", "adult", "dirty", "explicit", "18+")):
-            flags.extend(["nsfw", "explicit"])
-        if "political" not in q and "politics" not in q:
-            flags.append("political")
-        if "religious" not in q and "religion" not in q:
-            flags.append("religious")
-        return flags
+        return ["racist", "sexist", "political", "religious"]
 
     @staticmethod
     def _extract_jokes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -343,31 +188,15 @@ class JokeAPIPlugin(ToolPlugin):
         return "\n\n".join(lines).strip()
 
     async def _handle(self, args: Dict[str, Any], _llm_client: Any) -> Dict[str, Any]:
-        args = args or {}
         settings = self._settings()
-        query = self._query_from_args(args) or "tell me a joke"
+        lang = settings["default_lang"]
+        safe_mode = settings["default_safe_mode"]
+        blacklist = self._blacklist_flags(safe_mode)
 
-        categories = self._infer_categories(query)
-        contains = self._infer_contains(query, args)
-        amount = self._infer_amount(query, args, settings["max_amount"])
-        joke_type = self._infer_joke_type(query, args)
-        lang = self._infer_lang(query, args, settings["default_lang"])
-        safe_mode = self._infer_safe_mode(query, args, settings["default_safe_mode"])
-        blacklist = self._blacklist_flags(query, safe_mode)
-
-        categories_path = ",".join(categories) if categories else "Any"
-        url = f"https://v2.jokeapi.dev/joke/{categories_path}"
+        url = "https://v2.jokeapi.dev/joke/Any"
         params: Dict[str, Any] = {"lang": lang}
-        if amount > 1:
-            params["amount"] = amount
-        if joke_type:
-            params["type"] = joke_type
-        if contains:
-            params["contains"] = contains
         if blacklist:
             params["blacklistFlags"] = ",".join(blacklist)
-        if safe_mode:
-            params["safe-mode"] = ""
 
         try:
             response = requests.get(url, params=params, timeout=settings["timeout_seconds"])
@@ -375,7 +204,7 @@ class JokeAPIPlugin(ToolPlugin):
                 return action_failure(
                     code="joke_api_http_error",
                     message=f"JokeAPI request failed with HTTP {response.status_code}.",
-                    say_hint="Explain JokeAPI failed and suggest retrying.",
+                    say_hint="Explain JokeAPI failed and suggest retrying later.",
                 )
             payload = response.json() if "application/json" in (response.headers.get("content-type") or "").lower() else {}
         except Exception as exc:
@@ -401,7 +230,7 @@ class JokeAPIPlugin(ToolPlugin):
             return action_failure(
                 code="joke_api_error",
                 message=message,
-                say_hint="Explain no joke could be returned with the current filters and suggest a different theme.",
+                say_hint="Explain JokeAPI could not return a joke right now and suggest retrying later.",
             )
 
         jokes = self._extract_jokes(payload)
@@ -417,13 +246,10 @@ class JokeAPIPlugin(ToolPlugin):
         return action_success(
             facts={
                 "count": len(jokes),
-                "categories": categories,
-                "contains": contains or "",
                 "lang": lang,
                 "safe_mode": safe_mode,
-                "type": joke_type or "any",
             },
-            data={"jokes": jokes, "query": query},
+            data={"jokes": jokes},
             summary_for_user=rendered,
             say_hint="Return the fetched joke text directly and do not invent additional jokes.",
         )
