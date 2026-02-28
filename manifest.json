@@ -178,7 +178,7 @@
     {
       "id": "discord_admin",
       "name": "Discord Admin",
-      "version": "1.0.17",
+      "version": "1.0.18",
       "min_tater_version": "59",
       "description": "Discord server setup, admin changes, and current-room always-respond control.",
       "platforms": [
@@ -188,7 +188,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "40f04cad339bd9bcfb53268e00d9fefac5bed1e66363f5025049985d2ee11fc0"
+      "sha256": "9f0c03be1a7ecaed5381248928de97484d480de0e8bc2b6b446cefbafc5fcd35"
     },
     {
       "id": "doorbell_alert",
