@@ -149,7 +149,7 @@ class DiscordAdminPlugin(ToolPlugin):
     name = "discord_admin"
     plugin_name = "Discord Admin"
     pretty_name = "Discord Admin"
-    version = "1.0.17"
+    version = "1.0.18"
     min_tater_version = "59"
     platforms = ["discord"]
     routing_keywords = [
@@ -346,6 +346,376 @@ class DiscordAdminPlugin(ToolPlugin):
         out = " ".join(out.split())
         return out.strip()
 
+    @staticmethod
+    def _normalized_request_text(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        return " ".join(text.split())
+
+    @classmethod
+    def _request_delegates_creative_choices(cls, request_text: str) -> bool:
+        text = cls._normalized_request_text(request_text)
+        if not text:
+            return False
+        delegate_phrases = (
+            "be creative",
+            "choose names yourself",
+            "pick names yourself",
+            "you decide",
+            "surprise me",
+            "your call",
+            "make it your own",
+            "style it",
+            "design it",
+            "setup this discord",
+            "set up this discord",
+            "setup this server",
+            "set up this server",
+        )
+        if any(phrase in text for phrase in delegate_phrases):
+            return True
+        if " style" in text or text.endswith(" style"):
+            return True
+        return False
+
+    @classmethod
+    def _infer_setup_route_from_request(cls, request_text: str) -> Dict[str, Any]:
+        text = cls._normalized_request_text(request_text)
+        if not text:
+            return {"route": "none", "setup_requested": False, "setup_mode": "none"}
+
+        role_only_markers = (
+            "list roles",
+            "show roles",
+            "role me",
+            "role yourself",
+            "assign me role",
+            "give me role",
+            "grant me role",
+        )
+        if any(marker in text for marker in role_only_markers):
+            return {"route": "none", "setup_requested": False, "setup_mode": "none"}
+
+        response_only_markers = (
+            "always talk here",
+            "always respond here",
+            "mention only here",
+            "stop always talking here",
+            "reply to every message in this room",
+        )
+        if any(marker in text for marker in response_only_markers):
+            return {"route": "none", "setup_requested": False, "setup_mode": "none"}
+
+        has_scope = any(
+            token in text
+            for token in (
+                "discord",
+                "server",
+                "guild",
+                "channel",
+                "channels",
+                "category",
+                "categories",
+                "room",
+                "rooms",
+                "role",
+                "roles",
+            )
+        )
+        has_action = any(
+            token in text
+            for token in (
+                "setup",
+                "set up",
+                "configure",
+                "organize",
+                "build",
+                "make ",
+                "rename",
+                "theme",
+                "style",
+                "vibe",
+                "create",
+            )
+        )
+        if not has_scope or not (has_action or cls._request_delegates_creative_choices(text)):
+            return {"route": "none", "setup_requested": False, "setup_mode": "none"}
+
+        creative = cls._request_delegates_creative_choices(text) or any(
+            token in text
+            for token in (
+                " for us",
+                "hq",
+                "vibe",
+                "theme",
+                "style",
+                "gamer",
+                "gaming",
+            )
+        )
+        exact = any(
+            token in text
+            for token in (
+                "rename ",
+                "called ",
+                "named ",
+                "exactly",
+                "specific",
+            )
+        )
+        setup_mode = "creative" if creative or not exact else "exact"
+        return {"route": "setup", "setup_requested": True, "setup_mode": setup_mode}
+
+    @classmethod
+    def _extract_excluded_theme_terms(cls, request_text: str) -> set[str]:
+        text = cls._normalized_request_text(request_text)
+        if not text:
+            return set()
+
+        out: set[str] = set()
+        ignored = {
+            "it",
+            "this",
+            "that",
+            "them",
+            "these",
+            "those",
+            "here",
+            "there",
+            "us",
+            "me",
+            "we",
+            "our",
+            "the",
+            "a",
+            "an",
+        }
+        for pattern in (
+            r"\bnot\s+([a-z0-9][a-z0-9'_-]{1,31})",
+            r"\bwithout\s+([a-z0-9][a-z0-9'_-]{1,31})",
+            r"\bavoid\s+([a-z0-9][a-z0-9'_-]{1,31})",
+            r"\binstead of\s+([a-z0-9][a-z0-9'_-]{1,31})",
+        ):
+            for match in re.finditer(pattern, text):
+                token = str(match.group(1) or "").strip(" .,!?:;\"'`-_")
+                if token and token not in ignored:
+                    out.add(token)
+        return out
+
+    @staticmethod
+    def _name_contains_excluded_term(name: Any, excluded_terms: set[str]) -> bool:
+        if not excluded_terms:
+            return False
+        text = str(name or "").strip().lower()
+        if not text:
+            return False
+        normalized = " " + re.sub(r"[^a-z0-9]+", " ", text) + " "
+        for token in excluded_terms:
+            clean = str(token or "").strip().lower()
+            if not clean:
+                continue
+            if f" {clean} " in normalized:
+                return True
+            if clean in text:
+                return True
+        return False
+
+    @classmethod
+    def _preferred_creative_brand(cls, request_text: str, excluded_terms: set[str]) -> tuple[str, str]:
+        text = cls._normalized_request_text(request_text)
+        if any(token in text for token in ("totty", "totterson")) and "totty" not in excluded_terms:
+            return ("Totty", "totty")
+        if "phooey" in text and "phooey" not in excluded_terms:
+            return ("Phooey", "phooey")
+        if "tater" in text and "tater" not in excluded_terms:
+            return ("Tater", "tater")
+        return ("", "")
+
+    @classmethod
+    def _creative_outline_has_actionable_work(cls, outline: Dict[str, Any] | None) -> bool:
+        payload = outline if isinstance(outline, dict) else {}
+        if str(payload.get("server_name") or "").strip():
+            return True
+        if _coerce_bool(payload.get("set_guild_icon_from_attachment"), False):
+            return True
+        if list(payload.get("roles") or []):
+            return True
+        if list(payload.get("categories") or []):
+            return True
+        if list(payload.get("rename_channels") or []):
+            return True
+        return False
+
+    @classmethod
+    def _sanitize_creative_outline(
+        cls,
+        outline: Dict[str, Any],
+        *,
+        request_text: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(outline, dict) or not outline:
+            return {}
+
+        excluded_terms = cls._extract_excluded_theme_terms(request_text)
+        if not excluded_terms:
+            return dict(outline)
+
+        cleaned = dict(outline)
+
+        roles: list[Any] = []
+        for item in list(cleaned.get("roles") or []):
+            if isinstance(item, dict):
+                label = item.get("name")
+            else:
+                label = item
+            if cls._name_contains_excluded_term(label, excluded_terms):
+                continue
+            roles.append(item)
+        cleaned["roles"] = roles
+
+        categories: list[Dict[str, Any]] = []
+        for category in list(cleaned.get("categories") or []):
+            if not isinstance(category, dict):
+                continue
+            if cls._name_contains_excluded_term(category.get("name"), excluded_terms):
+                continue
+            next_category = dict(category)
+            kept_channels: list[Dict[str, Any]] = []
+            for channel in list(category.get("channels") or []):
+                if not isinstance(channel, dict):
+                    continue
+                if cls._name_contains_excluded_term(channel.get("name"), excluded_terms):
+                    continue
+                kept_channels.append(dict(channel))
+            next_category["channels"] = kept_channels
+            if kept_channels:
+                categories.append(next_category)
+        cleaned["categories"] = categories
+
+        rename_channels: list[Dict[str, Any]] = []
+        for item in list(cleaned.get("rename_channels") or []):
+            if not isinstance(item, dict):
+                continue
+            if cls._name_contains_excluded_term(item.get("to"), excluded_terms):
+                continue
+            rename_channels.append(dict(item))
+        cleaned["rename_channels"] = rename_channels
+
+        server_name = str(cleaned.get("server_name") or "").strip()
+        if cls._name_contains_excluded_term(server_name, excluded_terms):
+            cleaned["server_name"] = ""
+
+        return cleaned
+
+    @classmethod
+    def _fallback_creative_outline(cls, request_text: str, guild_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        text = cls._normalized_request_text(request_text)
+        excluded_terms = cls._extract_excluded_theme_terms(request_text)
+        brand_label, brand_slug = cls._preferred_creative_brand(request_text, excluded_terms)
+
+        is_gaming = any(token in text for token in ("gamer", "gaming", "lfg", "raid", "squad", "clips"))
+        is_builder = any(
+            token in text
+            for token in ("hq", "dev", "builder", "build", "workshop", "tool", "tooling", "bot")
+        ) or any(token in text for token in ("for us", "workspace", "crew", "team"))
+
+        if is_gaming:
+            roles: list[str] = []
+            if brand_label:
+                roles.append(f"{brand_label} Crew")
+            roles.extend(["Shot Callers", "Raid Team", "Clip Keepers"])
+            categories = [
+                {
+                    "name": "Lobby",
+                    "channels": [
+                        {"name": f"{brand_slug}-lobby" if brand_slug else "party-up", "kind": "text"},
+                        {"name": "match-plans", "kind": "text"},
+                        {"name": "server-news", "kind": "text"},
+                    ],
+                },
+                {
+                    "name": "Squads",
+                    "channels": [
+                        {"name": "looking-for-chaos", "kind": "text"},
+                        {"name": f"{brand_slug}-squad" if brand_slug else "party-room", "kind": "voice"},
+                        {"name": "warmup-room", "kind": "voice"},
+                    ],
+                },
+                {
+                    "name": "Highlights",
+                    "channels": [
+                        {"name": "clip-archive", "kind": "text"},
+                        {"name": "loadout-lab", "kind": "text"},
+                    ],
+                },
+            ]
+        elif is_builder:
+            roles = []
+            if brand_label:
+                roles.append(f"{brand_label} Crew")
+            roles.extend(["Builders", "Ops", "Backstage"])
+            categories = [
+                {
+                    "name": "Front Desk",
+                    "channels": [
+                        {"name": f"{brand_slug}-central" if brand_slug else "front-desk", "kind": "text"},
+                        {"name": "bulletin-board", "kind": "text"},
+                        {"name": "house-rules", "kind": "text"},
+                    ],
+                },
+                {
+                    "name": "Workshop",
+                    "channels": [
+                        {"name": f"{brand_slug}-lab" if brand_slug else "build-lab", "kind": "text"},
+                        {"name": "bot-pit", "kind": "text"},
+                        {"name": "wins-and-wreckage", "kind": "text"},
+                        {"name": f"{brand_slug}-huddle" if brand_slug else "standup-room", "kind": "voice"},
+                    ],
+                },
+                {
+                    "name": "Backstage",
+                    "channels": [
+                        {"name": "green-room", "kind": "text"},
+                        {"name": "inside-jokes", "kind": "text"},
+                        {"name": "after-hours", "kind": "voice"},
+                    ],
+                },
+            ]
+        else:
+            roles = []
+            if brand_label:
+                roles.append(f"{brand_label} Crew")
+            roles.extend(["Regulars", "Hosts", "Night Shift"])
+            categories = [
+                {
+                    "name": "Welcome Wagon",
+                    "channels": [
+                        {"name": f"{brand_slug}-square" if brand_slug else "town-square", "kind": "text"},
+                        {"name": "notice-board", "kind": "text"},
+                    ],
+                },
+                {
+                    "name": "Hangout",
+                    "channels": [
+                        {"name": "story-time", "kind": "text"},
+                        {"name": "show-and-tell", "kind": "text"},
+                        {"name": f"{brand_slug}-parlor" if brand_slug else "hangout-room", "kind": "voice"},
+                    ],
+                },
+            ]
+
+        outline = {
+            "response_channel_action": "none",
+            "server_name": "",
+            "set_guild_icon_from_attachment": False,
+            "roles": roles[:MAX_ROLES],
+            "categories": categories[:MAX_CATEGORIES],
+            "rename_channels": [],
+            "notes": "Autonomous creative fallback plan.",
+        }
+        return cls._sanitize_creative_outline(outline, request_text=request_text)
+
     async def _route_request_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
         command_text = self._normalize_role_command_text(text, message)
         if not command_text or llm_client is None:
@@ -379,6 +749,7 @@ class DiscordAdminPlugin(ToolPlugin):
             "- route=setup for channel/category/permission/server/icon/theme/rename/create/delete requests.\n"
             "- route=none only when nothing actionable is requested.\n"
             "- If the user says setup this Discord/server, build our HQ, make this our dev server, or describes the kind of server they want, route=setup.\n"
+            "- If the user says be creative, choose names yourself, you decide, or similar, that is explicit permission to design the setup without follow-up questions.\n"
             "- Use role_action=list_roles for requests like list role/list roles/show roles.\n"
             "- Use role_action=role_me when user asks to assign a role to themselves.\n"
             "- Use role_action=role_self when user asks to assign a role to the bot/assistant itself.\n"
@@ -1325,6 +1696,7 @@ class DiscordAdminPlugin(ToolPlugin):
     async def _llm_creative_outline(self, request_text: str, guild_snapshot: Dict[str, Any], llm_client) -> Dict[str, Any]:
         if llm_client is None:
             return {}
+        excluded_terms = sorted(self._extract_excluded_theme_terms(request_text))
         prompt = (
             "Design a practical Discord server layout for this broad request.\n"
             "Return strict JSON only with this compact schema:\n"
@@ -1334,12 +1706,17 @@ class DiscordAdminPlugin(ToolPlugin):
             '  "set_guild_icon_from_attachment":false,\n'
             '  "roles":["Role A","Role B"],\n'
             '  "categories":[{"name":"Category","channels":[{"name":"general","kind":"text|voice"}]}],\n'
+            '  "rename_channels":[{"from":"current|#general|123","to":"new name","kind":"text|voice|any"}],\n'
             '  "notes":"short optional notes"\n'
             "}\n"
             "Rules:\n"
             "- The user asked for a themed or open-ended setup. You must design the layout.\n"
             "- Return a NON-EMPTY layout with concrete categories and channels.\n"
             "- Do not ask follow-up questions. Choose names yourself.\n"
+            "- If the user delegated creativity, treat that as full permission to choose channel/category/role names without asking.\n"
+            "- If the user says 'not <theme/name>', do not use that theme/name in new roles, categories, channels, or server names.\n"
+            "- Do not ask whether excluded themes should be removed; just avoid creating new items that use them unless removal was explicitly requested.\n"
+            "- If the guild already has obvious default rooms like general, rules, announcements, or voice, you may rename them in rename_channels instead of asking what they should become.\n"
             "- Keep it purposeful and practical for the request.\n"
             "- For HQ, dev, tooling, builder, workshop, assistant, or chit-chat requests, create a useful working layout.\n"
             f"- Max {MAX_CATEGORIES} categories total.\n"
@@ -1348,6 +1725,7 @@ class DiscordAdminPlugin(ToolPlugin):
             "- Do not include @everyone in roles.\n"
             "- If the user did not explicitly ask for always-respond mode, leave response_channel_action as none.\n"
             "- If the user did not explicitly ask for a server name, you may leave server_name blank.\n\n"
+            f"Excluded theme/name tokens: {json.dumps(excluded_terms, ensure_ascii=False)}\n"
             f"User request: {request_text}\n"
             f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}"
         )
@@ -1364,7 +1742,9 @@ class DiscordAdminPlugin(ToolPlugin):
             if not blob:
                 return {}
             parsed = json.loads(blob)
-            return parsed if isinstance(parsed, dict) else {}
+            if not isinstance(parsed, dict):
+                return {}
+            return self._sanitize_creative_outline(parsed, request_text=request_text)
         except Exception as exc:
             logger.warning(f"[discord_admin] creative outline planning failed: {exc}")
             return {}
@@ -1411,7 +1791,9 @@ class DiscordAdminPlugin(ToolPlugin):
     async def _llm_plan_creative(self, request_text: str, guild, llm_client) -> Dict[str, Any]:
         guild_snapshot = self._guild_snapshot(guild)
         outline = await self._llm_creative_outline(request_text, guild_snapshot, llm_client)
-        if not isinstance(outline, dict) or not outline:
+        if not self._creative_outline_has_actionable_work(outline):
+            outline = self._fallback_creative_outline(request_text, guild_snapshot)
+        if not self._creative_outline_has_actionable_work(outline):
             return {}
 
         plan: Dict[str, Any] = {
@@ -1420,7 +1802,7 @@ class DiscordAdminPlugin(ToolPlugin):
             "set_guild_icon_from_attachment": _coerce_bool(outline.get("set_guild_icon_from_attachment"), False),
             "roles": [],
             "categories": [],
-            "rename_channels": [],
+            "rename_channels": list(outline.get("rename_channels") or []),
             "notes": str(outline.get("notes") or "").strip(),
         }
 
@@ -2350,6 +2732,15 @@ class DiscordAdminPlugin(ToolPlugin):
         if setup_mode not in {"none", "exact", "creative"}:
             setup_mode = "none"
         delete_requested = _coerce_bool((route_info or {}).get("delete_requested"), False)
+
+        heuristic_setup = self._infer_setup_route_from_request(request_text)
+        if route == "none" and str(heuristic_setup.get("route") or "") == "setup":
+            route = "setup"
+        if not setup_requested and bool(heuristic_setup.get("setup_requested")):
+            setup_requested = True
+        heuristic_setup_mode = str(heuristic_setup.get("setup_mode") or "none").strip().lower()
+        if setup_mode == "none" and heuristic_setup_mode in {"exact", "creative"}:
+            setup_mode = heuristic_setup_mode
 
         parsed_role_command: Dict[str, Any] = {}
         if role_action != "none":
