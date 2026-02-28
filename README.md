@@ -7,7 +7,7 @@
 </p>
 
 <!-- AUTO:PLUGIN_TABLES:BEGIN -->
-## 🧩 Tater Plugin Store (Tater Shop)
+## 🧩 Verba Plugin Store (Tater Shop)
 
 ### 💬 Interactive / Conversational Plugins
 
