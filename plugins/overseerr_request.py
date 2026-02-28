@@ -9,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 
 from plugin_base import ToolPlugin
-from helpers import redis_client
+from helpers import redis_client, extract_json
 
 load_dotenv()
 logger = logging.getLogger("overseerr_request")
@@ -26,12 +26,14 @@ class OverseerrRequestPlugin(ToolPlugin):
     """
     name = "overseerr_request"
     plugin_name = "Overseerr Request"
-    version = "1.0.2"
-    min_tater_version = "50"
-    usage = '{"function":"overseerr_request","arguments":{"title":"<title string>","kind":"movie|tv (optional)"}}'
+    version = "1.1.0"
+    min_tater_version = "59"
+    usage = (
+        '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
+        '(for example: request dune part two, add the movie f1 to overseerr, request the tv show severance)."}}'
+    )
     description = (
-        "Adds a movie or TV show to Overseerr by title, creating a new request for it. "
-        "Example: add the movie F1, request the TV show One Piece, request the movie Dune."
+        "Create one Overseerr request from one natural-language movie or TV show request."
     )
     plugin_dec = "Request a movie or TV show in Overseerr by title."
     pretty_name = "Overseerr: Add Request"
@@ -53,9 +55,19 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Keep it short and friendly. Only output that message."
     )
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use when the user wants to request a specific movie or TV show in Overseerr."
+    how_to_use = (
+        "Pass one natural-language request in query. Include the title naturally. "
+        "Mention movie or show only when that distinction matters."
+    )
+    common_needs = ["A natural-language request for one movie or TV show."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"overseerr_request","arguments":{"query":"request dune part two"}}',
+        '{"function":"overseerr_request","arguments":{"query":"add the movie f1 to overseerr"}}',
+        '{"function":"overseerr_request","arguments":{"query":"request the tv show severance"}}',
+        '{"function":"overseerr_request","arguments":{"query":"put alien in my overseerr requests"}}',
+    ]
 
 
     # ---------- Settings ----------
@@ -118,6 +130,18 @@ class OverseerrRequestPlugin(ToolPlugin):
         return re.sub(r"\s+", " ", s or "").strip().lower()
 
     @staticmethod
+    def _query_from_args(args: Dict[str, Any]) -> str:
+        data = args or {}
+        for key in ("query", "request", "text", "message", "content", "prompt"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        title = data.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+        return ""
+
+    @staticmethod
     def _year_from_date(d: Optional[str]) -> Optional[int]:
         if not d:
             return None
@@ -136,6 +160,86 @@ class OverseerrRequestPlugin(ToolPlugin):
         if "tv" in k or "show" in k or "series" in k:
             return "tv"
         return None
+
+    @staticmethod
+    def _clean_title_candidate(text: str) -> str:
+        value = re.sub(r"\s+", " ", str(text or "").strip())
+        if not value:
+            return ""
+        quoted = re.findall(r"['\"]([^'\"]{2,160})['\"]", value)
+        if quoted:
+            return quoted[0].strip()
+        value = re.sub(
+            r"(?i)^(?:please\s+)?(?:can you\s+|could you\s+|will you\s+)?"
+            r"(?:request|add|put|get|grab|find)\s+",
+            "",
+            value,
+        )
+        value = re.sub(r"(?i)\b(?:to|in|on)\s+overseerr\b", "", value).strip(" .,!?:;")
+        value = re.sub(
+            r"(?i)^(?:the\s+)?(?:movie|film|tv show|show|series)\s+",
+            "",
+            value,
+        ).strip()
+        return value[:160]
+
+    def _infer_kind_from_query(self, query: str, explicit: Optional[str] = None) -> Optional[str]:
+        normalized = self._coerce_kind(explicit)
+        if normalized:
+            return normalized
+        text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if not text:
+            return None
+        if re.search(r"\b(tv|show|series|season|episode|miniseries|anime)\b", text):
+            return "tv"
+        if re.search(r"\b(movie|film|cinema)\b", text):
+            return "movie"
+        return None
+
+    async def _parse_request_with_llm(self, query: str, llm_client):
+        text = re.sub(r"\s+", " ", str(query or "").strip())
+        if not text or not llm_client:
+            return "", None
+        prompt = (
+            "Extract the ONE movie or TV title the user wants requested in Overseerr.\n"
+            "Return only JSON with this shape: {\"title\":\"\",\"kind\":\"movie|tv|\"}\n"
+            "Rules:\n"
+            "1) title must contain only the actual title, without filler words.\n"
+            "2) kind must be movie or tv only when the request clearly specifies it.\n"
+            "3) If unclear, leave kind empty.\n"
+            "4) If no clear title is present, return an empty title.\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=120,
+                temperature=0,
+            )
+            raw = ((resp or {}).get("message") or {}).get("content") or ""
+            data = json.loads(extract_json(raw) or raw)
+            title = self._clean_title_candidate(str(data.get("title") or ""))
+            kind = self._coerce_kind(str(data.get("kind") or ""))
+            return title, kind
+        except Exception as e:
+            logger.warning("[overseerr_request] request parse fallback: %s", e)
+            return "", None
+
+    async def _resolve_request(self, args: Dict[str, Any], llm_client):
+        data = args or {}
+        explicit_title = self._clean_title_candidate(str(data.get("title") or ""))
+        explicit_kind = self._coerce_kind(data.get("kind"))
+        if explicit_title:
+            return explicit_title, self._infer_kind_from_query(explicit_title, explicit_kind)
+
+        query = self._query_from_args(data)
+        if not query:
+            return "", None
+
+        parsed_title, parsed_kind = await self._parse_request_with_llm(query, llm_client)
+        title = parsed_title or self._clean_title_candidate(query)
+        kind = parsed_kind or self._infer_kind_from_query(query, explicit_kind)
+        return title, kind
 
     def _pick_best_result(self, results: List[Dict[str, Any]], title: str, kind: Optional[str]):
         """
@@ -214,13 +318,9 @@ class OverseerrRequestPlugin(ToolPlugin):
         logger.error(f"[Overseerr POST /request] sending payload={payload}")
         return self._post("/request", payload)
 
-    def _do_request_flow(self, args: Dict[str, Any]) -> str:
-        title = (args.get("title") or "").strip()
+    def _do_request_flow(self, title: str, kind: Optional[str]) -> str:
         if not title:
             return "No title provided."
-
-        # Coerce kind early to bias selection but never send it directly
-        kind = self._coerce_kind(args.get("kind"))
 
         # 1) Search
         srch = self._search(title)
@@ -334,15 +434,18 @@ class OverseerrRequestPlugin(ToolPlugin):
 
     # ---------- Platform handlers ----------
     async def handle_webui(self, args, llm_client):
-        raw = self._do_request_flow(args or {})
+        title, kind = await self._resolve_request(args or {}, llm_client)
+        raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=False)]
 
     async def handle_homeassistant(self, args, llm_client):
-        raw = self._do_request_flow(args or {})
+        title, kind = await self._resolve_request(args or {}, llm_client)
+        raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=True)]
 
     async def handle_homekit(self, args, llm_client):
-        raw = self._do_request_flow(args or {})
+        title, kind = await self._resolve_request(args or {}, llm_client)
+        raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=True)]
 
     async def handle_discord(self, message, args, llm_client):

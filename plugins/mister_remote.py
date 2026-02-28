@@ -82,15 +82,17 @@ class MisterRemotePlugin(ToolPlugin):
         "launch game",
     ]
     description = (
-        "Control MiSTer via the MiSTer Remote API.\n"
-        "Include the user's MiSTer request in the `utterance` field when calling this tool.\n"
-        "Examples users might say: 'play super mario 3 on mister', 'what’s playing?', 'go to menu', 'take a screenshot'."
+        "Control MiSTer via the MiSTer Remote API from one natural-language request "
+        "(launch games, check now playing, go to menu, or take screenshots)."
     )
     plugin_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
     platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
-    usage = '{"function":"mister_remote","arguments":{"command":"<optional: play|now_playing|go_to_menu|screenshot_take>","utterance":"<user MiSTer request text>"}}'
+    usage = (
+        '{"function":"mister_remote","arguments":{"query":"ONE consolidated MiSTer request in natural language '
+        '(for example: play super mario world on snes, what is playing on mister, go to menu, take a screenshot)."}}'
+    )
 
     settings_category = "MiSTer Remote"
     required_settings = {
@@ -107,12 +109,19 @@ class MisterRemotePlugin(ToolPlugin):
     }
 
     waiting_prompt_template = (
-        "Write a short, friendly message telling {mention} you are connecting to thier MiSTer now. "
+        "Write a short, friendly message telling {mention} you are connecting to their MiSTer now. "
         "Only output that message."
     )
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use for MiSTer actions like launching a game, checking current game, opening menu, or taking a screenshot."
+    how_to_use = "Pass one natural-language MiSTer request in query. Include game title/system naturally for launch requests."
+    common_needs = ["A natural-language MiSTer request."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"mister_remote","arguments":{"query":"play super mario world on snes"}}',
+        '{"function":"mister_remote","arguments":{"query":"what is playing on mister"}}',
+        '{"function":"mister_remote","arguments":{"query":"go back to menu on mister"}}',
+        '{"function":"mister_remote","arguments":{"query":"take a screenshot on mister"}}',
+    ]
 
 
     def _settings(self) -> dict:
@@ -183,13 +192,44 @@ class MisterRemotePlugin(ToolPlugin):
             return ""
         if re.search(r"\b(screenshot|screen ?shot|capture)\b", text):
             return "screenshot_take"
-        if re.search(r"\b(now playing|what('?| i)s playing|status)\b", text):
+        if re.search(r"\b(now playing|what('?| i)s playing|what are you playing|status)\b", text):
             return "now_playing"
-        if re.search(r"\b(menu|go to menu|main menu|home)\b", text):
+        if re.search(r"\b(menu|go to menu|back to menu|main menu|home)\b", text):
             return "go_to_menu"
-        if re.search(r"\b(play|launch|start)\b", text):
+        if re.search(r"\b(play|launch|start|open|load|run)\b", text):
             return "play"
         return ""
+
+    async def _ai_pick_command(self, llm_client, utterance: str) -> str | None:
+        if not llm_client:
+            return None
+        text = _strip(utterance)
+        if not text:
+            return None
+        prompt = (
+            "Choose the best MiSTer command for the request.\n"
+            "Allowed commands only: play, now_playing, go_to_menu, screenshot_take.\n"
+            "Rules:\n"
+            "1) Use play for launch/open/start/load/run game requests.\n"
+            "2) Use now_playing for status/what is playing.\n"
+            "3) Use go_to_menu for menu/home requests.\n"
+            "4) Use screenshot_take for screenshot/capture requests.\n"
+            "5) If unclear, return play only when a game title appears; otherwise return empty.\n"
+            "Respond ONLY JSON: {\"command\":\"<one allowed command or empty string>\"}\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = (resp["message"].get("content") or "").strip()
+            jtxt = extract_json(raw) or raw
+            data = json.loads(jtxt)
+            cmd = self._normalize_command(_strip(data.get("command", "")))
+            if cmd in {"play", "now_playing", "go_to_menu", "screenshot_take"}:
+                return cmd
+            return None
+        except Exception as e:
+            logger.warning(f"[mister_remote] _ai_pick_command fallback: {e}")
+            return None
 
     @staticmethod
     def _normalize_systems(items) -> list[dict]:
@@ -810,14 +850,17 @@ class MisterRemotePlugin(ToolPlugin):
 
     # ---------------- Dispatcher -----------------
     async def _handle_async(self, args: dict, llm_client):
+        utt = self._extract_utterance(args or {})
         cmd = self._normalize_command(_strip((args or {}).get("command", "")))
 
-        # Accept multiple keys + be resilient
-        utt = self._extract_utterance(args or {})
+        # Natural-language first command inference.
         inferred_cmd = self._infer_command_from_utterance(utt)
         if inferred_cmd:
-            # The original user utterance is authoritative when it clearly maps to a command.
             cmd = inferred_cmd
+        elif not cmd and utt:
+            ai_cmd = await self._ai_pick_command(llm_client, utt)
+            if ai_cmd:
+                cmd = ai_cmd
 
         try:
             if cmd == "play":
@@ -858,9 +901,9 @@ class MisterRemotePlugin(ToolPlugin):
 
             return action_failure(
                 code="unknown_command",
-                message="Unknown command. Try play, now_playing, go_to_menu, or screenshot_take.",
-                needs=["Which MiSTer command should I run?"],
-                say_hint="Explain valid MiSTer command options.",
+                message="I couldn't determine the MiSTer action from that request.",
+                needs=["Try: play <game>, what's playing, go to menu, or take screenshot."],
+                say_hint="Ask the user to restate the MiSTer request in one short sentence.",
             )
 
         except requests.HTTPError as e:
@@ -880,19 +923,19 @@ class MisterRemotePlugin(ToolPlugin):
     # ---------------- Platform wrappers ----------
     async def handle_discord(self, message, args, llm_client):
         args = args or {}
-        if not _strip(args.get("utterance","")):
+        if not self._extract_utterance(args):
             args["utterance"] = (getattr(message, "content", "") or "").strip()
         return await self._handle_structured(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
         args = args or {}
-        if not _strip(args.get("utterance","")):
+        if not self._extract_utterance(args):
             args["utterance"] = _strip(args.get("user_text",""))
         return await self._handle_structured(args, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         args = args or {}
-        if not _strip(args.get("utterance","")):
+        if not self._extract_utterance(args):
             args["utterance"] = (raw or "").strip()
         return await self._handle_structured(args, llm_client)
 
@@ -902,13 +945,13 @@ class MisterRemotePlugin(ToolPlugin):
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         args = args or {}
-        if not _strip(args.get("utterance","")):
+        if not self._extract_utterance(args):
             args["utterance"] = (body or "").strip()
         return await self._handle_structured(args, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):
         args = args or {}
-        if not _strip(args.get("utterance", "")):
+        if not self._extract_utterance(args):
             text = ""
             try:
                 if isinstance(update, dict):

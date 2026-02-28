@@ -16,7 +16,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
     version = "1.0.1"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"premiumize_download","arguments":{"url":"<URL to check>"}}'
     description = (
         "Checks if a link (HTTP/HTTPS or magnet) is cached on Premiumize.me and, if so, returns direct download links."

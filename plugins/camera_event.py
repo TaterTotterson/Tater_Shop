@@ -37,7 +37,7 @@ class CameraEventPlugin(ToolPlugin):
     name = "camera_event"
     plugin_name = "Camera Event"
     version = "1.2.0"
-    min_tater_version = "50"
+    min_tater_version = "59"
     description = (
         "Capture a Home Assistant camera snapshot, describe it with vision AI, log the event, "
         "and optionally send Home Assistant phone/persistent notifications."

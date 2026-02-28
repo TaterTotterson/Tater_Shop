@@ -46,10 +46,9 @@ class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
     version = "1.0.9"
-    min_tater_version = "50"
+    min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
-    optional_args = []
 
     description = (
         "Play music and control playback via Music Assistant in Home Assistant."
@@ -60,8 +59,6 @@ class MusicAssistantPlugin(ToolPlugin):
 
     when_to_use = "Use to control music playback with explicit action/query/room/volume inputs."
     common_needs = ["action", "query (for play/queue)", "room (optional)"]
-    required_args = ["action"]
-    optional_args = ["query", "room", "volume", "prefer", "random"]
     missing_info_prompts = [
         "What should I play or control, and which room should I use?",
     ]

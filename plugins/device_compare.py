@@ -32,17 +32,30 @@ logger.setLevel(logging.INFO)
 class DeviceComparePlugin(ToolPlugin):
     name = "device_compare"
     plugin_name = "Device Compare"
-    version = "1.0.1"
-    min_tater_version = "50"
-    usage = '{"function":"device_compare","arguments":{"device_a":"<first device>","device_b":"<second device>"}}'
-    required_args = ["device_a", "device_b"]
-    optional_args = ["device1", "device2", "first_device", "second_device", "left_device", "right_device", "devices", "query", "compare"]
-    description = "Compares two devices by fetching specs and per-game FPS from multiple sources, then renders image tables."
-    plugin_dec = "Compare two devices with spec tables and per-game FPS benchmarks."
+    version = "1.1.0"
+    min_tater_version = "59"
+    usage = (
+        '{"function":"device_compare","arguments":{"query":"Natural-language request naming two devices to compare '
+        '(for example: compare Steam Deck OLED vs ROG Ally Z1 Extreme)."}}'
+    )
+    description = (
+        "Compare two devices from a natural-language query by fetching specs and optional per-game FPS benchmarks, "
+        "then render image comparison tables."
+    )
+    plugin_dec = "Natural-language device comparison with spec tables and optional per-game FPS benchmarks."
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
     # Matrix supported (images only). IRC still not supported (images).
     platforms = ["discord", "webui", "matrix", "telegram"]
+    when_to_use = "Use when the user asks to compare two specific devices."
+    how_to_use = "Pass a single natural-language query that clearly names exactly two devices."
+    common_needs = ["Two device names in the query text."]
+    missing_info_prompts = ["Which two devices should I compare?"]
+    example_calls = [
+        '{"function":"device_compare","arguments":{"query":"compare iPhone 15 Pro vs Samsung Galaxy S24 Ultra"}}',
+        '{"function":"device_compare","arguments":{"query":"Steam Deck OLED versus ROG Ally Z1 Extreme"}}',
+        '{"function":"device_compare","arguments":{"query":"RTX 4070 laptop vs RX 7800 XT desktop for gaming"}}',
+    ]
 
     required_settings = {
         "RESULTS_PER_QUERY": {"label": "Results to consider (specs)", "type": "number", "default": 10},
@@ -53,9 +66,6 @@ class DeviceComparePlugin(ToolPlugin):
     }
 
     waiting_prompt_template = "Let {mention} know you’re grabbing specs, benchmarks, and rendering comparison images now. Only output that message."
-    when_to_use = ""
-    common_needs = []
-    missing_info_prompts = []
 
 
     # ---------- settings / http / search ----------
@@ -662,7 +672,54 @@ class DeviceComparePlugin(ToolPlugin):
             return False
 
     @staticmethod
-    def _extract_devices(args: Dict[str, Any]) -> Tuple[str, str]:
+    def _clean_device_text(value: str) -> str:
+        text = str(value or "").strip()
+        text = text.strip(" \t\r\n\"'`")
+        text = re.sub(r"^[\s,;:.\-]+|[\s,;:.\-]+$", "", text).strip()
+        return text
+
+    @classmethod
+    def _query_from_args(cls, args: Dict[str, Any]) -> str:
+        for key in ("query", "request", "compare", "text", "content", "message"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _extract_pair_from_query(cls, query: str) -> Tuple[str, str]:
+        text = " ".join(str(query or "").strip().split())
+        if not text:
+            return "", ""
+
+        patterns = [
+            r"^\s*compare\s+(.+?)\s+(?:vs\.?|versus|v)\s+(.+?)\s*$",
+            r"^\s*(.+?)\s+(?:vs\.?|versus|v)\s+(.+?)\s*$",
+            r"^\s*(?:what(?:'s| is)\s+the\s+difference\s+between|difference\s+between|between)\s+(.+?)\s+and\s+(.+?)\s*$",
+            r"^\s*(?:is|are)\s+(.+?)\s+(?:better\s+than|faster\s+than|stronger\s+than)\s+(.+?)\s*$",
+            r"^\s*compare\s+(.+?)\s+and\s+(.+?)\s*$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            left = cls._clean_device_text(match.group(1))
+            right = cls._clean_device_text(match.group(2))
+            if left and right:
+                return left, right
+
+        if re.search(r"\b(compare|comparison|difference|between)\b", text, flags=re.IGNORECASE):
+            parts = re.split(r"\s+and\s+", text, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2:
+                left = cls._clean_device_text(re.sub(r"^\s*compare\s+", "", parts[0], flags=re.IGNORECASE))
+                right = cls._clean_device_text(parts[1])
+                if left and right:
+                    return left, right
+
+        return "", ""
+
+    @classmethod
+    def _extract_devices(cls, args: Dict[str, Any]) -> Tuple[str, str]:
         args = args or {}
 
         def first_value(*keys: str) -> str:
@@ -672,8 +729,11 @@ class DeviceComparePlugin(ToolPlugin):
                     return value.strip()
             return ""
 
-        device_a = first_value("device_a", "first_device", "left_device", "device1", "a")
-        device_b = first_value("device_b", "second_device", "right_device", "device2", "b")
+        query = cls._query_from_args(args)
+        q_left, q_right = cls._extract_pair_from_query(query)
+
+        device_a = q_left or first_value("device_a", "first_device", "left_device", "device1", "a")
+        device_b = q_right or first_value("device_b", "second_device", "right_device", "device2", "b")
 
         if (not device_a or not device_b) and isinstance(args.get("devices"), list):
             pair = [str(x).strip() for x in args.get("devices") if str(x).strip()]
@@ -695,7 +755,7 @@ class DeviceComparePlugin(ToolPlugin):
                     if not device_b and right:
                         device_b = right
 
-        return device_a, device_b
+        return cls._clean_device_text(device_a), cls._clean_device_text(device_b)
 
     # ---------- main pipeline ----------
     async def _pipeline(self, device_a: str, device_b: str, llm_client) -> Dict[str, Any]:
@@ -781,7 +841,7 @@ class DeviceComparePlugin(ToolPlugin):
         if not device_a or not device_b:
             return action_failure(
                 code="missing_devices",
-                message='Please provide two devices using {"device_a":"...","device_b":"..."}.',
+                message='Please provide a query with two devices (for example: {"query":"compare Device A vs Device B"}).',
                 needs=["Which two devices should I compare?"],
                 say_hint="Ask for both device names to run the comparison.",
             )
@@ -849,7 +909,7 @@ class DeviceComparePlugin(ToolPlugin):
         if not device_a or not device_b:
             return action_failure(
                 code="missing_devices",
-                message='Please provide two devices using {"device_a":"...","device_b":"..."}.',
+                message='Please provide a query with two devices (for example: {"query":"compare Device A vs Device B"}).',
                 needs=["Which two devices should I compare?"],
                 say_hint="Ask for both device names to run the comparison.",
             )

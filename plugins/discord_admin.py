@@ -28,27 +28,6 @@ DELETION_DISABLED_TEXT = (
     "Channel/category deletion is disabled in this plugin for safety. "
     "Please delete channels or categories manually in Discord."
 )
-PLAN_ROOT_KEYS = {
-    "response_channel_action",
-    "server_name",
-    "set_guild_icon_from_attachment",
-    "roles",
-    "categories",
-    "rename_channels",
-    "delete_channels",
-    "delete_categories",
-    "delete_all_channels_except",
-    "delete_all_channels_except_ids",
-    "delete_all_channels_except_names",
-    "confirm_delete_all_channels",
-    "delete_all_categories_except",
-    "delete_all_categories_except_ids",
-    "delete_all_categories_except_names",
-    "confirm_delete_all_categories",
-    "notes",
-}
-
-
 def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for key, value in (raw or {}).items():
@@ -199,23 +178,21 @@ class DiscordAdminPlugin(ToolPlugin):
 
     usage = (
         '{"function":"discord_admin","arguments":{"request":"Discord admin request in natural language '
-        '(describe what to create, rename, or configure; for example: setup this discord for gaming, '
-        'always talk in this room, only respond to ping here, list roles, give me the Totty Crew role, role yourself BotRole)."}}'
+        '(describe what to create, rename, or configure; for example: setup this Discord for Tater HQ Dev, '
+        'setup this server gamer style, setup this Discord for Tater HQ, always talk in this room, only respond to ping here, list roles, '
+        'give me the Tater Crew role, role yourself BotRole)."}}'
     )
     description = (
-        "Configure Discord servers from natural language: create themed channel/category layouts, create roles, "
-        "set channel permission overwrites, rename channels, optionally update guild icon from an attached image or recent media ref, and manage which "
-        "channels are set to 'always talk here' versus '@ mention only'."
+        "Configure this Discord server from natural language: set up themed server layouts, create categories and rooms, "
+        "create or assign roles, set channel permissions, rename channels, optionally update the server icon, and enable or disable always-respond mode for the current room."
     )
     when_to_use = (
-        "Use for role commands in this Discord server (list roles, role me, role yourself, give/assign role), "
-        "plus server admin changes like channels, categories, permissions, guild icon, and response-channel mode."
+        "Use for Discord server setup and admin work in this server: broad creative setups like Tater HQ or gamer style, "
+        "exact room/category requests, role commands, permissions, server icon changes, and current-room always-respond mode."
     )
-    plugin_dec = "AI-driven Discord server administration and response-channel control."
-    required_args = []
-    optional_args = ["dry_run", "response_channel_action", "theme", "server_name", "icon_blob_key"]
+    plugin_dec = "Discord server setup, admin changes, and current-room always-respond control."
     common_needs = [
-        "A single natural-language Discord admin request. Detailed channel/role lists are optional; AI can infer.",
+        "A single natural-language Discord admin request. Broad themed setup requests are allowed; exact channel/role lists are optional.",
         "Channel/category deletion is disabled in this plugin; ask the user to delete those manually in Discord.",
     ]
     missing_info_prompts = []
@@ -369,23 +346,60 @@ class DiscordAdminPlugin(ToolPlugin):
         out = " ".join(out.split())
         return out.strip()
 
-    async def _classify_role_command_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
+    async def _route_request_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
         command_text = self._normalize_role_command_text(text, message)
         if not command_text or llm_client is None:
-            return {}
+            return {
+                "route": "none",
+                "role_action": "none",
+                "role": "",
+                "roles": [],
+                "role_only": False,
+                "response_channel_action": "none",
+                "setup_requested": False,
+                "setup_mode": "none",
+                "delete_requested": False,
+            }
 
         prompt = (
-            "Classify this Discord message for direct role-command handling.\n"
+            "Classify this Discord admin request and choose the primary execution path.\n"
             "Return strict JSON only with this shape:\n"
-            '{"action":"none|list_roles|role_me|role_self","role":"role name or empty string","role_only":true|false}\n\n'
+            '{"route":"none|role|response_mode|setup",'
+            '"role_action":"none|list_roles|role_me|role_self",'
+            '"role":"role name or empty string",'
+            '"roles":["role name","role name"],'
+            '"role_only":true|false,'
+            '"response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",'
+            '"setup_requested":true|false,'
+            '"setup_mode":"none|exact|creative",'
+            '"delete_requested":true|false}\n\n'
             "Rules:\n"
-            "- Use action=none when this is not a role command.\n"
-            "- Use action=list_roles for requests like list role/list roles/show roles.\n"
-            "- Use action=role_me when user asks to assign a role to themselves.\n"
-            "- Use action=role_self when user asks to assign a role to the bot/assistant itself.\n"
-            "- Set role only for role_me/role_self; otherwise role must be empty.\n"
-            "- Set role_only=true when the request is only a role command.\n"
-            "- Set role_only=false when the same request also asks for additional Discord admin actions.\n"
+            "- route=role for direct role commands like list roles, role me, assign role to me, or role yourself.\n"
+            "- route=response_mode for always-talk-here / mention-only-here / response-channel changes.\n"
+            "- route=setup for channel/category/permission/server/icon/theme/rename/create/delete requests.\n"
+            "- route=none only when nothing actionable is requested.\n"
+            "- If the user says setup this Discord/server, build our HQ, make this our dev server, or describes the kind of server they want, route=setup.\n"
+            "- Use role_action=list_roles for requests like list role/list roles/show roles.\n"
+            "- Use role_action=role_me when user asks to assign a role to themselves.\n"
+            "- Use role_action=role_self when user asks to assign a role to the bot/assistant itself.\n"
+            "- Set role or roles only for role_me/role_self; otherwise role must be empty and roles must be [].\n"
+            "- If multiple roles are requested, put them in roles.\n"
+            "- If one role is requested, you may use role and optionally also include it in roles.\n"
+            "- Set role_only=true only when the request is purely a role command.\n"
+            "- Set setup_requested=true when the request asks to change server structure/settings "
+            "(roles, channels, categories, permissions, server/guild icon, server name, themed setup).\n"
+            "- setup_mode=exact when the user clearly specifies exact rooms/channels/categories/roles or precise structural changes.\n"
+            "- setup_mode=creative when the user asks for a themed setup, style, vibe, HQ, workspace, or says to design it for them.\n"
+            "- Requests like 'setup this Discord for Tater HQ', 'setup this server gamer style', 'build our HQ', or 'make this our dev server' should be setup_mode=creative.\n"
+            "- Requests like 'create a category named Tater HQ Dev with channels tooling and bot-dev' should be setup_mode=exact.\n"
+            "- setup_mode=none when route is not setup.\n"
+            "- 'always talk in this room', 'always respond here', or 'reply to every message in this room' means response_channel_action=add_current.\n"
+            "- 'mention only in this room', 'stop always talking here', or 'disable always respond in this room' means response_channel_action=remove_current.\n"
+            "- Use set_only_current ONLY when the user explicitly says this should be the only always-response room in the server.\n"
+            "- Use clear_all ONLY when the user explicitly asks to clear or disable always-response rooms across the whole server.\n"
+            "- Do not choose response_mode just because the user mentions chat, talking, or chit-chat inside a broader server setup request.\n"
+            "- Set delete_requested=true when the request asks to delete channels/categories or wipe most of the server.\n"
+            "- response_channel_action must be add_current/remove_current/set_only_current/clear_all only when requested.\n"
             "- Do not invent role names.\n\n"
             f"Request: {command_text}"
         )
@@ -399,18 +413,59 @@ class DiscordAdminPlugin(ToolPlugin):
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
             blob = extract_json(raw) if raw else None
             if not blob:
-                return {}
+                return {
+                    "route": "none",
+                    "role_action": "none",
+                    "role": "",
+                    "roles": [],
+                    "role_only": False,
+                    "response_channel_action": "none",
+                    "setup_requested": False,
+                    "setup_mode": "none",
+                    "delete_requested": False,
+                }
             try:
                 parsed = json.loads(blob)
             except Exception:
-                return {}
+                return {
+                    "route": "none",
+                    "role_action": "none",
+                    "role": "",
+                    "roles": [],
+                    "role_only": False,
+                    "response_channel_action": "none",
+                    "setup_requested": False,
+                    "setup_mode": "none",
+                    "delete_requested": False,
+                }
             if not isinstance(parsed, dict):
-                return {}
+                return {
+                    "route": "none",
+                    "role_action": "none",
+                    "role": "",
+                    "roles": [],
+                    "role_only": False,
+                    "response_channel_action": "none",
+                    "setup_requested": False,
+                    "setup_mode": "none",
+                    "delete_requested": False,
+                }
 
-            action = str(parsed.get("action") or "").strip().lower()
-            if action not in {"list_roles", "role_me", "role_self"}:
-                return {}
+            route = str(parsed.get("route") or "").strip().lower()
+            if route not in {"none", "role", "response_mode", "setup"}:
+                route = "none"
+            action = str(parsed.get("role_action") or "").strip().lower()
+            if action not in {"none", "list_roles", "role_me", "role_self"}:
+                action = "none"
             role_only = _coerce_bool(parsed.get("role_only"), True)
+            response_channel_action = str(parsed.get("response_channel_action") or "").strip().lower()
+            if response_channel_action not in VALID_RESPONSE_ACTIONS:
+                response_channel_action = "none"
+            setup_requested = _coerce_bool(parsed.get("setup_requested"), False)
+            setup_mode = str(parsed.get("setup_mode") or "").strip().lower()
+            if setup_mode not in {"none", "exact", "creative"}:
+                setup_mode = "none"
+            delete_requested = _coerce_bool(parsed.get("delete_requested"), False)
 
             role_raw = str(parsed.get("role") or "").strip()
             role_raw = role_raw.strip(" \t\r\n.,!?")
@@ -418,15 +473,47 @@ class DiscordAdminPlugin(ToolPlugin):
                 role_raw.startswith("'") and role_raw.endswith("'")
             ):
                 role_raw = role_raw[1:-1].strip()
+            role_list_raw = parsed.get("roles")
+            role_list: list[str] = []
+            if isinstance(role_list_raw, list):
+                for item in role_list_raw:
+                    text = str(item or "").strip().strip(" \t\r\n.,!?")
+                    if not text:
+                        continue
+                    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+                        text = text[1:-1].strip()
+                    if text and text not in role_list:
+                        role_list.append(text)
+            if role_raw and role_raw not in role_list:
+                role_list.append(role_raw)
+            if action == "list_roles":
+                role_raw = ""
+                role_list = []
 
-            if action in {"role_me", "role_self"}:
-                if not role_raw:
-                    return {}
-                return {"action": action, "role": role_raw, "role_only": role_only}
-            return {"action": "list_roles", "role_only": role_only}
+            return {
+                "route": route,
+                "role_action": action,
+                "role": role_raw,
+                "roles": role_list,
+                "role_only": role_only,
+                "response_channel_action": response_channel_action,
+                "setup_requested": setup_requested,
+                "setup_mode": setup_mode,
+                "delete_requested": delete_requested,
+            }
         except Exception as exc:
-            logger.debug(f"[discord_admin] role-command LLM classification failed: {exc}")
-            return {}
+            logger.debug(f"[discord_admin] request routing failed: {exc}")
+            return {
+                "route": "none",
+                "role_action": "none",
+                "role": "",
+                "roles": [],
+                "role_only": False,
+                "response_channel_action": "none",
+                "setup_requested": False,
+                "setup_mode": "none",
+                "delete_requested": False,
+            }
 
     @staticmethod
     def _normalize_role_lookup_token(value: str) -> str:
@@ -465,6 +552,38 @@ class DiscordAdminPlugin(ToolPlugin):
                 return role_obj
         return None
 
+    @staticmethod
+    def _normalize_role_match_text(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return " ".join(text.split())
+
+    def _match_role_names_from_request(self, guild, request_text: str) -> list[str]:
+        haystack = self._normalize_role_match_text(request_text)
+        if not haystack:
+            return []
+        matched: list[tuple[int, str]] = []
+        for role_obj in list(getattr(guild, "roles", []) or []):
+            role_name = str(getattr(role_obj, "name", "") or "").strip()
+            if not role_name or role_name == "@everyone":
+                continue
+            needle = self._normalize_role_match_text(role_name)
+            if not needle:
+                continue
+            pattern = rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])"
+            if re.search(pattern, haystack):
+                matched.append((len(needle), role_name))
+        matched.sort(key=lambda item: (-item[0], item[1].lower()))
+        out: list[str] = []
+        seen: set[str] = set()
+        for _, role_name in matched:
+            lowered = role_name.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            out.append(role_name)
+        return out
+
     def _bot_member(self, guild, message):
         if guild is None:
             return None
@@ -500,7 +619,7 @@ class DiscordAdminPlugin(ToolPlugin):
             return False
         return bool(getattr(perms, "manage_roles", False) or getattr(perms, "administrator", False))
 
-    async def _handle_direct_role_command(self, message, parsed: Dict[str, str]) -> Dict[str, Any]:
+    async def _handle_direct_role_command(self, message, parsed: Dict[str, Any]) -> Dict[str, Any]:
         guild = getattr(message, "guild", None)
         if guild is None:
             return action_failure(
@@ -545,13 +664,47 @@ class DiscordAdminPlugin(ToolPlugin):
                 summary_for_user="Server roles: " + ", ".join(preview) + suffix,
             )
 
+        requested_role_names: list[str] = []
+        role_list = parsed.get("roles")
+        if isinstance(role_list, list):
+            for item in role_list:
+                name = str(item or "").strip()
+                if name and name not in requested_role_names:
+                    requested_role_names.append(name)
         role_text = str(parsed.get("role") or "").strip()
-        role_obj = self._resolve_role_by_text(guild, role_text)
-        if role_obj is None:
+        if role_text and role_text not in requested_role_names:
+            requested_role_names.append(role_text)
+        request_text = str(parsed.get("request_text") or "").strip()
+        for name in self._match_role_names_from_request(guild, request_text):
+            if name not in requested_role_names:
+                requested_role_names.append(name)
+        if not requested_role_names:
             return action_failure(
                 code="role_not_found",
-                message=f"I couldn't find role `{role_text}`. Try `list roles` first.",
-                say_hint="Explain the requested role was not found.",
+                message="I couldn't tell which role or roles you want. Try `list roles` first.",
+                say_hint="Explain that the requested role names could not be identified.",
+            )
+
+        role_objs: list[Any] = []
+        missing_roles: list[str] = []
+        seen_role_ids: set[int] = set()
+        for role_name in requested_role_names:
+            role_obj = self._resolve_role_by_text(guild, role_name)
+            if role_obj is None:
+                missing_roles.append(role_name)
+                continue
+            rid = int(getattr(role_obj, "id", 0) or 0)
+            if rid > 0 and rid in seen_role_ids:
+                continue
+            if rid > 0:
+                seen_role_ids.add(rid)
+            role_objs.append(role_obj)
+        if not role_objs:
+            missing_preview = ", ".join(f"`{name}`" for name in missing_roles[:5]) or "those roles"
+            return action_failure(
+                code="role_not_found",
+                message=f"I couldn't find {missing_preview}. Try `list roles` first.",
+                say_hint="Explain the requested roles were not found.",
             )
 
         if not self._author_can_manage_roles(message):
@@ -577,23 +730,7 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Explain the bot is missing Manage Roles permission.",
             )
 
-        if bool(getattr(role_obj, "managed", False)):
-            return action_failure(
-                code="managed_role_forbidden",
-                message=f"I can't assign managed role `{getattr(role_obj, 'name', 'unknown')}`.",
-                say_hint="Explain managed roles cannot be assigned by the bot.",
-            )
-
         bot_top = self._role_position(getattr(bot_member, "top_role", None))
-        if self._role_position(role_obj) >= bot_top:
-            return action_failure(
-                code="role_hierarchy_blocked",
-                message=(
-                    f"I can't assign `{getattr(role_obj, 'name', 'that role')}` "
-                    "because it's above my highest role."
-                ),
-                say_hint="Explain role hierarchy prevents this assignment.",
-            )
 
         if action == "role_self":
             target_member = bot_member
@@ -613,29 +750,81 @@ class DiscordAdminPlugin(ToolPlugin):
             int(getattr(item, "id", 0) or 0)
             for item in list(getattr(target_member, "roles", []) or [])
         }
-        role_id = int(getattr(role_obj, "id", 0) or 0)
-        role_name = str(getattr(role_obj, "name", "that role") or "that role")
-        if role_id > 0 and role_id in existing_role_ids:
-            return action_success(
-                facts={"action": action, "role": role_name, "already_had_role": True},
-                summary_for_user=f"{target_label} already have `{role_name}`.",
-            )
+        blocked_managed: list[str] = []
+        blocked_hierarchy: list[str] = []
+        already_have: list[str] = []
+        assignable: list[Any] = []
+        assignable_names: list[str] = []
+        for role_obj in role_objs:
+            role_name = str(getattr(role_obj, "name", "that role") or "that role")
+            if bool(getattr(role_obj, "managed", False)):
+                blocked_managed.append(role_name)
+                continue
+            if self._role_position(role_obj) >= bot_top:
+                blocked_hierarchy.append(role_name)
+                continue
+            role_id = int(getattr(role_obj, "id", 0) or 0)
+            if role_id > 0 and role_id in existing_role_ids:
+                already_have.append(role_name)
+                continue
+            assignable.append(role_obj)
+            assignable_names.append(role_name)
 
-        try:
-            await target_member.add_roles(
-                role_obj,
-                reason=f"Requested by {getattr(getattr(message, 'author', None), 'name', 'user')} via role command",
-            )
-        except Exception as exc:
+        added_names: list[str] = []
+        if assignable:
+            try:
+                await target_member.add_roles(
+                    *assignable,
+                    reason=f"Requested by {getattr(getattr(message, 'author', None), 'name', 'user')} via role command",
+                )
+                added_names = list(assignable_names)
+            except Exception as exc:
+                if not already_have:
+                    return action_failure(
+                        code="role_assignment_failed",
+                        message=f"I couldn't assign the requested roles: {exc}",
+                        say_hint="Explain the role assignment failed and include the error briefly.",
+                    )
+                blocked_hierarchy.append(str(exc))
+
+        if not added_names and not already_have:
+            problems: list[str] = []
+            if missing_roles:
+                problems.append("missing: " + ", ".join(f"`{name}`" for name in missing_roles[:5]))
+            if blocked_managed:
+                problems.append("managed: " + ", ".join(f"`{name}`" for name in blocked_managed[:5]))
+            if blocked_hierarchy:
+                problems.append("blocked: " + ", ".join(f"`{name}`" for name in blocked_hierarchy[:5]))
+            detail = "; ".join(problems) or "I couldn't assign those roles."
             return action_failure(
                 code="role_assignment_failed",
-                message=f"I couldn't assign `{role_name}`: {exc}",
-                say_hint="Explain the role assignment failed and include the error briefly.",
+                message=detail,
+                say_hint="Explain which requested roles could not be assigned and why.",
             )
 
+        summary_parts: list[str] = []
+        if added_names:
+            summary_parts.append(f"{target_label} now have " + ", ".join(f"`{name}`" for name in added_names))
+        if already_have:
+            summary_parts.append("already had " + ", ".join(f"`{name}`" for name in already_have))
+        if missing_roles:
+            summary_parts.append("couldn't find " + ", ".join(f"`{name}`" for name in missing_roles))
+        if blocked_managed:
+            summary_parts.append("couldn't assign managed roles " + ", ".join(f"`{name}`" for name in blocked_managed))
+        if blocked_hierarchy:
+            summary_parts.append("couldn't assign higher roles " + ", ".join(f"`{name}`" for name in blocked_hierarchy))
+
         return action_success(
-            facts={"action": action, "role": role_name, "already_had_role": False},
-            summary_for_user=f"Done. {target_label} now have `{role_name}`.",
+            facts={
+                "action": action,
+                "requested_roles": requested_role_names,
+                "added_roles": added_names,
+                "already_had_roles": already_have,
+                "missing_roles": missing_roles,
+                "blocked_managed_roles": blocked_managed,
+                "blocked_hierarchy_roles": blocked_hierarchy,
+            },
+            summary_for_user="Done. " + "; ".join(summary_parts) + ".",
         )
 
     @staticmethod
@@ -718,75 +907,6 @@ class DiscordAdminPlugin(ToolPlugin):
         if author_id != admin_id:
             return False, "This tool is restricted to the configured Discord admin user."
         return True, ""
-
-    async def _classify_request_intent_with_llm(self, text: str, llm_client) -> Dict[str, Any]:
-        request_text = str(text or "").strip()
-        if not request_text or llm_client is None:
-            return {"response_channel_action": "none", "setup_requested": False}
-
-        prompt = (
-            "Classify this Discord admin request.\n"
-            "Return strict JSON only: "
-            "{\"response_channel_action\":\"none|add_current|remove_current|set_only_current|clear_all\","
-            "\"setup_requested\":true|false}\n\n"
-            "Meaning:\n"
-            "- add_current: make this room always-response (bot replies to all messages here without ping).\n"
-            "- remove_current: remove this room from always-response (ping-only here).\n"
-            "- set_only_current: this room should be the only always-response room in this server.\n"
-            "- clear_all: remove all always-response rooms in this server.\n"
-            "- none: request is not about response-channel behavior.\n\n"
-            "- setup_requested: true ONLY when the user asks to change server structure/settings "
-            "(create roles/channels/categories, change permissions, set server/guild icon, rename server, "
-            "or create a themed server layout).\n\n"
-            "Rules:\n"
-            "- If the request is mainly server setup/theme/roles/channels/permissions, choose none and setup_requested=true.\n"
-            "- Requests like 'setup this discord for us', 'set this server up', 'build our HQ', "
-            "or channel/category create/remove requests are setup_requested=true.\n"
-            "- If the user asks to respond to all messages here or make this room a response channel, choose add_current.\n"
-            "- If the user asks only respond to ping here, choose remove_current.\n"
-            "- Handle misspellings and casual phrasing.\n\n"
-            f"Request: {request_text}"
-        )
-
-        out = {"response_channel_action": "none", "setup_requested": False}
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": "You return only strict JSON."},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
-            blob = extract_json(raw) if raw else None
-            candidate = raw
-            setup_requested = False
-            if blob:
-                try:
-                    parsed = json.loads(blob)
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    candidate = str(parsed.get("response_channel_action") or "").strip().lower()
-                    setup_requested = _coerce_bool(parsed.get("setup_requested"), False)
-            candidate = str(candidate or "").strip().lower()
-            if candidate in VALID_RESPONSE_ACTIONS:
-                out["response_channel_action"] = candidate
-                out["setup_requested"] = setup_requested
-                return out
-            if not (candidate.startswith("{") and candidate.endswith("}")):
-                token = re.sub(r"[^a-z_]", "", candidate)
-                if token in VALID_RESPONSE_ACTIONS:
-                    out["response_channel_action"] = token
-                    out["setup_requested"] = setup_requested
-                    return out
-        except Exception as exc:
-            logger.debug(f"[discord_admin] response-action LLM classification failed: {exc}")
-        return out
-
-    async def _detect_response_action_with_llm(self, text: str, llm_client) -> str:
-        intent = await self._classify_request_intent_with_llm(text, llm_client)
-        action = str((intent or {}).get("response_channel_action") or "none").strip().lower()
-        return action if action in VALID_RESPONSE_ACTIONS else "none"
 
     @staticmethod
     def _guild_snapshot(guild) -> Dict[str, Any]:
@@ -880,98 +1000,18 @@ class DiscordAdminPlugin(ToolPlugin):
             return True
         return False
 
-    async def _llm_review_plan(self, request_text: str, guild, plan: Dict[str, Any], llm_client) -> Dict[str, Any]:
-        normalized_plan = self._normalize_plan(plan if isinstance(plan, dict) else {})
-        out: Dict[str, Any] = {
-            "needs_clarification": False,
-            "clarification_question": "",
-            "review_applied": False,
-            "plan": normalized_plan,
-        }
-        if llm_client is None:
-            return out
-
-        guild_snapshot = self._guild_snapshot(guild)
-        prompt = (
-            "Review this Discord admin plan so it matches the user request exactly.\n"
-            "Return strict JSON only with this shape:\n"
-            "{\n"
-            '  "needs_clarification": false,\n'
-            '  "clarification_question": "",\n'
-            '  "plan": {\n'
-            '    "response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",\n'
-            '    "server_name":"optional",\n'
-            '    "set_guild_icon_from_attachment":false,\n'
-            '    "roles":[...],\n'
-            '    "categories":[...],\n'
-            '    "rename_channels":[{"from":"name|#name|<#id>|id|current","to":"new name","kind":"text|voice|any"}],\n'
-            '    "delete_channels":[...ignored...],\n'
-            '    "delete_categories":[...ignored...],\n'
-            '    "delete_all_channels_except":[...ignored...],\n'
-            '    "confirm_delete_all_channels":false,\n'
-            '    "delete_all_categories_except":[...ignored...],\n'
-            '    "confirm_delete_all_categories":false,\n'
-            '    "notes":"optional"\n'
-            "  }\n"
-            "}\n\n"
-            "Rules:\n"
-            "- Keep only actions explicitly requested by the user. Remove anything extra.\n"
-            "- Do not broaden scope. Minimal changes only.\n"
-            "- Channel/category deletion is disabled. Clear all delete_* fields and leave confirmation booleans false.\n"
-            "- For channel rename requests, use rename_channels with explicit from/to values.\n"
-            "- Keep rename targets specific; if ambiguous, set needs_clarification=true with one short question.\n\n"
-            f"User request: {request_text}\n"
-            f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}\n"
-            f"Candidate plan JSON: {json.dumps(normalized_plan, ensure_ascii=False)}"
-        )
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": "You output only strict JSON."},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
-            blob = extract_json(raw) if raw else None
-            if not blob:
-                return out
-            parsed = json.loads(blob)
-            if not isinstance(parsed, dict):
-                return out
-            out["review_applied"] = True
-
-            reviewed_payload: Dict[str, Any] | None = None
-            if isinstance(parsed.get("plan"), dict):
-                reviewed_payload = parsed.get("plan")
-            elif any(key in parsed for key in PLAN_ROOT_KEYS):
-                reviewed_payload = parsed
-            if isinstance(reviewed_payload, dict):
-                out["plan"] = self._normalize_plan(reviewed_payload)
-
-            needs_clarification = _coerce_bool(parsed.get("needs_clarification"), False)
-            question = str(parsed.get("clarification_question") or "").strip()
-            out["needs_clarification"] = needs_clarification
-            out["clarification_question"] = question[:240] if question else ""
-
-            if out["needs_clarification"]:
-                safe_plan = self._strip_deletion_fields(dict(out.get("plan") or {}))
-                out["plan"] = safe_plan
-                if not out["clarification_question"]:
-                    out["clarification_question"] = (
-                        "Can you clarify exactly which channels or categories you want changed?"
-                    )
-        except Exception as exc:
-            logger.debug(f"[discord_admin] plan review failed: {exc}")
-        return out
-
-    async def _llm_plan(self, request_text: str, guild, llm_client) -> Dict[str, Any]:
+    async def _llm_plan(self, request_text: str, guild, llm_client, *, setup_mode: str = "exact") -> Dict[str, Any]:
         if llm_client is None:
             return {}
         guild_snapshot = self._guild_snapshot(guild)
+        mode = str(setup_mode or "exact").strip().lower()
+        if mode not in {"exact", "creative"}:
+            mode = "exact"
+        if mode == "creative":
+            return await self._llm_plan_creative(request_text, guild, llm_client)
 
         allowed_perms = ", ".join(sorted(VALID_CHANNEL_PERMISSIONS))
-        prompt = (
-            "Build a safe Discord admin execution plan. Return strict JSON only with this schema:\n"
+        plan_schema = (
             "{\n"
             '  "response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",\n'
             '  "server_name":"optional server name",\n'
@@ -984,12 +1024,17 @@ class DiscordAdminPlugin(ToolPlugin):
             '  "rename_channels":[{"from":"channel ref (name,#name,<#id>,id,current)","to":"new channel name","kind":"text|voice|any"}],\n'
             '  "notes":"short optional notes"\n'
             "}\n"
+        )
+        prompt = (
+            "Build a safe Discord admin execution plan. Return strict JSON only with this schema:\n"
+            f"{plan_schema}"
             "Rules:\n"
-            "- Do NOT output boilerplate/default rooms. Generate only changes inferred from the user request.\n"
-            "- Choose minimal change set. If no server-structure changes are needed, return empty roles/categories and blank server_name.\n"
-            "- If user asks broad setup ('setup this discord', 'however you think'), provide a concrete plan instead of asking follow-up questions.\n"
+            "- The user gave explicit setup instructions. Follow them literally.\n"
+            "- Create or change only the rooms, categories, roles, and settings the user clearly asked for.\n"
+            "- Do not invent extra structure, filler rooms, or theme ideas beyond the request.\n"
+            "- If no server-structure changes are needed, return empty roles/categories and blank server_name.\n"
             "- Default apply_mode should be create_only. Use create_or_update only when user explicitly asks to modify an existing role/channel/category.\n"
-            "- Channel/category deletion is disabled in this plugin. Never output delete_* fields.\n"
+            "- Channel/category deletion is disabled. Never output delete_* fields.\n"
             "- For rename requests, output rename_channels with exact from/to references from the snapshot.\n"
             "- Never represent rename as delete + create.\n"
             f"- Max {MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels per category.\n"
@@ -1276,6 +1321,179 @@ class DiscordAdminPlugin(ToolPlugin):
         out["delete_all_categories_except_names"] = []
         out["confirm_delete_all_categories"] = False
         return out
+
+    async def _llm_creative_outline(self, request_text: str, guild_snapshot: Dict[str, Any], llm_client) -> Dict[str, Any]:
+        if llm_client is None:
+            return {}
+        prompt = (
+            "Design a practical Discord server layout for this broad request.\n"
+            "Return strict JSON only with this compact schema:\n"
+            "{\n"
+            '  "response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",\n'
+            '  "server_name":"optional server name",\n'
+            '  "set_guild_icon_from_attachment":false,\n'
+            '  "roles":["Role A","Role B"],\n'
+            '  "categories":[{"name":"Category","channels":[{"name":"general","kind":"text|voice"}]}],\n'
+            '  "notes":"short optional notes"\n'
+            "}\n"
+            "Rules:\n"
+            "- The user asked for a themed or open-ended setup. You must design the layout.\n"
+            "- Return a NON-EMPTY layout with concrete categories and channels.\n"
+            "- Do not ask follow-up questions. Choose names yourself.\n"
+            "- Keep it purposeful and practical for the request.\n"
+            "- For HQ, dev, tooling, builder, workshop, assistant, or chit-chat requests, create a useful working layout.\n"
+            f"- Max {MAX_CATEGORIES} categories total.\n"
+            f"- Max {MAX_CHANNELS_PER_CATEGORY} channels per category.\n"
+            "- Keep role names short and useful.\n"
+            "- Do not include @everyone in roles.\n"
+            "- If the user did not explicitly ask for always-respond mode, leave response_channel_action as none.\n"
+            "- If the user did not explicitly ask for a server name, you may leave server_name blank.\n\n"
+            f"User request: {request_text}\n"
+            f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You output only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=900,
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            if not blob:
+                return {}
+            parsed = json.loads(blob)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.warning(f"[discord_admin] creative outline planning failed: {exc}")
+            return {}
+
+    async def _llm_creative_role_details(
+        self,
+        request_text: str,
+        role_names: list[str],
+        llm_client,
+    ) -> list[Dict[str, Any]]:
+        if llm_client is None or not role_names:
+            return []
+        prompt = (
+            "Add optional role details for this Discord server layout.\n"
+            "Return strict JSON only with this schema:\n"
+            '{"roles":[{"name":"Role","color":"#RRGGBB","mentionable":false,"hoist":false,"permissions":["manage_messages"]}]}\n'
+            "Rules:\n"
+            "- Only return roles from the provided role list.\n"
+            "- Keep permissions minimal and purposeful.\n"
+            "- Do not include @everyone.\n"
+            "- Omit unnecessary power/admin permissions unless clearly justified by the request.\n\n"
+            f"User request: {request_text}\n"
+            f"Role names: {json.dumps(role_names, ensure_ascii=False)}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You output only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=500,
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            if not blob:
+                return []
+            parsed = json.loads(blob)
+            items = parsed.get("roles") if isinstance(parsed, dict) else None
+            return items if isinstance(items, list) else []
+        except Exception as exc:
+            logger.warning(f"[discord_admin] creative role detail planning failed: {exc}")
+            return []
+
+    async def _llm_plan_creative(self, request_text: str, guild, llm_client) -> Dict[str, Any]:
+        guild_snapshot = self._guild_snapshot(guild)
+        outline = await self._llm_creative_outline(request_text, guild_snapshot, llm_client)
+        if not isinstance(outline, dict) or not outline:
+            return {}
+
+        plan: Dict[str, Any] = {
+            "response_channel_action": str(outline.get("response_channel_action") or "none").strip().lower(),
+            "server_name": str(outline.get("server_name") or "").strip(),
+            "set_guild_icon_from_attachment": _coerce_bool(outline.get("set_guild_icon_from_attachment"), False),
+            "roles": [],
+            "categories": [],
+            "rename_channels": [],
+            "notes": str(outline.get("notes") or "").strip(),
+        }
+
+        role_names: list[str] = []
+        for item in list(outline.get("roles") or [])[:MAX_ROLES]:
+            if isinstance(item, dict):
+                name = _clean_name(item.get("name"), "")
+            else:
+                name = _clean_name(item, "")
+            if not name or name.lower() == "@everyone":
+                continue
+            role_names.append(name)
+            plan["roles"].append({"name": name, "apply_mode": "create_only"})
+
+        role_details = await self._llm_creative_role_details(request_text, role_names, llm_client)
+        details_by_name: Dict[str, Dict[str, Any]] = {}
+        for item in role_details:
+            if not isinstance(item, dict):
+                continue
+            name = _clean_name(item.get("name"), "")
+            if not name:
+                continue
+            details_by_name[name.lower()] = item
+
+        merged_roles: list[Dict[str, Any]] = []
+        for role in plan["roles"]:
+            detail = details_by_name.get(str(role.get("name") or "").strip().lower(), {})
+            merged_roles.append(
+                {
+                    "name": role["name"],
+                    "apply_mode": "create_only",
+                    "color": detail.get("color"),
+                    "mentionable": _coerce_bool(detail.get("mentionable"), False),
+                    "hoist": _coerce_bool(detail.get("hoist"), False),
+                    "permissions": detail.get("permissions") if isinstance(detail.get("permissions"), list) else [],
+                }
+            )
+        plan["roles"] = merged_roles
+
+        categories: list[Dict[str, Any]] = []
+        for category in list(outline.get("categories") or [])[:MAX_CATEGORIES]:
+            if not isinstance(category, dict):
+                continue
+            category_name = _clean_name(category.get("name"), "")
+            if not category_name:
+                continue
+            channels: list[Dict[str, Any]] = []
+            for channel in list(category.get("channels") or [])[:MAX_CHANNELS_PER_CATEGORY]:
+                if not isinstance(channel, dict):
+                    continue
+                channel_name = _clean_name(channel.get("name"), "")
+                if not channel_name:
+                    continue
+                kind = str(channel.get("kind") or "text").strip().lower()
+                if kind not in {"text", "voice", "vc"}:
+                    kind = "text"
+                channels.append(
+                    {
+                        "name": channel_name,
+                        "kind": "voice" if kind in {"voice", "vc"} else "text",
+                        "apply_mode": "create_only",
+                    }
+                )
+            if channels:
+                categories.append(
+                    {
+                        "name": category_name,
+                        "apply_mode": "create_only",
+                        "channels": channels,
+                    }
+                )
+        plan["categories"] = categories
+        return plan
 
     def _normalize_plan(self, raw_plan: Dict[str, Any]) -> Dict[str, Any]:
         plan = raw_plan if isinstance(raw_plan, dict) else {}
@@ -2116,18 +2334,53 @@ class DiscordAdminPlugin(ToolPlugin):
 
         role_summary_prefix = ""
         role_action_applied = False
-        parsed_role_command = await self._classify_role_command_with_llm(request_text, message, llm_client)
+        route_info = await self._route_request_with_llm(request_text, message, llm_client)
+        route = str((route_info or {}).get("route") or "none").strip().lower()
+        if route not in {"none", "role", "response_mode", "setup"}:
+            route = "none"
+        role_action = str((route_info or {}).get("role_action") or "none").strip().lower()
+        if role_action not in {"none", "list_roles", "role_me", "role_self"}:
+            role_action = "none"
+        role_only = _coerce_bool((route_info or {}).get("role_only"), False)
+        direct_action = str((route_info or {}).get("response_channel_action") or "none").strip().lower()
+        if direct_action not in VALID_RESPONSE_ACTIONS:
+            direct_action = "none"
+        setup_requested = _coerce_bool((route_info or {}).get("setup_requested"), False)
+        setup_mode = str((route_info or {}).get("setup_mode") or "none").strip().lower()
+        if setup_mode not in {"none", "exact", "creative"}:
+            setup_mode = "none"
+        delete_requested = _coerce_bool((route_info or {}).get("delete_requested"), False)
+
+        parsed_role_command: Dict[str, Any] = {}
+        if role_action != "none":
+            parsed_role_command = {
+                "action": role_action,
+                "role": str((route_info or {}).get("role") or "").strip(),
+                "roles": list((route_info or {}).get("roles") or []),
+                "role_only": role_only,
+                "request_text": request_text,
+            }
+
         if parsed_role_command:
             role_result = await self._handle_direct_role_command(message, parsed_role_command)
             if not bool(role_result.get("ok")):
                 return role_result
             role_action_applied = True
             role_summary_prefix = str(role_result.get("summary_for_user") or "").strip()
-            if _coerce_bool(parsed_role_command.get("role_only"), True):
+            if role_only and direct_action == "none" and not setup_requested and not delete_requested:
                 return role_result
 
+        args = args or {}
+        dry_run = _coerce_bool(args.get("dry_run"), False)
+        action_hint = str(args.get("response_channel_action") or "").strip().lower()
+        if action_hint in VALID_RESPONSE_ACTIONS:
+            direct_action = action_hint
+
+        needs_admin_actions = bool(
+            setup_requested or delete_requested or direct_action != "none" or route == "setup"
+        )
         allowed, err = self._admin_allowed(message)
-        if not allowed:
+        if needs_admin_actions and not allowed:
             if role_action_applied:
                 reason = err or "This tool is restricted to the configured Discord admin user."
                 summary = role_summary_prefix or "Role command applied."
@@ -2146,20 +2399,7 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Explain that this tool is restricted to the configured Discord admin user.",
             )
 
-        args = args or {}
-        dry_run = _coerce_bool(args.get("dry_run"), False)
-
-        intent = await self._classify_request_intent_with_llm(request_text, llm_client)
-        direct_action = str((intent or {}).get("response_channel_action") or "none").strip().lower()
-        if direct_action not in VALID_RESPONSE_ACTIONS:
-            direct_action = "none"
-        setup_requested = _coerce_bool((intent or {}).get("setup_requested"), False)
-        action_hint = str(args.get("response_channel_action") or "").strip().lower()
-        if action_hint in VALID_RESPONSE_ACTIONS:
-            direct_action = action_hint
-
-        should_setup = bool(setup_requested)
-        if direct_action != "none" and not should_setup:
+        if direct_action != "none" and not setup_requested and not delete_requested and route != "setup":
             response_result = await self._apply_response_action(message, direct_action, dry_run=dry_run)
             if not response_result.get("ok"):
                 return action_failure(
@@ -2182,22 +2422,16 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Confirm the response channel mode update in plain language.",
             )
 
-        should_plan = bool(should_setup or direct_action == "none")
-        llm_plan = await self._llm_plan(request_text, message.guild, llm_client) if should_plan else {}
+        should_plan = bool(setup_requested or delete_requested or route == "setup")
+        if should_plan and setup_mode == "none":
+            setup_mode = "creative" if route == "setup" else "exact"
+        llm_plan = (
+            await self._llm_plan(request_text, message.guild, llm_client, setup_mode=setup_mode)
+            if should_plan
+            else {}
+        )
         plan = self._normalize_plan(llm_plan)
-        delete_requested = self._has_delete_intent(llm_plan) or self._has_destructive_delete_work(plan)
-        clarification_question = ""
-        if should_plan:
-            reviewed = await self._llm_review_plan(request_text, message.guild, plan, llm_client)
-            reviewed_plan = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else plan
-            plan = self._normalize_plan(reviewed_plan)
-            delete_requested = (
-                delete_requested
-                or self._has_delete_intent(reviewed_plan if isinstance(reviewed_plan, dict) else {})
-                or self._has_destructive_delete_work(plan)
-            )
-            if _coerce_bool(reviewed.get("needs_clarification"), False):
-                clarification_question = str(reviewed.get("clarification_question") or "").strip()
+        delete_requested = delete_requested or self._has_delete_intent(llm_plan) or self._has_destructive_delete_work(plan)
         if direct_action != "none":
             plan["response_channel_action"] = direct_action
 
@@ -2227,18 +2461,16 @@ class DiscordAdminPlugin(ToolPlugin):
                 say_hint="Explain deletion is disabled and ask the user to delete channels/categories manually in Discord.",
             )
 
-        if delete_requested and clarification_question:
-            clarification_question = ""
-
-        if clarification_question:
-            return action_failure(
-                code="needs_clarification",
-                message="I need one detail before I can apply that safely.",
-                needs=[clarification_question],
-                say_hint="Ask one precise follow-up question, then wait for the user's answer.",
-            )
-
         if not self._has_setup_work(plan) and str(plan.get("response_channel_action") or "none") == "none":
+            if role_action_applied:
+                return action_success(
+                    facts={
+                        "role_action_applied": True,
+                        "admin_actions_applied": False,
+                    },
+                    summary_for_user=role_summary_prefix or "Role command applied.",
+                    say_hint="Confirm the role command and do not claim additional Discord admin changes were applied.",
+                )
             return action_failure(
                 code="nothing_to_apply",
                 message="I could not find a concrete Discord admin change to apply.",

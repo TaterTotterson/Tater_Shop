@@ -11,7 +11,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
     plugin_name = "SFTPGo Activity"
     version = "1.0.0"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"sftpgo_activity","arguments":{}}'
     description = "Retrieves current connection activity from the SFTPGo server."
     plugin_dec = "Show current connection activity on the SFTPGo server."

@@ -30,18 +30,18 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     name = "voicepe_remote_timer"
     plugin_name = "Voice PE Remote Timer"
-    version = "1.0.2"
-    min_tater_version = "50"
+    version = "1.1.0"
+    min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
 
-    usage = '{"function":"voicepe_remote_timer","arguments":{"duration":"5 minutes (or omit duration to check remaining time)","action":"cancel (optional, to cancel the running timer)"}}'
+    usage = (
+        '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language Voice PE timer request '
+        '(for example: set a timer for 5 minutes, how much time is left, cancel the timer)."}}'
+    )
 
     description = (
-        "Start, cancel, or check remaining time for a device-local timer on a Voice PE (ESPHome). "
-        "If duration is provided, starts a timer (unless one is already running). "
-        "If duration is omitted, reports remaining time. "
-        "If action is 'cancel', cancels the current timer."
+        "Start, cancel, or check the remaining time for a device-local Voice PE timer from one natural-language request."
     )
     plugin_dec = "Start, cancel, or check a Voice PE (ESPHome) timer device."
 
@@ -101,9 +101,19 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
     )
 
     platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use when the user wants to start a timer, cancel a timer, or ask how much time is left on a Voice PE timer."
+    how_to_use = (
+        "Pass one natural-language timer request in query. Include the duration naturally for start requests. "
+        "For status checks or cancel requests, no duration is needed."
+    )
+    common_needs = ["A natural-language timer request."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"voicepe_remote_timer","arguments":{"query":"set a timer for 5 minutes"}}',
+        '{"function":"voicepe_remote_timer","arguments":{"query":"how much time is left on the timer"}}',
+        '{"function":"voicepe_remote_timer","arguments":{"query":"cancel the timer"}}',
+        '{"function":"voicepe_remote_timer","arguments":{"query":"start a 90 second timer"}}',
+    ]
 
 
     # ─────────────────────────────────────────────────────────────

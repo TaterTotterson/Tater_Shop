@@ -27,9 +27,8 @@ class FtpBrowserPlugin(ToolPlugin):
     name = "ftp_browser"
     plugin_name = "FTP Browser"
     version = "1.1.1"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"ftp_browser","arguments":{}}'
-    optional_args = []
     description = "Lets the user browse and download files from the FTP server."
     plugin_dec = "Browse and download files from the configured FTP server."
     pretty_name = "Connecting to FTP"

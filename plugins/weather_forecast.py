@@ -55,8 +55,6 @@ class WeatherForecastPlugin(ToolPlugin):
     plugin_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
     when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."
     common_needs = ["weather request (e.g., current, tonight, tomorrow, multi-day)"]
-    required_args = ["request"]
-    optional_args = []
     missing_info_prompts = [
         "What weather do you want (current conditions, tonight, tomorrow, or multi-day forecast)?",
     ]

@@ -35,7 +35,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
     name = "events_query_brief"
     plugin_name = "Events Query Brief"
     version = "1.0.2"
-    min_tater_version = "50"
+    min_tater_version = "59"
     pretty_name = "Events Query (Brief)"
 
     description = (

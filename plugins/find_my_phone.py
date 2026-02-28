@@ -32,10 +32,9 @@ class FindMyPhonePlugin(ToolPlugin):
     name = "find_my_phone"
     plugin_name = "Find My Phone"
     version = "1.0.4"
-    min_tater_version = "50"
+    min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
-    optional_args = []
     description = (
         "Use this when the user asks where their phone is, or asks to find, ring, "
         "locate, or make their phone play a sound."

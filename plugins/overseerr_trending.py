@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import Any, Dict, List, Tuple
@@ -5,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 from dotenv import load_dotenv
 
-from helpers import redis_client
+from helpers import redis_client, extract_json
 from plugin_base import ToolPlugin
 from plugin_result import action_failure, action_success
 
@@ -17,14 +18,17 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolPlugin):
     name = "overseerr_trending"
     plugin_name = "Overseerr Trending"
-    version = "1.1.0"
-    min_tater_version = "50"
+    version = "1.2.0"
+    min_tater_version = "59"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
 
-    usage = '{"function":"overseerr_trending","arguments":{"kind":"movies|tv","when":"trending|upcoming"}}'
+    usage = (
+        '{"function":"overseerr_trending","arguments":{"query":"ONE natural-language trending request '
+        '(for example: what movies are trending, show upcoming tv shows, what is popular on overseerr right now)."}}'
+    )
 
-    description = "Lists trending or upcoming movies/TV from Overseerr. Use this ONLY to list titles."
+    description = "List trending or upcoming movies or TV shows from Overseerr from one natural-language request."
     plugin_dec = "List trending or upcoming movies/TV from Overseerr."
     waiting_prompt_template = (
         "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. "
@@ -44,9 +48,18 @@ class OverseerrTrendingPlugin(ToolPlugin):
             "default": "",
         },
     }
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use when the user asks what movies or TV shows are trending, popular, or upcoming in Overseerr."
+    how_to_use = (
+        "Pass one natural-language request in query. Mention movie or TV if needed, and say trending or upcoming naturally."
+    )
+    common_needs = ["A natural-language trending or upcoming request."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"overseerr_trending","arguments":{"query":"what movies are trending"}}',
+        '{"function":"overseerr_trending","arguments":{"query":"show upcoming tv shows"}}',
+        '{"function":"overseerr_trending","arguments":{"query":"what is popular on overseerr right now"}}',
+        '{"function":"overseerr_trending","arguments":{"query":"what upcoming movies should I watch"}}',
+    ]
 
 
     @staticmethod
@@ -62,6 +75,85 @@ class OverseerrTrendingPlugin(ToolPlugin):
     def _coerce_when(when: str) -> str:
         text = str(when or "").strip().lower()
         return "upcoming" if text == "upcoming" else "trending"
+
+    @staticmethod
+    def _query_from_args(args: Dict[str, Any]) -> str:
+        data = args or {}
+        for key in ("query", "request", "text", "message", "content", "prompt"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _infer_kind_from_query(self, query: str, explicit: str = "") -> str:
+        normalized = self._coerce_kind(explicit)
+        if explicit:
+            return normalized
+        text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if re.search(r"\b(tv|show|shows|series|episodes|anime)\b", text):
+            return "tv"
+        if re.search(r"\b(movie|movies|film|films|cinema)\b", text):
+            return "movie"
+        return "movie"
+
+    def _infer_when_from_query(self, query: str, explicit: str = "") -> str:
+        normalized = self._coerce_when(explicit)
+        if explicit:
+            return normalized
+        text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if re.search(r"\b(upcoming|coming soon|coming out|release soon|releasing soon|next up)\b", text):
+            return "upcoming"
+        return "trending"
+
+    async def _parse_request_with_llm(self, query: str, llm_client):
+        text = re.sub(r"\s+", " ", str(query or "").strip())
+        if not text or not llm_client:
+            return "", ""
+        prompt = (
+            "Extract the trending-list intent from the user request.\n"
+            "Return only JSON with this shape: {\"kind\":\"movie|tv\",\"when\":\"trending|upcoming\"}\n"
+            "Rules:\n"
+            "1) kind must be movie or tv.\n"
+            "2) when must be trending or upcoming.\n"
+            "3) If the user does not specify kind, choose the most likely one.\n"
+            "4) If the user does not specify when, default to trending.\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=80,
+                temperature=0,
+            )
+            raw = ((resp or {}).get("message") or {}).get("content") or ""
+        except Exception as exc:
+            logger.warning("[overseerr_trending] request parse fallback: %s", exc)
+            return "", ""
+        try:
+            parsed = extract_json(raw) or raw
+            payload = json.loads(parsed)
+            kind = self._coerce_kind(str(payload.get("kind") or ""))
+            when = self._coerce_when(str(payload.get("when") or ""))
+            return kind, when
+        except Exception as exc:
+            logger.warning("[overseerr_trending] request parse decode fallback: %s", exc)
+            return "", ""
+
+    async def _resolve_request(self, args: Dict[str, Any], llm_client):
+        data = args or {}
+        explicit_kind = str(data.get("kind") or "").strip()
+        explicit_when = str(data.get("when") or "").strip()
+        if explicit_kind or explicit_when:
+            return self._infer_kind_from_query(explicit_kind, explicit_kind), self._infer_when_from_query(explicit_when, explicit_when)
+
+        query = self._query_from_args(data)
+        if not query:
+            return "movie", "trending"
+
+        parsed_kind, parsed_when = await self._parse_request_with_llm(query, llm_client)
+        kind = parsed_kind or self._infer_kind_from_query(query)
+        when = parsed_when or self._infer_when_from_query(query)
+        return kind, when
 
     @staticmethod
     def _get_settings() -> Tuple[str, str]:
@@ -151,8 +243,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
 
     async def _answer(self, args: Dict[str, Any], llm_client, *, platform: str) -> str:
         args = args or {}
-        kind = str(args.get("kind") or "movies").strip()
-        when = str(args.get("when") or "trending").strip()
+        kind, when = await self._resolve_request(args, llm_client)
 
         data = self._fetch_list(kind, when)
         if "error" in data:

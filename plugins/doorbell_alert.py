@@ -34,7 +34,7 @@ class DoorbellAlertPlugin(ToolPlugin):
     name = "doorbell_alert"
     plugin_name = "Doorbell Alert"
     version = "1.0.4"
-    min_tater_version = "50"
+    min_tater_version = "59"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     plugin_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
     usage = '{"function":"doorbell_alert","arguments":{"camera":"camera.doorbell_high","players":["media_player.kitchen"],"tts_entity":"tts.piper","notifications":true,"persistent_notifications":true,"api_notification":true,"device_service":"notify.mobile_app_my_phone","area":"front door"}}'

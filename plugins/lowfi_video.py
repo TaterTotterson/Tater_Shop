@@ -345,9 +345,8 @@ class LowfiVideoPlugin(ToolPlugin):
     name = "lowfi_video"
     plugin_name = "Lofi Video"
     version = "1.1.1"
-    min_tater_version = "56"
+    min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
-    optional_args = []
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
     plugin_dec = "Create a cozy lofi video by generating music and looping a matching animation."
     pretty_name = "Your Lofi Video"
