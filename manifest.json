@@ -323,9 +323,9 @@
     {
       "id": "joke_api",
       "name": "Joke API",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "59",
-      "description": "Fetch jokes from JokeAPI.",
+      "description": "Fetch one joke from JokeAPI.",
       "platforms": [
         "webui",
         "homeassistant",
@@ -340,7 +340,7 @@
       "settings_category": "Joke API",
       "tags": [],
       "entry": "plugins/joke_api.py",
-      "sha256": "e5a29ce2c245ab84632dee1eae893cf74612cff30770ce3b761ec5e748ef192a"
+      "sha256": "bdcfb26f15dac6d93ff07422885140c00cf2875ac20e81fff4b7c5901d4478c1"
     },
     {
       "id": "lowfi_video",
