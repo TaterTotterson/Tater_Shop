@@ -46,7 +46,7 @@ def build_tables(plugins: list[dict]) -> str:
         return "\n".join(lines)
 
     out = []
-    out.append("## 🧩 Tater Plugin Store (Tater Shop)\n")
+    out.append("## 🧩 Verba Plugin Store (Tater Shop)\n")
     out.append(table_block("💬 Interactive / Conversational Plugins", interactive))
     out.append(table_block("⚙️ Automation Plugins (Home Assistant)", automation))
     out.append(table_block("📡 RSS Notifier Plugins", notifiers))
