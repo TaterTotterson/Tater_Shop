@@ -23,7 +23,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
     plugin_name = "SFTPGo Account"
     version = "1.0.0"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"sftpgo_account","arguments":{"username":"<optional custom username>"}}'
     description = "Creates an SFTPGo account for the user and returns their credentials."
     plugin_dec = "Create an SFTPGo account for the user and return login details."

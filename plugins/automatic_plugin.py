@@ -55,26 +55,25 @@ def _as_float(value: Any, default: float, minimum: float, maximum: float) -> flo
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
     plugin_name = "Automatic1111 Image"
-    version = "1.1.1"
-    min_tater_version = "50"
+    version = "1.2.0"
+    min_tater_version = "59"
     pretty_name = "Your Image"
     settings_category = "Automatic111"
 
-    usage = '{"function":"automatic_plugin","arguments":{"prompt":"<Text prompt for the image>","negative_prompt":"<Optional negative prompt>"}'
-    required_args = ["prompt"]
-    optional_args = [
-        "negative_prompt",
-        "steps",
-        "cfg_scale",
-        "width",
-        "height",
-        "sampler_name",
-        "scheduler",
-        "seed",
+    usage = '{"function":"automatic_plugin","arguments":{"request":"Generate an image of a neon-lit cyberpunk alley in the rain."}}'
+    description = "Generate an image from one natural-language request using your Automatic1111 server."
+    plugin_dec = "Create one image from a natural-language image request."
+    when_to_use = "Use for image generation requests."
+    how_to_use = (
+        "Pass one natural-language image request in request. "
+        "Put the subject, style, mood, colors, composition, and any text/details directly in that request. "
+        "Do not split prompt fields unless you are calling the plugin manually."
+    )
+    example_calls = [
+        '{"function":"automatic_plugin","arguments":{"request":"Generate a cinematic portrait of Tater as a retro-futuristic robot engineer in a warm workshop."}}',
+        '{"function":"automatic_plugin","arguments":{"request":"Create a cozy pixel-art room with glowing monitors, plants, and a small robot on the desk."}}',
+        '{"function":"automatic_plugin","arguments":{"request":"Make a product-style render of a sleek black microphone on a matte stone pedestal with soft studio lighting."}}',
     ]
-    description = "Generates an image from a prompt using an AUTOMATIC1111 txt2img API endpoint."
-    plugin_dec = "Generate an image from a text prompt using your Automatic1111 server."
-    when_to_use = "Use when the user asks you to generate an image from text."
 
     required_settings = {
         "AUTOMATIC_URL": {

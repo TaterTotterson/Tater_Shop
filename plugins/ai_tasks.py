@@ -53,40 +53,30 @@ _WEEKDAY_TOKEN_MAP = {
 
 class AITasksPlugin(ToolPlugin):
     name = "ai_tasks"
-    required_args = []
-    optional_args = [
-        "request",
-        "task_prompt",
-        "when",
-        "cron",
-        "title",
-        "platform",
-        "target",
-        "targets",
-        "channel",
-        "room",
-        "chat_id",
-        "priority",
-        "tags",
-        "ttl_sec",
-        "origin",
-    ]
-    version = "1.2.5"
-    usage = '{"function":"ai_tasks","arguments":{"request":"User request in plain language. Example: everyday at 6am turn on living room lights to 50% and send weather forecast."}}'
+    version = "1.2.7"
+    min_tater_version = "59"
+    usage = (
+        '{"function":"ai_tasks","arguments":{"task_prompt":"Assistant-authored execution prompt in your own words '
+        '(no schedule text). Example: turn on living room lights to 50% and send weather forecast.",'
+        '"when":"Schedule phrase in local time. Example: everyday at 6am."}}'
+    )
     description = (
         "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
-        "You can pass just `request`; the plugin derives schedule, action, and destination defaults."
+        "Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling."
     )
     pretty_name = "AI Tasks"
     when_to_use = "Schedule recurring tasks (everyday, hourly, secondly, weekly, or explicit cron)."
+    how_to_use = (
+        "Provide task_prompt in the assistant's own words (what to do each run), and provide schedule via when or cron."
+    )
     common_needs = [
-        "what the user wants (request/task_prompt)",
-        "when to run (optional; can be inferred from request)",
+        "task_prompt (assistant-authored execution instruction)",
+        "when/cron schedule (local time)",
         "destination (optional; defaults to current channel/room or platform defaults)",
     ]
     missing_info_prompts = [
         "What should this task do each time it runs? Put that in `task_prompt`.",
-        "When should this run? You can say `everyday at 6am`, `every hour`, `every second`, or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
+        "When should this run? Put that in `when` (for example `everyday at 6am`) or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
     ]
 
     platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
@@ -94,34 +84,6 @@ class AITasksPlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} you’re scheduling the task now. "
         "Only output that message."
     )
-
-    _CURRENT_TARGET_ALIASES = {
-        "current",
-        "here",
-        "this",
-        "this chat",
-        "this channel",
-        "same chat",
-        "same channel",
-        "current chat",
-        "current channel",
-    }
-    _TITLE_STOPWORDS = {
-        "a",
-        "an",
-        "and",
-        "at",
-        "by",
-        "for",
-        "from",
-        "in",
-        "of",
-        "on",
-        "or",
-        "the",
-        "to",
-        "with",
-    }
 
     # ----------------------------
     # NEW: build a runtime prompt
@@ -237,11 +199,93 @@ class AITasksPlugin(ToolPlugin):
             text += "."
         return text
 
+    @staticmethod
+    def _normalize_compare_text(value: Any) -> str:
+        text = " ".join(str(value or "").strip().lower().split())
+        return text
+
+    async def _rewrite_task_prompt_with_llm(
+        self,
+        *,
+        llm_client: Any,
+        task_prompt: Any,
+        request_text: Any = "",
+    ) -> str:
+        base = self._polish_task_prompt(task_prompt, request_text=request_text)
+        if not base:
+            return ""
+        if llm_client is None:
+            return base
+
+        request_raw = str(request_text or "").strip()
+        rewrite_prompt = (
+            "Rewrite this scheduled task into a concise execution prompt.\n"
+            "Return JSON only:\n"
+            '{"task_prompt":"<rewritten prompt>"}\n\n'
+            "Rules:\n"
+            "1) Keep the exact intended action/data/entities.\n"
+            "2) Remove scheduling words/timing/reminder phrasing.\n"
+            "3) Make it executable now (imperative, concise).\n"
+            "4) Do not add new actions.\n"
+            "5) No markdown, no explanation text.\n\n"
+            f"Original user request: {request_raw}\n"
+            f"Current task prompt: {base}\n"
+        )
+
+        try:
+            response = await llm_client.chat(messages=[{"role": "system", "content": rewrite_prompt}])
+            raw = str((response.get("message") or {}).get("content") or "").strip()
+            json_text = extract_json(raw) or raw
+            parsed = json.loads(json_text)
+            candidate = ""
+            if isinstance(parsed, dict):
+                candidate = str(parsed.get("task_prompt") or "").strip()
+            rewritten = self._polish_task_prompt(candidate, request_text=base) if candidate else ""
+            if not rewritten:
+                return base
+
+            req_norm = self._normalize_compare_text(request_raw)
+            rewritten_norm = self._normalize_compare_text(rewritten)
+            base_norm = self._normalize_compare_text(base)
+
+            # Ensure the stored task prompt is not verbatim user wording when possible.
+            if req_norm and rewritten_norm == req_norm:
+                if base_norm and base_norm != req_norm:
+                    return base
+                minimal = re.sub(r"^\s*(?:please\s+)?", "", rewritten, flags=re.IGNORECASE).strip()
+                minimal = re.sub(r"\s+", " ", minimal).strip(" ,.-")
+                if minimal and self._normalize_compare_text(minimal) != req_norm:
+                    if not re.search(r"[.!?]$", minimal):
+                        minimal += "."
+                    return minimal
+                return base
+
+            return rewritten
+        except Exception as exc:
+            logger.warning("[ai_tasks] task prompt rewrite fallback: %s", exc)
+            return base
+
     @classmethod
     def _title_case(cls, text: str) -> str:
         words = [w for w in re.split(r"\s+", str(text or "").strip()) if w]
         if not words:
             return ""
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "at",
+            "by",
+            "for",
+            "from",
+            "in",
+            "of",
+            "on",
+            "or",
+            "the",
+            "to",
+            "with",
+        }
         out: list[str] = []
         for idx, word in enumerate(words):
             lead = re.match(r"^[^A-Za-z0-9']*", word)
@@ -253,7 +297,7 @@ class AITasksPlugin(ToolPlugin):
                 out.append(word)
                 continue
             lower = core.lower()
-            if idx > 0 and lower in cls._TITLE_STOPWORDS:
+            if idx > 0 and lower in stopwords:
                 cooked = lower
             else:
                 cooked = core[0].upper() + core[1:]
@@ -472,7 +516,17 @@ class AITasksPlugin(ToolPlugin):
         if not text:
             return False
         text = " ".join(text.replace("_", " ").split())
-        return text in cls._CURRENT_TARGET_ALIASES
+        return text in {
+            "current",
+            "here",
+            "this",
+            "this chat",
+            "this channel",
+            "same chat",
+            "same channel",
+            "current chat",
+            "current channel",
+        }
 
     @staticmethod
     def _extract_target_hint(raw: Any) -> str:
@@ -565,6 +619,7 @@ class AITasksPlugin(ToolPlugin):
                 request_text = origin_request_text or request_text
 
         task_prompt = self._clean_task_prompt(args.get("task_prompt"))
+        explicit_task_prompt = bool(task_prompt)
         if not task_prompt and request_text:
             task_prompt = self._clean_task_prompt(request_text)
         if not task_prompt and request_text:
@@ -610,6 +665,7 @@ class AITasksPlugin(ToolPlugin):
             when_txt,
             origin,
             request_text,
+            explicit_task_prompt,
             meta,
         )
 
@@ -1108,7 +1164,7 @@ class AITasksPlugin(ToolPlugin):
             schedule["recurrence"] = recurrence
         return schedule, ""
 
-    async def _schedule(self, args: Dict[str, Any]):
+    async def _schedule(self, args: Dict[str, Any], llm_client: Any = None):
         (
             title,
             task_prompt,
@@ -1119,11 +1175,22 @@ class AITasksPlugin(ToolPlugin):
             when_txt,
             origin,
             request_text,
+            explicit_task_prompt,
             meta,
         ) = self._extract_args(args)
 
         task_prompt = (task_prompt or "").strip()
 
+        if not task_prompt:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
+
+        if not explicit_task_prompt:
+            task_prompt = await self._rewrite_task_prompt_with_llm(
+                llm_client=llm_client,
+                task_prompt=task_prompt,
+                request_text=request_text,
+            )
+        task_prompt = (task_prompt or "").strip()
         if not task_prompt:
             return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
 
@@ -1309,22 +1376,22 @@ class AITasksPlugin(ToolPlugin):
         }
 
     async def handle_discord(self, message, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
     async def handle_homeassistant(self, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
     async def handle_telegram(self, update, args, llm_client):
-        return await self._schedule(args)
+        return await self._schedule(args, llm_client)
 
 
 plugin = AITasksPlugin()

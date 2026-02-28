@@ -29,7 +29,7 @@ class ComfyUIImagePlugin(ToolPlugin):
     name = "comfyui_image_plugin"
     plugin_name = "ComfyUI Image"
     version = "1.0.4"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>"}}'
     description = "Draws a picture from a text prompt using your ComfyUI workflow."
     plugin_dec = "Generate a still image from a text prompt using your ComfyUI workflow."

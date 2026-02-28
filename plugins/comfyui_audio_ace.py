@@ -32,7 +32,7 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
     version = "1.0.3"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Generates music using ComfyUI Audio Ace."
     plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."

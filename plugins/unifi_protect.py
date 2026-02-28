@@ -355,8 +355,8 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.8"
-    min_tater_version = "50"
+    version = "1.0.9"
+    min_tater_version = "59"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
 
@@ -380,11 +380,13 @@ class UniFiProtectPlugin(ToolPlugin):
         "motion",
     ]
 
-    usage = '{"function":"unifi_protect","arguments":{"query":"User request about UniFi Protect (sensors status, list cameras, or describe a camera/area)."}}'
+    usage = (
+        '{"function":"unifi_protect","arguments":{"query":"ONE natural-language UniFi Protect request '
+        '(for example: list my cameras, what is going on in the front yard, describe the doorbell camera, are any doors open)."}}'
+    )
 
     description = (
-        "Query UniFi Protect sensors and camera snapshots (with vision summaries) via the UniFi Protect Integration API. "
-        "Use this for visual scene questions like who/what is in the yard, driveway, porch, or garage."
+        "Handle one natural-language UniFi Protect request for sensors, camera lists, or camera and area snapshot descriptions."
     )
     plugin_dec = (
         "Get UniFi Protect camera snapshot descriptions and sensor status. "
@@ -396,10 +398,18 @@ class UniFiProtectPlugin(ToolPlugin):
         "'describe the porch camera'), plus Protect sensor status and camera lists. "
         "If a request is about viewing/describing a scene, prefer this over unifi_network."
     )
-    common_needs = ["camera or area name (optional if already in the request)"]
-    required_args = []
-    optional_args = ["action", "target", "camera", "area", "query"]
+    how_to_use = (
+        "Pass one natural-language Protect request in query. Include the camera or area naturally when needed. "
+        "This plugin can infer whether the user wants sensor status, a camera list, a specific camera description, or an area description."
+    )
+    common_needs = ["A natural-language UniFi Protect request."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"unifi_protect","arguments":{"query":"list my cameras"}}',
+        '{"function":"unifi_protect","arguments":{"query":"what is going on in the front yard"}}',
+        '{"function":"unifi_protect","arguments":{"query":"describe the doorbell camera"}}',
+        '{"function":"unifi_protect","arguments":{"query":"are any doors open"}}',
+    ]
 
     argument_schema = {
         "type": "object",

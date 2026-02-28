@@ -625,7 +625,7 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
     name = "comfyui_music_video"
     plugin_name = "ComfyUI Music Video"
     version = "1.0.2"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI plugins."
     plugin_dec = "Build a full AI music video\u2014lyrics, music, and animated visuals\u2014using ComfyUI."

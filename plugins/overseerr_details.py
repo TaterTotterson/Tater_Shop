@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from plugin_base import ToolPlugin
-from helpers import redis_client, get_tater_name
+from helpers import redis_client, extract_json
 from plugin_result import action_failure, action_success
 
 load_dotenv()
@@ -19,18 +19,20 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolPlugin):
     name = "overseerr_details"
     plugin_name = "Overseerr Details"
-    version = "1.1.1"
-    min_tater_version = "50"
+    version = "1.2.0"
+    min_tater_version = "59"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
 
-    usage = '{"function":"overseerr_details","arguments":{"title":"<movie or show title>","media_type":"movie|tv (optional)"}}'
+    usage = (
+        '{"function":"overseerr_details","arguments":{"query":"ONE natural-language title details request '
+        '(for example: tell me about severance, get details for dune part two, show me info on the movie alien)."}}'
+    )
 
     description = (
-        "Get details for ONE movie or TV show from Overseerr. "
-        "Use when the user asks for more info about a specific title. "
+        "Get details for one movie or TV show from Overseerr from one natural-language request."
     )
-    plugin_dec = "Fetch details for a specific title from Overseerr."
+    plugin_dec = "Fetch details for a specific movie or TV show from Overseerr."
     waiting_prompt_template = (
         "Give {mention} a short, cheerful note that you’re fetching details from Overseerr now. "
         "Only output that message."
@@ -49,9 +51,19 @@ class OverseerrDetailsPlugin(ToolPlugin):
             "default": "",
         },
     }
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use when the user asks for details, info, synopsis, rating, or status for a specific movie or TV show."
+    how_to_use = (
+        "Pass one natural-language request in query. Include the title naturally. "
+        "Mention movie or show only when that distinction matters."
+    )
+    common_needs = ["A natural-language title lookup request."]
     missing_info_prompts = []
+    example_calls = [
+        '{"function":"overseerr_details","arguments":{"query":"tell me about severance"}}',
+        '{"function":"overseerr_details","arguments":{"query":"get details for dune part two"}}',
+        '{"function":"overseerr_details","arguments":{"query":"show me info on the movie alien"}}',
+        '{"function":"overseerr_details","arguments":{"query":"give me details for the tv show the bear"}}',
+    ]
 
 
     # ---------- Internals ----------
@@ -131,6 +143,105 @@ class OverseerrDetailsPlugin(ToolPlugin):
         return results[0]
 
     @staticmethod
+    def _query_from_args(args: dict | None) -> str:
+        data = args or {}
+        for key in ("query", "request", "text", "message", "content", "prompt"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        title = data.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+        return ""
+
+    @staticmethod
+    def _normalize_media_type(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"movie", "film"}:
+            return "movie"
+        if raw in {"tv", "show", "series"}:
+            return "tv"
+        return ""
+
+    def _infer_media_type_from_query(self, query: str, explicit: str = "") -> str:
+        normalized = self._normalize_media_type(explicit)
+        if normalized:
+            return normalized
+        text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if not text:
+            return ""
+        if re.search(r"\b(tv|show|series|season|episode|miniseries|anime)\b", text):
+            return "tv"
+        if re.search(r"\b(movie|film|cinema)\b", text):
+            return "movie"
+        return ""
+
+    @staticmethod
+    def _clean_title_candidate(text: str) -> str:
+        value = re.sub(r"\s+", " ", str(text or "").strip())
+        if not value:
+            return ""
+        quoted = re.findall(r"['\"]([^'\"]{2,160})['\"]", value)
+        if quoted:
+            return quoted[0].strip()
+        value = re.sub(
+            r"(?i)^(?:please\s+)?(?:can you\s+|could you\s+|will you\s+)?"
+            r"(?:tell me about|get details for|get details on|show me details for|show me info on|"
+            r"show me info about|give me details for|give me info on|look up|search for|find info on|"
+            r"find details for|what can you tell me about|what do you know about)\s+",
+            "",
+            value,
+        )
+        value = re.sub(r"(?i)\b(?:on|in)\s+overseerr\b", "", value).strip(" .,!?:;")
+        value = re.sub(r"(?i)^(?:the\s+)?(?:movie|film|tv show|show|series)\s+", "", value).strip()
+        return value[:160]
+
+    async def _parse_request_with_llm(self, query: str, llm_client):
+        text = re.sub(r"\s+", " ", str(query or "").strip())
+        if not text or not llm_client:
+            return "", ""
+        prompt = (
+            "Extract the ONE movie or TV title the user wants details about.\n"
+            "Return only JSON with this shape: {\"title\":\"\",\"media_type\":\"movie|tv|\"}\n"
+            "Rules:\n"
+            "1) title must contain only the actual title, without filler words.\n"
+            "2) media_type must be movie or tv only when the request clearly specifies it.\n"
+            "3) If unclear, leave media_type empty.\n"
+            "4) If no clear title is present, return an empty title.\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[{"role": "system", "content": prompt}],
+                max_tokens=120,
+                temperature=0,
+            )
+            raw = ((resp or {}).get("message") or {}).get("content") or ""
+            data = json.loads(extract_json(raw) or raw)
+            title = self._clean_title_candidate(str(data.get("title") or ""))
+            media_type = self._normalize_media_type(str(data.get("media_type") or ""))
+            return title, media_type
+        except Exception as e:
+            logger.warning("[overseerr_details] request parse fallback: %s", e)
+            return "", ""
+
+    async def _resolve_request(self, args: dict | None, llm_client):
+        data = args or {}
+        explicit_title = self._clean_title_candidate(str(data.get("title") or ""))
+        explicit_media_type = self._normalize_media_type(str(data.get("media_type") or ""))
+        if explicit_title:
+            return explicit_title, self._infer_media_type_from_query(explicit_title, explicit_media_type)
+
+        query = self._query_from_args(data)
+        if not query:
+            return "", ""
+
+        parsed_title, parsed_media_type = await self._parse_request_with_llm(query, llm_client)
+        title = parsed_title or self._clean_title_candidate(query)
+        media_type = parsed_media_type or self._infer_media_type_from_query(query, explicit_media_type)
+        return title, media_type
+
+    @staticmethod
     def _tame_text(text: str, max_len: int = 700) -> str:
         text = re.sub(r"\s+", " ", (text or "").strip())
         return text[:max_len]
@@ -177,7 +288,7 @@ class OverseerrDetailsPlugin(ToolPlugin):
 
     async def _answer(self, args, llm_client):
         args = args or {}
-        title = (args.get("title") or "").strip()
+        title, prefer_type = await self._resolve_request(args, llm_client)
         if not title:
             return action_failure(
                 code="missing_title",
@@ -185,8 +296,6 @@ class OverseerrDetailsPlugin(ToolPlugin):
                 needs=["Provide the movie or TV title."],
                 say_hint="Ask for the specific title to look up.",
             )
-
-        prefer_type = (args.get("media_type") or "").strip().lower()
 
         search_data = self._search(title)
         if "error" in search_data:

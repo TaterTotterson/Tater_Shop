@@ -33,19 +33,28 @@ class EventsQueryPlugin(ToolPlugin):
     """
     name = "events_query"
     plugin_name = "Events Query"
-    version = "1.0.5"
-    min_tater_version = "50"
+    version = "1.1.0"
+    min_tater_version = "59"
     pretty_name = "Events Query"
     description = (
-        "Answer questions about stored household events (all sources) by area and timeframe. "
-        "Use this when the user asks what happened, who was seen, how long something occurred, "
-        "or whether someone is currently there. The model should always include the original user question "
-        "as the 'query' argument so context is preserved."
+        "Answer natural-language questions about stored household events by area and timeframe "
+        "(for example what happened, who was seen, how long activity lasted, and whether someone is there now)."
     )
     plugin_dec = "Answer questions about stored household events by area and timeframe."
     when_to_use = "Use for historical event summaries from stored automations logs (not live camera snapshots)."
-
-    usage = '{"function":"events_query","arguments":{"area":"front yard","timeframe":"today","query":"is anyone currently in the back yard"}}'
+    how_to_use = (
+        "Pass one natural-language query. Include area and timeframe naturally in the query. "
+        "Optional structured overrides: area, timeframe."
+    )
+    usage = (
+        '{"function":"events_query","arguments":{"query":"natural-language events question naming area/timeframe '
+        '(for example: what happened in the front yard yesterday?)"}}'
+    )
+    example_calls = [
+        '{"function":"events_query","arguments":{"query":"what happened in the front yard today?"}}',
+        '{"function":"events_query","arguments":{"query":"is anyone currently in the back yard?"}}',
+        '{"function":"events_query","arguments":{"query":"anything happen around the house in the last 24 hours?"}}',
+    ]
 
     platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
     settings_category = "Events Query"
@@ -56,8 +65,8 @@ class EventsQueryPlugin(ToolPlugin):
         "Let {mention} know you’re checking recent home events now. "
         "Keep it short and friendly. No emojis. Only output that message."
     )
-    common_needs = []
-    missing_info_prompts = []
+    common_needs = ["A natural-language events question."]
+    missing_info_prompts = ["What area/timeframe should I check in the event history?"]
 
 
     # ---------- Settings / Env ----------
@@ -148,6 +157,85 @@ class EventsQueryPlugin(ToolPlugin):
     def _strip_ordinal(day_str: str) -> str:
         # "14th" -> "14"
         return re.sub(r"(?i)(\d+)(st|nd|rd|th)", r"\1", day_str.strip())
+
+    @staticmethod
+    def _query_from_args(args: Dict[str, Any]) -> str:
+        args = args or {}
+        for key in ("query", "request", "text", "content", "message"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _infer_timeframe_from_query(self, query: str, now: datetime) -> str:
+        q = " ".join(str(query or "").strip().lower().split())
+        if not q:
+            return ""
+
+        if any(token in q for token in ("last 24 hours", "past 24 hours", "last 24h", "past 24h")):
+            return "last_24h"
+        if "yesterday" in q:
+            return "yesterday"
+        if any(token in q for token in ("tonight", "this evening", " evening")):
+            return "this evening"
+        if "this afternoon" in q:
+            return "this afternoon"
+        if "this morning" in q:
+            return "this morning"
+        if "today" in q:
+            return "today"
+
+        date_match = re.search(
+            r"\b(?:on\s+)?("
+            r"\d{4}-\d{2}-\d{2}|"
+            r"\d{4}/\d{1,2}/\d{1,2}|"
+            r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?"
+            r")\b",
+            q,
+            flags=re.IGNORECASE,
+        )
+        if date_match:
+            return date_match.group(1)
+        return ""
+
+    def _infer_area_from_query(self, query: str, sources_catalog: List[str]) -> str:
+        q = " ".join(str(query or "").strip().lower().split())
+        if not q:
+            return ""
+        if self._looks_like_whole_home(q):
+            return "around the house"
+        if self._looks_like_outside(q):
+            return "outside"
+
+        friendly_catalog = sorted(
+            set([self._source_to_area(src) for src in (sources_catalog or []) if self._source_to_area(src)])
+        )
+        direct = [area for area in friendly_catalog if self._areas_match(q, area)]
+        if len(direct) == 1:
+            return direct[0]
+        if len(direct) > 1:
+            # Prefer the longest area phrase match when multiple areas partially match.
+            return sorted(set(direct), key=len, reverse=True)[0]
+
+        preposition = re.search(
+            r"\b(?:in|at|around|near|from|on)\s+(?:the\s+)?([a-z0-9][a-z0-9 _-]{1,80})",
+            q,
+            flags=re.IGNORECASE,
+        )
+        if preposition:
+            candidate = preposition.group(1)
+            candidate = re.sub(
+                r"\b(?:today|yesterday|tonight|this morning|this afternoon|this evening|"
+                r"currently|right now|last 24 hours|past 24 hours|last 24h|past 24h)\b.*$",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+            candidate = candidate.strip(" ,.;:-")
+            if candidate:
+                return candidate
+
+        return ""
 
     def _parse_loose_date(self, s: str, assume_year: int) -> Optional[datetime]:
         """
@@ -600,9 +688,12 @@ class EventsQueryPlugin(ToolPlugin):
     async def _handle(self, args: Dict[str, Any], llm_client) -> str:
         # Local naive wall-clock used by automations event timestamps.
         now = self._ha_now()
+        user_query = self._query_from_args(args)
 
         # Timeframe: today|yesterday|last_24h|<date>
-        tf_raw = (args.get("timeframe") or "today").strip()
+        tf_raw = str(args.get("timeframe") or "").strip()
+        if not tf_raw:
+            tf_raw = self._infer_timeframe_from_query(user_query, now) or "today"
         tf = tf_raw.lower()
 
         if tf in ("evening", "tonight", "this evening"):
@@ -654,8 +745,12 @@ class EventsQueryPlugin(ToolPlugin):
 
         # If a specific area was given, try to map it to one or more sources
         area_raw = (args.get("area") or "").strip()
-        user_query = (args.get("query") or args.get("request") or "").strip()
-        area_phrase = area_raw or user_query  # allow natural-language fallback
+        if not area_raw and user_query:
+            area_raw = self._infer_area_from_query(user_query, sources_catalog)
+
+        area_phrase = (area_raw or "").strip()
+        if not area_phrase and user_query and (self._looks_like_whole_home(user_query) or self._looks_like_outside(user_query)):
+            area_phrase = user_query.strip()
 
         resolved_sources: Optional[List[str]] = None
         if area_phrase:

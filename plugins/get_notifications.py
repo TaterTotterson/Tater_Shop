@@ -15,9 +15,8 @@ class GetNotificationsPlugin(ToolPlugin):
     name = "get_notifications"
     plugin_name = "Get Notifications"
     version = "1.1.1"
-    min_tater_version = "50"
+    min_tater_version = "59"
     usage = '{"function":"get_notifications","arguments":{}}'
-    optional_args = []
     when_to_use = (
         "Use when the user asks for notifications or alerts."
     )
