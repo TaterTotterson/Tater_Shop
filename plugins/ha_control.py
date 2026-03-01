@@ -62,30 +62,9 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.9"
+    version = "1.1.10"
     min_tater_version = "59"
     pretty_name = "Home Assistant Control"
-    routing_keywords = [
-        "home assistant",
-        "hass",
-        "ha",
-        "light",
-        "lights",
-        "switch",
-        "switches",
-        "thermostat",
-        "temperature",
-        "garage door",
-        "lock",
-        "unlock",
-        "fan",
-        "fans",
-        "cover",
-        "blinds",
-        "scene",
-        "entity",
-    ]
-
     settings_category = "Home Assistant Control"
     platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
@@ -135,12 +114,6 @@ class HAControlPlugin(ToolPlugin):
             "type": "number",
             "default": 45,
             "description": "Cache LLM chosen entity per-query+catalog (seconds)."
-        },
-        "HA_FASTPATH_ENABLED": {
-            "label": "Enable Fast-Path Parsing",
-            "type": "checkbox",
-            "default": True,
-            "description": "If true, common commands (lights, brightness, color, thermostat set, remote buttons) skip the interpret LLM."
         },
     }
 
@@ -221,176 +194,130 @@ class HAControlPlugin(ToolPlugin):
         logger.debug(f"[ha_control] excluded voice PE entities: {excluded}")
         return excluded
 
-    @staticmethod
-    def _contains_any(text: str, words: List[str]) -> bool:
-        t = (text or "").lower()
-        return any(w in t for w in words)
+    def _clean_search_text(self, text: str) -> str:
+        normalized = self._normalize_for_match(text)
+        if not normalized:
+            return ""
+        filler = {
+            "turn", "on", "off", "the", "a", "an", "please", "to", "in", "of", "for",
+            "set", "make", "switch", "device", "devices", "area", "room", "what", "whats",
+            "is", "are", "status", "state", "check", "show", "tell", "me", "get", "with",
+            "my", "our", "your", "all", "run", "activate",
+        }
+        tokens = [tok for tok in normalized.split(" ") if tok and tok not in filler]
+        if not tokens:
+            return normalized
+        return " ".join(tokens[:8]).strip()
 
+    def _default_route_info(self, query: str) -> dict:
+        return {
+            "route": "unknown",
+            "search_text": self._clean_search_text(query) or (query or "").strip(),
+        }
 
-    # ---- CRITICAL FIX: hard guard so "lights to blue" never routes to thermostat temperature ----
-    def _is_light_color_command(self, text: str) -> bool:
-        """
-        True when the user is clearly changing light color.
-        This must take precedence over any thermostat/set_temperature logic.
-        """
-        t = (text or "").lower()
-        if not t:
-            return False
+    async def _route_query_with_llm(self, query: str, intent: Optional[dict], llm_client) -> dict:
+        base = self._default_route_info(query)
+        if not str(query or "").strip() or llm_client is None:
+            return base
 
-        # must be about lights
-        is_lightish = bool(
-            re.search(r"\b(light|lights|lamp|lamps|bulb|bulbs|led|hue|sconce)\b", t)
+        cache_ttl = self._get_int_setting("HA_INTERPRET_CACHE_SECONDS", 45)
+        cache_key = None
+        if cache_ttl > 0:
+            try:
+                intent_key = _json.dumps(intent or {}, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                intent_key = "{}"
+            cache_key = f"ha_control:route:v1:{query.strip().lower()}:{intent_key}"
+            cached = self._cache_get_json(cache_key)
+            if isinstance(cached, dict) and str(cached.get("route") or "").strip():
+                route = str(cached.get("route") or "").strip().lower()
+                if route in {
+                    "unknown", "light", "switch", "climate", "temperature", "cover",
+                    "lock", "fan", "remote", "media_player", "scene", "script", "sensor",
+                }:
+                    search_text = str(cached.get("search_text") or "").strip()
+                    return {
+                        "route": route,
+                        "search_text": search_text or base["search_text"],
+                    }
+
+        prompt = (
+            "Classify this Home Assistant request and choose the primary entity-routing path.\n"
+            "Return strict JSON only with this shape:\n"
+            '{"route":"unknown|light|switch|climate|temperature|cover|lock|fan|remote|media_player|scene|script|sensor",'
+            '"search_text":"short entity lookup phrase"}\n'
+            "Rules:\n"
+            "- route=light for lights, lamps, bulbs, colors, brightness, or light state requests.\n"
+            "- route=switch for switches, outlets, plugs, and simple power control for named devices like TVs, arcade cabinets, consoles, receivers, chargers, lamps, or similar gear when Home Assistant exposes them as switch entities.\n"
+            "- route=climate for thermostat/HVAC state or setpoint changes.\n"
+            "- route=temperature for ambient temperature sensor questions.\n"
+            "- route=cover for garage doors, blinds, shades, and covers.\n"
+            "- route=lock for locks and unlock/lock requests.\n"
+            "- route=fan for fans.\n"
+            "- route=remote for button presses like mute, volume, play, pause, home, back, menu, select.\n"
+            "- route=media_player for native playback/source/app/state requests on media devices.\n"
+            "- For simple on/off power requests for a TV, arcade cabinet, receiver, or similar device, prefer route=switch when it could plausibly be a smart plug/switch entity.\n"
+            "- route=scene only for explicit scene activation/state.\n"
+            "- route=script only for explicit script execution/state.\n"
+            "- route=sensor for non-temperature sensor status.\n"
+            "- route=unknown only when the domain is not clear.\n"
+            "- Think in terms of these paths: light, switch/plug/device-power, climate/thermostat, temperature sensor, cover/garage, lock, fan, remote buttons, native media_player, scene, script, sensor.\n"
+            "- search_text should be short, concrete, and based on the user's wording.\n"
+            "- search_text should focus on the target entity phrase, like 'office lights', 'kitchen switch', 'garage door', 'living room tv', or 'arcade plug'.\n"
+            "- Do not invent entity_ids.\n"
+            "Examples:\n"
+            '- "turn off office lights" -> {"route":"light","search_text":"office lights"}\n'
+            '- "set office lights to blue" -> {"route":"light","search_text":"office lights"}\n'
+            '- "turn on the kitchen plug" -> {"route":"switch","search_text":"kitchen plug"}\n'
+            '- "power on the arcade" -> {"route":"switch","search_text":"arcade"}\n'
+            '- "turn off the living room tv" -> {"route":"switch","search_text":"living room tv"}\n'
+            '- "what is the living room tv playing" -> {"route":"media_player","search_text":"living room tv"}\n'
+            '- "pause the roku" -> {"route":"remote","search_text":"roku"}\n'
+            '- "mute the family room receiver" -> {"route":"remote","search_text":"family room receiver"}\n'
+            '- "open the garage door" -> {"route":"cover","search_text":"garage door"}\n'
+            '- "is the front door locked" -> {"route":"lock","search_text":"front door"}\n'
+            '- "turn on the bedroom fan" -> {"route":"fan","search_text":"bedroom fan"}\n'
+            '- "set the hallway thermostat to 72" -> {"route":"climate","search_text":"hallway thermostat"}\n'
+            '- "what is the thermostat set to in the office" -> {"route":"climate","search_text":"office thermostat"}\n'
+            '- "what is the temperature in the kitchen" -> {"route":"temperature","search_text":"kitchen temperature"}\n'
+            '- "run movie time scene" -> {"route":"scene","search_text":"movie time"}\n'
         )
-        if not is_lightish:
-            return False
 
-        # must mention a known color phrase (or "color" itself)
-        has_color_word = bool(re.search(
-            r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
-            t
-        )) or bool(re.search(r"\bcolor\b", t))
-
-        if not has_color_word:
-            return False
-
-        # if they explicitly say thermostat/hvac, it's not a light command
-        if any(w in t for w in ["thermostat", "hvac", "heat", "cool", "setpoint", "climate"]):
-            return False
-
-        return True
-
-    def _parse_color_name_from_text(self, text: str) -> Optional[str]:
-        if not text:
-            return None
-        m = re.search(
-            r"\b(red|orange|yellow|green|cyan|blue|purple|magenta|pink|white|warm white|cool white)\b",
-            text,
-            re.I,
-        )
-        return m.group(1).lower() if m else None
-
-    def _parse_brightness_pct_from_text(self, text: str) -> Optional[int]:
-        """
-        Matches:
-          - "to 50%" / "at 50%" / "50 percent"
-          - "brightness 50"
-        """
-        if not text:
-            return None
-        m = re.search(r"\b(\d{1,3})\s*(%|percent)\b", text, re.I)
-        if m:
-            try:
-                v = int(m.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        m2 = re.search(r"\bbrightness\s*(\d{1,3})\b", text, re.I)
-        if m2:
-            try:
-                v = int(m2.group(1))
-                if 0 <= v <= 100:
-                    return v
-            except Exception:
-                pass
-        return None
-
-    def _parse_temperature_from_text(self, text: str) -> Optional[float]:
-        """
-        Matches:
-          - "set to 74"
-          - "to 74 degrees"
-          - "74°"
-        """
-        if not text:
-            return None
-        m = re.search(r"\b(?:to|set to|set)\s*(\d{2,3})(?:\s*(?:degrees|°|deg))?\b", text, re.I)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-        m2 = re.search(r"\b(\d{2,3})\s*(?:degrees|°|deg)\b", text, re.I)
-        if m2:
-            try:
-                return float(m2.group(1))
-            except Exception:
-                return None
-        return None
-
-    # ----------------------------
-    # Fast-path intent parsing (skip interpret LLM for common commands)
-    # ----------------------------
-    def _fast_intent_from_text(self, query: str) -> Optional[dict]:
-        """
-        Returns a full intent dict when we're confident.
-        Otherwise returns None to fall back to the LLM interpreter.
-        """
-        q = (query or "").strip()
-        t = q.lower()
-
-        def mk(intent: str, action: str, domain_hint: str, desired: Optional[dict] = None, scope: str = "unknown") -> dict:
-            d = desired or {}
-            # ensure desired keys exist
-            out = {
-                "intent": intent,
-                "action": action,
-                "scope": scope,
-                "domain_hint": domain_hint,
-                "desired": {
-                    "temperature": d.get("temperature"),
-                    "brightness_pct": d.get("brightness_pct"),
-                    "color_name": d.get("color_name"),
-                    "activity": d.get("activity"),
-                    "command": d.get("command"),
-                }
-            }
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You return only strict JSON."},
+                    {
+                        "role": "user",
+                        "content": _json.dumps(
+                            {"query": query, "intent_hint": intent or {}},
+                            ensure_ascii=False,
+                        ) + "\n\n" + prompt,
+                    },
+                ]
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+            parsed = _json.loads(raw)
+            if not isinstance(parsed, dict):
+                return base
+            route = str(parsed.get("route") or "").strip().lower()
+            if route not in {
+                "unknown", "light", "switch", "climate", "temperature", "cover",
+                "lock", "fan", "remote", "media_player", "scene", "script", "sensor",
+            }:
+                route = "unknown"
+            search_text = self._clean_search_text(parsed.get("search_text")) or base["search_text"]
+            out = {"route": route, "search_text": search_text}
+            if cache_key and cache_ttl > 0:
+                self._cache_set_json(cache_key, out, cache_ttl)
             return out
+        except Exception as exc:
+            logger.debug(f"[ha_control] route_query failed: {exc}")
+            return base
 
-        # Remote button presses
-        cmd = self._normalize_remote_command(q)
-        if cmd:
-            return mk("control", "send_command", "remote", {"command": cmd})
-
-        # Light color changes
-        if self._is_light_color_command(q):
-            cn = self._parse_color_name_from_text(q) or "white"
-            return mk("control", "turn_on", "light", {"color_name": cn})
-
-        # Light brightness changes
-        bp = self._parse_brightness_pct_from_text(q)
-        if bp is not None and any(w in t for w in ["light", "lights", "lamp", "bulb", "led", "hue", "sconce"]):
-            return mk("control", "turn_on", "light", {"brightness_pct": bp})
-
-        # Thermostat setpoint
-        tp = self._parse_temperature_from_text(q)
-        if tp is not None and any(w in t for w in ["thermostat", "hvac", "climate", "heat", "cool"]):
-            return mk("set_temperature", "set_temperature", "climate", {"temperature": tp})
-
-        # Generic on/off lights
-        if ("turn on" in t or "turn off" in t) and any(w in t for w in ["light", "lights", "lamp", "bulb", "led", "hue", "sconce"]):
-            act = "turn_on" if "turn on" in t else "turn_off"
-            return mk("control", act, "light")
-
-        return None
-
-    # ----------------------------
-    # Power intent helpers (TVs usually live under media_player/switch)
-    # ----------------------------
-    def _is_power_request(self, action: str, query: str) -> bool:
-        """
-        Only treat as a "power" request when the text implies AV gear.
-        Do NOT treat generic turn_on/turn_off as "power" automatically.
-        """
-        q = (query or "").lower()
-        a = (action or "").lower().strip()
-
-        power_words = ("turn on", "turn off", "power on", "power off")
-        if not any(p in q for p in power_words) and a not in ("turn_on", "turn_off"):
-            return False
-
-        tv_words = ("tv", "television", "roku", "apple tv", "appletv", "shield", "fire tv", "chromecast", "receiver", "soundbar")
-        return any(w in q for w in tv_words)
+    async def _route_query(self, query: str, intent: Optional[dict], llm_client) -> dict:
+        return await self._route_query_with_llm(query, intent, llm_client)
 
     @staticmethod
     def _state_key(st: Any) -> str:
@@ -447,43 +374,6 @@ class HAControlPlugin(ToolPlugin):
 
         if best and best_score >= 10:
             return best.get("entity_id")
-        return None
-
-    # ----------------------------
-    # Remote helpers (broad compatibility)
-    # ----------------------------
-    def _normalize_remote_command(self, text: str) -> Optional[str]:
-        """
-        Convert common voice phrases into a "base command".
-        We'll expand it into multiple variants later to match different integrations.
-        """
-        t = (text or "").lower().strip()
-        if not t:
-            return None
-
-        mapping = [
-            (["volume up", "vol up", "turn it up", "louder"], "volume_up"),
-            (["volume down", "vol down", "turn it down", "quieter"], "volume_down"),
-            (["unmute"], "mute"),
-            (["mute"], "mute"),
-            (["pause"], "pause"),
-            (["play"], "play"),
-            (["stop"], "stop"),
-            (["back", "go back"], "back"),
-            (["home"], "home"),
-            (["menu"], "menu"),
-            (["select", "ok", "okay", "enter"], "select"),
-            (["up"], "up"),
-            (["down"], "down"),
-            (["left"], "left"),
-            (["right"], "right"),
-            (["rewind"], "rewind"),
-            (["fast forward", "fast-forward", "forward"], "fast_forward"),
-        ]
-
-        for phrases, cmd in mapping:
-            if any(p in t for p in phrases):
-                return cmd
         return None
 
     def _command_variants(self, base_or_raw: str) -> List[str]:
@@ -543,25 +433,6 @@ class HAControlPlugin(ToolPlugin):
                 add(camel)
 
         return variants
-
-    def _guess_activity_from_text(self, text: str) -> Optional[str]:
-        t = (text or "").lower()
-        if not t:
-            return None
-
-        if "roku" in t:
-            return "Roku"
-        if "apple tv" in t or "appletv" in t:
-            return "Apple TV"
-        if "watch tv" in t or "tv" in t:
-            return "Watch TV"
-        if "ps5" in t or "playstation" in t:
-            return "Play PS5"
-        if "xbox" in t:
-            return "Play Xbox"
-        if "music" in t:
-            return "Listen to Music"
-        return None
 
     def _best_match_from_list(self, wanted: str, options: List[str]) -> Optional[str]:
         if not wanted or not options:
@@ -657,6 +528,164 @@ class HAControlPlugin(ToolPlugin):
         if max_score <= 0:
             return candidates, False
         return [c for c, sc in zip(candidates, scores) if sc == max_score], True
+
+    def _shortlist_candidates_for_search(
+        self,
+        candidates: List[dict],
+        *,
+        search_text: str,
+        fallback_text: str,
+        limit: int = 48,
+    ) -> Tuple[List[dict], bool]:
+        if not candidates:
+            return [], False
+
+        phrase = self._normalize_for_match(search_text or fallback_text)
+        tokens = self._extract_keywords(search_text or fallback_text)
+        if not phrase and not tokens:
+            return candidates[:limit], False
+
+        scored: List[Tuple[float, dict]] = []
+        for candidate in candidates:
+            name = str(candidate.get("name") or "")
+            eid = str(candidate.get("entity_id") or "")
+            blob = self._normalize_for_match(f"{name} {eid}")
+            if not blob:
+                continue
+
+            score = 0.0
+            if phrase:
+                if blob == phrase:
+                    score += 8.0
+                elif phrase in blob:
+                    score += 4.5
+                else:
+                    phrase_parts = [part for part in phrase.split(" ") if part]
+                    if phrase_parts and all(part in blob for part in phrase_parts):
+                        score += 2.5
+
+            for token in tokens:
+                if token in blob:
+                    score += 1.0
+                    continue
+                for word in blob.split():
+                    if difflib.SequenceMatcher(None, token, word).ratio() >= 0.86:
+                        score += 0.55
+                        break
+
+            if score > 0:
+                scored.append((score, candidate))
+
+        if not scored:
+            return candidates[:limit], False
+
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                str(item[1].get("name") or "").lower(),
+                str(item[1].get("entity_id") or "").lower(),
+            )
+        )
+        return [candidate for _, candidate in scored[:limit]], True
+
+    def _domains_for_route(
+        self,
+        route: str,
+        *,
+        mode: str,
+        intent_type: str,
+        action: str,
+        query: str,
+        domain_hint: str,
+    ) -> Set[str]:
+        route_key = str(route or "").strip().lower()
+        if route_key == "light":
+            return {"light"}
+        if route_key == "switch":
+            return {"switch"}
+        if route_key == "climate":
+            return {"climate"}
+        if route_key == "cover":
+            return {"cover"}
+        if route_key == "lock":
+            return {"lock"}
+        if route_key == "fan":
+            return {"fan"}
+        if route_key == "scene":
+            return {"scene"}
+        if route_key == "script":
+            return {"script"}
+        if route_key == "remote":
+            return {"remote"}
+        if route_key == "media_player":
+            return {"media_player"}
+        if route_key in {"sensor", "temperature"}:
+            return {"sensor", "binary_sensor", "select"}
+        hinted = str(domain_hint or "").strip().lower()
+        if hinted in {"light", "switch", "climate", "cover", "lock", "fan", "scene", "script", "remote", "media_player"}:
+            return {hinted}
+        if hinted in {"sensor", "binary_sensor", "select"}:
+            return {"sensor", "binary_sensor", "select"}
+        if mode == "control":
+            return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock", "remote"}
+        if intent_type == "get_temp":
+            return {"sensor"}
+        return {"sensor", "binary_sensor", "lock", "cover", "light", "switch", "fan", "media_player", "climate", "remote", "select"}
+
+    def _route_search_seed(self, query: str, scope: str, route_info: Optional[dict]) -> str:
+        route_info = route_info if isinstance(route_info, dict) else {}
+        search_text = str(route_info.get("search_text") or "").strip()
+        scope_text = ""
+        raw_scope = str(scope or "").strip()
+        if raw_scope and raw_scope.lower() not in {"unknown", "inside", "outside"}:
+            scope_text = raw_scope.split(":", 1)[-1].strip()
+        if search_text and scope_text and scope_text.lower() not in search_text.lower():
+            return f"{scope_text} {search_text}".strip()
+        return search_text or scope_text or query
+
+    def _prepare_routed_candidates(
+        self,
+        *,
+        catalog: List[dict],
+        route: str,
+        mode: str,
+        intent_type: str,
+        action: str,
+        query: str,
+        scope: str,
+        domain_hint: str,
+        excluded: Set[str],
+        route_info: Optional[dict],
+    ) -> List[dict]:
+        domains = self._domains_for_route(
+            route,
+            mode=mode,
+            intent_type=intent_type,
+            action=action,
+            query=query,
+            domain_hint=domain_hint,
+        )
+        candidates = self._candidates_for_domains(catalog, domains)
+
+        if excluded:
+            candidates = [
+                candidate for candidate in candidates
+                if not (
+                    (candidate.get("domain") or "").lower() == "light"
+                    and (candidate.get("entity_id") or "").lower() in excluded
+                )
+            ]
+
+        search_seed = self._route_search_seed(query, scope, route_info)
+        if search_seed:
+            shortlisted, narrowed = self._shortlist_candidates_for_search(
+                candidates,
+                search_text=search_seed,
+                fallback_text=query,
+            )
+            if narrowed and shortlisted:
+                return shortlisted
+        return candidates
 
     # ----------------------------
     # Catalog (grounding)
@@ -779,6 +808,7 @@ class HAControlPlugin(ToolPlugin):
             '  "action": "turn_on|turn_off|open|close|get_state|set_temperature|send_command",\n'
             '  "scope": "inside|outside|area:<name>|device:<phrase>|unknown",\n'
             f'  "domain_hint": "one of: {allowed_domain}",\n'
+            '  "read_target": "none|state|target_temperature|current_temperature",\n'
             '  "desired": {\n'
             '     "temperature": <number or null>,\n'
             '     "brightness_pct": <int 0-100 or null>,\n'
@@ -789,17 +819,39 @@ class HAControlPlugin(ToolPlugin):
             "}\n"
             "Rules:\n"
             "- If user asks 'what's the temp inside' or 'temp in the kitchen', intent=get_temp, action=get_state.\n"
-            "- If user asks 'thermostat set to' or 'thermostat temp', intent=get_state, domain_hint=climate.\n"
+            "- If user asks 'thermostat set to' or 'what is the thermostat set to', intent=get_state, domain_hint=climate, read_target=target_temperature.\n"
+            "- If user asks for thermostat current temp/current temperature, use intent=get_state, domain_hint=climate, read_target=current_temperature.\n"
+            "- For normal status/state questions, use read_target=state.\n"
+            "- When not reading state, use read_target=none.\n"
             "- If user says 'set thermostat to 74', intent=set_temperature, action=set_temperature, domain_hint=climate.\n"
             "- For lights, domain_hint=light and action turn_on/turn_off accordingly.\n"
             "- If user says 'set lights to blue' / 'turn lights blue', that's lights (domain_hint=light), NOT thermostat.\n"
             "- If user asks to set lights to a percent (brightness), you MUST use intent=control and action=turn_on,\n"
             "  and put the percent into desired.brightness_pct. Do NOT use actions like set_brightness.\n"
             "- For remotes, domain_hint=remote.\n"
-            "- 'turn on the tv/roku/apple tv' usually means device power; it may be media_player.turn_on.\n"
+            "- Use domain_hint=switch for switches, plugs, outlets, and simple power control for named devices like TVs, arcade cabinets, consoles, receivers, chargers, or lamps when they may actually be exposed as smart plugs/switches.\n"
+            "- Use domain_hint=media_player for native playback/source/app/state requests or clearly native media-player device control.\n"
+            "- For simple 'turn on/off the TV' style requests, domain_hint=switch is acceptable and preferred when the device could plausibly be controlled as a plug/switch.\n"
             "- 'mute', 'volume up', 'pause', 'play', 'home', 'back', 'menu' means action=send_command and desired.command.\n"
             "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
             "- If it's a named device (christmas tree lights), use scope=device:<phrase>.\n"
+            "Examples:\n"
+            '- "turn off office lights" -> {"intent":"control","action":"turn_off","scope":"area:office","domain_hint":"light","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "set office lights to blue" -> {"intent":"control","action":"turn_on","scope":"area:office","domain_hint":"light","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":"blue","activity":null,"command":null}}\n'
+            '- "set kitchen lights to 50 percent" -> {"intent":"control","action":"turn_on","scope":"area:kitchen","domain_hint":"light","read_target":"none","desired":{"temperature":null,"brightness_pct":50,"color_name":null,"activity":null,"command":null}}\n'
+            '- "turn on the kitchen plug" -> {"intent":"control","action":"turn_on","scope":"area:kitchen","domain_hint":"switch","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "power on the arcade" -> {"intent":"control","action":"turn_on","scope":"device:arcade","domain_hint":"switch","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "turn off the living room tv" -> {"intent":"control","action":"turn_off","scope":"area:living room","domain_hint":"switch","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "what is the living room tv playing" -> {"intent":"get_state","action":"get_state","scope":"area:living room","domain_hint":"media_player","read_target":"state","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "mute the roku" -> {"intent":"control","action":"send_command","scope":"device:roku","domain_hint":"remote","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":"mute"}}\n'
+            '- "pause the family room apple tv" -> {"intent":"control","action":"send_command","scope":"area:family room","domain_hint":"remote","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":"pause"}}\n'
+            '- "open the garage door" -> {"intent":"control","action":"open","scope":"device:garage door","domain_hint":"cover","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "is the front door locked" -> {"intent":"get_state","action":"get_state","scope":"device:front door","domain_hint":"lock","read_target":"state","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "turn on the bedroom fan" -> {"intent":"control","action":"turn_on","scope":"area:bedroom","domain_hint":"fan","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "set the hallway thermostat to 72" -> {"intent":"set_temperature","action":"set_temperature","scope":"area:hallway","domain_hint":"climate","read_target":"none","desired":{"temperature":72,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "what is the thermostat set to in the office" -> {"intent":"get_state","action":"get_state","scope":"area:office","domain_hint":"climate","read_target":"target_temperature","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "what is the current temperature on the hallway thermostat" -> {"intent":"get_state","action":"get_state","scope":"area:hallway","domain_hint":"climate","read_target":"current_temperature","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "what is the temperature in the kitchen" -> {"intent":"get_temp","action":"get_state","scope":"area:kitchen","domain_hint":"sensor","read_target":"state","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
         )
 
         resp = await llm_client.chat(messages=[
@@ -848,62 +900,18 @@ class HAControlPlugin(ToolPlugin):
         doms = {d.lower().strip() for d in (domains or set()) if d}
         return [c for c in catalog if (c.get("domain") or "").lower() in doms]
 
-    def _domains_for_control(self, domain_hint: str, action: str, query: str) -> Set[str]:
-        """
-        Domain prioritization:
-        - If we KNOW it's lights, always stay in light.
-        - Remote is for button presses/activities.
-        - "Power" routing only for TV-ish requests.
-        """
-        dh = (domain_hint or "").lower().strip()
-
-        # Never override a light intent
-        if dh == "light":
-            return {"light"}
-
-        # Remote requests stay remote-first
-        if dh == "remote":
-            if (action or "").lower().strip() == "send_command":
-                return {"remote", "media_player"}
-            return {"media_player", "switch", "remote"}
-
-        # Only TV-ish "power" requests prefer media_player/switch/remote
-        if self._is_power_request(action, query):
-            return {"media_player", "switch", "remote"}
-
-        # Respect other domain hints
-        if dh:
-            return {dh}
-
-        # Avoid scenes/scripts for turn_off unless explicitly requested
-        if (action or "").lower().strip() in {"turn_off"}:
-            return {"light", "switch", "fan", "media_player", "cover", "lock", "remote"}
-
-        return {"light", "switch", "fan", "media_player", "scene", "script", "cover", "lock", "remote"}
-
-    def _infer_domain_hint_from_query(self, query: str) -> str:
-        t = (query or "").lower()
-        if not t:
-            return ""
-
-        if any(w in t for w in ["light", "lights", "lamp", "lamps", "bulb", "bulbs", "led", "hue", "sconce"]):
-            return "light"
-        if any(w in t for w in ["fan", "fans"]):
-            return "fan"
-        if any(w in t for w in ["switch", "plug", "outlet"]):
-            return "switch"
-        if any(w in t for w in ["garage", "cover", "blinds", "shade", "door"]):
-            return "cover"
-        if any(w in t for w in ["lock", "locked", "unlock"]):
-            return "lock"
-        if any(w in t for w in ["scene", "mode"]):
-            return "scene"
-        return ""
-
     # ----------------------------
     # Step 3: LLM chooser (grounded) + tournament chunking + cache + single-candidate shortcut
     # ----------------------------
-    async def _choose_entity_llm(self, query: str, intent: dict, candidates: List[dict], llm_client) -> Optional[str]:
+    async def _choose_entity_llm(
+        self,
+        query: str,
+        intent: dict,
+        candidates: List[dict],
+        llm_client,
+        *,
+        route: str = "",
+    ) -> Optional[str]:
         if not candidates:
             return None
 
@@ -939,14 +947,32 @@ class HAControlPlugin(ToolPlugin):
             except Exception:
                 pass
 
+        route_hint = str(route or "").strip().lower()
+        route_rule = ""
+        if route_hint and route_hint != "unknown":
+            route_rule = f"Candidates are already filtered to the {route_hint} path. Stay on that path.\n"
+            if route_hint == "switch":
+                route_rule += (
+                    "Switch path includes smart plugs/outlets and simple power entities.\n"
+                    "Prefer switch.* candidates for TVs, arcade cabinets, receivers, consoles, chargers, lamps, or similar gear when they appear to be plug-backed devices.\n"
+                )
+            elif route_hint == "media_player":
+                route_rule += (
+                    "Media-player path is for native media devices and playback/state control.\n"
+                    "Prefer media_player.* candidates for playback/source/app/state, not generic smart-plug power.\n"
+                )
+            elif route_hint == "light":
+                route_rule += "Prefer light.* candidates only; do not drift to switch.* just because names look similar.\n"
+
         system = (
             "Pick the SINGLE best Home Assistant entity for this user request.\n"
             "You MUST choose an entity_id from the provided candidates (no inventions).\n"
             "Return strict JSON only: {\"entity_id\":\"...\"}. No explanation.\n"
             "Use the user's exact words to match rooms/devices.\n"
             "If the request is temperature inside, do NOT pick obvious outside/outdoor sensors.\n"
-            "If the request is to TURN ON/OFF a TV/device, prefer a matching media_player or switch first.\n"
+            "For TV/device power requests, choose the entity type that best matches the current path and the candidate names shown.\n"
             "Use remote.* mainly for button presses (volume/mute/home/back/menu/select) or starting activities.\n"
+            f"{route_rule}"
         )
 
         async def ask_pick(chunk: List[dict]) -> Optional[str]:
@@ -1241,25 +1267,17 @@ class HAControlPlugin(ToolPlugin):
             logger.error(f"[ha_control] catalog build failed: {e}")
             return "I couldn't access Home Assistant states."
 
-        # ✅ Fast-path: try deterministic intent parsing first (skips interpret LLM for common commands)
-        intent: Optional[dict] = None
-        if self._get_bool_setting("HA_FASTPATH_ENABLED", True):
-            try:
-                intent = self._fast_intent_from_text(query)
-            except Exception:
-                intent = None
-
-        if not intent:
-            try:
-                intent = await self._interpret_query(query, llm_client)
-            except Exception as e:
-                logger.error(f"[ha_control] interpret_query failed: {e}")
-                return "I couldn't understand that request."
+        try:
+            intent = await self._interpret_query(query, llm_client)
+        except Exception as e:
+            logger.error(f"[ha_control] interpret_query failed: {e}")
+            return "I couldn't understand that request."
 
         intent_type = (intent.get("intent") or "").strip()
         action = (intent.get("action") or "").strip()
         scope = (intent.get("scope") or "").strip()
         domain_hint = (intent.get("domain_hint") or "").strip()
+        read_target = str(intent.get("read_target") or "").strip().lower()
         if not scope or scope.lower() == "unknown":
             scope_from_origin = self._scope_from_origin(args)
             if scope_from_origin:
@@ -1269,59 +1287,40 @@ class HAControlPlugin(ToolPlugin):
         if not isinstance(desired, dict):
             desired = {}
 
-        # Fill missing "desired" fields from the raw query
-        if desired.get("color_name") in (None, "", "null"):
-            cn = self._parse_color_name_from_text(query)
-            if cn:
-                desired["color_name"] = cn
-        if desired.get("brightness_pct") in (None, "", "null"):
-            bp = self._parse_brightness_pct_from_text(query)
-            if bp is not None:
-                desired["brightness_pct"] = bp
-        if desired.get("temperature") in (None, "", "null"):
-            tp = self._parse_temperature_from_text(query)
-            if tp is not None:
-                desired["temperature"] = tp
+        route_info = await self._route_query(
+            query,
+            {
+                "intent": intent_type,
+                "action": action,
+                "scope": scope,
+                "domain_hint": domain_hint,
+                "read_target": read_target,
+                "desired": desired,
+            },
+            llm_client,
+        )
+        primary_route = str((route_info or {}).get("route") or "").strip().lower() or "unknown"
 
-        # Remote fallbacks
-        if desired.get("command") in (None, "", "null"):
-            cmd = self._normalize_remote_command(query)
-            if cmd:
-                desired["command"] = cmd
-        if desired.get("activity") in (None, "", "null"):
-            act = self._guess_activity_from_text(query)
-            if act:
-                desired["activity"] = act
-
-        # Light color hard-guard (extra safety)
-        if self._is_light_color_command(query):
-            intent_type = "control"
-            action = "turn_on"
-            domain_hint = "light"
-            if not scope:
-                scope = "unknown"
-            if not desired.get("color_name"):
-                desired["color_name"] = self._parse_color_name_from_text(query) or "white"
-
-        is_temp_question = False
-        if intent_type == "get_temp":
-            is_temp_question = True
-        else:
-            is_temp_question = self._contains_any(query, ["temp", "temperature", "degrees"])
-        if intent_type == "get_temp" or (is_temp_question and intent_type in ("get_state", "control", "set_temperature")):
-            scope_l = (scope or "").lower()
-            if not scope_l or scope_l == "unknown":
-                if self._contains_any(query, ["outside", "outdoor"]):
-                    scope = "outside"
-                elif self._contains_any(query, ["inside", "in the house", "indoors"]):
-                    scope = "inside"
-
+        if intent_type == "get_temp" or primary_route == "temperature":
             candidates = self._candidates_temperature(catalog, scope.lower() if scope else "unknown")
             if excluded:
                 candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+            temp_search = self._route_search_seed(query, scope, route_info)
+            if temp_search:
+                shortlisted, narrowed = self._shortlist_candidates_for_search(
+                    candidates,
+                    search_text=temp_search,
+                    fallback_text=query,
+                )
+                if narrowed and shortlisted:
+                    candidates = shortlisted
 
             entity_id = explicit_entity or await self._choose_entity_llm(
-                query, {"intent": "get_temp", "scope": scope}, candidates, llm_client
+                query,
+                {"intent": "get_temp", "scope": scope},
+                candidates,
+                llm_client,
+                route="temperature",
             )
             if not entity_id:
                 return "I couldn’t find a temperature sensor for that."
@@ -1337,18 +1336,30 @@ class HAControlPlugin(ToolPlugin):
                 logger.error(f"[ha_control] temp get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
-        wants_thermostat = self._contains_any(query, ["thermostat", "hvac"]) or (domain_hint or "").lower() == "climate"
-        if wants_thermostat and intent_type in ("get_state", "control") and action == "get_state":
-            climate_candidates = self._candidates_for_domains(catalog, {"climate"})
-            if excluded:
-                climate_candidates = [c for c in climate_candidates if (c.get("entity_id") or "").lower() not in excluded]
+        if primary_route == "climate" and intent_type in ("get_state", "control") and action == "get_state":
+            climate_candidates = self._prepare_routed_candidates(
+                catalog=catalog,
+                route="climate",
+                mode="get_state",
+                intent_type=intent_type,
+                action=action,
+                query=query,
+                scope=scope,
+                domain_hint="climate",
+                excluded=excluded,
+                route_info=route_info,
+            )
 
             entity_id = explicit_entity
             if entity_id and not entity_id.startswith("climate."):
                 return "That entity_id is not a climate device. Please provide a climate entity."
             if not entity_id:
                 entity_id = await self._choose_entity_llm(
-                    query, {"intent": "get_state", "domain_hint": "climate"}, climate_candidates, llm_client
+                    query,
+                    {"intent": "get_state", "domain_hint": "climate"},
+                    climate_candidates,
+                    llm_client,
+                    route="climate",
                 )
             if not entity_id:
                 return "I couldn’t find a thermostat."
@@ -1358,8 +1369,13 @@ class HAControlPlugin(ToolPlugin):
                 attrs = (st.get("attributes") or {}) if isinstance(st, dict) else {}
                 friendly = (attrs.get("friendly_name") or entity_id)
 
-                if self._contains_any(query, ["temp set", "temperature set", "set to", "setpoint"]):
+                if read_target == "target_temperature":
                     temp_val = attrs.get("temperature")
+                    unit = attrs.get("unit_of_measurement") or "°F"
+                    if temp_val is not None:
+                        return await self._speak_response_state(query, friendly, str(temp_val), str(unit), llm_client)
+                elif read_target == "current_temperature":
+                    temp_val = attrs.get("current_temperature")
                     unit = attrs.get("unit_of_measurement") or "°F"
                     if temp_val is not None:
                         return await self._speak_response_state(query, friendly, str(temp_val), str(unit), llm_client)
@@ -1371,15 +1387,30 @@ class HAControlPlugin(ToolPlugin):
                 return f"Error reading {entity_id}: {e}"
 
         if intent_type == "set_temperature" or action == "set_temperature":
-            candidates = self._candidates_for_domains(catalog, {"climate"})
-            if excluded:
-                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+            candidates = self._prepare_routed_candidates(
+                catalog=catalog,
+                route="climate",
+                mode="control",
+                intent_type=intent_type,
+                action=action,
+                query=query,
+                scope=scope,
+                domain_hint="climate",
+                excluded=excluded,
+                route_info=route_info,
+            )
 
             entity_id = explicit_entity
             if entity_id and not entity_id.startswith("climate."):
                 return "That entity_id is not a climate device. Please provide a thermostat entity."
             if not entity_id:
-                entity_id = await self._choose_entity_llm(query, intent, candidates, llm_client)
+                entity_id = await self._choose_entity_llm(
+                    query,
+                    intent,
+                    candidates,
+                    llm_client,
+                    route="climate",
+                )
             if not entity_id:
                 return "I couldn’t find a thermostat to set."
 
@@ -1403,23 +1434,26 @@ class HAControlPlugin(ToolPlugin):
                 return f"Error setting {entity_id}: {e}"
 
         if intent_type == "control":
-            domains = self._domains_for_control(domain_hint, action, query)
-            candidates = self._candidates_for_domains(catalog, domains)
+            candidates = self._prepare_routed_candidates(
+                catalog=catalog,
+                route=primary_route,
+                mode="control",
+                intent_type=intent_type,
+                action=action,
+                query=query,
+                scope=scope,
+                domain_hint=domain_hint,
+                excluded=excluded,
+                route_info=route_info,
+            )
 
-            if excluded and "light" in {d.lower() for d in domains}:
-                candidates = [
-                    c for c in candidates
-                    if not ((c.get("domain") or "").lower() == "light" and (c.get("entity_id") or "").lower() in excluded)
-                ]
-
-            tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
-            if not explicit_entity:
-                filtered, matched = self._filter_candidates_by_tokens(candidates, tokens)
-                if tokens and matched:
-                    candidates = filtered
-                # If token filtering misses, keep full candidate list and let chooser decide.
-
-            entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
+            entity_id = explicit_entity or await self._choose_entity_llm(
+                query,
+                intent,
+                candidates,
+                llm_client,
+                route=primary_route,
+            )
             if not entity_id:
                 return "I couldn’t find a device matching that."
 
@@ -1555,8 +1589,6 @@ class HAControlPlugin(ToolPlugin):
                             )
 
                     elif service == "send_command":
-                        if not desired_command:
-                            desired_command = self._normalize_remote_command(query) or ""
                         if not desired_command:
                             return "Tell me what button to press, like 'mute' or 'volume up'."
 
@@ -1703,19 +1735,26 @@ class HAControlPlugin(ToolPlugin):
                 )
 
         if intent_type == "get_state" or action == "get_state":
-            allowed = {"sensor", "binary_sensor", "lock", "cover", "light", "switch", "fan", "media_player", "climate", "remote", "select"}
-            candidates = self._candidates_for_domains(catalog, allowed)
-            if excluded:
-                candidates = [c for c in candidates if (c.get("entity_id") or "").lower() not in excluded]
+            candidates = self._prepare_routed_candidates(
+                catalog=catalog,
+                route=primary_route,
+                mode="get_state",
+                intent_type=intent_type,
+                action=action,
+                query=query,
+                scope=scope,
+                domain_hint=domain_hint,
+                excluded=excluded,
+                route_info=route_info,
+            )
 
-            tokens = self._tokens_from_scope(scope) or self._extract_keywords(query)
-            if not explicit_entity:
-                filtered, matched = self._filter_candidates_by_tokens(candidates, tokens)
-                if tokens and matched:
-                    candidates = filtered
-                # If token filtering misses, keep full candidate list and let chooser decide.
-
-            entity_id = explicit_entity or await self._choose_entity_llm(query, intent, candidates, llm_client)
+            entity_id = explicit_entity or await self._choose_entity_llm(
+                query,
+                intent,
+                candidates,
+                llm_client,
+                route=primary_route,
+            )
             if not entity_id:
                 return "I couldn’t find a device or sensor matching that."
 
