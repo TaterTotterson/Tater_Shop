@@ -22,6 +22,8 @@ from helpers import (
 )
 import plugin_registry as pr
 from cerberus import run_cerberus_turn, resolve_agent_limits
+__version__ = "1.0.0"
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xbmc")

@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 import plugin_registry as pr
 from helpers import get_llm_client_from_env, build_llm_host_from_env
+__version__ = "1.0.0"
+
 
 load_dotenv()
 

@@ -31,6 +31,8 @@ from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
+__version__ = "1.0.0"
+
 
 load_dotenv()
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")

@@ -21,6 +21,8 @@ from admin_gate import (
 from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
+__version__ = "1.0.0"
+
 
 load_dotenv()
 logger = logging.getLogger("irc.tater")
