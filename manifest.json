@@ -66,7 +66,7 @@
     {
       "id": "camera_event",
       "name": "Camera Event",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "min_tater_version": "59",
       "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
       "portals": [
@@ -76,7 +76,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "265153ff89700fc97eda4209257f63669a0c6ad66ab6b071834a04c5786cdb0d"
+      "sha256": "be66a5cf4f3c504562b2d3f76927e353c6a2dabe4c38411671b2c259a58dc0a9"
     },
     {
       "id": "comfyui_audio_ace",
