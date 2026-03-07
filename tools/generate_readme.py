@@ -5,13 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "manifest.json"
+PLATFORM_MANIFEST = ROOT / "platform_manifest.json"
 README = ROOT / "README.md"
 
 BEGIN = "<!-- AUTO:PLUGIN_TABLES:BEGIN -->"
-END   = "<!-- AUTO:PLUGIN_TABLES:END -->"
+END = "<!-- AUTO:PLUGIN_TABLES:END -->"
+
 
 def md_escape(s: str) -> str:
     return (s or "").replace("\n", " ").replace("|", "\\|").strip()
+
 
 def plugin_row(p: dict) -> str:
     pid = md_escape(p.get("id", ""))
@@ -20,17 +23,31 @@ def plugin_row(p: dict) -> str:
     plats = md_escape(plats)
     return f"| `{pid}` | {desc} | {plats} |"
 
-def build_tables(plugins: list[dict]) -> str:
+
+def platform_row(p: dict) -> str:
+    pid = md_escape(p.get("id", ""))
+    module_key = md_escape(p.get("module_key", ""))
+    desc = md_escape(p.get("description", ""))
+    autostart_key = md_escape(p.get("autostart_key", ""))
+    return f"| `{pid}` | `{module_key}` | {desc} | `{autostart_key}` |"
+
+
+def build_plugin_tables(plugins: list[dict]) -> str:
     # Normalize sorting
     plugins = sorted(plugins, key=lambda x: (x.get("id") or "").lower())
 
-    def plats(p): return set((p.get("platforms") or []))
-    def is_notifier(p): return ("notifier" in plats(p)) or bool(p.get("notifier", False))
-    def is_automation(p): return ("automation" in plats(p))
+    def plats(p):
+        return set((p.get("platforms") or []))
+
+    def is_notifier(p):
+        return ("notifier" in plats(p)) or bool(p.get("notifier", False))
+
+    def is_automation(p):
+        return "automation" in plats(p)
 
     interactive = [p for p in plugins if (not is_notifier(p)) and (not is_automation(p))]
-    automation  = [p for p in plugins if is_automation(p)]
-    notifiers   = [p for p in plugins if is_notifier(p)]
+    automation = [p for p in plugins if is_automation(p)]
+    notifiers = [p for p in plugins if is_notifier(p)]
 
     def table_block(title: str, items: list[dict]) -> str:
         if not items:
@@ -52,11 +69,44 @@ def build_tables(plugins: list[dict]) -> str:
     out.append(table_block("📡 RSS Notifier Plugins", notifiers))
     return "\n".join(out).strip() + "\n"
 
-def main():
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    plugins = manifest.get("plugins") or []
 
-    generated = build_tables(plugins)
+def build_platform_table(platforms: list[dict]) -> str:
+    platforms = sorted(platforms, key=lambda x: (x.get("id") or "").lower())
+
+    out = []
+    out.append("## 🌐 Platform Store\n")
+
+    if not platforms:
+        out.append("*(none)*\n")
+        return "\n".join(out).strip() + "\n"
+
+    out.append("| Platform ID | Module | Description | Autostart Key |")
+    out.append("|-------------|--------|-------------|---------------|")
+    out.extend(platform_row(p) for p in platforms)
+    out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
+def load_manifest_items(path: Path, key: str) -> list[dict]:
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    items = payload.get(key)
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def build_generated_block() -> str:
+    plugins = load_manifest_items(MANIFEST, "plugins")
+    platforms = load_manifest_items(PLATFORM_MANIFEST, "platforms")
+    plugin_text = build_plugin_tables(plugins)
+    platform_text = build_platform_table(platforms)
+    return (plugin_text + "\n" + platform_text).strip() + "\n"
+
+
+def main() -> None:
+    generated = build_generated_block()
 
     # If README doesn’t exist yet, create a basic one
     if not README.exists():
@@ -75,6 +125,7 @@ def main():
 
     README.write_text(new_text, encoding="utf-8")
     print("Updated README.md")
+
 
 if __name__ == "__main__":
     main()
