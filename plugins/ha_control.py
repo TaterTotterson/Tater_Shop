@@ -183,7 +183,7 @@ class HAControlPlugin(ToolPlugin):
         Read up to five Voice PE entity IDs from platform settings and exclude them
         from light control calls.
         """
-        plat = redis_client.hgetall("homeassistant_platform_settings") or {}
+        plat = redis_client.hgetall("homeassistant_portal_settings") or {}
         ids = []
         keys = ("VOICE_PE_ENTITY_1", "VOICE_PE_ENTITY_2", "VOICE_PE_ENTITY_3", "VOICE_PE_ENTITY_4", "VOICE_PE_ENTITY_5")
         for k in keys:

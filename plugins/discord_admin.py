@@ -15,7 +15,7 @@ logger = logging.getLogger("discord_admin")
 logger.setLevel(logging.INFO)
 
 
-DISCORD_SETTINGS_KEY = "discord_platform_settings"
+DISCORD_SETTINGS_KEY = "discord_portal_settings"
 RESPONSE_CHANNEL_IDS_BY_GUILD_KEY = "response_channel_ids_by_guild"
 MAX_ROLES = 10
 MAX_CATEGORIES = 8

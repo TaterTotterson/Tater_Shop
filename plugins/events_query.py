@@ -102,7 +102,7 @@ class EventsQueryPlugin(ToolPlugin):
 
     def _automation_base(self) -> str:
         try:
-            raw = redis_client.hget("ha_automations_platform_settings", "bind_port")
+            raw = redis_client.hget("ha_automations_portal_settings", "bind_port")
             port = int(raw) if raw is not None else 8788
         except Exception:
             port = 8788

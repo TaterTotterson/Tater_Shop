@@ -97,7 +97,7 @@ class CameraEventPlugin(ToolPlugin):
             "label": "Enable Home Assistant API notifications",
             "type": "checkbox",
             "default": True,
-            "description": "If enabled, also send to the Home Assistant platform notification endpoint.",
+            "description": "If enabled, also send to the Home Assistant portal notification endpoint.",
         },
         "DEFAULT_NOTIFICATION_TITLE": {
             "label": "Default notification title",
@@ -267,7 +267,7 @@ class CameraEventPlugin(ToolPlugin):
 
     def _automation_base_url(self) -> str:
         try:
-            raw_port = redis_client.hget("ha_automations_platform_settings", "bind_port")
+            raw_port = redis_client.hget("ha_automations_portal_settings", "bind_port")
             port = int(raw_port) if raw_port is not None else 8788
         except Exception:
             port = 8788
