@@ -55,7 +55,7 @@ def _as_float(value: Any, default: float, minimum: float, maximum: float) -> flo
 class AutomaticPlugin(ToolPlugin):
     name = "automatic_plugin"
     plugin_name = "Automatic1111 Image"
-    version = "1.2.0"
+    version = "1.2.1"
     min_tater_version = "59"
     pretty_name = "Your Image"
     settings_category = "Automatic111"
@@ -138,7 +138,7 @@ class AutomaticPlugin(ToolPlugin):
         "Write a fun, casual message telling {mention} you’re generating their image now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "telegram"]
+    platforms = ["discord", "webui", "macos", "telegram"]
     common_needs = []
     missing_info_prompts = []
 
@@ -348,6 +348,12 @@ class AutomaticPlugin(ToolPlugin):
                 say_hint="Explain the generation error and suggest checking Automatic1111 settings.",
             )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)
 

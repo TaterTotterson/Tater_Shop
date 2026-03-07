@@ -355,13 +355,13 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolPlugin):
     name = "comfyui_video_plugin"
     plugin_name = "ComfyUI Video"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"comfyui_video_plugin","arguments":{"prompt":"<Describe the video you want>"}}'
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
     plugin_dec = "Create a short video from a text prompt by stitching ComfyUI-generated clips."
     pretty_name = "Your Video"
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
     settings_category = SETTINGS_CATEGORY
     required_settings = {
         "COMFYUI_URL": {
@@ -733,6 +733,12 @@ class ComfyUIVideoPlugin(ToolPlugin):
                 say_hint="Explain the generation failure and suggest retrying.",
             )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         return action_failure(
             code="unsupported_platform",

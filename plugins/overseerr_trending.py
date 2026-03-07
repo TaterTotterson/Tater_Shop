@@ -18,7 +18,7 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolPlugin):
     name = "overseerr_trending"
     plugin_name = "Overseerr Trending"
-    version = "1.2.0"
+    version = "1.2.1"
     min_tater_version = "59"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
@@ -34,7 +34,7 @@ class OverseerrTrendingPlugin(ToolPlugin):
         "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -293,6 +293,12 @@ class OverseerrTrendingPlugin(ToolPlugin):
             logger.exception("[OverseerrTrending handle_webui] %s", exc)
             return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         try:
             return await self._answer(args or {}, llm_client, platform="irc")

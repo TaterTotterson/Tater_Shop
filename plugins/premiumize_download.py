@@ -15,7 +15,7 @@ logger.setLevel(logging.DEBUG)
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     usage = '{"function":"premiumize_download","arguments":{"url":"<URL to check>"}}'
     description = (
@@ -36,7 +36,7 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         "Write a friendly message telling {mention} you’re checking Premiumize and retrieving download links now! "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -219,6 +219,12 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             )
         return self._to_contract(result, url)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         url = (args or {}).get("url")
         if not url:

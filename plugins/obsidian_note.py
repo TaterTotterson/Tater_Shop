@@ -43,7 +43,7 @@ class ObsidianNotePlugin(ToolPlugin):
     name = "obsidian_note"
     plugin_name = "Obsidian Note"
     pretty_name = "Add to Obsidian"
-    version = "3.0.1"
+    version = "3.0.2"
     min_tater_version = "59"
 
     description = "Create, append, or overwrite markdown notes in your Obsidian vault with strict path safety."
@@ -132,7 +132,7 @@ class ObsidianNotePlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
 
     _INVALID_PATH_CHARS_RE = re.compile(r'[\\:*?"<>|]')
     _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -561,6 +561,12 @@ class ObsidianNotePlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._save_note(args or {}, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_discord(self, message, args, llm_client):
         return action_failure(
             code="unsupported_platform",

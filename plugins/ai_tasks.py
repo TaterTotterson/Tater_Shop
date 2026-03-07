@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 import re
+import calendar
 from bisect import bisect_left
 from datetime import datetime, timedelta
 from typing import Any, Dict
@@ -38,34 +39,57 @@ _WEEKDAY_TOKEN_MAP = {
     "tue": 1,
     "tues": 1,
     "tuesday": 1,
+    "tuesdays": 1,
     "wed": 2,
+    "weds": 2,
+    "wedsday": 2,
     "wednesday": 2,
+    "wednesdays": 2,
     "thu": 3,
     "thur": 3,
     "thurs": 3,
     "thursday": 3,
+    "thursdays": 3,
     "fri": 4,
     "friday": 4,
+    "fridays": 4,
     "sat": 5,
     "saturday": 5,
+    "saturdays": 5,
+    "mondays": 0,
+    "sundays": 6,
 }
+
+
+def _ordinal_day(value: Any) -> str:
+    try:
+        day = int(value)
+    except Exception:
+        return str(value or "").strip()
+    if day <= 0:
+        return str(day)
+    if 10 <= (day % 100) <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
 
 
 class AITasksPlugin(ToolPlugin):
     name = "ai_tasks"
-    version = "1.2.7"
+    version = "1.2.9"
     min_tater_version = "59"
     usage = (
         '{"function":"ai_tasks","arguments":{"task_prompt":"Assistant-authored execution prompt in your own words '
         '(no schedule text). Example: turn on living room lights to 50% and send weather forecast.",'
-        '"when":"Schedule phrase in local time. Example: everyday at 6am."}}'
+        '"when":"Schedule phrase in local time. Example: weekdays at 6am or on the 10th of every month."}}'
     )
     description = (
         "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
         "Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling."
     )
     pretty_name = "AI Tasks"
-    when_to_use = "Schedule recurring tasks (everyday, hourly, secondly, weekly, or explicit cron)."
+    when_to_use = "Schedule recurring tasks (everyday, weekdays/weekends, weekly, monthly, hourly, secondly, or explicit cron)."
     how_to_use = (
         "Provide task_prompt in the assistant's own words (what to do each run), and provide schedule via when or cron."
     )
@@ -76,10 +100,10 @@ class AITasksPlugin(ToolPlugin):
     ]
     missing_info_prompts = [
         "What should this task do each time it runs? Put that in `task_prompt`.",
-        "When should this run? Put that in `when` (for example `everyday at 6am`) or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
+        "When should this run? Put that in `when` (for example `everyday at 6am`, `weekdays at 8am`, or `on the 10th of every month`) or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
     ]
 
-    platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui"]
+    platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui", "macos"]
     waiting_prompt_template = (
         "Write a short, friendly message telling {mention} you’re scheduling the task now. "
         "Only output that message."
@@ -154,7 +178,10 @@ class AITasksPlugin(ToolPlugin):
             r"^\s*(?:every|each)\s+(?:second|minute|hour)\b\s*(?:,|:|-)?\s*",
             r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
             r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-            r"^\s*(?:every\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+week|each\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*on\s+(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?)(?:\s*(?:,|and)\s*(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?))*\s+(?:every|each)\s+week\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*\s+of\s+(?:every|each)\s+month\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+month|each\s+month|monthly)\b(?:\s+on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
             r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
             r"^\s*(?:at|@)\s*\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
         )
@@ -312,6 +339,8 @@ class AITasksPlugin(ToolPlugin):
             return "Daily"
         if kind == "weekly_local_time":
             return "Weekly"
+        if kind == "monthly_local_time":
+            return "Monthly"
         if kind == "cron_simple":
             hours = rec.get("hours") if isinstance(rec.get("hours"), list) else []
             minutes = rec.get("minutes") if isinstance(rec.get("minutes"), list) else []
@@ -678,7 +707,7 @@ class AITasksPlugin(ToolPlugin):
         second: int,
         weekdays: list[int] | None = None,
     ) -> float:
-        now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+        now_local = datetime.fromtimestamp(float(now_ts))
         h = min(23, max(0, int(hour)))
         m = min(59, max(0, int(minute)))
         s = min(59, max(0, int(second)))
@@ -773,7 +802,7 @@ class AITasksPlugin(ToolPlugin):
         if not valid_hours or not valid_minutes or not valid_seconds:
             return 0.0
 
-        base = datetime.fromtimestamp(float(now_ts)).astimezone().replace(microsecond=0) + timedelta(seconds=1)
+        base = datetime.fromtimestamp(float(now_ts)).replace(microsecond=0) + timedelta(seconds=1)
         day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
 
         for day_offset in range(0, 370):
@@ -826,6 +855,26 @@ class AITasksPlugin(ToolPlugin):
             minute = int(m24.group(2))
             second = int(m24.group(3) or 0)
             return hour, minute, second
+
+        m_compact = re.search(r"\bat\s+(\d{3,4})(?:\b|$)", raw, flags=re.IGNORECASE)
+        if m_compact:
+            digits = str(m_compact.group(1) or "")
+            if len(digits) == 3:
+                hour = int(digits[0])
+                minute = int(digits[1:])
+            else:
+                hour = int(digits[:2])
+                minute = int(digits[2:])
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute, 0
+
+        m_at = re.search(r"\bat\s+([01]?\d|2[0-3])(?::([0-5]\d))?(?::([0-5]\d))?(?:\b|$)", raw, flags=re.IGNORECASE)
+        if m_at:
+            return int(m_at.group(1)), int(m_at.group(2) or 0), int(m_at.group(3) or 0)
+
+        m_oclock = re.search(r"\b([1-9]|1[0-2])\s*o'?clock\b", raw, flags=re.IGNORECASE)
+        if m_oclock:
+            return int(m_oclock.group(1)), 0, 0
         return None
 
     @staticmethod
@@ -833,7 +882,7 @@ class AITasksPlugin(ToolPlugin):
         text = str(value or "").strip().lower()
         if not text:
             return []
-        if "weekdays" in text:
+        if "weekdays" in text or "weekday" in text:
             return [0, 1, 2, 3, 4]
         if "weekends" in text or "weekend" in text:
             return [5, 6]
@@ -845,6 +894,87 @@ class AITasksPlugin(ToolPlugin):
                 if mapped not in out:
                     out.append(mapped)
         return sorted(out)
+
+    @staticmethod
+    def _extract_monthdays_from_text(value: Any) -> list[int]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return []
+        if not re.search(r"\b(every month|each month|monthly)\b", text):
+            return []
+
+        out: list[int] = []
+        for token in re.findall(r"\b([12]?\d|3[01])(?:st|nd|rd|th)\b", text):
+            day = int(token)
+            if 1 <= day <= 31 and day not in out:
+                out.append(day)
+
+        if not out:
+            for token in re.findall(r"\bon\s+the\s+([12]?\d|3[01])\b", text):
+                day = int(token)
+                if 1 <= day <= 31 and day not in out:
+                    out.append(day)
+
+        return sorted(out)
+
+    @staticmethod
+    def _default_local_time_parts(now_ts: float) -> tuple[int, int, int]:
+        now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+        return int(now_local.hour), int(now_local.minute), 0
+
+    @staticmethod
+    def _normalize_monthdays(raw: Any) -> list[int]:
+        if not isinstance(raw, list):
+            return []
+        out: list[int] = []
+        for item in raw:
+            try:
+                day = int(item)
+            except Exception:
+                continue
+            if 1 <= day <= 31 and day not in out:
+                out.append(day)
+        return sorted(out)
+
+    @classmethod
+    def _next_monthly_occurrence(
+        cls,
+        *,
+        now_ts: float,
+        hour: int,
+        minute: int,
+        second: int,
+        monthdays: list[int] | None = None,
+    ) -> float:
+        valid_monthdays = cls._normalize_monthdays(monthdays or [])
+        if not valid_monthdays:
+            return 0.0
+
+        now_local = datetime.fromtimestamp(float(now_ts))
+        h = min(23, max(0, int(hour)))
+        m = min(59, max(0, int(minute)))
+        s = min(59, max(0, int(second)))
+
+        for month_offset in range(0, 61):
+            month_index = (now_local.month - 1) + month_offset
+            year = now_local.year + (month_index // 12)
+            month = (month_index % 12) + 1
+            last_day = calendar.monthrange(year, month)[1]
+            for day in valid_monthdays:
+                if day > last_day:
+                    continue
+                candidate = now_local.replace(
+                    year=year,
+                    month=month,
+                    day=day,
+                    hour=h,
+                    minute=m,
+                    second=s,
+                    microsecond=0,
+                )
+                if candidate.timestamp() > now_ts:
+                    return candidate.timestamp()
+        return 0.0
 
     @classmethod
     def _build_cron_simple_schedule(
@@ -895,6 +1025,42 @@ class AITasksPlugin(ToolPlugin):
         if cron:
             out["cron"] = str(cron).strip()
         return out
+
+    @classmethod
+    def _build_monthly_schedule(
+        cls,
+        *,
+        now_ts: float,
+        hour: int,
+        minute: int,
+        second: int,
+        monthdays: list[int],
+    ) -> Dict[str, Any] | None:
+        valid_monthdays = cls._normalize_monthdays(monthdays)
+        if not valid_monthdays:
+            return None
+
+        next_run = cls._next_monthly_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            monthdays=valid_monthdays,
+        )
+        if next_run <= 0:
+            return None
+
+        return {
+            "next_run_ts": float(next_run),
+            "interval_sec": 0.0,
+            "recurrence": {
+                "kind": "monthly_local_time",
+                "hour": int(hour),
+                "minute": int(minute),
+                "second": int(second),
+                "monthdays": valid_monthdays,
+            },
+        }
 
     def _parse_human_schedule(
         self,
@@ -1007,13 +1173,27 @@ class AITasksPlugin(ToolPlugin):
             return None, "Could not compute next run for every-hours schedule."
 
         daily = bool(re.search(r"\b(every day|everyday|daily|each day)\b", text))
-        weekly = bool(re.search(r"\b(every week|weekly)\b", text))
+        weekly = bool(re.search(r"\b(every week|each week|weekly)\b", text))
+        monthly = bool(re.search(r"\b(every month|each month|monthly)\b", text))
         weekdays = self._extract_weekdays_from_text(text)
-        if daily or weekly or weekdays:
+        monthdays = self._extract_monthdays_from_text(text)
+        if daily or weekly or weekdays or monthly or monthdays:
             time_parts = self._parse_time_of_day(text)
             if not time_parts:
-                return None, "Natural schedule is missing a time (for example: everyday at 6am)."
+                time_parts = self._default_local_time_parts(now_ts)
             hour, minute, second = time_parts
+            if monthly or monthdays:
+                chosen_monthdays = monthdays or [int(datetime.fromtimestamp(float(now_ts)).astimezone().day)]
+                schedule = self._build_monthly_schedule(
+                    now_ts=now_ts,
+                    hour=hour,
+                    minute=minute,
+                    second=second,
+                    monthdays=chosen_monthdays,
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for monthly schedule."
             cron_text = f"{int(second)} {int(minute)} {int(hour)} * * *"
             if weekdays or weekly:
                 chosen_weekdays = weekdays or [datetime.fromtimestamp(float(now_ts)).astimezone().weekday()]
@@ -1072,6 +1252,12 @@ class AITasksPlugin(ToolPlugin):
             if day_labels:
                 return f"weekly ({', '.join(day_labels)}) at {time_part}"
             return f"weekly at {time_part}"
+        if kind == "monthly_local_time":
+            monthdays = recurrence.get("monthdays") if isinstance(recurrence.get("monthdays"), list) else []
+            day_labels = [_ordinal_day(day) for day in monthdays if str(day).strip()]
+            if day_labels:
+                return f"monthly ({', '.join(day_labels)}) at {time_part}"
+            return f"monthly at {time_part}"
         if kind == "cron_simple":
             hours = recurrence.get("hours") if isinstance(recurrence.get("hours"), list) else []
             minutes = recurrence.get("minutes") if isinstance(recurrence.get("minutes"), list) else []
@@ -1233,8 +1419,9 @@ class AITasksPlugin(ToolPlugin):
                     "ok": False,
                     "error": (
                         f"`{key}` is no longer supported. "
-                        "Use `when`/`cron` (for example: `everyday at 6am`, `every hour`, "
-                        "`every second`, or `0 0 6 * * *`)."
+                        "Use `when`/`cron` (for example: `everyday at 6am`, `weekdays at 8am`, "
+                        "`on monday and wedsday each week`, `on the 10th of every month`, "
+                        "`every hour`, `every second`, or `0 0 6 * * *`)."
                     ),
                 }
 
@@ -1285,7 +1472,9 @@ class AITasksPlugin(ToolPlugin):
         if not isinstance(schedule_result, dict):
             guidance = (
                 "Use `when`/`cron` in local time, for example `everyday at 6am`, "
-                "`every hour`, `every second`, or `0 0 6 * * *`."
+                "`weekdays at 8am`, `on monday and wedsday each week`, "
+                "`on the 10th of every month`, `every hour`, `every second`, "
+                "or `0 0 6 * * *`."
             )
             if parse_error:
                 return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {parse_error} {guidance}"}
@@ -1354,6 +1543,7 @@ class AITasksPlugin(ToolPlugin):
             "origin": normalize_origin(origin),
             "meta": meta or {},
             "schedule": schedule_payload,
+            "enabled": True,
         }
 
         redis_client.set(f"{REMINDER_KEY_PREFIX}{reminder_id}", json.dumps(reminder))
@@ -1381,6 +1571,12 @@ class AITasksPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._schedule(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._schedule(args, llm_client)
 

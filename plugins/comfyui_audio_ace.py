@@ -31,14 +31,14 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolPlugin):
     name = "comfyui_audio_ace"
     plugin_name = "ComfyUI Audio Ace"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Generates music using ComfyUI Audio Ace."
     plugin_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ["discord", "webui", "homeassistant", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "homeassistant", "matrix", "telegram"]
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {
@@ -413,6 +413,12 @@ class ComfyUIAudioAcePlugin(ToolPlugin):
                 say_hint="Explain the generation failure and suggest retrying.",
             )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)
 

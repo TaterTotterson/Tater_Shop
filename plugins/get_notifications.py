@@ -14,7 +14,7 @@ logger.setLevel(logging.INFO)
 class GetNotificationsPlugin(ToolPlugin):
     name = "get_notifications"
     plugin_name = "Get Notifications"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "59"
     usage = '{"function":"get_notifications","arguments":{}}'
     when_to_use = (
@@ -27,7 +27,7 @@ class GetNotificationsPlugin(ToolPlugin):
     plugin_dec = "Fetch queued notifications from the Home Assistant bridge."
     pretty_name = "Get Notifications"
     settings_category = "Notifications"
-    platforms = ["webui", "homeassistant", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "discord", "telegram", "matrix", "irc"]
 
     waiting_prompt_template = (
         "Let {mention} know you are checking for notifications now. "
@@ -142,6 +142,12 @@ class GetNotificationsPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args, llm_client)
 

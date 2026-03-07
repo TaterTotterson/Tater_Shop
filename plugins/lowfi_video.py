@@ -344,7 +344,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolPlugin):
     name = "lowfi_video"
     plugin_name = "Lofi Video"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
@@ -352,7 +352,7 @@ class LowfiVideoPlugin(ToolPlugin):
     pretty_name = "Your Lofi Video"
     waiting_prompt_template = "Generate a fun, cozy message telling the user you're creating their lofi music video right now. Only output that message."
     settings_category = SETTINGS_CATEGORY
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
 
     required_settings = {
         "COMFYUI_URL": {
@@ -976,6 +976,12 @@ class LowfiVideoPlugin(ToolPlugin):
                 if path:
                     self._safe_unlink(path)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_discord(self, message, args, llm_client):
         return action_failure(
             code="unsupported_platform",

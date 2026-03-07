@@ -42,7 +42,7 @@ class ObsidianSearchPlugin(ToolPlugin):
     name = "obsidian_search"
     plugin_name = "Obsidian Search"
     pretty_name = "Search Obsidian"
-    version = "2.0.1"
+    version = "2.0.2"
     min_tater_version = "59"
 
     description = "Search markdown notes in Obsidian with bounded scan limits and ranked snippets."
@@ -126,7 +126,7 @@ class ObsidianSearchPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
 
     _TOKEN_RE = re.compile(r"[a-z0-9_]+")
     _STOPWORDS = {
@@ -497,6 +497,12 @@ class ObsidianSearchPlugin(ToolPlugin):
             say_hint="Answer using the ranked Obsidian hit snippets only.",
         )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_discord(self, message, args, llm_client):
         return "Obsidian search is only supported in the WebUI."
 

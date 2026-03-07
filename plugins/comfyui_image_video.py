@@ -32,7 +32,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolPlugin):
     name = "comfyui_image_video"
     plugin_name = "ComfyUI Animate Image"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -67,7 +67,7 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -430,6 +430,12 @@ class ComfyUIImageVideoPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._generate(args or {}, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return action_failure(
             code="unsupported_platform",

@@ -355,12 +355,12 @@ class UniFiProtectPlugin(ToolPlugin):
 
     name = "unifi_protect"
     plugin_name = "UniFi Protect"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
     pretty_name = "UniFi Protect"
     settings_category = "UniFi Protect"
 
-    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
     routing_keywords = [
         "unifi protect",
         "protect",
@@ -796,6 +796,12 @@ class UniFiProtectPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="webui", context=context)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="homeassistant", context=context)
 

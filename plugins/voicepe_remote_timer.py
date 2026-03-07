@@ -30,7 +30,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
 
     name = "voicepe_remote_timer"
     plugin_name = "Voice PE Remote Timer"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -100,7 +100,7 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
+    platforms = ["homeassistant", "homekit", "xbmc", "webui", "macos", "discord", "telegram", "matrix", "irc"]
     when_to_use = "Use when the user wants to start a timer, cancel a timer, or ask how much time is left on a Voice PE timer."
     how_to_use = (
         "Pass one natural-language timer request in query. Include the duration naturally for start requests. "
@@ -782,6 +782,12 @@ class VoicePERemoteTimerPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_discord(self, message, args, llm_client):
         return await self.handle_webui(args, llm_client, context=None)
 

@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolPlugin):
     name = "music_assistant"
     plugin_name = "Music Assistant"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -96,7 +96,7 @@ class MusicAssistantPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     # -------------------- HA helpers --------------------
     def _ha_settings(self) -> Dict[str, str]:
@@ -1008,6 +1008,12 @@ class MusicAssistantPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client):
         try:
             return await self._run_structured(args or {}, llm_client)

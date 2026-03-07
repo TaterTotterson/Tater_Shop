@@ -624,13 +624,13 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolPlugin):
     name = "comfyui_music_video"
     plugin_name = "ComfyUI Music Video"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI plugins."
     plugin_dec = "Build a full AI music video\u2014lyrics, music, and animated visuals\u2014using ComfyUI."
     pretty_name = "Your Music Video"
-    platforms = ["webui"]
+    platforms = ["webui", "macos"]
     waiting_prompt_template = "Generate a fun, upbeat message saying you're composing the full music video now! Only output that message."
     settings_category = SETTINGS_CATEGORY
     required_settings = {
@@ -991,4 +991,10 @@ class ComfyUIMusicVideoPlugin(ToolPlugin):
                 say_hint="Explain the generation failure and suggest retrying.",
             )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
 plugin = ComfyUIMusicVideoPlugin()
