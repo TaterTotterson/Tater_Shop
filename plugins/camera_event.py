@@ -271,7 +271,8 @@ class CameraEventPlugin(ToolPlugin):
             port = int(raw_port) if raw_port is not None else 8788
         except Exception:
             port = 8788
-        return f"http://localhost:{port}"
+        # Use explicit IPv4 loopback to avoid localhost resolution issues.
+        return f"http://127.0.0.1:{port}"
 
     @staticmethod
     def _slug(text: str) -> str:
@@ -402,7 +403,7 @@ class CameraEventPlugin(ToolPlugin):
         entity_id: str,
         area: Optional[str],
         ha_time: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         url = f"{self._automation_base_url()}/tater-ha/v1/events/add"
         payload = {
             "source": source,
@@ -414,12 +415,32 @@ class CameraEventPlugin(ToolPlugin):
             "ha_time": ha_time,
             "data": {"area": (area or "").strip()},
         }
+        last_error = ""
         try:
-            resp = requests.post(url, json=payload, timeout=5)
-            if resp.status_code >= 400:
-                logger.warning("[camera_event] events/add failed %s: %s", resp.status_code, resp.text[:200])
+            # Retry once before fallback.
+            for attempt in range(2):
+                resp = requests.post(url, json=payload, timeout=5)
+                if resp.status_code < 400:
+                    return {"ok": True, "via": "events_api"}
+                last_error = f"events/add failed {resp.status_code}: {resp.text[:200]}"
+                if attempt == 0:
+                    time.sleep(0.25)
         except Exception as exc:
-            logger.warning("[camera_event] events/add error: %s", exc)
+            last_error = str(exc)
+
+        if last_error:
+            logger.warning("[camera_event] %s", last_error)
+
+        # Fallback: write directly to the same Redis events list used by the
+        # automations bridge so events are not silently dropped.
+        try:
+            key = f"tater:automations:events:{source}"
+            redis_client.lpush(key, json.dumps(payload))
+            logger.warning("[camera_event] events/add fallback wrote directly to redis key %s", key)
+            return {"ok": True, "via": "redis_fallback", "warning": last_error}
+        except Exception as fallback_exc:
+            logger.warning("[camera_event] redis fallback failed: %s", fallback_exc)
+            return {"ok": False, "error": last_error or str(fallback_exc)}
 
     async def _notify_via_homeassistant_notifier(
         self,
@@ -596,7 +617,7 @@ class CameraEventPlugin(ToolPlugin):
         description = self._compact(description) or "Motion event detected."
 
         event_title = f"{area.title()} motion"
-        self._post_event(
+        event_store = self._post_event(
             source=self._slug(area),
             title=event_title,
             message=description,
@@ -605,7 +626,10 @@ class CameraEventPlugin(ToolPlugin):
             ha_time=now_iso,
         )
 
-        self._mark_fired(camera)
+        if bool((event_store or {}).get("ok")):
+            self._mark_fired(camera)
+        else:
+            logger.warning("[camera_event] event storage failed for %s (%s)", camera, area)
 
         notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
         notify_requested = bool(send_phone_alerts or persistent_notifications or api_notification)
@@ -639,7 +663,8 @@ class CameraEventPlugin(ToolPlugin):
 
         return {
             "ok": True,
-            "stored": True,
+            "stored": bool((event_store or {}).get("ok")),
+            "event_store": event_store,
             "camera": camera,
             "area": area,
             "cooldown_seconds": cooldown_seconds,

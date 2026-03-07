@@ -62,11 +62,11 @@ class HAClient:
 class HAControlPlugin(ToolPlugin):
     name = "ha_control"
     plugin_name = "Home Assistant Control"
-    version = "1.1.10"
+    version = "1.1.11"
     min_tater_version = "59"
     pretty_name = "Home Assistant Control"
     settings_category = "Home Assistant Control"
-    platforms = ["homeassistant", "webui", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
+    platforms = ["homeassistant", "webui", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
 
     usage = '{"function":"ha_control","arguments":{"query":"A single Home Assistant request in natural language (for example: turn off office lights, set bedroom thermostat to 72, or what is the living room temperature?)"}}'
 
@@ -1224,6 +1224,12 @@ class HAControlPlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._handle_structured(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_xbmc(self, args, llm_client):
         return await self._handle_structured(args, llm_client)
 

@@ -31,7 +31,7 @@ class FindMyPhonePlugin(ToolPlugin):
 
     name = "find_my_phone"
     plugin_name = "Find My Phone"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -78,7 +78,7 @@ class FindMyPhonePlugin(ToolPlugin):
         "Write a short, friendly message telling {mention} you're looking for their phone now. "
         "Only output that message."
     )
-    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
     common_needs = []
     missing_info_prompts = []
 
@@ -319,6 +319,12 @@ class FindMyPhonePlugin(ToolPlugin):
     async def handle_webui(self, args, llm_client):
         return await self._run(args or {}, llm_client, mention="you")
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client):
         return await self._run(args or {}, llm_client, mention="you")
 

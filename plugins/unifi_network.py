@@ -33,7 +33,7 @@ class UnifiNetworkPlugin(ToolPlugin):
 
     name = "unifi_network"
     plugin_name = "UniFi Network"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "59"
     pretty_name = "UniFi Network"
     description = (
@@ -77,7 +77,7 @@ class UnifiNetworkPlugin(ToolPlugin):
         "online",
     ]
     settings_category = "UniFi Network"
-    platforms = ["webui", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
     usage = '{"function":"unifi_network","arguments":{"query":"One UniFi Network request in natural language (for example: list clients, show offline devices, find hdhomerun IP)."}}'
 
@@ -853,6 +853,12 @@ class UnifiNetworkPlugin(ToolPlugin):
     async def handle_webui(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
 

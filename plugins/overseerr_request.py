@@ -26,7 +26,7 @@ class OverseerrRequestPlugin(ToolPlugin):
     """
     name = "overseerr_request"
     plugin_name = "Overseerr Request"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "59"
     usage = (
         '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
@@ -54,7 +54,7 @@ class OverseerrRequestPlugin(ToolPlugin):
         "Tell {mention} you’re adding their title to Overseerr now. "
         "Keep it short and friendly. Only output that message."
     )
-    platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
     when_to_use = "Use when the user wants to request a specific movie or TV show in Overseerr."
     how_to_use = (
         "Pass one natural-language request in query. Include the title naturally. "
@@ -438,6 +438,12 @@ class OverseerrRequestPlugin(ToolPlugin):
         raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=False)]
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client):
         title, kind = await self._resolve_request(args or {}, llm_client)
         raw = self._do_request_flow(title, kind)

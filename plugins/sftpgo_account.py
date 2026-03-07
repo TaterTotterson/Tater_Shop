@@ -22,7 +22,7 @@ logger.setLevel(logging.INFO)
 class SFTPGoAccountPlugin(ToolPlugin):
     name = "sftpgo_account"
     plugin_name = "SFTPGo Account"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_account","arguments":{"username":"<optional custom username>"}}'
     description = "Creates an SFTPGo account for the user and returns their credentials."
@@ -62,7 +62,7 @@ class SFTPGoAccountPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -304,6 +304,12 @@ class SFTPGoAccountPlugin(ToolPlugin):
             say_hint="Explain account creation failed and suggest retrying.",
         )
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         desired = (args or {}).get("username", "").strip() or user
         username = self._sanitize_username(desired)

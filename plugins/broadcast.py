@@ -22,7 +22,7 @@ class BroadcastPlugin(ToolPlugin):
     """
     name = "broadcast"
     plugin_name = "Broadcast"
-    version = "1.1.2"
+    version = "1.1.3"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -61,7 +61,7 @@ class BroadcastPlugin(ToolPlugin):
         "Only output that message."
     )
 
-    platforms = ["homeassistant", "homekit", "xbmc", "webui", "discord", "telegram", "matrix", "irc"]
+    platforms = ["homeassistant", "homekit", "xbmc", "webui", "macos", "discord", "telegram", "matrix", "irc"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -352,6 +352,12 @@ class BroadcastPlugin(ToolPlugin):
         raw_text = self._extract_announcement_arg(args)
         return await self._broadcast(raw_text, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homekit(self, args, llm_client):
         args = args or {}
         return await self._broadcast(self._extract_announcement_arg(args), llm_client)

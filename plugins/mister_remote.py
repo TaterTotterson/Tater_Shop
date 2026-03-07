@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolPlugin):
     name = "mister_remote"
     plugin_name = "MiSTer Remote"
-    version = "1.1.6"
+    version = "1.1.7"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
     routing_keywords = [
@@ -87,7 +87,7 @@ class MisterRemotePlugin(ToolPlugin):
     )
     plugin_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
     usage = (
         '{"function":"mister_remote","arguments":{"query":"ONE consolidated MiSTer request in natural language '
@@ -933,6 +933,12 @@ class MisterRemotePlugin(ToolPlugin):
             args["utterance"] = _strip(args.get("user_text",""))
         return await self._handle_structured(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         args = args or {}
         if not self._extract_utterance(args):

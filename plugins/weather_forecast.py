@@ -36,7 +36,7 @@ class WeatherForecastPlugin(ToolPlugin):
 
     name = "weather_forecast"
     plugin_name = "Weather Forecast"
-    version = "1.1.4"
+    version = "1.1.5"
     min_tater_version = "59"
     routing_keywords = [
         "weather",
@@ -136,7 +136,7 @@ class WeatherForecastPlugin(ToolPlugin):
         "Do not use markdown. Only output the message."
     )
 
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
 
     def _normalize_request_text(self, text: str) -> str:
         if not text:
@@ -972,6 +972,12 @@ class WeatherForecastPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         args2, request_text = self._with_request_from_fallback(args or {}, raw_message)
         text = await self._get_weather_text(args2, llm_client=llm_client)

@@ -12,7 +12,7 @@ DEFAULT_MAX_TOKENS = 2048
 class YouTubeSummaryPlugin(ToolPlugin):
     name = "youtube_summary"
     plugin_name = "YouTube Summary"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     usage = '{"function":"youtube_summary","arguments":{"video_url":"<YouTube URL>"}}'
     description = "Summarizes a YouTube video using its transcript."
@@ -27,7 +27,7 @@ class YouTubeSummaryPlugin(ToolPlugin):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re watching the video and working on it now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -221,6 +221,12 @@ class YouTubeSummaryPlugin(ToolPlugin):
     # ---------------------------------------------------------
     # IRC handler
     # ---------------------------------------------------------
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         video_url = args.get("video_url")
 

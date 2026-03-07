@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolPlugin):
     name = "overseerr_details"
     plugin_name = "Overseerr Details"
-    version = "1.2.0"
+    version = "1.2.1"
     min_tater_version = "59"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -37,7 +37,7 @@ class OverseerrDetailsPlugin(ToolPlugin):
         "Give {mention} a short, cheerful note that you’re fetching details from Overseerr now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -357,6 +357,12 @@ class OverseerrDetailsPlugin(ToolPlugin):
         except RuntimeError:
             return asyncio.run(inner())
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._answer(args, llm_client)
 

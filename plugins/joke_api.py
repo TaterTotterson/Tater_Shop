@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 class JokeAPIPlugin(ToolPlugin):
     name = "joke_api"
     plugin_name = "Joke API"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "59"
     pretty_name = "Joke API"
     usage = '{"function":"joke_api","arguments":{}}'
@@ -32,7 +32,7 @@ class JokeAPIPlugin(ToolPlugin):
         '{"function":"joke_api","arguments":{}}',
     ]
     settings_category = "Joke API"
-    platforms = ["webui", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc", "xbmc"]
+    platforms = ["webui", "macos", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc", "xbmc"]
     routing_keywords = [
         "joke",
         "jokes",
@@ -257,6 +257,12 @@ class JokeAPIPlugin(ToolPlugin):
     async def handle_webui(self, args: Dict[str, Any], llm_client: Any):
         return await self._handle(args, llm_client)
 
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args: Dict[str, Any], llm_client: Any):
         return await self._handle(args, llm_client)
 

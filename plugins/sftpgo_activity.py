@@ -10,7 +10,7 @@ from plugin_result import action_failure, action_success
 class SFTPGoActivityPlugin(ToolPlugin):
     name = "sftpgo_activity"
     plugin_name = "SFTPGo Activity"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_activity","arguments":{}}'
     description = "Retrieves current connection activity from the SFTPGo server."
@@ -18,7 +18,7 @@ class SFTPGoActivityPlugin(ToolPlugin):
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "irc", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",
@@ -153,6 +153,12 @@ class SFTPGoActivityPlugin(ToolPlugin):
             return asyncio.run(self._get_activity_summary(llm_client))
 
     # Telegram
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
     async def handle_telegram(self, update, args, llm_client):
         return await self.handle_webui(args, llm_client)
 
