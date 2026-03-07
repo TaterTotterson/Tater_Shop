@@ -7,7 +7,7 @@
       "version": "1.2.9",
       "min_tater_version": "59",
       "description": "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling.",
-      "platforms": [
+      "portals": [
         "discord",
         "irc",
         "matrix",
@@ -20,7 +20,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "1c15a49e64da98fd9f5c91f667a8cbc5cc5228a6b18013240885573d60313af7"
+      "sha256": "5055632861989c31945f943c46beb806da5e4ed58ab051126ecc28d5a03cb465"
     },
     {
       "id": "automatic_plugin",
@@ -28,7 +28,7 @@
       "version": "1.2.1",
       "min_tater_version": "59",
       "description": "Create one image from a natural-language image request.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -46,7 +46,7 @@
       "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Send a one-time spoken announcement to your Home Assistant media players.",
-      "platforms": [
+      "portals": [
         "homeassistant",
         "homekit",
         "xbmc",
@@ -69,14 +69,14 @@
       "version": "1.2.0",
       "min_tater_version": "59",
       "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
-      "platforms": [
+      "portals": [
         "automation"
       ],
       "notifier": false,
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "d5a33073c412a7f6e7ab71becfb26c5c0480eebbb84a3231459d4d6be829e75e"
+      "sha256": "265153ff89700fc97eda4209257f63669a0c6ad66ab6b071834a04c5786cdb0d"
     },
     {
       "id": "comfyui_audio_ace",
@@ -84,7 +84,7 @@
       "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -104,7 +104,7 @@
       "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -123,7 +123,7 @@
       "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -139,7 +139,7 @@
       "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -155,7 +155,7 @@
       "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -171,7 +171,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Natural-language device comparison with spec tables and optional per-game FPS benchmarks.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -190,14 +190,14 @@
       "version": "1.0.18",
       "min_tater_version": "59",
       "description": "Discord server setup, admin changes, and current-room always-respond control.",
-      "platforms": [
+      "portals": [
         "discord"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "9f0c03be1a7ecaed5381248928de97484d480de0e8bc2b6b446cefbafc5fcd35"
+      "sha256": "19d50b737447efb0b13b7c62795aa544268f9eaad84207c8a9e3265bd252fa47"
     },
     {
       "id": "doorbell_alert",
@@ -205,14 +205,14 @@
       "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
-      "platforms": [
+      "portals": [
         "automation"
       ],
       "notifier": false,
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "6ac846b4352ac3901067978719fe1f23b53dbdc36d4acae6968cbe18a4299527"
+      "sha256": "5bd9f09dd479ea906ef93a2a7d927421ad205443d6157f9ac5a5ad051c8ab02c"
     },
     {
       "id": "events_query",
@@ -220,7 +220,7 @@
       "version": "2.0.0",
       "min_tater_version": "59",
       "description": "Natural-language semantic event-history search.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -234,7 +234,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "de994827086ee8f22e2f5aa6f0e23fcab127cedae38b217f1e4affeb9f642be0"
+      "sha256": "0defee84466a01436e5df652a5afd8da39043a70b44f3f93f9c26896492d1c1f"
     },
     {
       "id": "events_query_brief",
@@ -242,14 +242,14 @@
       "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant.",
-      "platforms": [
+      "portals": [
         "automation"
       ],
       "notifier": false,
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "3e0869de6d3e3c581a43ac035c80c6f2e8345d122324bdc02a7dd032130326bc"
+      "sha256": "44ca70e8d556105dd514a29398d17e5f1e9b1ef2677dc99e07d0beafbfde64b2"
     },
     {
       "id": "find_my_phone",
@@ -257,7 +257,7 @@
       "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -280,7 +280,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Browse and download files from the configured FTP server.",
-      "platforms": [
+      "portals": [
         "discord"
       ],
       "notifier": false,
@@ -295,7 +295,7 @@
       "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Fetch queued notifications from the Home Assistant bridge.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -308,7 +308,7 @@
       "settings_category": "Notifications",
       "tags": [],
       "entry": "plugins/get_notifications.py",
-      "sha256": "672f25b650bfddface061d0659b0f6a6a39908dfc806dff160d570f7e429fcf1"
+      "sha256": "9a319f2aa13c139444fab06e5f25ba8111509e0cf2ea802f9d975b16ce1fa781"
     },
     {
       "id": "ha_control",
@@ -316,7 +316,7 @@
       "version": "1.1.11",
       "min_tater_version": "59",
       "description": "Control Home Assistant devices.",
-      "platforms": [
+      "portals": [
         "homeassistant",
         "webui",
         "macos",
@@ -331,7 +331,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "11c96cdc0944c8ea04b697fd78b8cb109c5bcb7bce95a10a7f26ddbf192f3442"
+      "sha256": "5980f613b5e8828d8d831cf732e6fbf4cfd57a352dc29ec0ce2b40cac96f58fb"
     },
     {
       "id": "joke_api",
@@ -339,7 +339,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Fetch one joke from JokeAPI.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -362,7 +362,7 @@
       "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Create a cozy lofi video by generating music and looping a matching animation.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -378,7 +378,7 @@
       "version": "1.1.7",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -400,7 +400,7 @@
       "version": "1.0.10",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -423,7 +423,7 @@
       "version": "3.0.2",
       "min_tater_version": "59",
       "description": "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -439,7 +439,7 @@
       "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos"
       ],
@@ -455,7 +455,7 @@
       "version": "1.2.1",
       "min_tater_version": "59",
       "description": "Fetch details for a specific movie or TV show from Overseerr.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -477,7 +477,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Request a movie or TV show in Overseerr by title.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -499,7 +499,7 @@
       "version": "1.2.1",
       "min_tater_version": "59",
       "description": "List trending or upcoming movies/TV from Overseerr.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -521,7 +521,7 @@
       "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Check if a link is cached on Premiumize and return direct download links.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -541,7 +541,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Check the latest torrent or magnet against Premiumize cache and provide direct links.",
-      "platforms": [
+      "portals": [
         "discord",
         "matrix"
       ],
@@ -557,7 +557,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Create an SFTPGo account for the user and return login details.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -577,7 +577,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Show current connection activity on the SFTPGo server.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -597,7 +597,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Add a GitHub releases feed to the tater-gits watcher with smart naming.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "discord",
@@ -617,7 +617,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Fetch UniFi Network sites/clients/devices via the official API and answer natural-language requests.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -640,7 +640,7 @@
       "version": "1.0.10",
       "min_tater_version": "59",
       "description": "Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions.",
-      "platforms": [
+      "portals": [
         "webui",
         "macos",
         "homeassistant",
@@ -663,7 +663,7 @@
       "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
-      "platforms": [
+      "portals": [
         "homeassistant",
         "homekit",
         "xbmc",
@@ -686,7 +686,7 @@
       "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Give a short automation-friendly recap of recent weather conditions.",
-      "platforms": [
+      "portals": [
         "automation"
       ],
       "notifier": false,
@@ -701,7 +701,7 @@
       "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -724,7 +724,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Browse and download files from the configured WebDAV server.",
-      "platforms": [
+      "portals": [
         "discord"
       ],
       "notifier": false,
@@ -739,7 +739,7 @@
       "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Summarize a YouTube video using its transcript.",
-      "platforms": [
+      "portals": [
         "discord",
         "webui",
         "macos",
@@ -759,7 +759,7 @@
       "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Generate a calming daily greeting and message for dashboards.",
-      "platforms": [
+      "portals": [
         "automation"
       ],
       "notifier": false,
