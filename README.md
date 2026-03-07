@@ -63,4 +63,21 @@
 
 *(none)*
 
+## 🌐 Platform Store
+
+| Platform ID | Module | Description | Autostart Key |
+|-------------|--------|-------------|---------------|
+| `ai_task` | `ai_task_platform` | AI Task Scheduler integration platform for Tater. | `ai_task_platform_running` |
+| `discord` | `discord_platform` | Discord integration platform for Tater. | `discord_platform_running` |
+| `ha_automations` | `ha_automations_platform` | Automation integration platform for Tater. | `ha_automations_platform_running` |
+| `homeassistant` | `homeassistant_platform` | Home Assistant integration platform for Tater. | `homeassistant_platform_running` |
+| `homekit` | `homekit_platform` | HomeKit / Siri integration platform for Tater. | `homekit_platform_running` |
+| `irc` | `irc_platform` | IRC integration platform for Tater. | `irc_platform_running` |
+| `macos` | `macos_platform` | macOS integration platform for Tater. | `macos_platform_running` |
+| `matrix` | `matrix_platform` | Matrix integration platform for Tater. | `matrix_platform_running` |
+| `memory` | `memory_platform` | Memory Platform integration platform for Tater. | `memory_platform_running` |
+| `rss` | `rss_platform` | RSS integration platform for Tater. | `rss_platform_running` |
+| `telegram` | `telegram_platform` | Telegram integration platform for Tater. | `telegram_platform_running` |
+| `xbmc` | `xbmc_platform` | XBMC / Original Xbox integration platform for Tater. | `xbmc_platform_running` |
+
 <!-- AUTO:PLUGIN_TABLES:END -->
