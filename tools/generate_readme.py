@@ -28,8 +28,7 @@ def platform_row(p: dict) -> str:
     pid = md_escape(p.get("id", ""))
     module_key = md_escape(p.get("module_key", ""))
     desc = md_escape(p.get("description", ""))
-    autostart_key = md_escape(p.get("autostart_key", ""))
-    return f"| `{pid}` | `{module_key}` | {desc} | `{autostart_key}` |"
+    return f"| `{pid}` | `{module_key}` | {desc} |"
 
 
 def build_plugin_tables(plugins: list[dict]) -> str:
@@ -80,8 +79,8 @@ def build_platform_table(platforms: list[dict]) -> str:
         out.append("*(none)*\n")
         return "\n".join(out).strip() + "\n"
 
-    out.append("| Platform ID | Module | Description | Autostart Key |")
-    out.append("|-------------|--------|-------------|---------------|")
+    out.append("| Platform ID | Module | Description |")
+    out.append("|-------------|--------|-------------|")
     out.extend(platform_row(p) for p in platforms)
     out.append("")
     return "\n".join(out).strip() + "\n"
@@ -102,7 +101,7 @@ def build_generated_block() -> str:
     platforms = load_manifest_items(PLATFORM_MANIFEST, "platforms")
     plugin_text = build_plugin_tables(plugins)
     platform_text = build_platform_table(platforms)
-    return (plugin_text + "\n" + platform_text).strip() + "\n"
+    return (platform_text + "\n" + plugin_text).strip() + "\n"
 
 
 def main() -> None:
