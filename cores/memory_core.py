@@ -21,6 +21,8 @@ from memory_core_store import (
     save_doc,
     user_doc_key,
 )
+__version__ = "1.0.0"
+
 
 load_dotenv()
 

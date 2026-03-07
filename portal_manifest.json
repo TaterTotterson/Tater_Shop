@@ -5,7 +5,7 @@
       "id": "discord",
       "name": "Discord",
       "module_key": "discord_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "Discord integration portal for Tater.",
       "settings_category": "Discord Settings",
@@ -13,13 +13,13 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "3c3a15f35dbdb24531dd3aac62eb94789a7ce1539a652c8af907e0a9457548db"
+      "sha256": "d74aef876ad4fddbba532be9151b16aa79e9289f4d5fcf70b158c5a0d999d5b2"
     },
     {
       "id": "ha_automations",
       "name": "Automation",
       "module_key": "ha_automations_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "Automation integration portal for Tater.",
       "settings_category": "Automation Settings",
@@ -27,13 +27,13 @@
       "autostart_key": "ha_automations_portal_running",
       "tags": [],
       "entry": "portals/ha_automations_portal.py",
-      "sha256": "141abbe2ce6595a941cef8b534885f74bfb9e7a09d4e65952112032a1e9c9ae9"
+      "sha256": "8348fd3d364d63c417eea1d0b2aa747305f363badc480bd5f38437ec808924d9"
     },
     {
       "id": "homeassistant",
       "name": "Home Assistant",
       "module_key": "homeassistant_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "Home Assistant integration portal for Tater.",
       "settings_category": "Home Assistant Settings",
@@ -41,13 +41,13 @@
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "6c428db927e95288035b0dd5e2ba58ac8d84c2fa2ac0de2818668d5b1db48dab"
+      "sha256": "33dc7b5b43cdf949413194e85f4c2e96070d005dff341d7ddd55ba5d64205a39"
     },
     {
       "id": "homekit",
       "name": "HomeKit / Siri",
       "module_key": "homekit_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "HomeKit / Siri integration portal for Tater.",
       "settings_category": "HomeKit / Siri",
@@ -55,13 +55,13 @@
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "5d48cf45528676e44f90911bd969cab97a887d285b84e58fe4320769998a3c20"
+      "sha256": "cdc6ddfeccceaf8cbabeef148e89d21375bb56a7bf0dd36155b11ce3bd87be6b"
     },
     {
       "id": "irc",
       "name": "IRC",
       "module_key": "irc_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "IRC integration portal for Tater.",
       "settings_category": "IRC Settings",
@@ -69,13 +69,13 @@
       "autostart_key": "irc_portal_running",
       "tags": [],
       "entry": "portals/irc_portal.py",
-      "sha256": "eff7fd2fda02a703fa03ebe41c229556bd4ec89157b8f8476824f8429b38fb9a"
+      "sha256": "ea63252dddaf7b1bf657ee2f651f09915b92d46bc31b167a6fee119753bea00e"
     },
     {
       "id": "macos",
       "name": "macOS",
       "module_key": "macos_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "macOS integration portal for Tater.",
       "settings_category": "macOS Settings",
@@ -83,13 +83,13 @@
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "e9544f6fe7b87d7d5a5b7f9fff2c4d8e212980ffca8d444a753f3691e462cbc0"
+      "sha256": "a02f744b1260429db01a981408c142545d7c96892af53dfa8058d7816e19d237"
     },
     {
       "id": "matrix",
       "name": "Matrix",
       "module_key": "matrix_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "Matrix integration portal for Tater.",
       "settings_category": "Matrix Settings",
@@ -97,13 +97,13 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "4a4dc19e3cbf1e90225780ca147989a6472e3c0ad46affa3857a3ca07c39d396"
+      "sha256": "e2eb1247b2373e1cf8eec121c940a8f72b0f51a66536f03f815d30737ef623c1"
     },
     {
       "id": "telegram",
       "name": "Telegram",
       "module_key": "telegram_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "Telegram integration portal for Tater.",
       "settings_category": "Telegram Settings",
@@ -111,13 +111,13 @@
       "autostart_key": "telegram_portal_running",
       "tags": [],
       "entry": "portals/telegram_portal.py",
-      "sha256": "7ac0aea936ef5ec4999d36661ba020f0e5c1422ff9ca5c7abe43306cb8cef594"
+      "sha256": "067dce45d5323adcfe292c85b6d4528fe34acc9f950864fc8d432e285b8aa9d5"
     },
     {
       "id": "xbmc",
       "name": "XBMC / Original Xbox",
       "module_key": "xbmc_portal",
-      "version": "0.0.0",
+      "version": "1.0.0",
       "min_tater_version": "59",
       "description": "XBMC / Original Xbox integration portal for Tater.",
       "settings_category": "XBMC / Original Xbox Settings",
@@ -125,7 +125,7 @@
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "56688f7094e867a0765ada752861ae0a85b6d40739e9c2565edadfd949d7d971"
+      "sha256": "b23fedcf45d58c0a9151666d7b46f636df5bd469e6ddeeb7a61b4c7a6e901dd4"
     }
   ]
 }

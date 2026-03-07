@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, update_feed, ensure_feed, delete_feed
+__version__ = "1.0.0"
+
 
 logger = logging.getLogger("rss")
 logger.setLevel(logging.INFO)

@@ -68,6 +68,8 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
+__version__ = "1.0.0"
+
 
 # Tables plugin: handle both modern and legacy module names, else no-op
 try:

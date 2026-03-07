@@ -16,6 +16,8 @@ from helpers import (
     build_llm_host_from_env,
 )
 from cerberus import run_cerberus_turn, resolve_agent_limits
+__version__ = "1.0.0"
+
 
 load_dotenv()
 

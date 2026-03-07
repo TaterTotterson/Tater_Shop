@@ -21,6 +21,8 @@ from cerberus import run_cerberus_turn, resolve_agent_limits
 from notify import dispatch_notification
 
 from dotenv import load_dotenv
+__version__ = "1.0.0"
+
 load_dotenv()
 
 logger = logging.getLogger("ai_task_core")

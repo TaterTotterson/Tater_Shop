@@ -25,6 +25,8 @@ from notify.queue import is_expired as notify_item_is_expired, queue_key as noti
 from plugin_kernel import plugin_supports_platform
 from plugin_result import narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
+__version__ = "1.0.0"
+
 
 load_dotenv()
 
