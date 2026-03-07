@@ -5,7 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "manifest.json"
-PLATFORM_MANIFEST = ROOT / "platform_manifest.json"
+CORE_MANIFEST = ROOT / "core_manifest.json"
+PORTAL_MANIFEST = ROOT / "portal_manifest.json"
 README = ROOT / "README.md"
 
 BEGIN = "<!-- AUTO:PLUGIN_TABLES:BEGIN -->"
@@ -16,15 +17,25 @@ def md_escape(s: str) -> str:
     return (s or "").replace("\n", " ").replace("|", "\\|").strip()
 
 
+def plugin_surfaces(p: dict) -> list[str]:
+    return list(p.get("portals") or [])
+
+
 def plugin_row(p: dict) -> str:
     pid = md_escape(p.get("id", ""))
     desc = md_escape(p.get("description", ""))
-    plats = ", ".join((p.get("platforms") or []))
-    plats = md_escape(plats)
-    return f"| `{pid}` | {desc} | {plats} |"
+    portals = md_escape(", ".join(plugin_surfaces(p)))
+    return f"| `{pid}` | {desc} | {portals} |"
 
 
-def platform_row(p: dict) -> str:
+def core_row(c: dict) -> str:
+    cid = md_escape(c.get("id", ""))
+    module_key = md_escape(c.get("module_key", ""))
+    desc = md_escape(c.get("description", ""))
+    return f"| `{cid}` | `{module_key}` | {desc} |"
+
+
+def portal_row(p: dict) -> str:
     pid = md_escape(p.get("id", ""))
     module_key = md_escape(p.get("module_key", ""))
     desc = md_escape(p.get("description", ""))
@@ -32,17 +43,16 @@ def platform_row(p: dict) -> str:
 
 
 def build_plugin_tables(plugins: list[dict]) -> str:
-    # Normalize sorting
     plugins = sorted(plugins, key=lambda x: (x.get("id") or "").lower())
 
-    def plats(p):
-        return set((p.get("platforms") or []))
+    def portals(p):
+        return set(plugin_surfaces(p))
 
     def is_notifier(p):
-        return ("notifier" in plats(p)) or bool(p.get("notifier", False))
+        return ("notifier" in portals(p)) or bool(p.get("notifier", False))
 
     def is_automation(p):
-        return "automation" in plats(p)
+        return "automation" in portals(p)
 
     interactive = [p for p in plugins if (not is_notifier(p)) and (not is_automation(p))]
     automation = [p for p in plugins if is_automation(p)]
@@ -54,7 +64,7 @@ def build_plugin_tables(plugins: list[dict]) -> str:
         lines = [
             f"### {title}",
             "",
-            "| Plugin Name | Description | Platform |",
+            "| Plugin Name | Description | Portals |",
             "|------------|-------------|----------|",
         ]
         lines += [plugin_row(p) for p in items]
@@ -62,26 +72,43 @@ def build_plugin_tables(plugins: list[dict]) -> str:
         return "\n".join(lines)
 
     out = []
-    out.append("## 🧩 Verba Plugin Store (Tater Shop)\n")
+    out.append("## 🧩 Verba Plugin Store\n")
     out.append(table_block("💬 Interactive / Conversational Plugins", interactive))
     out.append(table_block("⚙️ Automation Plugins (Home Assistant)", automation))
     out.append(table_block("📡 RSS Notifier Plugins", notifiers))
     return "\n".join(out).strip() + "\n"
 
 
-def build_platform_table(platforms: list[dict]) -> str:
-    platforms = sorted(platforms, key=lambda x: (x.get("id") or "").lower())
+def build_core_table(cores: list[dict]) -> str:
+    cores = sorted(cores, key=lambda x: (x.get("id") or "").lower())
 
     out = []
-    out.append("## 🌐 Platform Store\n")
+    out.append("## 🧠 Core Store\n")
 
-    if not platforms:
+    if not cores:
         out.append("*(none)*\n")
         return "\n".join(out).strip() + "\n"
 
-    out.append("| Platform ID | Module | Description |")
+    out.append("| Core ID | Module | Description |")
     out.append("|-------------|--------|-------------|")
-    out.extend(platform_row(p) for p in platforms)
+    out.extend(core_row(c) for c in cores)
+    out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
+def build_portal_table(portals: list[dict]) -> str:
+    portals = sorted(portals, key=lambda x: (x.get("id") or "").lower())
+
+    out = []
+    out.append("## 🌐 Portal Store\n")
+
+    if not portals:
+        out.append("*(none)*\n")
+        return "\n".join(out).strip() + "\n"
+
+    out.append("| Portal ID | Module | Description |")
+    out.append("|-------------|--------|-------------|")
+    out.extend(portal_row(p) for p in portals)
     out.append("")
     return "\n".join(out).strip() + "\n"
 
@@ -98,16 +125,17 @@ def load_manifest_items(path: Path, key: str) -> list[dict]:
 
 def build_generated_block() -> str:
     plugins = load_manifest_items(MANIFEST, "plugins")
-    platforms = load_manifest_items(PLATFORM_MANIFEST, "platforms")
+    cores = load_manifest_items(CORE_MANIFEST, "cores")
+    portals = load_manifest_items(PORTAL_MANIFEST, "portals")
     plugin_text = build_plugin_tables(plugins)
-    platform_text = build_platform_table(platforms)
-    return (platform_text + "\n" + plugin_text).strip() + "\n"
+    core_text = build_core_table(cores)
+    portal_text = build_portal_table(portals)
+    return (core_text + "\n" + portal_text + "\n" + plugin_text).strip() + "\n"
 
 
 def main() -> None:
     generated = build_generated_block()
 
-    # If README doesn’t exist yet, create a basic one
     if not README.exists():
         README.write_text(f"{BEGIN}\n{generated}\n{END}\n", encoding="utf-8")
         print("Created README.md")
@@ -119,7 +147,6 @@ def main() -> None:
         after = text.split(END, 1)[1]
         new_text = before + BEGIN + "\n" + generated + "\n" + END + after
     else:
-        # Append if markers missing
         new_text = text.rstrip() + "\n\n" + BEGIN + "\n" + generated + "\n" + END + "\n"
 
     README.write_text(new_text, encoding="utf-8")
