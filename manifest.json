@@ -20,7 +20,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/ai_tasks.py",
-      "sha256": "5055632861989c31945f943c46beb806da5e4ed58ab051126ecc28d5a03cb465"
+      "sha256": "1c15a49e64da98fd9f5c91f667a8cbc5cc5228a6b18013240885573d60313af7"
     },
     {
       "id": "automatic_plugin",
@@ -76,7 +76,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "plugins/camera_event.py",
-      "sha256": "265153ff89700fc97eda4209257f63669a0c6ad66ab6b071834a04c5786cdb0d"
+      "sha256": "d5a33073c412a7f6e7ab71becfb26c5c0480eebbb84a3231459d4d6be829e75e"
     },
     {
       "id": "comfyui_audio_ace",
@@ -197,7 +197,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "plugins/discord_admin.py",
-      "sha256": "19d50b737447efb0b13b7c62795aa544268f9eaad84207c8a9e3265bd252fa47"
+      "sha256": "9f0c03be1a7ecaed5381248928de97484d480de0e8bc2b6b446cefbafc5fcd35"
     },
     {
       "id": "doorbell_alert",
@@ -212,7 +212,7 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "plugins/doorbell_alert.py",
-      "sha256": "5bd9f09dd479ea906ef93a2a7d927421ad205443d6157f9ac5a5ad051c8ab02c"
+      "sha256": "6ac846b4352ac3901067978719fe1f23b53dbdc36d4acae6968cbe18a4299527"
     },
     {
       "id": "events_query",
@@ -234,7 +234,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query.py",
-      "sha256": "0defee84466a01436e5df652a5afd8da39043a70b44f3f93f9c26896492d1c1f"
+      "sha256": "de994827086ee8f22e2f5aa6f0e23fcab127cedae38b217f1e4affeb9f642be0"
     },
     {
       "id": "events_query_brief",
@@ -249,7 +249,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "plugins/events_query_brief.py",
-      "sha256": "44ca70e8d556105dd514a29398d17e5f1e9b1ef2677dc99e07d0beafbfde64b2"
+      "sha256": "3e0869de6d3e3c581a43ac035c80c6f2e8345d122324bdc02a7dd032130326bc"
     },
     {
       "id": "find_my_phone",
@@ -308,7 +308,7 @@
       "settings_category": "Notifications",
       "tags": [],
       "entry": "plugins/get_notifications.py",
-      "sha256": "9a319f2aa13c139444fab06e5f25ba8111509e0cf2ea802f9d975b16ce1fa781"
+      "sha256": "672f25b650bfddface061d0659b0f6a6a39908dfc806dff160d570f7e429fcf1"
     },
     {
       "id": "ha_control",
@@ -331,7 +331,7 @@
       "settings_category": "Home Assistant Control",
       "tags": [],
       "entry": "plugins/ha_control.py",
-      "sha256": "5980f613b5e8828d8d831cf732e6fbf4cfd57a352dc29ec0ce2b40cac96f58fb"
+      "sha256": "11c96cdc0944c8ea04b697fd78b8cb109c5bcb7bce95a10a7f26ddbf192f3442"
     },
     {
       "id": "joke_api",
