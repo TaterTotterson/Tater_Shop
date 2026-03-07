@@ -1,83 +1,114 @@
-<p align="center">
-  <img 
-    src="https://github.com/user-attachments/assets/b5eded08-f1d4-4af7-a50e-75db228a327e" 
-    alt="screenshot"
-    width="300"
-  />
-</p>
+# Tater Assistant Wiki
 
-<!-- AUTO:PLUGIN_TABLES:BEGIN -->
-## 🌐 Platform Store
+Static wiki generator for the Tater Assistant docs site.
 
-| Platform ID | Module | Description |
-|-------------|--------|-------------|
-| `ai_task` | `ai_task_platform` | AI Task Scheduler integration platform for Tater. |
-| `discord` | `discord_platform` | Discord integration platform for Tater. |
-| `ha_automations` | `ha_automations_platform` | Automation integration platform for Tater. |
-| `homeassistant` | `homeassistant_platform` | Home Assistant integration platform for Tater. |
-| `homekit` | `homekit_platform` | HomeKit / Siri integration platform for Tater. |
-| `irc` | `irc_platform` | IRC integration platform for Tater. |
-| `macos` | `macos_platform` | macOS integration platform for Tater. |
-| `matrix` | `matrix_platform` | Matrix integration platform for Tater. |
-| `memory` | `memory_platform` | Memory Platform integration platform for Tater. |
-| `rss` | `rss_platform` | RSS integration platform for Tater. |
-| `telegram` | `telegram_platform` | Telegram integration platform for Tater. |
-| `xbmc` | `xbmc_platform` | XBMC / Original Xbox integration platform for Tater. |
+This repo is set up for a Linux host with this layout:
 
-## 🧩 Verba Plugin Store (Tater Shop)
+```text
+/home/taterassistant/
+  public_html/
+    assets/
+    ...
+  scripts/
+    build_wiki.py
+    sync_wiki_sources.py
+    Tater/
+    Tater_Shop/
+```
 
-### 💬 Interactive / Conversational Plugins
+## What it does
 
-| Plugin Name | Description | Platform |
-|------------|-------------|----------|
-| `ai_tasks` | Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling. | discord, irc, matrix, homeassistant, telegram, webui, macos |
-| `automatic_plugin` | Create one image from a natural-language image request. | discord, webui, macos, telegram |
-| `broadcast` | Send a one-time spoken announcement to your Home Assistant media players. | homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc |
-| `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, macos, homeassistant, matrix, telegram |
-| `comfyui_image_plugin` | Generate a still image from a text prompt using your ComfyUI workflow. | discord, webui, macos, matrix, telegram |
-| `comfyui_image_video` | Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI. | webui, macos |
-| `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui, macos |
-| `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui, macos |
-| `device_compare` | Natural-language device comparison with spec tables and optional per-game FPS benchmarks. | discord, webui, macos, matrix, telegram |
-| `discord_admin` | Discord server setup, admin changes, and current-room always-respond control. | discord |
-| `events_query` | Natural-language semantic event-history search. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
-| `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `ftp_browser` | Browse and download files from the configured FTP server. | discord |
-| `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, homeassistant, discord, telegram, matrix, irc |
-| `ha_control` | Control Home Assistant devices. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
-| `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
-| `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `music_assistant` | Play music and control playback via Music Assistant in Home Assistant. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `obsidian_note` | Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags. | webui, macos |
-| `obsidian_search` | Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis. | webui, macos |
-| `overseerr_details` | Fetch details for a specific movie or TV show from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `overseerr_request` | Request a movie or TV show in Overseerr by title. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
-| `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `premiumize_download` | Check if a link is cached on Premiumize and return direct download links. | discord, webui, macos, irc, matrix, telegram |
-| `premiumize_torrent` | Check the latest torrent or magnet against Premiumize cache and provide direct links. | discord, matrix |
-| `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, matrix, telegram |
-| `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, macos, irc, matrix, telegram |
-| `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, macos, discord, irc, matrix, telegram |
-| `unifi_network` | Fetch UniFi Network sites/clients/devices via the official API and answer natural-language requests. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `unifi_protect` | Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc |
-| `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, macos, irc, homeassistant, matrix, homekit, xbmc, telegram |
-| `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |
-| `youtube_summary` | Summarize a YouTube video using its transcript. | discord, webui, macos, irc, matrix, telegram |
+- builds the website into `public_html`
+- reads core runtime, Cerberus, and kernel-tool info from `Tater`
+- reads portal source/settings from `Tater_Shop/portals` (no fallback to `Tater/portals`)
+- reads core source/settings from `Tater_Shop/cores` (no fallback to `Tater/cores`)
+- reads Verba Plugin inventory from `Tater_Shop/manifest.json`
+- reads plugin detail metadata from the actual plugin files in `Tater_Shop/plugins`
+- can clone/update both repos automatically and rebuild the site when they change
 
-### ⚙️ Automation Plugins (Home Assistant)
+## Main files
 
-| Plugin Name | Description | Platform |
-|------------|-------------|----------|
-| `camera_event` | Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier. | automation |
-| `doorbell_alert` | Handle doorbell events: snapshot, describe with vision, announce, and log notifications. | automation |
-| `events_query_brief` | Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant. | automation |
-| `weather_brief` | Give a short automation-friendly recap of recent weather conditions. | automation |
-| `zen_greeting` | Generate a calming daily greeting and message for dashboards. | automation |
+- `scripts/build_wiki.py`
+  Generates the HTML site in `public_html`
+- `scripts/sync_wiki_sources.py`
+  Clones or updates `Tater` and `Tater_Shop`, then runs the wiki build when source heads change
+- `scripts/.wiki-sync-state.json`
+  Stores the last built source heads so unchanged runs can skip the rebuild
+- `public_html/assets/`
+  Shared CSS, JS, and images used by the generated site
 
-### 📡 RSS Notifier Plugins
+## Requirements
 
-*(none)*
+- Python 3
+- Git
 
-<!-- AUTO:PLUGIN_TABLES:END -->
+## Manual build
+
+If `scripts/Tater` and `scripts/Tater_Shop` already exist:
+
+```bash
+python3 /home/taterassistant/scripts/build_wiki.py
+```
+
+## Manual sync and rebuild
+
+This is the normal command to run by hand:
+
+```bash
+python3 /home/taterassistant/scripts/sync_wiki_sources.py
+```
+
+What it does:
+
+- clones `Tater` into `scripts/Tater` if missing
+- clones `Tater_Shop` into `scripts/Tater_Shop` if missing
+- fast-forwards clean repos
+- skips rebuilds when nothing changed
+- blocks rebuilds if a source repo is dirty or diverged
+
+Useful flags:
+
+```bash
+python3 /home/taterassistant/scripts/sync_wiki_sources.py --force-build
+python3 /home/taterassistant/scripts/sync_wiki_sources.py --skip-fetch
+python3 /home/taterassistant/scripts/sync_wiki_sources.py --allow-dirty-build
+```
+
+## Force rebuild
+
+To force a rebuild even when the repo heads did not change:
+
+```bash
+python3 /home/taterassistant/scripts/sync_wiki_sources.py --force-build
+```
+
+To reset the sync state and let the next normal run rebuild:
+
+```bash
+rm -f /home/taterassistant/scripts/.wiki-sync-state.json
+```
+
+## Cron / Webmin
+
+For a headless Linux server, use cron.
+
+Cron line:
+
+```cron
+0 4,16 * * * /bin/bash -lc '/usr/bin/python3 /home/taterassistant/scripts/sync_wiki_sources.py >> /home/taterassistant/scripts/wiki-sync.log 2>&1'
+```
+
+Webmin cron job values:
+
+- user: `taterassistant`
+- minute: `0`
+- hour: `4,16`
+- command: `/bin/bash -lc '/usr/bin/python3 /home/taterassistant/scripts/sync_wiki_sources.py >> /home/taterassistant/scripts/wiki-sync.log 2>&1'`
+
+For the Linux-specific sync notes, see `docs/auto-sync-linux.md`.
+
+## Notes
+
+- Keep `public_html/assets` in place. The generator writes HTML pages, but the site assets live there.
+- Generated HTML should be treated as build output.
+- The source of truth for plugin inventory, portal source files, and core source files is `Tater_Shop`.
