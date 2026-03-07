@@ -36,7 +36,7 @@ class CameraEventPlugin(ToolPlugin):
 
     name = "camera_event"
     plugin_name = "Camera Event"
-    version = "1.2.0"
+    version = "1.2.1"
     min_tater_version = "59"
     description = (
         "Capture a Home Assistant camera snapshot, describe it with vision AI, log the event, "
@@ -45,7 +45,7 @@ class CameraEventPlugin(ToolPlugin):
     plugin_dec = (
         "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier."
     )
-    usage = '{"function":"camera_event","arguments":{"area":"front yard | back yard | garage | ...","camera":"camera.front_door_high","query":"optional hint for the vision model","title":"optional notification title override","priority":"critical|high|normal|low","cooldown_seconds":30,"notification_cooldown_seconds":0,"ignore_vehicles":false,"send_phone_alerts":false,"persistent_notifications":false,"api_notification":true}}'
+    usage = '{"function":"camera_event","arguments":{"area":"front yard | back yard | garage | ...","camera":"camera.front_door_high","query":"optional hint for the vision model","title":"optional notification title override","priority":"critical|high|normal|low","cooldown_seconds":30,"notification_cooldown_seconds":0,"events_api_timeout_seconds":25,"ignore_vehicles":false,"send_phone_alerts":false,"persistent_notifications":false,"api_notification":true}}'
 
     platforms = ["automation"]
     settings_category = "Camera Event"
@@ -117,6 +117,12 @@ class CameraEventPlugin(ToolPlugin):
             "type": "number",
             "default": 0,
             "description": "Minimum seconds between Home Assistant notifier sends for the same camera. 0 disables this cooldown.",
+        },
+        "EVENTS_API_TIMEOUT_SECONDS": {
+            "label": "Events API Timeout (seconds)",
+            "type": "number",
+            "default": 25,
+            "description": "HTTP timeout for posting events to /tater-ha/v1/events/add. Increase this on slower systems.",
         },
         "MOBILE_NOTIFY_SERVICE": {
             "label": "Phone notifier #1 (optional)",
@@ -403,6 +409,7 @@ class CameraEventPlugin(ToolPlugin):
         entity_id: str,
         area: Optional[str],
         ha_time: str,
+        events_api_timeout_seconds: int,
     ) -> Dict[str, Any]:
         url = f"{self._automation_base_url()}/tater-ha/v1/events/add"
         payload = {
@@ -419,7 +426,7 @@ class CameraEventPlugin(ToolPlugin):
         try:
             # Retry once before fallback.
             for attempt in range(2):
-                resp = requests.post(url, json=payload, timeout=5)
+                resp = requests.post(url, json=payload, timeout=events_api_timeout_seconds)
                 if resp.status_code < 400:
                     return {"ok": True, "via": "events_api"}
                 last_error = f"events/add failed {resp.status_code}: {resp.text[:200]}"
@@ -550,6 +557,17 @@ class CameraEventPlugin(ToolPlugin):
             notification_cooldown_seconds = 0
         notification_cooldown_seconds = max(0, min(notification_cooldown_seconds, 86_400))
 
+        try:
+            events_api_timeout_seconds = int(
+                args.get(
+                    "events_api_timeout_seconds",
+                    settings.get("EVENTS_API_TIMEOUT_SECONDS", 25),
+                )
+            )
+        except Exception:
+            events_api_timeout_seconds = 25
+        events_api_timeout_seconds = max(16, min(events_api_timeout_seconds, 300))
+
         ignore_default = self._boolish(settings.get("IGNORE_VEHICLES_DEFAULT"), False)
         if "ignore_vehicles" in args:
             ignore_vehicles = self._boolish(args.get("ignore_vehicles"), ignore_default)
@@ -624,6 +642,7 @@ class CameraEventPlugin(ToolPlugin):
             entity_id=camera,
             area=area,
             ha_time=now_iso,
+            events_api_timeout_seconds=events_api_timeout_seconds,
         )
 
         if bool((event_store or {}).get("ok")):
@@ -669,6 +688,7 @@ class CameraEventPlugin(ToolPlugin):
             "area": area,
             "cooldown_seconds": cooldown_seconds,
             "notification_cooldown_seconds": notification_cooldown_seconds,
+            "events_api_timeout_seconds": events_api_timeout_seconds,
             "ignore_vehicles": ignore_vehicles,
             "summary": description,
             "vision_fallback_used": used_generic_snapshot,
