@@ -20,6 +20,7 @@ FIELDS = {
     "description",
     "plugin_dec",
     "platforms",
+    "portals",
     "notifier",
     "settings_category",
     "tags",
@@ -41,42 +42,29 @@ def literal(node):
         return None
 
 
-def normalize_platforms(plats) -> list[str]:
-    """
-    Normalize platforms into a lowercased list[str] with stable unique ordering.
-    Accepts:
-      - None
-      - "discord"
-      - ["Discord", "webui", ...]
-    """
-    if not plats:
+def normalize_surfaces(raw) -> list[str]:
+    if not raw:
         return []
-    if isinstance(plats, str):
-        plats = [plats]
-    if not isinstance(plats, list):
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
         return []
     out: list[str] = []
-    for p in plats:
-        if not p:
-            continue
-        out.append(str(p).strip().lower())
-    # unique, stable order
     seen = set()
-    uniq: list[str] = []
-    for p in out:
-        if p not in seen:
-            seen.add(p)
-            uniq.append(p)
-    return uniq
+    for item in raw:
+        val = str(item or "").strip().lower()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        out.append(val)
+    return out
 
 
-def ensure_tag(plats: list[str], tag: str) -> list[str]:
+def ensure_tag(values: list[str], tag: str) -> list[str]:
     tag = str(tag).strip().lower()
-    if not tag:
-        return plats
-    if tag not in plats:
-        plats.append(tag)
-    return plats
+    if tag and tag not in values:
+        values.append(tag)
+    return values
 
 
 def extract_plugin_meta(py_file: Path) -> dict:
@@ -84,44 +72,38 @@ def extract_plugin_meta(py_file: Path) -> dict:
 
     class_assigns = {}
     for n in tree.body:
-        if isinstance(n, ast.ClassDef):
-            # Take the first class that looks like a plugin (inherits ToolPlugin or has fields)
-            base_names = []
-            for b in n.bases:
-                if isinstance(b, ast.Name):
-                    base_names.append(b.id)
-                elif isinstance(b, ast.Attribute):
-                    base_names.append(b.attr)
+        if not isinstance(n, ast.ClassDef):
+            continue
+        base_names = []
+        for b in n.bases:
+            if isinstance(b, ast.Name):
+                base_names.append(b.id)
+            elif isinstance(b, ast.Attribute):
+                base_names.append(b.attr)
 
-            looks_like_plugin = ("ToolPlugin" in base_names)
+        looks_like_plugin = ("ToolPlugin" in base_names)
 
-            assigns = {}
-            for stmt in n.body:
-                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-                    key = stmt.targets[0].id
-                    if key in FIELDS:
-                        val = literal(stmt.value)
-                        if val is not None:
-                            assigns[key] = val
+        assigns = {}
+        for stmt in n.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                key = stmt.targets[0].id
+                if key in FIELDS:
+                    val = literal(stmt.value)
+                    if val is not None:
+                        assigns[key] = val
 
-            # If it inherits ToolPlugin OR it has a name/platforms field, treat it as the plugin class
-            if looks_like_plugin or ("name" in assigns and "platforms" in assigns):
-                class_assigns = assigns
-                break
+        if looks_like_plugin or ("name" in assigns and ("portals" in assigns or "platforms" in assigns)):
+            class_assigns = assigns
+            break
 
-    # Fallbacks
     pid = class_assigns.get("name") or py_file.stem
     display = class_assigns.get("plugin_name") or class_assigns.get("pretty_name") or pid
     desc = class_assigns.get("plugin_dec") or class_assigns.get("description") or ""
 
-    plats = normalize_platforms(class_assigns.get("platforms") or [])
+    surfaces = normalize_surfaces(class_assigns.get("portals") or class_assigns.get("platforms") or [])
     is_notifier = bool(class_assigns.get("notifier", False))
-
-    # Backward compatible:
-    # - keep notifier boolean field
-    # - ALSO add "notifier" into platforms so the Shop can filter by platform
     if is_notifier:
-        plats = ensure_tag(plats, "notifier")
+        surfaces = ensure_tag(surfaces, "notifier")
 
     return {
         "id": pid,
@@ -129,7 +111,7 @@ def extract_plugin_meta(py_file: Path) -> dict:
         "version": class_assigns.get("version", "0.0.0"),
         "min_tater_version": class_assigns.get("min_tater_version", "0.0.0"),
         "description": desc,
-        "platforms": plats,
+        "portals": surfaces,
         "notifier": is_notifier,
         "settings_category": class_assigns.get("settings_category", None),
         "tags": list(class_assigns.get("tags") or []),
