@@ -64,11 +64,11 @@ class GetNotificationsPlugin(ToolPlugin):
     def _platform_base_url() -> str:
         """
         Resolve the HA bridge base URL using the configured bind_port:
-          Redis hash: 'homeassistant_platform_settings' -> 'bind_port'
+          Redis hash: 'homeassistant_portal_settings' -> 'bind_port'
         Falls back to 8787 if missing/invalid.
         """
         try:
-            raw_port = redis_client.hget("homeassistant_platform_settings", "bind_port")
+            raw_port = redis_client.hget("homeassistant_portal_settings", "bind_port")
             port = GetNotificationsPlugin._coerce_int(
                 GetNotificationsPlugin._decode_text(raw_port),
                 default=8787,

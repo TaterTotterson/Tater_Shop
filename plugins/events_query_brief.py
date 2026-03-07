@@ -92,7 +92,7 @@ class EventsQueryBriefPlugin(ToolPlugin):
 
     def _automation_base(self) -> str:
         try:
-            port = int(redis_client.hget("ha_automations_platform_settings", "bind_port") or 8788)
+            port = int(redis_client.hget("ha_automations_portal_settings", "bind_port") or 8788)
         except Exception:
             port = 8788
         return f"http://127.0.0.1:{port}"

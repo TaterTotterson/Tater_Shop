@@ -591,7 +591,7 @@ class AITasksPlugin(ToolPlugin):
         out: Dict[str, Any] = {}
         try:
             if platform == "discord":
-                settings = redis_client.hgetall("discord_platform_settings") or {}
+                settings = redis_client.hgetall("discord_portal_settings") or {}
                 channel_id = str(settings.get("response_channel_id") or "").strip()
                 if channel_id:
                     out["channel_id"] = channel_id
@@ -599,7 +599,7 @@ class AITasksPlugin(ToolPlugin):
 
             if platform == "irc":
                 settings = (
-                    redis_client.hgetall("irc_platform_settings")
+                    redis_client.hgetall("irc_portal_settings")
                     or redis_client.hgetall("platform_settings:IRC Settings")
                     or redis_client.hgetall("platform_settings:IRC")
                     or {}
@@ -610,7 +610,7 @@ class AITasksPlugin(ToolPlugin):
                 return out
 
             if platform == "telegram":
-                settings = redis_client.hgetall("telegram_platform_settings") or {}
+                settings = redis_client.hgetall("telegram_portal_settings") or {}
                 legacy = redis_client.hgetall("plugin_settings:Telegram Notifier") or {}
                 chat_id = str(settings.get("response_chat_id") or legacy.get("telegram_chat_id") or "").strip()
                 if chat_id:

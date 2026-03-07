@@ -89,7 +89,7 @@ class DoorbellAlertPlugin(ToolPlugin):
             "label": "Enable Home Assistant API notifications",
             "type": "boolean",
             "default": True,
-            "description": "If true, also send to the Home Assistant platform notification endpoint.",
+            "description": "If true, also send to the Home Assistant portal notification endpoint.",
         },
         "AREA_LABEL": {
             "label": "Area Label",
@@ -205,7 +205,7 @@ class DoorbellAlertPlugin(ToolPlugin):
         POST to Automations events: /tater-ha/v1/events/add
         """
         try:
-            raw_port = redis_client.hget("ha_automations_platform_settings", "bind_port")
+            raw_port = redis_client.hget("ha_automations_portal_settings", "bind_port")
             port = int(raw_port) if raw_port is not None else 8788
         except Exception:
             port = 8788
