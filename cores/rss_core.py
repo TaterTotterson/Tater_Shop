@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.1"
+__version__ = "1.0.3"
 
 
 logger = logging.getLogger("rss")
@@ -298,7 +298,7 @@ class RSSManager:
             for _url, cfg in feeds.items():
                 if not cfg.get("enabled", True):
                     continue
-                platforms = cfg.get("portals") or cfg.get("platforms") or {}
+                platforms = cfg.get("portals") or {}
                 pcfg = platforms.get(platform_key)
                 if pcfg and pcfg.get("enabled", True):
                     enabled_notifiers.append(platform_key)
@@ -328,7 +328,7 @@ class RSSManager:
                         if not feed_cfg.get("enabled", True):
                             continue
                         last_ts = float(feed_cfg.get("last_ts") or 0.0)
-                        feed_platforms = feed_cfg.get("portals") or feed_cfg.get("platforms") or {}
+                        feed_platforms = feed_cfg.get("portals") or {}
                         parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
                         if parsed_feed.bozo:
                             logger.error(
@@ -392,6 +392,18 @@ class RSSManager:
 def render_webui_tab(**_kwargs):
     import streamlit as st
 
+    def _as_bool(value: object, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        token = str(value).strip().lower()
+        if token in ("1", "true", "yes", "on", "enabled"):
+            return True
+        if token in ("0", "false", "no", "off", "disabled"):
+            return False
+        return default
+
     st.title("RSS Feeds")
     st.caption("Add feeds and customize delivery per feed. Leave targets blank to use default routing.")
 
@@ -433,8 +445,22 @@ def render_webui_tab(**_kwargs):
         "send_homeassistant": True,
         "ha_device_service": "",
         "send_ntfy": True,
+        "ntfy_server": "https://ntfy.sh",
+        "ntfy_topic": "",
+        "ntfy_priority": "3",
+        "ntfy_tags": "",
+        "ntfy_click_from_first_url": True,
+        "ntfy_token": "",
+        "ntfy_username": "",
+        "ntfy_password": "",
         "send_telegram": True,
+        "telegram_chat_id": "",
         "send_wordpress": True,
+        "wordpress_site_url": "",
+        "wordpress_username": "",
+        "wordpress_app_password": "",
+        "wordpress_post_status": "draft",
+        "wordpress_category_id": "",
     }
 
     for idx, (feed_url, cfg) in enumerate(sorted(feeds.items(), key=lambda kv: kv[0].lower())):
@@ -442,7 +468,7 @@ def render_webui_tab(**_kwargs):
         with st.expander(feed_url, expanded=False):
             enabled_val = st.checkbox("Enabled", value=cfg.get("enabled", True), key=f"{exp_key}_enabled")
 
-            portals = cfg.get("portals") or cfg.get("platforms") or {}
+            portals = cfg.get("portals") or {}
 
             discord_override = portals.get("discord") or {}
             discord_enabled = st.checkbox(
@@ -517,17 +543,133 @@ def render_webui_tab(**_kwargs):
                 value=ntfy_override.get("enabled", default_cfg["send_ntfy"]),
                 key=f"{exp_key}_ntfy_enabled",
             )
+            ntfy_targets = ntfy_override.get("targets") or {}
+            ntfy_server = st.text_input(
+                "Ntfy Server (override)",
+                value=str(ntfy_targets.get("ntfy_server") or ntfy_targets.get("server") or ""),
+                placeholder=default_cfg["ntfy_server"],
+                key=f"{exp_key}_ntfy_server",
+            )
+            ntfy_topic = st.text_input(
+                "Ntfy Topic (override)",
+                value=str(ntfy_targets.get("ntfy_topic") or ntfy_targets.get("topic") or ""),
+                placeholder=default_cfg["ntfy_topic"],
+                key=f"{exp_key}_ntfy_topic",
+            )
+            ntfy_priority_options = ["1", "2", "3", "4", "5"]
+            ntfy_priority_current = str(
+                ntfy_targets.get("ntfy_priority") or ntfy_targets.get("priority") or default_cfg["ntfy_priority"]
+            ).strip()
+            if ntfy_priority_current not in ntfy_priority_options:
+                ntfy_priority_current = default_cfg["ntfy_priority"]
+            ntfy_priority = st.selectbox(
+                "Ntfy Priority (override)",
+                options=ntfy_priority_options,
+                index=ntfy_priority_options.index(ntfy_priority_current),
+                key=f"{exp_key}_ntfy_priority",
+            )
+            ntfy_tags = st.text_input(
+                "Ntfy Tags (override)",
+                value=str(ntfy_targets.get("ntfy_tags") or ntfy_targets.get("tags") or ""),
+                placeholder=default_cfg["ntfy_tags"],
+                key=f"{exp_key}_ntfy_tags",
+            )
+            ntfy_click = st.checkbox(
+                "Ntfy Click URL from first link",
+                value=_as_bool(
+                    ntfy_targets.get("ntfy_click_from_first_url", ntfy_targets.get("click_from_first_url")),
+                    default=default_cfg["ntfy_click_from_first_url"],
+                ),
+                key=f"{exp_key}_ntfy_click_from_first_url",
+            )
+            ntfy_token = st.text_input(
+                "Ntfy Token (override)",
+                value=str(ntfy_targets.get("ntfy_token") or ntfy_targets.get("token") or ""),
+                placeholder=default_cfg["ntfy_token"],
+                type="password",
+                key=f"{exp_key}_ntfy_token",
+            )
+            ntfy_username = st.text_input(
+                "Ntfy Username (override)",
+                value=str(ntfy_targets.get("ntfy_username") or ntfy_targets.get("username") or ""),
+                placeholder=default_cfg["ntfy_username"],
+                key=f"{exp_key}_ntfy_username",
+            )
+            ntfy_password = st.text_input(
+                "Ntfy Password (override)",
+                value=str(ntfy_targets.get("ntfy_password") or ntfy_targets.get("password") or ""),
+                placeholder=default_cfg["ntfy_password"],
+                type="password",
+                key=f"{exp_key}_ntfy_password",
+            )
+
             telegram_override = portals.get("telegram") or {}
             telegram_enabled = st.checkbox(
                 "Send to Telegram",
                 value=telegram_override.get("enabled", default_cfg["send_telegram"]),
                 key=f"{exp_key}_telegram_enabled",
             )
+            telegram_targets = telegram_override.get("targets") or {}
+            telegram_chat_id = st.text_input(
+                "Telegram Chat ID / Username (override)",
+                value=str(
+                    telegram_targets.get("chat_id")
+                    or telegram_targets.get("channel_id")
+                    or telegram_targets.get("channel")
+                    or ""
+                ),
+                placeholder=default_cfg["telegram_chat_id"],
+                key=f"{exp_key}_telegram_chat_id",
+            )
+
             wp_override = portals.get("wordpress") or {}
             wp_enabled = st.checkbox(
                 "Send to WordPress",
                 value=wp_override.get("enabled", default_cfg["send_wordpress"]),
                 key=f"{exp_key}_wp_enabled",
+            )
+            wp_targets = wp_override.get("targets") or {}
+            wp_site_url = st.text_input(
+                "WordPress Site URL (override)",
+                value=str(wp_targets.get("wordpress_site_url") or wp_targets.get("site_url") or ""),
+                placeholder=default_cfg["wordpress_site_url"],
+                key=f"{exp_key}_wordpress_site_url",
+            )
+            wp_username = st.text_input(
+                "WordPress Username (override)",
+                value=str(wp_targets.get("wordpress_username") or wp_targets.get("username") or ""),
+                placeholder=default_cfg["wordpress_username"],
+                key=f"{exp_key}_wordpress_username",
+            )
+            wp_app_password = st.text_input(
+                "WordPress App Password (override)",
+                value=str(
+                    wp_targets.get("wordpress_app_password")
+                    or wp_targets.get("app_password")
+                    or wp_targets.get("password")
+                    or ""
+                ),
+                placeholder=default_cfg["wordpress_app_password"],
+                type="password",
+                key=f"{exp_key}_wordpress_app_password",
+            )
+            wp_post_status_options = ["draft", "publish", "pending", "private"]
+            wp_post_status_current = str(
+                wp_targets.get("post_status") or default_cfg["wordpress_post_status"]
+            ).strip().lower()
+            if wp_post_status_current not in wp_post_status_options:
+                wp_post_status_current = default_cfg["wordpress_post_status"]
+            wp_post_status = st.selectbox(
+                "WordPress Post Status (override)",
+                options=wp_post_status_options,
+                index=wp_post_status_options.index(wp_post_status_current),
+                key=f"{exp_key}_wordpress_post_status",
+            )
+            wp_category_id = st.text_input(
+                "WordPress Category ID (override)",
+                value=str(wp_targets.get("category_id") or ""),
+                placeholder=default_cfg["wordpress_category_id"],
+                key=f"{exp_key}_wordpress_category_id",
             )
 
             save_cols = st.columns([1, 1, 2])
@@ -561,12 +703,54 @@ def render_webui_tab(**_kwargs):
                         "enabled": ha_enabled,
                         "targets": targets,
                     }
-                if ntfy_enabled != default_cfg["send_ntfy"]:
-                    new_portals["ntfy"] = {"enabled": ntfy_enabled, "targets": {}}
-                if telegram_enabled != default_cfg["send_telegram"]:
-                    new_portals["telegram"] = {"enabled": telegram_enabled, "targets": {}}
-                if wp_enabled != default_cfg["send_wordpress"]:
-                    new_portals["wordpress"] = {"enabled": wp_enabled, "targets": {}}
+                ntfy_targets: dict[str, object] = {}
+                if ntfy_server:
+                    ntfy_targets["ntfy_server"] = ntfy_server
+                if ntfy_topic:
+                    ntfy_targets["ntfy_topic"] = ntfy_topic
+                if ntfy_priority != default_cfg["ntfy_priority"]:
+                    ntfy_targets["ntfy_priority"] = ntfy_priority
+                if ntfy_tags:
+                    ntfy_targets["ntfy_tags"] = ntfy_tags
+                if ntfy_click != default_cfg["ntfy_click_from_first_url"]:
+                    ntfy_targets["ntfy_click_from_first_url"] = bool(ntfy_click)
+                if ntfy_token:
+                    ntfy_targets["ntfy_token"] = ntfy_token
+                if ntfy_username:
+                    ntfy_targets["ntfy_username"] = ntfy_username
+                if ntfy_password:
+                    ntfy_targets["ntfy_password"] = ntfy_password
+                if ntfy_enabled != default_cfg["send_ntfy"] or ntfy_targets:
+                    new_portals["ntfy"] = {
+                        "enabled": ntfy_enabled,
+                        "targets": ntfy_targets,
+                    }
+
+                telegram_targets: dict[str, str] = {}
+                if telegram_chat_id:
+                    telegram_targets["chat_id"] = telegram_chat_id
+                if telegram_enabled != default_cfg["send_telegram"] or telegram_targets:
+                    new_portals["telegram"] = {
+                        "enabled": telegram_enabled,
+                        "targets": telegram_targets,
+                    }
+
+                wp_targets_save: dict[str, str] = {}
+                if wp_site_url:
+                    wp_targets_save["wordpress_site_url"] = wp_site_url
+                if wp_username:
+                    wp_targets_save["wordpress_username"] = wp_username
+                if wp_app_password:
+                    wp_targets_save["wordpress_app_password"] = wp_app_password
+                if wp_post_status != default_cfg["wordpress_post_status"]:
+                    wp_targets_save["post_status"] = wp_post_status
+                if wp_category_id:
+                    wp_targets_save["category_id"] = wp_category_id
+                if wp_enabled != default_cfg["send_wordpress"] or wp_targets_save:
+                    new_portals["wordpress"] = {
+                        "enabled": wp_enabled,
+                        "targets": wp_targets_save,
+                    }
 
                 update_feed(redis_client, feed_url, {"enabled": enabled_val, "portals": new_portals})
                 st.success("Feed settings saved.")
