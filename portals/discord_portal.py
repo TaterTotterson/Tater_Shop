@@ -31,7 +31,7 @@ from plugin_result import action_failure
 from plugin_kernel import plugin_supports_platform, plugin_display_name
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -446,6 +446,7 @@ class discord_portal(commands.Bot):
         self._response_channel_last_refresh = 0.0
         self.set_response_channel_map(response_channel_ids_by_guild)
         self.max_response_length = max_response_length
+        self._notify_worker_task = None
 
     def set_response_channel_map(self, channel_map: Any) -> dict[int, set[int]]:
         parsed = parse_response_channel_map(channel_map)
@@ -641,6 +642,8 @@ class discord_portal(commands.Bot):
                 for media in attachments:
                     await self._send_notify_attachment(channel, media)
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.warning(f"[notifyq] Discord worker error: {e}")
                 await asyncio.sleep(1)
@@ -661,9 +664,18 @@ class discord_portal(commands.Bot):
             logger.error(f"Failed to sync app commands: {e}")
         # Start notifier queue worker
         try:
-            self.loop.create_task(self._notify_queue_worker())
+            self._notify_worker_task = self.loop.create_task(self._notify_queue_worker())
         except Exception as e:
             logger.warning(f"[notifyq] Failed to start Discord worker: {e}")
+
+    async def close(self):
+        task = self._notify_worker_task
+        self._notify_worker_task = None
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await super().close()
 
     async def on_ready(self):
         first, last = get_tater_name()
@@ -1073,9 +1085,6 @@ def run(stop_event=None):
         async def shutdown():
             try:
                 await client.close()
-                if hasattr(client, "http") and getattr(client.http, "session", None):
-                    await client.http.session.close()
-                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Error during Discord shutdown: {e}")
             finally:
@@ -1091,4 +1100,14 @@ def run(stop_event=None):
         loop.run_until_complete(run_bot())
     finally:
         if not loop.is_closed():
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                with suppress(Exception):
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
