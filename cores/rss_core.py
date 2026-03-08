@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 logger = logging.getLogger("rss")
@@ -477,7 +477,7 @@ def render_webui_tab(**_kwargs):
                 key=f"{exp_key}_discord_enabled",
             )
             discord_channel_id = st.text_input(
-                "Discord Channel ID (override)",
+                "Discord Channel ID",
                 value=(discord_override.get("targets") or {}).get("channel_id", ""),
                 placeholder=default_cfg["discord_channel_id"],
                 key=f"{exp_key}_discord_channel_id",
@@ -490,7 +490,7 @@ def render_webui_tab(**_kwargs):
                 key=f"{exp_key}_irc_enabled",
             )
             irc_channel = st.text_input(
-                "IRC Channel (override)",
+                "IRC Channel",
                 value=(irc_override.get("targets") or {}).get("channel", ""),
                 placeholder=default_cfg["irc_channel"],
                 key=f"{exp_key}_irc_channel",
@@ -503,7 +503,7 @@ def render_webui_tab(**_kwargs):
                 key=f"{exp_key}_matrix_enabled",
             )
             matrix_room_id = st.text_input(
-                "Matrix Room ID or Alias (override)",
+                "Matrix Room ID or Alias",
                 value=(matrix_override.get("targets") or {}).get("room_id", ""),
                 placeholder=default_cfg["matrix_room_id"],
                 key=f"{exp_key}_matrix_room_id",
@@ -545,13 +545,13 @@ def render_webui_tab(**_kwargs):
             )
             ntfy_targets = ntfy_override.get("targets") or {}
             ntfy_server = st.text_input(
-                "Ntfy Server (override)",
+                "Ntfy Server",
                 value=str(ntfy_targets.get("ntfy_server") or ntfy_targets.get("server") or ""),
                 placeholder=default_cfg["ntfy_server"],
                 key=f"{exp_key}_ntfy_server",
             )
             ntfy_topic = st.text_input(
-                "Ntfy Topic (override)",
+                "Ntfy Topic",
                 value=str(ntfy_targets.get("ntfy_topic") or ntfy_targets.get("topic") or ""),
                 placeholder=default_cfg["ntfy_topic"],
                 key=f"{exp_key}_ntfy_topic",
@@ -563,13 +563,13 @@ def render_webui_tab(**_kwargs):
             if ntfy_priority_current not in ntfy_priority_options:
                 ntfy_priority_current = default_cfg["ntfy_priority"]
             ntfy_priority = st.selectbox(
-                "Ntfy Priority (override)",
+                "Ntfy Priority",
                 options=ntfy_priority_options,
                 index=ntfy_priority_options.index(ntfy_priority_current),
                 key=f"{exp_key}_ntfy_priority",
             )
             ntfy_tags = st.text_input(
-                "Ntfy Tags (override)",
+                "Ntfy Tags",
                 value=str(ntfy_targets.get("ntfy_tags") or ntfy_targets.get("tags") or ""),
                 placeholder=default_cfg["ntfy_tags"],
                 key=f"{exp_key}_ntfy_tags",
@@ -583,20 +583,20 @@ def render_webui_tab(**_kwargs):
                 key=f"{exp_key}_ntfy_click_from_first_url",
             )
             ntfy_token = st.text_input(
-                "Ntfy Token (override)",
+                "Ntfy Token",
                 value=str(ntfy_targets.get("ntfy_token") or ntfy_targets.get("token") or ""),
                 placeholder=default_cfg["ntfy_token"],
                 type="password",
                 key=f"{exp_key}_ntfy_token",
             )
             ntfy_username = st.text_input(
-                "Ntfy Username (override)",
+                "Ntfy Username",
                 value=str(ntfy_targets.get("ntfy_username") or ntfy_targets.get("username") or ""),
                 placeholder=default_cfg["ntfy_username"],
                 key=f"{exp_key}_ntfy_username",
             )
             ntfy_password = st.text_input(
-                "Ntfy Password (override)",
+                "Ntfy Password",
                 value=str(ntfy_targets.get("ntfy_password") or ntfy_targets.get("password") or ""),
                 placeholder=default_cfg["ntfy_password"],
                 type="password",
@@ -611,7 +611,7 @@ def render_webui_tab(**_kwargs):
             )
             telegram_targets = telegram_override.get("targets") or {}
             telegram_chat_id = st.text_input(
-                "Telegram Chat ID / Username (override)",
+                "Telegram Chat ID / Username",
                 value=str(
                     telegram_targets.get("chat_id")
                     or telegram_targets.get("channel_id")
@@ -630,19 +630,19 @@ def render_webui_tab(**_kwargs):
             )
             wp_targets = wp_override.get("targets") or {}
             wp_site_url = st.text_input(
-                "WordPress Site URL (override)",
+                "WordPress Site URL",
                 value=str(wp_targets.get("wordpress_site_url") or wp_targets.get("site_url") or ""),
                 placeholder=default_cfg["wordpress_site_url"],
                 key=f"{exp_key}_wordpress_site_url",
             )
             wp_username = st.text_input(
-                "WordPress Username (override)",
+                "WordPress Username",
                 value=str(wp_targets.get("wordpress_username") or wp_targets.get("username") or ""),
                 placeholder=default_cfg["wordpress_username"],
                 key=f"{exp_key}_wordpress_username",
             )
             wp_app_password = st.text_input(
-                "WordPress App Password (override)",
+                "WordPress App Password",
                 value=str(
                     wp_targets.get("wordpress_app_password")
                     or wp_targets.get("app_password")
@@ -660,13 +660,13 @@ def render_webui_tab(**_kwargs):
             if wp_post_status_current not in wp_post_status_options:
                 wp_post_status_current = default_cfg["wordpress_post_status"]
             wp_post_status = st.selectbox(
-                "WordPress Post Status (override)",
+                "WordPress Post Status",
                 options=wp_post_status_options,
                 index=wp_post_status_options.index(wp_post_status_current),
                 key=f"{exp_key}_wordpress_post_status",
             )
             wp_category_id = st.text_input(
-                "WordPress Category ID (override)",
+                "WordPress Category ID",
                 value=str(wp_targets.get("category_id") or ""),
                 placeholder=default_cfg["wordpress_category_id"],
                 key=f"{exp_key}_wordpress_category_id",
