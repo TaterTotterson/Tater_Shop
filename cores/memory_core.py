@@ -21,7 +21,7 @@ from memory_core_store import (
     save_doc,
     user_doc_key,
 )
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -113,6 +113,12 @@ CORE_SETTINGS = {
             "description": "Automatically map matching usernames across platforms to one shared identity profile.",
         },
     },
+}
+
+CORE_WEBUI_TAB = {
+    "label": "Memory",
+    "order": 20,
+    "requires_running": True,
 }
 
 _SUPPORTED_PLATFORMS = ("webui", "macos", "discord", "telegram", "irc", "matrix", "homeassistant", "homekit", "xbmc")
@@ -1160,6 +1166,59 @@ def _sleep_with_stop(seconds: int, stop_event) -> None:
         step = min(0.5, target - elapsed)
         time.sleep(step)
         elapsed += step
+
+
+def render_webui_tab(**_kwargs):
+    from webui.webui_memory import render_memory_page
+
+    render_memory_page()
+
+
+def render_core_manager_extras(
+    *,
+    core=None,
+    surface_kind: str = "core",
+    wipe_memory_core_data_fn=None,
+    **_kwargs,
+):
+    import streamlit as st
+
+    core = core if isinstance(core, dict) else {}
+    key = str(core.get("key") or "memory_core").strip() or "memory_core"
+    surface_text = "core" if str(surface_kind or "").strip().lower() == "core" else "surface"
+
+    st.subheader("Danger Zone")
+    st.caption(f"Wipe all Memory {surface_text.capitalize()} data (user docs, room docs, cursors, and runtime stats).")
+
+    if not callable(wipe_memory_core_data_fn):
+        st.caption("Memory wipe action is unavailable in this runtime.")
+        return
+
+    confirm_wipe = st.checkbox(
+        f"Confirm wipe all memory {surface_text} data",
+        value=False,
+        key=f"{key}_wipe_all_confirm",
+    )
+    if st.button(
+        "Wipe All Memory Data",
+        key=f"{key}_wipe_all_button",
+        disabled=not confirm_wipe,
+    ):
+        wipe_result = wipe_memory_core_data_fn()
+        if wipe_result.get("ok"):
+            deleted_total = int(wipe_result.get("deleted_total") or 0)
+            deleted_by_pattern = wipe_result.get("deleted_by_pattern") or {}
+            stats_key = "mem:stats:memory_core"
+            detail = (
+                f"user={int(deleted_by_pattern.get('mem:user:*') or 0)}, "
+                f"room={int(deleted_by_pattern.get('mem:room:*') or 0)}, "
+                f"cursor={int(deleted_by_pattern.get('mem:cursor:*') or 0)}, "
+                f"stats={int(deleted_by_pattern.get(stats_key) or 0)}"
+            )
+            st.success(f"Wiped memory {surface_text} data. Deleted {deleted_total} keys ({detail}).")
+            st.rerun()
+        else:
+            st.error(wipe_result.get("error") or f"Failed to wipe memory {surface_text} data.")
 
 
 def run(stop_event=None):

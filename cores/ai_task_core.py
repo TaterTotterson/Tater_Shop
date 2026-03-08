@@ -21,7 +21,7 @@ from cerberus import run_cerberus_turn, resolve_agent_limits
 from notify import dispatch_notification
 
 from dotenv import load_dotenv
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 load_dotenv()
 
@@ -31,6 +31,12 @@ logger.setLevel(logging.INFO)
 CORE_SETTINGS = {
     "category": "AI Task Scheduler Core Settings",
     "required": {},
+}
+
+CORE_WEBUI_TAB = {
+    "label": "AI Tasks",
+    "order": 10,
+    "requires_running": True,
 }
 
 redis_client = redis.Redis(
@@ -632,6 +638,13 @@ async def _render_scheduled_message(
     if not text and not attachments:
         text = "Scheduled task completed."
     return text, attachments
+
+
+def render_webui_tab(*, redis_client=None, **_kwargs):
+    from webui.webui_ai_tasks import render_ai_tasks_page
+
+    target_redis = redis_client if redis_client is not None else globals().get("redis_client")
+    render_ai_tasks_page(redis_client=target_redis)
 
 
 def run(stop_event: Optional[object] = None):
