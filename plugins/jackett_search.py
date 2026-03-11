@@ -23,7 +23,7 @@ logger.setLevel(logging.INFO)
 class JackettSearchPlugin(ToolPlugin):
     name = "jackett_search"
     plugin_name = "Jackett Search"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Jackett Discovery"
     settings_category = "Jackett"
@@ -224,15 +224,16 @@ class JackettSearchPlugin(ToolPlugin):
     @staticmethod
     def _normalize_action(value: Any) -> str:
         text = str(value or "").strip().lower()
+        text = re.sub(r"[\s\-]+", "_", text)
         if text in {"search", "recent", "list_indexers", "inspect_indexer", "which_indexer", "handoff"}:
             return text
-        if text in {"list", "indexers", "listindexers"}:
+        if text in {"list", "indexers", "listindexers", "list_indexer", "list_trackers", "list_sources"}:
             return "list_indexers"
-        if text in {"inspect", "indexer_details", "indexer_info"}:
+        if text in {"inspect", "indexer_details", "indexer_info", "inspect_indexers", "inspect_tracker"}:
             return "inspect_indexer"
-        if text in {"source", "find_source"}:
+        if text in {"source", "find_source", "which_tracker", "which_source", "source_lookup"}:
             return "which_indexer"
-        if text in {"send", "handoff_prepare", "dispatch"}:
+        if text in {"send", "handoff_prepare", "dispatch", "send_to_downloader", "handoff_to_downloader"}:
             return "handoff"
         return "search"
 
@@ -444,6 +445,13 @@ class JackettSearchPlugin(ToolPlugin):
             "result_id, result_title, target_downloader.\n"
             "Only include indexers from known_indexers.\n"
             "If a field is unknown, use empty string, 0, null, or [].\n"
+            "Action guidance:\n"
+            "- list_indexers: asks to list/show configured/enabled indexers or trackers.\n"
+            "- inspect_indexer: asks details/about one named indexer.\n"
+            "- which_indexer: asks which indexer/tracker produced a prior result.\n"
+            "- handoff: asks to send/pass selected result to downloader.\n"
+            "- recent: asks newest/latest/recent uploads.\n"
+            "- search: normal Jackett search query.\n"
             f"known_indexers={json.dumps(known)}\n"
             f"user_request={json.dumps(query_text)}\n"
         )
@@ -679,6 +687,34 @@ class JackettSearchPlugin(ToolPlugin):
         age_h = max(0.0, (now - dt).total_seconds() / 3600.0)
         return dt.isoformat(), int(dt.timestamp()), age_h
 
+    @staticmethod
+    def _looks_like_search_api(url: str) -> bool:
+        text = str(url or "").strip().lower()
+        if not text:
+            return False
+        if "results/torznab" in text and ("t=search" in text or "q=" in text or "cat=" in text):
+            return True
+        if "/api/v2.0/indexers/" in text and "/results/torznab/api" in text and ("q=" in text or "t=search" in text):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_inline_urls(item: ET.Element) -> List[Tuple[str, str]]:
+        out: List[Tuple[str, str]] = []
+        seen = set()
+        # Capture common RSS/Atom-style URL carriers.
+        for node in list(item):
+            tag = str(node.tag or "").lower()
+            url = (node.attrib.get("url") or node.attrib.get("href") or "").strip()
+            if not url:
+                continue
+            key = (url, tag)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
     def _normalize_item(
         self,
         item: ET.Element,
@@ -726,14 +762,59 @@ class JackettSearchPlugin(ToolPlugin):
         except Exception:
             size_bytes = as_int("size")
 
-        magnet_url = self._safe_text(attrs.get("magneturl"), "")
-        torrent_url = self._safe_text(attrs.get("downloadurl"), "")
-        details_url = comments or ""
+        magnet_url = (
+            self._safe_text(attrs.get("magneturl"))
+            or self._safe_text(attrs.get("magnet"))
+            or self._safe_text(attrs.get("magneturi"))
+            or self._safe_text(attrs.get("magnetlink"))
+        )
+        torrent_url = (
+            self._safe_text(attrs.get("downloadurl"))
+            or self._safe_text(attrs.get("download"))
+            or self._safe_text(attrs.get("torrent"))
+            or self._safe_text(attrs.get("torrenturl"))
+        )
+        details_url = (
+            comments
+            or self._safe_text(attrs.get("detailsurl"))
+            or self._safe_text(attrs.get("details"))
+            or ""
+        )
+
+        # Inspect enclosure/atom URLs because many Torznab feeds provide magnet or torrent here.
+        for url, tag in self._extract_inline_urls(item):
+            low_url = url.lower()
+            low_tag = str(tag or "").lower()
+            if low_url.startswith("magnet:?"):
+                if not magnet_url:
+                    magnet_url = url
+                continue
+            if not low_url.startswith("http"):
+                continue
+            looks_like_torrent = (
+                ".torrent" in low_url
+                or "/download" in low_url
+                or "/dl/" in low_url
+                or "bittorrent" in low_tag
+            )
+            if looks_like_torrent and not torrent_url:
+                torrent_url = url
+                continue
+            if not details_url and not self._looks_like_search_api(low_url):
+                details_url = url
 
         if link.startswith("magnet:?") and not magnet_url:
             magnet_url = link
-        elif link.startswith("http") and not torrent_url:
-            torrent_url = link
+        elif link.startswith("http"):
+            low_link = link.lower()
+            if not torrent_url and not self._looks_like_search_api(low_link):
+                # Conservative fallback: use link as torrent URL only when it does not look like a query endpoint.
+                torrent_url = link
+            if not details_url and not self._looks_like_search_api(low_link):
+                details_url = link
+            if self._looks_like_search_api(low_link) and not details_url:
+                # Keep query/search-like URLs only as details fallback, never as download URI.
+                details_url = link
 
         if not details_url and guid.startswith("http"):
             details_url = guid

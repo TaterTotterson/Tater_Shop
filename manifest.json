@@ -336,7 +336,7 @@
     {
       "id": "jackett_search",
       "name": "Jackett Search",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results.",
       "portals": [
@@ -354,7 +354,7 @@
       "settings_category": "Jackett",
       "tags": [],
       "entry": "plugins/jackett_search.py",
-      "sha256": "02d542ebf114d302fc3289bbb2f1e81045c05fce97f3998c521206e8bb737724"
+      "sha256": "d251e9b54806d31c31ac03b3d339de44c6e04dadc43031f8cec1637c189c22cd"
     },
     {
       "id": "joke_api",
