@@ -50,6 +50,7 @@
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
 | `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, homeassistant, discord, telegram, matrix, irc |
 | `ha_control` | Control Home Assistant devices. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `jackett_search` | Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |

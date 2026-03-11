@@ -334,6 +334,29 @@
       "sha256": "5980f613b5e8828d8d831cf732e6fbf4cfd57a352dc29ec0ce2b40cac96f58fb"
     },
     {
+      "id": "jackett_search",
+      "name": "Jackett Search",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [],
+      "entry": "plugins/jackett_search.py",
+      "sha256": "3bc834c2231170059761db0358e7a60e42d88ac28f64a2f2b5729f68bff76555"
+    },
+    {
       "id": "joke_api",
       "name": "Joke API",
       "version": "1.1.1",
