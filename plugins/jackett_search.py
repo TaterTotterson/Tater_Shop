@@ -315,7 +315,7 @@ class JackettSearchPlugin(ToolPlugin):
             return f"{int(amount)} {units[idx]}"
         return f"{amount:.2f} {units[idx]}"
 
-    def _extract_categories(self, values: Any, query_text: str) -> List[int]:
+    def _extract_categories(self, values: Any) -> List[int]:
         items: List[str] = []
         if isinstance(values, list):
             items.extend([self._safe_text(v) for v in values if self._safe_text(v)])
@@ -323,10 +323,6 @@ class JackettSearchPlugin(ToolPlugin):
             items.extend([x.strip() for x in re.split(r"[,;/]+", values) if x.strip()])
         elif values is not None:
             items.append(self._safe_text(values))
-
-        for token in self._tokenize(query_text):
-            if token in self.CATEGORY_KEYWORDS:
-                items.append(token)
 
         out: List[int] = []
         for item in items:
@@ -343,154 +339,61 @@ class JackettSearchPlugin(ToolPlugin):
                 out.append(cid)
         return out
 
-    def _extract_limit(self, args: Dict[str, Any], query_text: str, default_limit: int) -> int:
-        for key in ("limit", "max_results", "top_n", "count"):
-            if key in args:
-                return self._clamp_int(args.get(key), 1, self.MAX_LIMIT, default_limit)
-        m = re.search(r"\b(?:top|first|show|return)\s+(\d{1,3})\b", query_text.lower())
-        if m:
-            return self._clamp_int(m.group(1), 1, self.MAX_LIMIT, default_limit)
-        return self._clamp_int(default_limit, 1, self.MAX_LIMIT, default_limit)
+    def _extract_limit(self, value: Any, default_limit: int) -> int:
+        return self._clamp_int(value, 1, self.MAX_LIMIT, default_limit)
 
     @staticmethod
-    def _extract_min_seeders(args: Dict[str, Any], query_text: str) -> int:
-        for key in ("min_seeders", "seeders_min", "minimum_seeds"):
-            value = args.get(key)
-            if value is not None:
-                try:
-                    return max(0, int(value))
-                except Exception:
-                    pass
-        m = re.search(r"\b(?:at least|min(?:imum)?|over|more than)\s+(\d+)\s*(?:seeds|seeders)\b", query_text.lower())
-        if m:
-            return max(0, int(m.group(1)))
-        return 0
+    def _extract_min_seeders(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 0
 
     @staticmethod
-    def _extract_max_age_days(args: Dict[str, Any], query_text: str) -> Optional[int]:
-        for key in ("max_age_days", "age_days", "days"):
-            value = args.get(key)
-            if value is not None:
-                try:
-                    days = int(value)
-                    return days if days > 0 else None
-                except Exception:
-                    pass
-        text = query_text.lower()
-        if "today" in text or "last 24 hours" in text:
-            return 1
-        if "yesterday" in text:
-            return 2
-        if "this week" in text:
-            return 7
-        m = re.search(r"\blast\s+(\d+)\s+days?\b", text)
-        if m:
-            days = int(m.group(1))
-            return days if days > 0 else None
-        return None
+    def _extract_max_age_days(value: Any) -> Optional[int]:
+        try:
+            days = int(value)
+        except Exception:
+            return None
+        return days if days > 0 else None
 
-    def _extract_size_filters(self, args: Dict[str, Any], query_text: str) -> Tuple[Optional[int], Optional[int]]:
+    def _extract_size_filters(self, min_value: Any, max_value: Any) -> Tuple[Optional[int], Optional[int]]:
         min_size: Optional[int] = None
         max_size: Optional[int] = None
-        for key in ("min_size", "min_size_bytes"):
-            if args.get(key) is not None:
-                value = args.get(key)
-                try:
-                    min_size = int(value)
-                except Exception:
-                    min_size = self._parse_size_to_bytes(str(value))
-        for key in ("max_size", "max_size_bytes"):
-            if args.get(key) is not None:
-                value = args.get(key)
-                try:
-                    max_size = int(value)
-                except Exception:
-                    max_size = self._parse_size_to_bytes(str(value))
-        text = query_text.lower()
-        if min_size is None:
-            m = re.search(r"\b(?:over|bigger than|larger than|at least)\s+(\d+(?:\.\d+)?\s*(?:kb|mb|gb|tb|kib|mib|gib|tib))\b", text)
-            if m:
-                min_size = self._parse_size_to_bytes(m.group(1))
-        if max_size is None:
-            m = re.search(r"\b(?:under|below|smaller than|at most)\s+(\d+(?:\.\d+)?\s*(?:kb|mb|gb|tb|kib|mib|gib|tib))\b", text)
-            if m:
-                max_size = self._parse_size_to_bytes(m.group(1))
+        if min_value is not None:
+            try:
+                min_size = int(min_value)
+            except Exception:
+                min_size = self._parse_size_to_bytes(str(min_value))
+        if max_value is not None:
+            try:
+                max_size = int(max_value)
+            except Exception:
+                max_size = self._parse_size_to_bytes(str(max_value))
         return min_size, max_size
 
-    def _infer_action_from_query(self, query_text: str) -> str:
-        text = query_text.lower()
-        if re.search(r"\b(send|hand off|handoff|dispatch)\b.*\b(qbittorrent|qb\b|transmission|deluge|rtorrent|download)", text):
-            return "handoff"
-        if re.search(r"\b(which indexer|what indexer|which tracker|what tracker)\b", text):
-            return "which_indexer"
-        if re.search(r"\b(show|list|what)\b.*\b(indexers|trackers)\b", text):
-            return "list_indexers"
-        if re.search(r"\b(indexer details|inspect indexer|details for indexer|about indexer)\b", text):
-            return "inspect_indexer"
-        if re.search(r"\b(recent|newest|latest|what('?s| is) new|new uploads|recent uploads)\b", text):
-            return "recent"
-        return "search"
-
-    def _infer_scope_from_query(self, query_text: str) -> str:
-        text = query_text.lower()
-        if re.search(r"\b(public(?:\s+trackers?)?|public-only|only public)\b", text):
-            return "public"
-        if re.search(r"\b(private(?:\s+trackers?)?|private-only|only private)\b", text):
-            return "private"
-        return "all"
-
-    def _infer_sort_from_query(self, query_text: str) -> Tuple[str, str]:
-        text = query_text.lower()
-        if re.search(r"\b(best seeded|most seeded|highest seeds?|top seeded)\b", text):
-            return "seeders", "desc"
-        if re.search(r"\b(sort by seeds?|seeders?)\b", text):
-            return "seeders", "desc"
-        if re.search(r"\b(newest|latest|most recent)\b", text):
-            return "newest", "desc"
-        if re.search(r"\b(sort by size|largest|biggest)\b", text):
-            return "size", "desc"
-        if re.search(r"\b(smallest|small files)\b", text):
-            return "size", "asc"
-        if re.search(r"\b(best match|best result)\b", text):
-            return "best_match", "desc"
-        return "best_match", "desc"
-
-    def _extract_downloader_target(self, args: Dict[str, Any], query_text: str) -> str:
-        for key in ("target_downloader", "downloader", "target_client", "target"):
-            value = self._safe_text(args.get(key))
-            if value:
-                return value
-        text = query_text.lower()
-        for candidate in ("qbittorrent", "transmission", "deluge", "rtorrent", "aria2", "premiumize"):
-            if candidate in text:
-                return candidate
-        if "qb" in text:
+    def _extract_downloader_target(self, value: Any) -> str:
+        text = self._safe_text(value).lower()
+        if not text:
+            return "downloader"
+        if "qb" == text:
             return "qbittorrent"
-        return "downloader"
+        return text
 
-    def _extract_result_reference(self, args: Dict[str, Any], query_text: str) -> Dict[str, Any]:
+    def _extract_result_reference(self, data: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
         for key in ("result_id", "result_title", "result_guid", "selection", "index"):
-            if args.get(key) is not None:
-                out[key] = args.get(key)
-        quoted = re.findall(r"['\"]([^'\"]{2,240})['\"]", query_text or "")
-        if quoted and "result_title" not in out:
-            out["result_title"] = quoted[0].strip()
-
-        for word, rank in self.ORDINAL_MAP.items():
-            if re.search(rf"\b{word}\b", (query_text or "").lower()):
-                out.setdefault("index", rank)
-                break
-        m = re.search(r"\b(\d{1,3})(?:st|nd|rd|th)\b", (query_text or "").lower())
-        if m:
-            out.setdefault("index", int(m.group(1)))
-        if re.search(r"\b(best|top)\b", (query_text or "").lower()):
-            out.setdefault("index", 1)
+            if data.get(key) is not None:
+                out[key] = data.get(key)
+        # Accept llm aliases.
+        if out.get("result_title") is None and data.get("title") is not None:
+            out["result_title"] = data.get("title")
+        if out.get("index") is None and data.get("rank") is not None:
+            out["index"] = data.get("rank")
         return out
 
-    def _extract_indexer_mentions(self, args: Dict[str, Any], query_text: str, indexers: List[Dict[str, Any]]) -> List[str]:
+    def _extract_indexer_mentions(self, raw: Any, indexers: List[Dict[str, Any]]) -> List[str]:
         mentioned: List[str] = []
-        raw = args.get("indexers") or args.get("indexer") or args.get("trackers") or args.get("tracker")
         if isinstance(raw, list):
             mentioned.extend([self._safe_text(x) for x in raw if self._safe_text(x)])
         elif raw is not None:
@@ -498,61 +401,28 @@ class JackettSearchPlugin(ToolPlugin):
             if text:
                 mentioned.extend([part.strip() for part in re.split(r"[,;/]+", text) if part.strip()])
 
-        if query_text:
-            m = re.search(r"\b(?:indexer|tracker)\s+([a-z0-9][a-z0-9 _\-.]{1,60})", query_text.lower())
-            if m:
-                mentioned.append(m.group(1).strip())
+        if not mentioned:
+            return []
 
-        if not mentioned and indexers and query_text:
-            qslug = self._slug(query_text)
+        canonical: List[str] = []
+        for name in mentioned:
+            key = self._slug(name)
+            resolved = ""
             for idx in indexers:
-                sid = self._slug(idx.get("id"))
-                sname = self._slug(idx.get("name"))
-                if sid and sid in qslug:
-                    mentioned.append(idx.get("id"))
-                    continue
-                if sname and sname in qslug:
-                    mentioned.append(idx.get("name"))
+                if key == self._slug(idx.get("id")) or key == self._slug(idx.get("name")):
+                    resolved = self._safe_text(idx.get("id") or idx.get("name"))
+                    break
+            canonical.append(resolved or name)
+
         dedup: List[str] = []
         seen = set()
-        for item in mentioned:
+        for item in canonical:
             key = self._slug(item)
             if not key or key in seen:
                 continue
             seen.add(key)
             dedup.append(item)
         return dedup
-
-    def _extract_search_terms(self, query_text: str, action: str, explicit_search: str = "") -> str:
-        if explicit_search:
-            return explicit_search.strip()
-        text = str(query_text or "").strip()
-        if not text:
-            return ""
-        lower = text.lower()
-        if action in {"list_indexers", "inspect_indexer", "which_indexer", "handoff"}:
-            return ""
-        if action == "recent":
-            recent_patterns = [
-                r"^(?:show|find|get)\s+(?:me\s+)?(?:the\s+)?(?:newest|latest|recent)\s+",
-                r"^(?:what(?:'s| is)\s+new(?:\s+today)?)\s*",
-            ]
-            candidate = lower
-            for pattern in recent_patterns:
-                candidate = re.sub(pattern, "", candidate).strip()
-            candidate = re.sub(r"\b(?:uploads?|torrents?)\b", "", candidate).strip()
-            return re.sub(r"\s+", " ", candidate)
-
-        match = re.search(r"\b(?:search|find|look up|lookup|show)\b(?:\s+jackett)?\s+(?:for\s+)?(.+)$", lower)
-        candidate = match.group(1).strip() if match else lower
-        candidate = re.sub(
-            r"\b(?:from|on)\s+(?:all\s+)?(?:public|private)?\s*(?:indexers?|trackers?)\b.*$",
-            "",
-            candidate,
-        ).strip()
-        candidate = re.sub(r"\b(?:torrent|torrents|uploads?)\b", "", candidate).strip()
-        candidate = re.sub(r"\s+", " ", candidate).strip(" .,!?:;")
-        return candidate
 
     async def _plan_from_llm(
         self,
@@ -593,119 +463,41 @@ class JackettSearchPlugin(ToolPlugin):
     async def _resolve_plan(
         self,
         *,
-        args: Dict[str, Any],
         query_text: str,
         llm_client: Any,
         known_indexers: List[Dict[str, Any]],
         default_limit: int,
     ) -> Dict[str, Any]:
-        args = args or {}
+        if not llm_client:
+            return {"_intent_error": "llm_unavailable"}
+
         llm_plan = await self._plan_from_llm(query_text=query_text, llm_client=llm_client, known_indexers=known_indexers)
+        if not isinstance(llm_plan, dict) or not llm_plan:
+            return {"_intent_error": "llm_parse_failed"}
 
-        explicit_action = self._normalize_action(args.get("action") or args.get("mode") or args.get("operation"))
-        has_explicit_action = any(
-            args.get(key) is not None and self._safe_text(args.get(key)) != ""
-            for key in ("action", "mode", "operation")
-        )
-        inferred_action = self._infer_action_from_query(query_text)
-        llm_action = self._normalize_action(llm_plan.get("action"))
-        action = explicit_action if has_explicit_action else (
-            llm_action if llm_action != "search" or inferred_action == "search" else inferred_action
-        )
-        if not action:
-            action = inferred_action
+        action = self._normalize_action(llm_plan.get("action"))
+        scope = self._normalize_scope(llm_plan.get("scope"))
+        sort_by = self._normalize_sort_by(llm_plan.get("sort_by"))
+        sort_direction = self._normalize_sort_direction(llm_plan.get("sort_direction"), sort_by)
 
-        explicit_scope = self._normalize_scope(args.get("scope") or args.get("indexer_scope"))
-        has_explicit_scope = any(
-            args.get(key) is not None and self._safe_text(args.get(key)) != ""
-            for key in ("scope", "indexer_scope")
-        )
-        llm_scope = self._normalize_scope(llm_plan.get("scope"))
-        inferred_scope = self._infer_scope_from_query(query_text)
-        scope = explicit_scope if has_explicit_scope else (llm_scope if llm_plan.get("scope") else inferred_scope)
-
-        explicit_sort = self._normalize_sort_by(args.get("sort_by") or args.get("sort"))
-        explicit_direction = self._normalize_sort_direction(args.get("sort_direction") or args.get("order"), explicit_sort)
-        has_explicit_sort = any(
-            args.get(key) is not None and self._safe_text(args.get(key)) != ""
-            for key in ("sort_by", "sort")
-        )
-        has_explicit_direction = any(
-            args.get(key) is not None and self._safe_text(args.get(key)) != ""
-            for key in ("sort_direction", "order")
-        )
-        llm_sort = self._normalize_sort_by(llm_plan.get("sort_by"))
-        llm_direction = self._normalize_sort_direction(llm_plan.get("sort_direction"), llm_sort)
-        inferred_sort, inferred_direction = self._infer_sort_from_query(query_text)
-        sort_by = explicit_sort if has_explicit_sort else (
-            llm_sort if llm_plan.get("sort_by") else inferred_sort
-        )
-        sort_direction = explicit_direction if has_explicit_direction else (
-            llm_direction if llm_plan.get("sort_direction") else inferred_direction
-        )
-
-        explicit_search = self._safe_text(args.get("search_query") or args.get("search") or args.get("q"))
-        llm_search = self._safe_text(llm_plan.get("search_query"))
-        search_query = self._extract_search_terms(query_text, action, explicit_search=explicit_search or llm_search)
-
-        category_values = args.get("categories", None)
-        if category_values is None:
-            category_values = llm_plan.get("categories")
-        categories = self._extract_categories(category_values, query_text)
-
-        limit = self._extract_limit(
-            args={"limit": args.get("limit", llm_plan.get("limit"))},
-            query_text=query_text,
-            default_limit=default_limit,
-        )
-        min_seeders = self._extract_min_seeders(
-            {"min_seeders": args.get("min_seeders", llm_plan.get("min_seeders"))},
-            query_text,
-        )
-        max_age_days = self._extract_max_age_days(
-            {"max_age_days": args.get("max_age_days", llm_plan.get("max_age_days"))},
-            query_text,
-        )
+        search_query = self._safe_text(llm_plan.get("search_query"))
+        categories = self._extract_categories(llm_plan.get("categories"))
+        limit = self._extract_limit(llm_plan.get("limit"), default_limit)
+        min_seeders = self._extract_min_seeders(llm_plan.get("min_seeders"))
+        max_age_days = self._extract_max_age_days(llm_plan.get("max_age_days"))
         min_size, max_size = self._extract_size_filters(
-            {
-                "min_size": args.get("min_size", llm_plan.get("min_size")),
-                "max_size": args.get("max_size", llm_plan.get("max_size")),
-            },
-            query_text,
+            llm_plan.get("min_size", llm_plan.get("min_size_bytes")),
+            llm_plan.get("max_size", llm_plan.get("max_size_bytes")),
         )
 
         indexers = self._extract_indexer_mentions(
-            {
-                "indexers": args.get("indexers") or llm_plan.get("indexers"),
-                "indexer": args.get("indexer"),
-                "tracker": args.get("tracker"),
-            },
-            query_text,
+            llm_plan.get("indexers") or llm_plan.get("indexer") or llm_plan.get("trackers") or llm_plan.get("tracker"),
             known_indexers,
         )
-
-        result_ref = self._extract_result_reference(
-            {
-                "result_id": args.get("result_id", llm_plan.get("result_id")),
-                "result_title": args.get("result_title", llm_plan.get("result_title")),
-                "result_guid": args.get("result_guid"),
-                "selection": args.get("selection"),
-                "index": args.get("index"),
-            },
-            query_text,
-        )
-
+        result_ref = self._extract_result_reference(llm_plan)
         target_downloader = self._extract_downloader_target(
-            {"target_downloader": args.get("target_downloader", llm_plan.get("target_downloader"))},
-            query_text,
+            llm_plan.get("target_downloader") or llm_plan.get("downloader") or llm_plan.get("target")
         )
-
-        # Interpret requests like "indexer details for nyaa" as inspect_indexer.
-        if action == "list_indexers" and indexers and re.search(r"\b(details?|inspect|about)\b", query_text.lower()):
-            action = "inspect_indexer"
-
-        if action in {"which_indexer", "handoff"} and not result_ref and not args.get("results"):
-            result_ref = self._extract_result_reference({}, query_text)
 
         return {
             "action": action,
@@ -1331,14 +1123,8 @@ class JackettSearchPlugin(ToolPlugin):
             say_hint="Report the requested indexer details from returned data.",
         )
 
-    async def _handle_which_indexer(self, args: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
-        candidate_results = []
-        if isinstance(args.get("results"), list):
-            candidate_results = [x for x in args.get("results") if isinstance(x, dict)]
-        elif isinstance(args.get("result"), dict):
-            candidate_results = [args.get("result")]
-        if not candidate_results:
-            candidate_results = self._load_cached_results()
+    async def _handle_which_indexer(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        candidate_results = self._load_cached_results()
 
         if not candidate_results:
             return action_failure(
@@ -1374,14 +1160,8 @@ class JackettSearchPlugin(ToolPlugin):
             say_hint="Answer with the matched result's indexer source.",
         )
 
-    async def _handle_handoff(self, args: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
-        candidate_results = []
-        if isinstance(args.get("results"), list):
-            candidate_results = [x for x in args.get("results") if isinstance(x, dict)]
-        elif isinstance(args.get("result"), dict):
-            candidate_results = [args.get("result")]
-        if not candidate_results:
-            candidate_results = self._load_cached_results()
+    async def _handle_handoff(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        candidate_results = self._load_cached_results()
 
         if not candidate_results:
             return action_failure(
@@ -1605,14 +1385,34 @@ class JackettSearchPlugin(ToolPlugin):
             )
 
         query_text = self._query_from_args(args or {}, context=context)
+        if not query_text:
+            return action_failure(
+                code="missing_query",
+                message="No natural-language request was provided.",
+                needs=["Tell me what to do in Jackett (search, recent, list indexers, inspect, source lookup, or handoff)."],
+                say_hint="Ask for the Jackett request in natural language.",
+            )
+        if llm_client is None:
+            return action_failure(
+                code="llm_required",
+                message="This plugin is configured for LLM-only intent extraction and needs an LLM client.",
+                say_hint="Explain that intent parsing requires the LLM and ask to retry when available.",
+            )
+
         indexers, indexer_error = await self._fetch_indexers(settings)
         plan = await self._resolve_plan(
-            args=args or {},
             query_text=query_text,
             llm_client=llm_client,
             known_indexers=indexers,
             default_limit=settings["default_limit"],
         )
+        if plan.get("_intent_error"):
+            return action_failure(
+                code="jackett_intent_parse_failed",
+                message="Failed to parse Jackett intent from the request with the LLM.",
+                needs=["Rephrase the request with explicit intent and criteria."],
+                say_hint="Explain LLM intent extraction failed and ask for a clearer request.",
+            )
 
         if plan.get("action") in {"list_indexers", "inspect_indexer"} and indexer_error:
             return action_failure(
@@ -1627,9 +1427,9 @@ class JackettSearchPlugin(ToolPlugin):
         if plan.get("action") == "inspect_indexer":
             return await self._handle_inspect_indexer(plan, indexers)
         if plan.get("action") == "which_indexer":
-            return await self._handle_which_indexer(args or {}, plan)
+            return await self._handle_which_indexer(plan)
         if plan.get("action") == "handoff":
-            return await self._handle_handoff(args or {}, plan)
+            return await self._handle_handoff(plan)
 
         if plan.get("action") == "search" and not self._safe_text(plan.get("search_query")):
             return action_failure(

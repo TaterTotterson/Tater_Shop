@@ -354,7 +354,7 @@
       "settings_category": "Jackett",
       "tags": [],
       "entry": "plugins/jackett_search.py",
-      "sha256": "3bc834c2231170059761db0358e7a60e42d88ac28f64a2f2b5729f68bff76555"
+      "sha256": "02d542ebf114d302fc3289bbb2f1e81045c05fce97f3998c521206e8bb737724"
     },
     {
       "id": "joke_api",
