@@ -541,38 +541,25 @@
     {
       "id": "premiumize_download",
       "name": "Premiumize Download",
-      "version": "1.0.2",
+      "version": "2.0.0",
       "min_tater_version": "59",
-      "description": "Check if a link is cached on Premiumize and return direct download links.",
+      "description": "Use Premiumize as a full cloud downloader with natural-language requests, status tracking, file browsing, and direct link retrieval.",
       "portals": [
         "discord",
         "webui",
         "macos",
         "irc",
         "matrix",
-        "telegram"
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "92e7860d3f43f785ac77dacde1b88ca4ec67df9ba3ddb55d372a2a355ae5b71d"
-    },
-    {
-      "id": "premiumize_torrent",
-      "name": "Premiumize Torrent",
-      "version": "1.0.1",
-      "min_tater_version": "59",
-      "description": "Check the latest torrent or magnet against Premiumize cache and provide direct links.",
-      "portals": [
-        "discord",
-        "matrix"
-      ],
-      "notifier": false,
-      "settings_category": "Premiumize",
-      "tags": [],
-      "entry": "plugins/premiumize_torrent.py",
-      "sha256": "7f1df08fadbce1426c43d128ea9a24b1056454d53740633fcf2a1fdea76a5385"
+      "sha256": "af373d134ea2bc615ff59a674db080057550af4b1ecd1861bba6ea43f192acc2"
     },
     {
       "id": "sftpgo_account",
