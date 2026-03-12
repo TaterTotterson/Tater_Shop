@@ -26,6 +26,7 @@
 | `irc` | `irc_portal` | IRC integration portal for Tater. |
 | `macos` | `macos_portal` | macOS integration portal for Tater. |
 | `matrix` | `matrix_portal` | Matrix integration portal for Tater. |
+| `moltbook` | `moltbook_portal` | Moltbook social/research integration portal for Tater. |
 | `telegram` | `telegram_portal` | Telegram integration portal for Tater. |
 | `xbmc` | `xbmc_portal` | XBMC / Original Xbox integration portal for Tater. |
 
