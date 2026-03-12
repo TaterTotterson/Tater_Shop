@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -58,6 +58,9 @@ MOLTBOOK_INSIGHTS_KEY = "tater:moltbook:insights"
 MOLTBOOK_EXPERIMENTS_KEY = "tater:moltbook:experiments"
 MOLTBOOK_AGENT_RADAR_ZSET = "tater:moltbook:agent_radar:scores"
 MOLTBOOK_HEARTBEAT_KEY = "lastMoltbookCheck"
+MOLTBOOK_OUTBOUND_COMMENTS_ZSET = "tater:moltbook:outbound_comments:zset"
+MOLTBOOK_OUTBOUND_COMMENT_PREFIX = "tater:moltbook:outbound_comment:"
+MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET = "tater:moltbook:handled_reply_comments:zset"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -84,6 +87,14 @@ PORTAL_SETTINGS = {
             "options": ["true", "false"],
             "default": "true",
             "description": "Master toggle for the Moltbook portal loop.",
+        },
+        "claim_url": {
+            "label": "Claim Link",
+            "type": "string",
+            "default": "",
+            "description": "Auto-populated after registration. Copy this link to finish claiming the account.",
+            "readonly": True,
+            "editable": False,
         },
         "api_key": {
             "label": "Moltbook API Key",
@@ -309,6 +320,31 @@ PORTAL_SETTINGS = {
             "default": "",
             "description": "Comma-separated submolts to avoid.",
         },
+        "auto_choose_submolts_to_monitor": {
+            "label": "Auto Choose Submolts",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "true",
+            "description": "Automatically discover and add high-value submolts to monitor.",
+        },
+        "submolt_monitor_pick_count": {
+            "label": "Auto Submolt Picks Per Refresh",
+            "type": "number",
+            "default": 3,
+            "description": "How many new submolts to add each auto-selection refresh.",
+        },
+        "submolt_monitor_max_count": {
+            "label": "Max Monitored Submolts",
+            "type": "number",
+            "default": 12,
+            "description": "Hard cap for total monitored submolts after auto-selection.",
+        },
+        "submolt_monitor_refresh_minutes": {
+            "label": "Submolt Refresh Minutes",
+            "type": "number",
+            "default": 360,
+            "description": "How often auto-selection should refresh monitored submolts.",
+        },
         "follow_only_high_radar_agents": {
             "label": "Follow Only High Radar Agents",
             "type": "select",
@@ -527,6 +563,16 @@ def _extract_comment_id(obj: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_parent_comment_id(obj: Dict[str, Any]) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    for key in ("parent_id", "parentId", "parent_comment_id", "parentCommentId"):
+        value = obj.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 def _extract_author_name(obj: Dict[str, Any]) -> str:
     if not isinstance(obj, dict):
         return ""
@@ -631,6 +677,10 @@ class MoltbookConfig:
     submolts_to_monitor: List[str] = field(default_factory=list)
     submolts_to_prefer_for_posting: List[str] = field(default_factory=list)
     submolts_to_avoid: List[str] = field(default_factory=list)
+    auto_choose_submolts_to_monitor: bool = True
+    submolt_monitor_pick_count: int = 3
+    submolt_monitor_max_count: int = 12
+    submolt_monitor_refresh_minutes: int = 360
     follow_only_high_radar_agents: bool = True
 
     auto_mark_notifications_read: bool = True
@@ -848,9 +898,17 @@ class MoltbookPortal:
             out[str(key)] = str(value) if value is not None else ""
         return out
 
+    def _sync_claim_url_setting(self, claim_url: str) -> None:
+        value = str(claim_url or "").strip()
+        try:
+            self.redis.hset(MOLTBOOK_SETTINGS_KEY, "claim_url", value)
+        except Exception:
+            return
+
     def _clear_api_key_material(self) -> None:
         try:
             self.redis.hdel(MOLTBOOK_SETTINGS_KEY, "api_key")
+            self.redis.hset(MOLTBOOK_SETTINGS_KEY, "claim_url", "")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "clear_api_key_now", "false")
         except Exception:
             pass
@@ -935,6 +993,11 @@ class MoltbookPortal:
             self._clear_api_key_material()
             raw = self._load_settings()
 
+        claim_url_state = self._state_get("claim_url", "")
+        if str(raw.get("claim_url") or "").strip() != str(claim_url_state or "").strip():
+            self._sync_claim_url_setting(claim_url_state)
+            raw["claim_url"] = str(claim_url_state or "").strip()
+
         # Hard policy cleanup: these are no longer user-configurable.
         try:
             self.redis.hdel(
@@ -944,6 +1007,7 @@ class MoltbookPortal:
                 "strict_rate_limit_mode",
                 "conservative_new_agent_mode",
                 "use_www_only_enforcement",
+                "credentials_path",
             )
         except Exception:
             pass
@@ -1005,6 +1069,15 @@ class MoltbookPortal:
             submolts_to_monitor=_split_csv(raw.get("submolts_to_monitor")),
             submolts_to_prefer_for_posting=_split_csv(raw.get("submolts_to_prefer_for_posting")),
             submolts_to_avoid=_split_csv(raw.get("submolts_to_avoid")),
+            auto_choose_submolts_to_monitor=_parse_bool(raw.get("auto_choose_submolts_to_monitor"), True),
+            submolt_monitor_pick_count=_parse_int(raw.get("submolt_monitor_pick_count"), 3, min_value=1, max_value=10),
+            submolt_monitor_max_count=_parse_int(raw.get("submolt_monitor_max_count"), 12, min_value=1, max_value=50),
+            submolt_monitor_refresh_minutes=_parse_int(
+                raw.get("submolt_monitor_refresh_minutes"),
+                360,
+                min_value=15,
+                max_value=7 * 24 * 60,
+            ),
             follow_only_high_radar_agents=_parse_bool(raw.get("follow_only_high_radar_agents"), True),
             auto_mark_notifications_read=_parse_bool(raw.get("auto_mark_notifications_read"), True),
             mark_read_after_reply_only=_parse_bool(raw.get("mark_read_after_reply_only"), False),
@@ -1064,6 +1137,156 @@ class MoltbookPortal:
             if isinstance(item, dict):
                 out.append(item)
         return out
+
+    def _outbound_comment_member(self, post_id: str, comment_id: str) -> str:
+        return f"{_safe_key_token(post_id)}:{_safe_key_token(comment_id)}"
+
+    def _extract_comment_id_from_result(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        comment_id = _extract_comment_id(payload)
+        if comment_id:
+            return comment_id
+        for key in ("comment", "data", "item", "result"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                comment_id = _extract_comment_id(nested)
+                if comment_id:
+                    return comment_id
+        return ""
+
+    def _track_outbound_comment(
+        self,
+        *,
+        post_id: str,
+        comment_id: str,
+        parent_id: str = "",
+        post_title: str = "",
+        post_author: str = "",
+    ) -> None:
+        if not post_id or not comment_id:
+            return
+        now = time.time()
+        member = self._outbound_comment_member(post_id, comment_id)
+        key = f"{MOLTBOOK_OUTBOUND_COMMENT_PREFIX}{member}"
+        payload = {
+            "post_id": post_id,
+            "comment_id": comment_id,
+            "parent_id": parent_id or "",
+            "post_title": _limit_text(post_title, 280),
+            "post_author": _limit_text(post_author, 120),
+            "tracked_at_ts": str(now),
+            "tracked_at": _iso_utc_now(),
+        }
+        ttl_sec = 21 * 24 * 60 * 60
+        cutoff = now - ttl_sec
+        try:
+            self.redis.hset(key, mapping=payload)
+            self.redis.expire(key, ttl_sec)
+            self.redis.zadd(MOLTBOOK_OUTBOUND_COMMENTS_ZSET, {member: now})
+            self.redis.zremrangebyscore(MOLTBOOK_OUTBOUND_COMMENTS_ZSET, 0, cutoff)
+        except Exception:
+            return
+
+    def _track_created_outbound_comment(
+        self,
+        *,
+        post: Dict[str, Any],
+        post_id: str,
+        created_payload: Dict[str, Any],
+        parent_id: str,
+        self_names: set[str],
+    ) -> None:
+        author = _extract_author_name(post).strip().lower()
+        if author and author in self_names:
+            return
+        comment_id = self._extract_comment_id_from_result(created_payload)
+        if not comment_id:
+            return
+        self._track_outbound_comment(
+            post_id=post_id,
+            comment_id=comment_id,
+            parent_id=parent_id,
+            post_title=_extract_post_title(post),
+            post_author=_extract_author_name(post),
+        )
+
+    def _load_tracked_outbound_comments(self, *, max_items: int = 100) -> List[Dict[str, str]]:
+        now = time.time()
+        ttl_sec = 21 * 24 * 60 * 60
+        cutoff = now - ttl_sec
+        try:
+            self.redis.zremrangebyscore(MOLTBOOK_OUTBOUND_COMMENTS_ZSET, 0, cutoff)
+            members = self.redis.zrevrangebyscore(
+                MOLTBOOK_OUTBOUND_COMMENTS_ZSET,
+                "+inf",
+                cutoff,
+                start=0,
+                num=max(1, int(max_items)),
+            )
+        except Exception:
+            members = []
+
+        out: List[Dict[str, str]] = []
+        for member in members:
+            m = str(member or "").strip()
+            if not m:
+                continue
+            key = f"{MOLTBOOK_OUTBOUND_COMMENT_PREFIX}{m}"
+            try:
+                row = self.redis.hgetall(key) or {}
+            except Exception:
+                row = {}
+            post_id = str(row.get("post_id") or "").strip()
+            comment_id = str(row.get("comment_id") or "").strip()
+            if not post_id or not comment_id:
+                continue
+            out.append(
+                {
+                    "member": m,
+                    "post_id": post_id,
+                    "comment_id": comment_id,
+                    "parent_id": str(row.get("parent_id") or "").strip(),
+                }
+            )
+        return out
+
+    def _is_reply_comment_handled(self, comment_id: str) -> bool:
+        if not comment_id:
+            return True
+        try:
+            return self.redis.zscore(MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET, comment_id) is not None
+        except Exception:
+            return False
+
+    def _mark_reply_comment_handled(self, comment_id: str) -> None:
+        if not comment_id:
+            return
+        now = time.time()
+        ttl_sec = 21 * 24 * 60 * 60
+        cutoff = now - ttl_sec
+        try:
+            self.redis.zadd(MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET, {comment_id: now})
+            self.redis.zremrangebyscore(MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET, 0, cutoff)
+        except Exception:
+            return
+
+    def _fetch_post_comments_for_tracking(self, post_id: str) -> List[Dict[str, Any]]:
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for sort in ("new", "best"):
+            payload = self._api_get(
+                f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
+                params={"sort": sort, "limit": 100},
+                auth_required=True,
+            )
+            roots = _as_list((payload or {}).get("comments")) if isinstance(payload, dict) else []
+            flat = _flatten_comment_tree(roots)
+            for comment in flat:
+                cid = _extract_comment_id(comment)
+                if not cid or cid in dedup:
+                    continue
+                dedup[cid] = comment
+        return list(dedup.values())
 
     def _daily_counter_key(self, name: str) -> str:
         return f"tater:moltbook:counts:{_safe_key_token(name)}:{_day_key_utc()}"
@@ -1451,6 +1674,7 @@ class MoltbookPortal:
                 "last_successful_auth_check": "",
             }
         )
+        self._sync_claim_url_setting(claim_url)
         if chosen_name and chosen_name != (candidates[0] if candidates else chosen_name):
             logger.info("[Moltbook] Registered using fallback name '%s' after name conflict.", chosen_name)
         if claim_url:
@@ -1511,14 +1735,22 @@ class MoltbookPortal:
         if config.conservative_new_agent_mode and claim_status != "claimed":
             can_participate = False
 
+        claim_url = _coalesce_str(
+            status_payload.get("claim_url"),
+            status_payload.get("claimUrl"),
+            self._state_get("claim_url", ""),
+            default="",
+        )
         self._state_set_many(
             {
                 "claim_status": claim_status or "unknown",
+                "claim_url": claim_url,
                 "agent_name": _coalesce_str(me_payload.get("name"), me_payload.get("agent_name"), config.agent_name),
                 "agent_id": _coalesce_str(me_payload.get("id"), me_payload.get("agent_id"), default=""),
                 "last_successful_auth_check": _iso_utc_now(),
             }
         )
+        self._sync_claim_url_setting(claim_url)
         self._sync_profile_identity(config, me_payload)
 
         return AccountSnapshot(
@@ -1614,6 +1846,153 @@ class MoltbookPortal:
             if isinstance(arr, list):
                 return [item for item in arr if isinstance(item, dict)]
         return []
+
+    def _extract_submolts(self, payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("submolts", "items", "data", "results"):
+            arr = payload.get(key)
+            if isinstance(arr, list):
+                return [item for item in arr if isinstance(item, dict)]
+        return []
+
+    def _submolt_name(self, item: Dict[str, Any]) -> str:
+        name = _coalesce_str(
+            item.get("name"),
+            item.get("submolt_name"),
+            (item.get("submolt") or {}).get("name") if isinstance(item.get("submolt"), dict) else "",
+            default="",
+        ).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9\-]{1,29}", name):
+            return ""
+        return name
+
+    def _submolt_metric(self, item: Dict[str, Any], keys: Iterable[str]) -> float:
+        for key in keys:
+            if key not in item:
+                continue
+            value = item.get(key)
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 0.0
+
+    def _submolt_score(self, item: Dict[str, Any]) -> float:
+        members = self._submolt_metric(item, ("member_count", "members", "subscriber_count", "subscribers"))
+        posts = self._submolt_metric(item, ("post_count", "posts_count", "total_posts"))
+        engagement = self._submolt_metric(item, ("engagement_score", "hot_score", "rising_score"))
+        # Log-scale style weighting so very large communities do not dominate too hard.
+        return (0.45 * min(4.0, (members / 400.0))) + (0.40 * min(4.0, (posts / 120.0))) + (0.15 * min(4.0, engagement))
+
+    def _maybe_refresh_submolts_to_monitor(self, config: MoltbookConfig) -> None:
+        if not config.auto_choose_submolts_to_monitor:
+            return
+
+        now = time.time()
+        last_refresh = _parse_float(self._state_get("submolt_monitor_last_refresh_ts", "0"), 0.0, min_value=0.0)
+        refresh_window = max(60, int(config.submolt_monitor_refresh_minutes) * 60)
+        if last_refresh > 0 and (now - last_refresh) < refresh_window:
+            return
+
+        payload = self._api_get(f"{MOLTBOOK_API_PREFIX}submolts", auth_required=True)
+        entries = self._extract_submolts(payload)
+        if not entries:
+            self._state_set("submolt_monitor_last_refresh_ts", str(now))
+            return
+
+        avoid = set(config.submolts_to_avoid)
+        existing = list(config.submolts_to_monitor)
+        existing_set = set(existing)
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for item in entries:
+            name = self._submolt_name(item)
+            if not name or name in avoid:
+                continue
+            if name in existing_set:
+                continue
+            if name in candidates:
+                continue
+            candidates[name] = item
+
+        if not candidates:
+            self._state_set("submolt_monitor_last_refresh_ts", str(now))
+            return
+
+        ranked_names = sorted(
+            candidates.keys(),
+            key=lambda name: self._submolt_score(candidates[name]),
+            reverse=True,
+        )
+        shortlist_names = ranked_names[: min(32, len(ranked_names))]
+        pick_count = max(1, int(config.submolt_monitor_pick_count))
+
+        prompt_lines: List[str] = []
+        for name in shortlist_names:
+            item = candidates[name]
+            members = self._submolt_metric(item, ("member_count", "members", "subscriber_count", "subscribers"))
+            posts = self._submolt_metric(item, ("post_count", "posts_count", "total_posts"))
+            desc = _limit_text(
+                _coalesce_str(item.get("description"), item.get("display_name"), default=""),
+                180,
+            )
+            prompt_lines.append(f"- {name} | members={int(members)} | posts={int(posts)} | {desc}")
+
+        system_prompt = (
+            "You choose high-value Moltbook submolts for monitoring.\n"
+            "Return strict JSON only:\n"
+            '{"selected":["name1","name2"],"reason":"short reason"}\n'
+            "Rules:\n"
+            "- Pick communities likely to produce useful technical/research discussions.\n"
+            "- Do not pick spammy/low-signal or repetitive communities.\n"
+            f"- Pick at most {pick_count} names."
+        )
+        user_prompt = (
+            f"Current monitored: {', '.join(existing) if existing else '(none)'}\n"
+            f"Avoid list: {', '.join(sorted(avoid)) if avoid else '(none)'}\n"
+            "Candidate submolts:\n"
+            + "\n".join(prompt_lines)
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"selected": shortlist_names[:pick_count], "reason": "fallback_heuristic"},
+            max_tokens=800,
+        )
+        selected = decision.get("selected")
+        selected_names: List[str] = []
+        for raw_name in _as_list(selected):
+            token = str(raw_name or "").strip().lower()
+            if token in candidates and token not in selected_names:
+                selected_names.append(token)
+            if len(selected_names) >= pick_count:
+                break
+
+        if not selected_names:
+            selected_names = shortlist_names[:pick_count]
+
+        merged: List[str] = []
+        seen = set()
+        for name in existing + selected_names:
+            token = str(name or "").strip().lower()
+            if not token or token in seen or token in avoid:
+                continue
+            seen.add(token)
+            merged.append(token)
+            if len(merged) >= max(1, int(config.submolt_monitor_max_count)):
+                break
+
+        if merged and merged != existing:
+            try:
+                self.redis.hset(MOLTBOOK_SETTINGS_KEY, "submolts_to_monitor", ",".join(merged))
+            except Exception:
+                pass
+            config.submolts_to_monitor = merged
+
+        self._state_set("submolt_monitor_last_refresh_ts", str(now))
+        self._state_set("submolt_monitor_last_reason", _limit_text(decision.get("reason"), 260))
 
     def _fetch_posts_for_discovery(self, config: MoltbookConfig) -> List[Dict[str, Any]]:
         posts: List[Dict[str, Any]] = []
@@ -2127,6 +2506,13 @@ class MoltbookPortal:
                 config=config,
             )
             if isinstance(created, dict):
+                self._track_created_outbound_comment(
+                    post=post_payload,
+                    post_id=post_id,
+                    created_payload=created,
+                    parent_id=parent_id,
+                    self_names=self_names,
+                )
                 replied_any = True
                 self._set_last_action_ts("comment")
                 self._inc_daily_counter("comments")
@@ -2417,6 +2803,121 @@ class MoltbookPortal:
                 replied_count += 1
         return replied_count
 
+    def _run_stage_reply_to_outbound_comment_replies(
+        self,
+        config: MoltbookConfig,
+        account: AccountSnapshot,
+        *,
+        self_names: set[str],
+    ) -> int:
+        if not config.reply_enabled or not account.can_participate:
+            return 0
+
+        tracked = self._load_tracked_outbound_comments(max_items=120)
+        if not tracked:
+            return 0
+
+        by_post: Dict[str, set[str]] = {}
+        for row in tracked:
+            post_id = str(row.get("post_id") or "").strip()
+            comment_id = str(row.get("comment_id") or "").strip()
+            if not post_id or not comment_id:
+                continue
+            if post_id not in by_post:
+                by_post[post_id] = set()
+            by_post[post_id].add(comment_id)
+
+        replied_count = 0
+        scanned_posts = 0
+        for post_id, tracked_comment_ids in by_post.items():
+            if scanned_posts >= MAX_ACTIVITY_POSTS_PER_TICK:
+                break
+            scanned_posts += 1
+
+            post_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}posts/{post_id}", auth_required=True)
+            if not isinstance(post_payload, dict):
+                continue
+
+            # This stage is only for comments on other agents' posts.
+            post_author = _extract_author_name(post_payload).strip().lower()
+            if post_author and post_author in self_names:
+                continue
+
+            flat_comments = self._fetch_post_comments_for_tracking(post_id)
+            if not flat_comments:
+                continue
+
+            candidates: List[Dict[str, Any]] = []
+            for comment in flat_comments:
+                comment_id = _extract_comment_id(comment)
+                if not comment_id:
+                    continue
+                parent_id = _extract_parent_comment_id(comment)
+                if not parent_id or parent_id not in tracked_comment_ids:
+                    continue
+                author = _extract_author_name(comment).strip().lower()
+                if author and author in self_names:
+                    continue
+                if self._is_reply_comment_handled(comment_id):
+                    continue
+                body = _coalesce_str(comment.get("content"), comment.get("text"), comment.get("body"), default="")
+                if len(body.strip()) < 8:
+                    continue
+                candidates.append(comment)
+
+            if not candidates:
+                continue
+
+            candidates = sorted(
+                candidates,
+                key=lambda item: _parse_datetime(item.get("created_at") or item.get("createdAt") or "") or datetime(1970, 1, 1, tzinfo=timezone.utc),
+            )
+
+            for target in candidates:
+                ok, reason = self._should_attempt_reply(config, account)
+                if not ok:
+                    logger.info("[Moltbook] Outbound-thread reply skipped: %s", reason)
+                    return replied_count
+
+                decision = self._decide_reply(config, post_payload, target)
+                if not decision.get("reply"):
+                    continue
+                if decision.get("value_score", 0.0) < 0.30:
+                    continue
+
+                draft = self._draft_reply(config, post_payload, target, thread_context=flat_comments)
+                if not draft:
+                    continue
+
+                target_id = _extract_comment_id(target)
+                body = {"content": draft}
+                if target_id:
+                    body["parent_id"] = target_id
+                created = self._create_with_verification(
+                    f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
+                    body,
+                    config=config,
+                )
+                if not isinstance(created, dict):
+                    continue
+
+                self._track_created_outbound_comment(
+                    post=post_payload,
+                    post_id=post_id,
+                    created_payload=created,
+                    parent_id=target_id,
+                    self_names=self_names,
+                )
+                self._mark_reply_comment_handled(target_id)
+                self._set_last_action_ts("comment")
+                self._inc_daily_counter("comments")
+                replied_count += 1
+
+                if replied_count >= MAX_REPLY_PER_TICK:
+                    return replied_count
+
+        return replied_count
+
     def _run_stage_discovery(self, config: MoltbookConfig, posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         discoveries = self._build_discoveries(config, posts)
         self._promote_learning(discoveries, posts)
@@ -2450,6 +2951,12 @@ class MoltbookPortal:
         replied_count = 0
         if config.prioritize_home_activity:
             replied_count = self._run_stage_activity(config, account, home=home, self_names=self_names)
+
+        # Stage 3b: explicit tracking for replies to Tater comments on other agents' posts.
+        replied_count += self._run_stage_reply_to_outbound_comment_replies(config, account, self_names=self_names)
+
+        # Auto-curate monitored submolts from live catalog before discovery scans.
+        self._maybe_refresh_submolts_to_monitor(config)
 
         # Stage 4/5: feed + broad scans
         posts = self._fetch_posts_for_discovery(config)
@@ -2509,6 +3016,13 @@ class MoltbookPortal:
                     config=config,
                 )
                 if isinstance(created, dict):
+                    self._track_created_outbound_comment(
+                        post=post,
+                        post_id=post_id,
+                        created_payload=created,
+                        parent_id=parent_id,
+                        self_names=self_names,
+                    )
                     self._set_last_action_ts("comment")
                     self._inc_daily_counter("comments")
                     replied_count += 1
