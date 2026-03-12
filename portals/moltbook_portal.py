@@ -7,7 +7,6 @@ without turning into a spammy broadcaster.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 import json
@@ -28,7 +27,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.2"
+__version__ = "1.0.5"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -61,6 +60,7 @@ MOLTBOOK_HEARTBEAT_KEY = "lastMoltbookCheck"
 MOLTBOOK_OUTBOUND_COMMENTS_ZSET = "tater:moltbook:outbound_comments:zset"
 MOLTBOOK_OUTBOUND_COMMENT_PREFIX = "tater:moltbook:outbound_comment:"
 MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET = "tater:moltbook:handled_reply_comments:zset"
+MOLTBOOK_INTRO_POSTED_KEY = "tater:moltbook:introduction_posted"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -375,7 +375,6 @@ PORTAL_SETTINGS = {
         },
     },
 }
-
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -910,6 +909,7 @@ class MoltbookPortal:
             self.redis.hdel(MOLTBOOK_SETTINGS_KEY, "api_key")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "claim_url", "")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "clear_api_key_now", "false")
+            self.redis.delete(MOLTBOOK_INTRO_POSTED_KEY)
         except Exception:
             pass
 
@@ -921,6 +921,10 @@ class MoltbookPortal:
                 "last_successful_auth_check",
                 "claim_url",
                 "verification_code",
+                "introduction_posted",
+                "introduction_post_id",
+                "introduction_post_title",
+                "introduction_posted_at",
             )
         except Exception:
             pass
@@ -1495,64 +1499,56 @@ class MoltbookPortal:
                 return str(parsed.get("text") or "").strip()
             return text
 
-    def _safe_eval_expr(self, expr: str) -> float:
-        node = ast.parse(expr, mode="eval")
+    def _format_verification_answer(self, value: Any) -> Optional[str]:
+        num: Optional[float] = None
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            num = float(value)
+        else:
+            text = str(value).strip()
+            while text and text[-1] in {".", ",", ";", ":", "!", "?"}:
+                text = text[:-1].rstrip()
+            if not text:
+                return None
+            try:
+                num = float(text)
+            except Exception:
+                return None
 
-        def _eval(n: ast.AST) -> float:
-            if isinstance(n, ast.Expression):
-                return _eval(n.body)
-            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
-                return float(n.value)
-            if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
-                value = _eval(n.operand)
-                return value if isinstance(n.op, ast.UAdd) else -value
-            if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-                left = _eval(n.left)
-                right = _eval(n.right)
-                if isinstance(n.op, ast.Add):
-                    return left + right
-                if isinstance(n.op, ast.Sub):
-                    return left - right
-                if isinstance(n.op, ast.Mult):
-                    return left * right
-                if right == 0:
-                    raise ValueError("division_by_zero")
-                return left / right
-            raise ValueError("unsupported_expression")
+        if num is None or num != num or num in (float("inf"), float("-inf")):
+            return None
+        return f"{num:.2f}"
 
-        return float(_eval(node))
+    def _solve_verification_challenge_with_llm(self, challenge_text: str) -> Optional[str]:
+        if self.llm_client is None:
+            return None
+        challenge = str(challenge_text or "").strip()
+        if not challenge:
+            return None
+
+        system_prompt = (
+            "You solve Moltbook verification math challenges.\n"
+            "Return strict JSON only with shape: {\"answer\":\"15.00\"}\n"
+            "Rules:\n"
+            "- Parse obfuscated text carefully.\n"
+            "- Solve the math exactly.\n"
+            "- answer must be numeric formatted to 2 decimals.\n"
+            "- No explanation, no extra keys."
+        )
+        user_prompt = f"Challenge:\n{challenge}"
+        parsed = self._llm_json(system_prompt=system_prompt, user_prompt=user_prompt, default={}, max_tokens=200)
+        raw_answer = _coalesce_str(
+            parsed.get("answer") if isinstance(parsed, dict) else "",
+            parsed.get("result") if isinstance(parsed, dict) else "",
+            parsed.get("value") if isinstance(parsed, dict) else "",
+            parsed.get("number") if isinstance(parsed, dict) else "",
+            default="",
+        )
+        return self._format_verification_answer(raw_answer)
 
     def _solve_verification_challenge(self, challenge_text: str) -> Optional[str]:
-        text = str(challenge_text or "").strip()
-        if not text:
-            return None
-        normalized = (
-            text.replace("×", "*")
-            .replace("x", "*")
-            .replace("X", "*")
-            .replace("÷", "/")
-            .replace("−", "-")
-            .replace("^", "")
-        )
-        normalized = re.sub(r"(?i)\bplus\b", "+", normalized)
-        normalized = re.sub(r"(?i)\bminus\b", "-", normalized)
-        normalized = re.sub(r"(?i)\btimes\b", "*", normalized)
-        normalized = re.sub(r"(?i)\bmultiplied\s+by\b", "*", normalized)
-        normalized = re.sub(r"(?i)\bdivided\s+by\b", "/", normalized)
-
-        candidates = re.findall(r"[0-9\.\+\-\*\/\(\)\s]{3,}", normalized)
-        candidates = sorted((c.strip() for c in candidates if c.strip()), key=len, reverse=True)
-        for candidate in candidates:
-            if not re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s]+", candidate):
-                continue
-            try:
-                value = self._safe_eval_expr(candidate)
-                if value != value or value in (float("inf"), float("-inf")):
-                    continue
-                return f"{value:.2f}"
-            except Exception:
-                continue
-        return None
+        return self._solve_verification_challenge_with_llm(challenge_text)
 
     def _record_verification_attempt(self, ok: bool) -> None:
         try:
@@ -1597,12 +1593,16 @@ class MoltbookPortal:
 
         code = _coalesce_str(
             verification.get("verification_code") if isinstance(verification, dict) else "",
+            verification.get("code") if isinstance(verification, dict) else "",
             result.get("verification_code"),
+            result.get("code"),
             default="",
         )
         challenge = _coalesce_str(
             verification.get("challenge_text") if isinstance(verification, dict) else "",
+            verification.get("challenge") if isinstance(verification, dict) else "",
             result.get("challenge_text"),
+            result.get("challenge"),
             default="",
         )
         answer = self._solve_verification_challenge(challenge)
@@ -1836,6 +1836,47 @@ class MoltbookPortal:
             out.append(pid)
         return out
 
+    def _persist_home_state(self, home: Dict[str, Any]) -> None:
+        if not isinstance(home, dict):
+            return
+        account_blob = home.get("your_account") if isinstance(home.get("your_account"), dict) else {}
+        dm_blob = home.get("your_direct_messages") if isinstance(home.get("your_direct_messages"), dict) else {}
+        announcement_blob = home.get("latest_moltbook_announcement") if isinstance(home.get("latest_moltbook_announcement"), dict) else {}
+        todo_blob = home.get("what_to_do_next")
+
+        todo_items: List[str] = []
+        for item in _as_list(todo_blob.get("items") if isinstance(todo_blob, dict) else todo_blob):
+            if isinstance(item, dict):
+                text = _coalesce_str(item.get("text"), item.get("title"), item.get("label"), default="")
+            else:
+                text = str(item or "").strip()
+            if text:
+                todo_items.append(_limit_text(text, 160))
+        todo_items = todo_items[:8]
+
+        quick_links_blob = home.get("quick_links")
+        quick_links_text = ""
+        if isinstance(quick_links_blob, (dict, list)):
+            quick_links_text = _limit_text(_safe_json_dumps(quick_links_blob), 2400)
+
+        self._state_set_many(
+            {
+                "home_last_seen": _iso_utc_now(),
+                "home_unread_notifications": _coalesce_str(
+                    account_blob.get("unread_notification_count"),
+                    account_blob.get("unread_notifications"),
+                    default="",
+                ),
+                "home_unread_dms": _coalesce_str(dm_blob.get("unread_count"), dm_blob.get("unread_messages"), default=""),
+                "home_latest_announcement_title": _limit_text(
+                    _coalesce_str(announcement_blob.get("title"), announcement_blob.get("headline"), default=""),
+                    300,
+                ),
+                "home_what_to_do_next": " | ".join(todo_items),
+                "home_quick_links": quick_links_text,
+            }
+        )
+
     def _extract_posts(self, payload: Any) -> List[Dict[str, Any]]:
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
@@ -1846,6 +1887,57 @@ class MoltbookPortal:
             if isinstance(arr, list):
                 return [item for item in arr if isinstance(item, dict)]
         return []
+
+    def _extract_home_posts(self, home: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(home, dict):
+            return []
+        posts: List[Dict[str, Any]] = []
+        sections = [
+            home.get("posts_from_accounts_you_follow"),
+            home.get("explore"),
+            home.get("activity_on_your_posts"),
+        ]
+        for section in sections:
+            posts.extend(self._extract_posts(section))
+            if not isinstance(section, dict):
+                continue
+            for key in ("posts", "items", "data", "results", "preview", "feed"):
+                posts.extend(self._extract_posts(section.get(key)))
+            for key in ("items", "activity", "posts"):
+                for row in _as_list(section.get(key)):
+                    if not isinstance(row, dict):
+                        continue
+                    nested_post = row.get("post")
+                    if isinstance(nested_post, dict):
+                        posts.append(nested_post)
+                    nested_preview = row.get("post_preview")
+                    if isinstance(nested_preview, dict):
+                        posts.append(nested_preview)
+        return posts
+
+    def _dedupe_posts(self, posts: List[Dict[str, Any]], *, limit: int = MAX_POSTS_SCANNED_PER_TICK) -> List[Dict[str, Any]]:
+        dedup: Dict[str, Dict[str, Any]] = {}
+        max_items = max(1, int(limit))
+        for item in posts:
+            if not isinstance(item, dict):
+                continue
+            pid = _extract_post_id(item)
+            if not pid:
+                synthetic = "\n".join(
+                    [
+                        _extract_post_title(item),
+                        _extract_author_name(item),
+                        _extract_submolt(item),
+                        _extract_post_content(item)[:80],
+                    ]
+                ).strip()
+                if not synthetic:
+                    continue
+                pid = f"synthetic:{hashlib.sha1(synthetic.encode('utf-8')).hexdigest()[:24]}"
+            dedup[pid] = item
+            if len(dedup) >= max_items:
+                break
+        return list(dedup.values())
 
     def _extract_submolts(self, payload: Any) -> List[Dict[str, Any]]:
         if isinstance(payload, list):
@@ -1994,8 +2086,10 @@ class MoltbookPortal:
         self._state_set("submolt_monitor_last_refresh_ts", str(now))
         self._state_set("submolt_monitor_last_reason", _limit_text(decision.get("reason"), 260))
 
-    def _fetch_posts_for_discovery(self, config: MoltbookConfig) -> List[Dict[str, Any]]:
+    def _fetch_posts_for_discovery(self, config: MoltbookConfig, *, home: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         posts: List[Dict[str, Any]] = []
+        if isinstance(home, dict):
+            posts.extend(self._extract_home_posts(home))
 
         if config.personalized_feed_enabled:
             feed_all = self._api_get(f"{MOLTBOOK_API_PREFIX}feed", params={"sort": "hot", "limit": 25}, auth_required=True)
@@ -2023,15 +2117,7 @@ class MoltbookPortal:
             )
             posts.extend(self._extract_posts(sub_payload))
 
-        dedup: Dict[str, Dict[str, Any]] = {}
-        for item in posts:
-            pid = _extract_post_id(item)
-            if not pid:
-                continue
-            dedup[pid] = item
-            if len(dedup) >= MAX_POSTS_SCANNED_PER_TICK:
-                break
-        return list(dedup.values())
+        return self._dedupe_posts(posts, limit=MAX_POSTS_SCANNED_PER_TICK)
 
     def _store_agent_memory(self, post: Dict[str, Any], score_delta: float = 0.0) -> None:
         author = _extract_author_name(post)
@@ -2764,8 +2850,107 @@ class MoltbookPortal:
                     "insight": _coalesce_str(experiment_result.get("summary"), summary, default=summary),
                     "ts": _iso_utc_now(),
                 },
-                max_len=400,
-            )
+                    max_len=400,
+                )
+        return True
+
+    def _draft_introduction_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
+        if self.llm_client is None:
+            return None
+        system_prompt = (
+            "Write one concise introduction post for Moltbook.\n"
+            "Return strict JSON only with shape:\n"
+            '{"title":"...","content":"..."}\n'
+            "Rules:\n"
+            "- Friendly and thoughtful, not salesy.\n"
+            "- Mention research/community intent.\n"
+            "- Do not include secrets or operational details.\n"
+            "- Keep title under 300 chars."
+        )
+        user_prompt = (
+            f"Display name: {config.display_name}\n"
+            "Target submolt: introductions\n"
+            "Context: one-time first introduction post for this portal."
+        )
+        parsed = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={},
+            max_tokens=450,
+        )
+        title = _limit_text(_coalesce_str(parsed.get("title"), default=""), 300)
+        content = _limit_text(_coalesce_str(parsed.get("content"), default=""), 4000)
+        if not title or not content:
+            return None
+        return {"title": title, "content": content}
+
+    def _is_introduction_posted(self) -> bool:
+        try:
+            stored = _parse_bool(self.redis.get(MOLTBOOK_INTRO_POSTED_KEY), False)
+            if stored:
+                return True
+        except Exception:
+            stored = False
+        state_value = _parse_bool(self._state_get("introduction_posted", ""), False)
+        if state_value and not stored:
+            try:
+                self.redis.set(MOLTBOOK_INTRO_POSTED_KEY, "true")
+            except Exception:
+                pass
+        return state_value
+
+    def _mark_introduction_posted(self, *, post_id: str, title: str) -> None:
+        try:
+            self.redis.set(MOLTBOOK_INTRO_POSTED_KEY, "true")
+        except Exception:
+            pass
+        self._state_set_many(
+            {
+                "introduction_posted": "true",
+                "introduction_post_id": post_id,
+                "introduction_post_title": _limit_text(title, 300),
+                "introduction_posted_at": _iso_utc_now(),
+            }
+        )
+
+    def _ensure_introduction_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
+        if self._is_introduction_posted():
+            return False
+        if not config.posting_enabled:
+            return False
+        if not account.can_participate:
+            return False
+
+        allowed, reason = self._should_attempt_post(config, account)
+        if not allowed:
+            logger.info("[Moltbook] Introduction post delayed: %s", reason)
+            return False
+
+        draft = self._draft_introduction_post(config)
+        if not isinstance(draft, dict):
+            logger.info("[Moltbook] Introduction post delayed: intro_draft_unavailable")
+            return False
+        title = _limit_text(draft.get("title"), 300)
+        content = _limit_text(draft.get("content"), 7000)
+        if not title or not content:
+            return False
+
+        payload = {
+            "submolt_name": "introductions",
+            "title": title,
+            "content": content,
+            "type": "text",
+        }
+        created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
+        if not isinstance(created, dict):
+            return False
+
+        post_id = _extract_post_id(created)
+        self._set_last_action_ts("post")
+        self._inc_daily_counter("posts")
+        self._remember_posted_content(title=title, content=content, submolt="introductions", url="")
+        self._mark_introduction_posted(post_id=post_id, title=title)
+        logger.info("[Moltbook] Posted first-time introduction in m/introductions.")
         return True
 
     def _collect_self_names(self, config: MoltbookConfig, account: AccountSnapshot) -> set[str]:
@@ -2782,6 +2967,7 @@ class MoltbookPortal:
             return {}
         payload = self._api_get(f"{MOLTBOOK_API_PREFIX}home", auth_required=True)
         if isinstance(payload, dict):
+            self._persist_home_state(payload)
             return payload
         return {}
 
@@ -2947,6 +3133,9 @@ class MoltbookPortal:
 
         self_names = self._collect_self_names(config, account)
 
+        # One-time first introduction post in m/introductions.
+        self._ensure_introduction_post(config, account)
+
         # Stage 3: activity on own posts
         replied_count = 0
         if config.prioritize_home_activity:
@@ -2959,7 +3148,7 @@ class MoltbookPortal:
         self._maybe_refresh_submolts_to_monitor(config)
 
         # Stage 4/5: feed + broad scans
-        posts = self._fetch_posts_for_discovery(config)
+        posts = self._fetch_posts_for_discovery(config, home=home)
         self._update_radar(posts)
 
         # Stage 6/7/8/9/10/11/12/23: discovery + learning + experiments
