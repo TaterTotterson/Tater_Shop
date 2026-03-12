@@ -19,7 +19,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -29,7 +28,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -65,7 +64,6 @@ LEARNING_IDEAS_KEY = "tater:learning:ideas"
 LEARNING_KNOWLEDGE_KEY = "tater:learning:knowledge"
 LEARNING_PATTERNS_KEY = "tater:learning:patterns"
 
-DEFAULT_CREDENTIALS_PATH = "~/.config/moltbook/credentials.json"
 DEFAULT_USER_AGENT = "Tater-Moltbook-Portal/1.0"
 
 DEFAULT_REPLY_CONTEXT_LIMIT = 16
@@ -118,12 +116,6 @@ PORTAL_SETTINGS = {
             "options": ["true", "false"],
             "default": "false",
             "description": "If true, portal may call setup-owner-email when owner_email is set.",
-        },
-        "credentials_path": {
-            "label": "Credentials File Path",
-            "type": "string",
-            "default": DEFAULT_CREDENTIALS_PATH,
-            "description": "Where to persist Moltbook credentials JSON.",
         },
         "auto_register_if_missing": {
             "label": "Auto Register If Missing Key",
@@ -602,7 +594,6 @@ class MoltbookConfig:
     profile_description: str
     owner_email: str
     owner_email_setup_enabled: bool
-    credentials_path: Path
     auto_register_if_missing: bool
 
     activity_interval_minutes: int
@@ -857,57 +848,12 @@ class MoltbookPortal:
             out[str(key)] = str(value) if value is not None else ""
         return out
 
-    def _credentials_path(self, raw: Dict[str, str]) -> Path:
-        configured = _coalesce_str(raw.get("credentials_path"), default=DEFAULT_CREDENTIALS_PATH)
-        return Path(configured).expanduser()
-
-    def _load_credentials_file(self, path: Path) -> Dict[str, Any]:
-        try:
-            if not path.exists():
-                return {}
-            blob = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(blob, dict):
-                return blob
-        except Exception:
-            logger.warning("[Moltbook] Unable to read credentials file at %s", path)
-        return {}
-
-    def _save_credentials_file(self, path: Path, payload: Dict[str, Any]) -> None:
-        safe_payload = {
-            "api_key": str(payload.get("api_key") or "").strip(),
-            "agent_name": str(payload.get("agent_name") or "").strip(),
-        }
-        claim_url = str(payload.get("claim_url") or "").strip()
-        verification_code = str(payload.get("verification_code") or "").strip()
-        if claim_url:
-            safe_payload["claim_url"] = claim_url
-        if verification_code:
-            safe_payload["verification_code"] = verification_code
-
-        if not safe_payload.get("api_key"):
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(safe_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            try:
-                os.chmod(path, 0o600)
-            except Exception:
-                pass
-        except Exception:
-            logger.exception("[Moltbook] Failed to write credentials file: %s", path)
-
-    def _clear_api_key_material(self, *, credentials_path: Path) -> None:
+    def _clear_api_key_material(self) -> None:
         try:
             self.redis.hdel(MOLTBOOK_SETTINGS_KEY, "api_key")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "clear_api_key_now", "false")
         except Exception:
             pass
-
-        try:
-            if credentials_path.exists():
-                credentials_path.unlink()
-        except Exception:
-            logger.warning("[Moltbook] Failed to remove credentials file at %s", credentials_path)
 
         try:
             self.redis.hdel(
@@ -984,14 +930,10 @@ class MoltbookPortal:
 
     def _build_config(self) -> MoltbookConfig:
         raw = self._load_settings()
-        creds_path = self._credentials_path(raw)
 
         if _parse_bool(raw.get("clear_api_key_now"), False):
-            self._clear_api_key_material(credentials_path=creds_path)
+            self._clear_api_key_material()
             raw = self._load_settings()
-            creds_path = self._credentials_path(raw)
-
-        creds = self._load_credentials_file(creds_path)
 
         # Hard policy cleanup: these are no longer user-configurable.
         try:
@@ -1009,7 +951,7 @@ class MoltbookPortal:
         first, last = get_tater_name()
         default_name = _coalesce_str(f"{first} {last}", "Tater", default="Tater")
 
-        api_key = _coalesce_str(raw.get("api_key"), creds.get("api_key"), default="")
+        api_key = _coalesce_str(raw.get("api_key"), default="")
         agent_name = default_name
         display_name = default_name
 
@@ -1026,7 +968,6 @@ class MoltbookPortal:
             profile_description=profile_description,
             owner_email=_coalesce_str(raw.get("owner_email"), default=""),
             owner_email_setup_enabled=_parse_bool(raw.get("owner_email_setup_enabled"), False),
-            credentials_path=creds_path,
             auto_register_if_missing=_parse_bool(raw.get("auto_register_if_missing"), False),
             activity_interval_minutes=_parse_int(raw.get("activity_interval_minutes"), 30, min_value=5, max_value=360),
             heartbeat_enabled=_parse_bool(raw.get("heartbeat_enabled"), True),
@@ -1075,14 +1016,6 @@ class MoltbookPortal:
             strict_rate_limit_mode=config.strict_rate_limit_mode,
             use_www_only=config.use_www_only_enforcement,
         )
-
-        if config.api_key:
-            existing = self._load_credentials_file(config.credentials_path)
-            if str(existing.get("api_key") or "").strip() != config.api_key or str(existing.get("agent_name") or "").strip() != config.agent_name:
-                self._save_credentials_file(
-                    config.credentials_path,
-                    {"api_key": config.api_key, "agent_name": config.agent_name},
-                )
 
         return config
 
@@ -1507,15 +1440,6 @@ class MoltbookPortal:
             MOLTBOOK_SETTINGS_KEY,
             mapping={
                 "api_key": api_key,
-            },
-        )
-        self._save_credentials_file(
-            config.credentials_path,
-            {
-                "api_key": api_key,
-                "agent_name": chosen_name or registration_name,
-                "claim_url": claim_url,
-                "verification_code": verification_code,
             },
         )
         self._state_set_many(
