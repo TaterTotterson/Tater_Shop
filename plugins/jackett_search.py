@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -23,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettSearchPlugin(ToolPlugin):
     name = "jackett_search"
     plugin_name = "Jackett Search"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Jackett Discovery"
     settings_category = "Jackett"
@@ -699,6 +700,81 @@ class JackettSearchPlugin(ToolPlugin):
         return False
 
     @staticmethod
+    def _is_http_url(url: str) -> bool:
+        text = str(url or "").strip().lower()
+        return text.startswith("http://") or text.startswith("https://")
+
+    @staticmethod
+    def _is_magnet_uri(uri: str) -> bool:
+        raw = str(uri or "").strip()
+        if not raw:
+            return False
+        lower = raw.lower()
+        if lower.startswith("magnet:%3f"):
+            raw = unquote(raw)
+            lower = raw.lower()
+        if not lower.startswith("magnet:?"):
+            return False
+        return "xt=urn:btih:" in lower
+
+    @staticmethod
+    def _looks_like_download_url(url: str) -> bool:
+        low = str(url or "").strip().lower()
+        if not low:
+            return False
+        if low.startswith("magnet:?"):
+            return True
+        if not (low.startswith("http://") or low.startswith("https://")):
+            return False
+        if (
+            ".torrent" in low
+            or "/download" in low
+            or "/dl/" in low
+            or "download=" in low
+            or "action=download" in low
+            or "torrentid=" in low
+            or "get.php" in low
+        ):
+            return True
+        return False
+
+    def _preferred_transfer_uri(self, item: Dict[str, Any]) -> Tuple[str, str]:
+        magnet = self._safe_text(item.get("magnet_url"))
+        if self._is_magnet_uri(magnet):
+            return magnet, "magnet"
+
+        torrent_url = self._safe_text(item.get("torrent_url"))
+        if (
+            self._is_http_url(torrent_url)
+            and not self._looks_like_search_api(torrent_url)
+            and self._looks_like_download_url(torrent_url)
+        ):
+            return torrent_url, "torrent"
+
+        return "", ""
+
+    def _top_result_preview(self, results: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for item in results[: max(0, int(limit))]:
+            transfer_uri, transfer_type = self._preferred_transfer_uri(item)
+            out.append(
+                {
+                    "rank": int(item.get("rank") or 0),
+                    "result_id": self._safe_text(item.get("id")),
+                    "title": self._safe_text(item.get("title")),
+                    "indexer": self._safe_text(item.get("indexer")),
+                    "seeders": int(item.get("seeders") or 0),
+                    "size": self._safe_text(item.get("size")),
+                    "publish_date": self._safe_text(item.get("publish_date")),
+                    "transfer_uri": transfer_uri,
+                    "transfer_type": transfer_type,
+                    "magnet_url": self._safe_text(item.get("magnet_url")),
+                    "torrent_url": self._safe_text(item.get("torrent_url")),
+                }
+            )
+        return out
+
+    @staticmethod
     def _extract_inline_urls(item: ET.Element) -> List[Tuple[str, str]]:
         out: List[Tuple[str, str]] = []
         seen = set()
@@ -781,40 +857,51 @@ class JackettSearchPlugin(ToolPlugin):
             or ""
         )
 
+        if magnet_url and not self._is_magnet_uri(magnet_url):
+            # Some trackers overload magnet-style attrs with HTTP links; keep those as torrent/details candidates.
+            if not torrent_url and self._is_http_url(magnet_url):
+                torrent_url = magnet_url
+            magnet_url = ""
+
         # Inspect enclosure/atom URLs because many Torznab feeds provide magnet or torrent here.
         for url, tag in self._extract_inline_urls(item):
             low_url = url.lower()
             low_tag = str(tag or "").lower()
-            if low_url.startswith("magnet:?"):
+            if self._is_magnet_uri(url):
                 if not magnet_url:
                     magnet_url = url
                 continue
-            if not low_url.startswith("http"):
+            if not self._is_http_url(low_url):
                 continue
-            looks_like_torrent = (
-                ".torrent" in low_url
-                or "/download" in low_url
-                or "/dl/" in low_url
-                or "bittorrent" in low_tag
-            )
+            looks_like_torrent = self._looks_like_download_url(low_url) or "bittorrent" in low_tag
             if looks_like_torrent and not torrent_url:
                 torrent_url = url
                 continue
             if not details_url and not self._looks_like_search_api(low_url):
                 details_url = url
 
-        if link.startswith("magnet:?") and not magnet_url:
+        if self._is_magnet_uri(link) and not magnet_url:
             magnet_url = link
-        elif link.startswith("http"):
+        elif self._is_http_url(link):
             low_link = link.lower()
-            if not torrent_url and not self._looks_like_search_api(low_link):
-                # Conservative fallback: use link as torrent URL only when it does not look like a query endpoint.
+            if not torrent_url and not self._looks_like_search_api(low_link) and self._looks_like_download_url(low_link):
                 torrent_url = link
             if not details_url and not self._looks_like_search_api(low_link):
                 details_url = link
             if self._looks_like_search_api(low_link) and not details_url:
                 # Keep query/search-like URLs only as details fallback, never as download URI.
                 details_url = link
+
+        if torrent_url:
+            low_torrent = torrent_url.lower()
+            if self._looks_like_search_api(low_torrent):
+                if not details_url:
+                    details_url = torrent_url
+                torrent_url = ""
+            elif not self._looks_like_download_url(low_torrent):
+                if not details_url:
+                    details_url = torrent_url
+                torrent_url = ""
 
         if not details_url and guid.startswith("http"):
             details_url = guid
@@ -870,6 +957,10 @@ class JackettSearchPlugin(ToolPlugin):
             "infohash": infohash,
             "raw_attrs": attrs,
         }
+        transfer_uri, transfer_type = self._preferred_transfer_uri(normalized)
+        normalized["transfer_uri"] = transfer_uri
+        normalized["transfer_type"] = transfer_type
+        normalized["has_transfer_uri"] = bool(transfer_uri)
         normalized["handoff"] = {
             "title": normalized["title"],
             "indexer": normalized["indexer"],
@@ -877,6 +968,8 @@ class JackettSearchPlugin(ToolPlugin):
             "magnet_url": normalized["magnet_url"],
             "torrent_url": normalized["torrent_url"],
             "details_url": normalized["details_url"],
+            "transfer_uri": normalized["transfer_uri"],
+            "transfer_type": normalized["transfer_type"],
             "size_bytes": normalized["size_bytes"],
             "seeders": normalized["seeders"],
             "leechers": normalized["leechers"],
@@ -994,7 +1087,7 @@ class JackettSearchPlugin(ToolPlugin):
         freshness = 0.0
         if isinstance(age_hours, (int, float)):
             freshness = max(0.0, min(1.0, (72.0 - float(age_hours)) / 72.0))
-        uri_bonus = 0.2 if self._safe_text(item.get("magnet_url") or item.get("torrent_url")) else 0.0
+        uri_bonus = 0.2 if bool(item.get("has_transfer_uri")) else 0.0
         return (relevance * 5.0) + (math.log1p(seeders) * 1.4) + freshness + uri_bonus
 
     def _explain_strength(self, item: Dict[str, Any], sort_by: str, query_tokens: List[str]) -> str:
@@ -1069,7 +1162,10 @@ class JackettSearchPlugin(ToolPlugin):
             base = f"Found {len(results)} Jackett results"
         if query:
             base += f" for '{query}'"
-        base += f" across {idx_count} indexer(s) ({scope_text} scope)."
+        if scope_text == "all" and idx_count == 0:
+            base += " across Jackett all scope (indexer metadata unavailable)."
+        else:
+            base += f" across {idx_count} indexer(s) ({scope_text} scope)."
         top_bits = [self._safe_text(top.get("title"), "Top result")]
         if int(top.get("seeders") or 0) > 0:
             top_bits.append(f"{int(top.get('seeders') or 0)} seeders")
@@ -1077,7 +1173,18 @@ class JackettSearchPlugin(ToolPlugin):
             top_bits.append(f"from {top.get('indexer')}")
         if self._safe_text(top.get("publish_date")):
             top_bits.append("newer-ranked")
-        return f"{base} Top result: {', '.join(top_bits)}."
+        preview = self._top_result_preview(results, limit=10)
+        if not preview:
+            return f"{base} Top result: {', '.join(top_bits)}."
+        lines = [f"{base} Top result: {', '.join(top_bits)}.", "Top 10 (use result_id to select):"]
+        for row in preview:
+            transfer = row.get("transfer_uri") or "no transfer URI"
+            lines.append(
+                f"{row.get('rank')}. [{row.get('result_id')}] {row.get('title')} | "
+                f"{row.get('seeders')} seeders | {row.get('size') or '?'} | "
+                f"{row.get('indexer') or 'unknown'} | {transfer}"
+            )
+        return "\n".join(lines)
 
     def _cache_results(self, payload: Dict[str, Any]) -> None:
         try:
@@ -1264,7 +1371,7 @@ class JackettSearchPlugin(ToolPlugin):
         target = self._safe_text(plan.get("target_downloader"), "downloader")
         magnet = self._safe_text(selected.get("magnet_url"))
         torrent_url = self._safe_text(selected.get("torrent_url"))
-        preferred_uri = magnet or torrent_url
+        preferred_uri, preferred_type = self._preferred_transfer_uri(selected)
         if not preferred_uri:
             return action_failure(
                 code="no_transfer_uri",
@@ -1276,6 +1383,7 @@ class JackettSearchPlugin(ToolPlugin):
             "target_downloader": target,
             "result_id": selected.get("id"),
             "preferred_uri": preferred_uri,
+            "preferred_uri_type": preferred_type,
             "available_uris": {"magnet": magnet, "torrent": torrent_url},
             "payload": {
                 "title": selected.get("title"),
@@ -1284,6 +1392,8 @@ class JackettSearchPlugin(ToolPlugin):
                 "details_url": selected.get("details_url"),
                 "magnet_url": magnet,
                 "torrent_url": torrent_url,
+                "transfer_uri": preferred_uri,
+                "transfer_type": preferred_type,
                 "size_bytes": selected.get("size_bytes"),
                 "seeders": selected.get("seeders"),
                 "leechers": selected.get("leechers"),
@@ -1406,6 +1516,7 @@ class JackettSearchPlugin(ToolPlugin):
             "results": ranked,
             "missing_indexers": missing,
             "warnings": warnings[:10],
+            "top_results": self._top_result_preview(ranked, limit=10),
             "ranking": {
                 "sort_by": self._normalize_sort_by(plan.get("sort_by")),
                 "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
@@ -1437,8 +1548,8 @@ class JackettSearchPlugin(ToolPlugin):
             data=payload,
             summary_for_user=summary,
             say_hint=(
-                "Summarize ranked Jackett results, explain the strongest match, and mention "
-                "that results include magnet/torrent URLs for downloader handoff."
+                "Summarize ranked Jackett results and list the top 10 with result_id, seeders, size, indexer, "
+                "and transfer URI (magnet or torrent URL) so the user can select one for downloader handoff."
             ),
             suggested_followups=[
                 "Want me to sort these by newest or seeders?",
