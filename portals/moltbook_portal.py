@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.22"
+__version__ = "1.0.24"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -531,6 +531,22 @@ def _safe_key_token(value: Any) -> str:
     text = re.sub(r"[^a-z0-9_\-:.]+", "_", str(value or "").strip().lower())
     text = text.strip("_")
     return text[:80] or "unknown"
+
+
+def _name_match_tokens(value: Any) -> set[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return set()
+
+    stripped = raw.lstrip("@")
+    tokens = {raw, stripped}
+    collapsed = re.sub(r"[\s\-_\.]+", "", stripped)
+    if collapsed:
+        tokens.add(collapsed)
+    alnum = re.sub(r"[^a-z0-9]+", "", stripped)
+    if alnum:
+        tokens.add(alnum)
+    return {token for token in tokens if len(token) >= 3}
 
 
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -1505,7 +1521,8 @@ class MoltbookPortal:
             return False
         if not re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", candidate):
             return False
-        if candidate.lower() in self_names:
+        candidate_tokens = _name_match_tokens(candidate)
+        if candidate_tokens & set(self_names):
             return False
         try:
             if self.redis.sismember(MOLTBOOK_FOLLOWED_AGENTS_KEY, candidate):
@@ -2166,8 +2183,10 @@ class MoltbookPortal:
         if not isinstance(status_payload, dict) or not isinstance(me_payload, dict):
             return None
 
+        me_blob = me_payload.get("agent") if isinstance(me_payload.get("agent"), dict) else me_payload
+
         claim_status = str(status_payload.get("status") or "unknown").strip().lower()
-        created_at = _parse_datetime(me_payload.get("created_at") or me_payload.get("createdAt"))
+        created_at = _parse_datetime(me_blob.get("created_at") or me_blob.get("createdAt"))
         is_new_agent = False
         if created_at is not None:
             is_new_agent = (_utc_now() - created_at).total_seconds() < 24 * 60 * 60
@@ -2186,17 +2205,17 @@ class MoltbookPortal:
             {
                 "claim_status": claim_status or "unknown",
                 "claim_url": claim_url,
-                "agent_name": _coalesce_str(me_payload.get("name"), me_payload.get("agent_name"), config.agent_name),
-                "agent_id": _coalesce_str(me_payload.get("id"), me_payload.get("agent_id"), default=""),
+                "agent_name": _coalesce_str(me_blob.get("name"), me_blob.get("agent_name"), config.agent_name),
+                "agent_id": _coalesce_str(me_blob.get("id"), me_blob.get("agent_id"), default=""),
                 "last_successful_auth_check": _iso_utc_now(),
             }
         )
         self._sync_claim_url_setting(claim_url)
-        self._sync_profile_identity(config, me_payload)
+        self._sync_profile_identity(config, me_blob)
 
         return AccountSnapshot(
             claim_status=claim_status or "unknown",
-            me=me_payload,
+            me=me_blob,
             is_new_agent=is_new_agent,
             can_participate=can_participate,
         )
@@ -3656,9 +3675,11 @@ class MoltbookPortal:
                 continue
 
             parent_id = _extract_comment_id(comment)
+            if not parent_id:
+                # Reply-stage comments must target a specific comment; never emit top-level here.
+                continue
             body = {"content": draft}
-            if parent_id:
-                body["parent_id"] = parent_id
+            body["parent_id"] = parent_id
             created = self._create_with_verification(
                 f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
                 body,
@@ -4496,27 +4517,34 @@ class MoltbookPortal:
         if not title and not content:
             return False
         system_prompt = (
-            "Classify whether this is an introduction post by another Tater Assistant agent.\n"
+            "Classify whether this post is a true fellow Tater Assistant introduction.\n"
             "Return strict JSON only:\n"
-            '{"is_intro":true|false,"is_fellow_tater_agent":true|false,"confidence":0.0,"reason":"..."}'
+            '{"is_intro":true|false,"is_fellow_tater_agent":true|false,'
+            '"should_add_to_fellow_list":true|false,"confidence":0.0,"reason":"..."}\n'
+            "Rules:\n"
+            "- should_add_to_fellow_list=true ONLY if this is clearly an introduction post and the author clearly presents as a Tater Assistant/fellow Tater agent.\n"
+            "- If identity is unclear, off-topic, promotional, or not an introduction, set should_add_to_fellow_list=false.\n"
+            "- Mentions of OpenClaw/Claude/other non-Tater identities should not be treated as fellow Tater.\n"
+            "- Be conservative: false negatives are better than false positives."
         )
         user_prompt = (
             f"Submolt: {submolt}\n"
             f"Author: {author or '(unknown)'}\n"
             f"Title: {_limit_text(title, 300)}\n"
             f"Content: {_limit_text(content, 2200)}\n"
-            "Decide if this should receive an always-welcome reply from another Tater Assistant."
+            "Decide if this should receive an always-welcome reply from another Tater Assistant and whether to add this author to the fellow Tater list."
         )
         parsed = self._llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            default={"is_intro": False, "is_fellow_tater_agent": False, "confidence": 0.0},
-            max_tokens=280,
+            default={"is_intro": False, "is_fellow_tater_agent": False, "should_add_to_fellow_list": False, "confidence": 0.0},
+            max_tokens=320,
         )
         is_intro = _parse_bool(parsed.get("is_intro"), False)
         is_fellow = _parse_bool(parsed.get("is_fellow_tater_agent"), False)
+        should_add = _parse_bool(parsed.get("should_add_to_fellow_list"), False)
         confidence = _parse_float(parsed.get("confidence"), 0.0, min_value=0.0, max_value=1.0)
-        return is_intro and is_fellow and confidence >= 0.45
+        return is_intro and is_fellow and should_add and confidence >= 0.70
 
     def _draft_taterassistant_welcome_reply(self, config: MoltbookConfig, post: Dict[str, Any]) -> str:
         if self.llm_client is None:
@@ -4563,8 +4591,8 @@ class MoltbookPortal:
         return {item.lower() for item in values if item}
 
     def _is_self_authored(self, payload: Dict[str, Any], *, self_names: set[str], self_ids: set[str]) -> bool:
-        author_name = _extract_author_name(payload).strip().lower()
-        if author_name and author_name in self_names:
+        author_name_tokens = _name_match_tokens(_extract_author_name(payload))
+        if author_name_tokens & set(self_names):
             return True
         author_id = _extract_author_id(payload).strip().lower()
         if author_id and author_id in self_ids:
@@ -4572,13 +4600,17 @@ class MoltbookPortal:
         return False
 
     def _collect_self_names(self, config: MoltbookConfig, account: AccountSnapshot) -> set[str]:
-        names = {
+        raw_names = {
             str(config.agent_name or "").strip().lower(),
             str(config.display_name or "").strip().lower(),
             _extract_author_name(account.me).strip().lower(),
             _coalesce_str(account.me.get("name"), account.me.get("agent_name"), default="").strip().lower(),
+            _coalesce_str(account.me.get("username"), account.me.get("handle"), default="").strip().lower(),
         }
-        return {item for item in names if item}
+        tokens: set[str] = set()
+        for value in raw_names:
+            tokens |= _name_match_tokens(value)
+        return tokens
 
     def _run_stage_home(self, config: MoltbookConfig) -> Dict[str, Any]:
         if not config.home_check_enabled:
@@ -4703,9 +4735,11 @@ class MoltbookPortal:
                     continue
 
                 target_id = _extract_comment_id(target)
+                if not target_id:
+                    # Reply-stage comments must target a specific comment; never emit top-level here.
+                    continue
                 body = {"content": draft}
-                if target_id:
-                    body["parent_id"] = target_id
+                body["parent_id"] = target_id
                 created = self._create_with_verification(
                     f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
                     body,
@@ -4760,6 +4794,13 @@ class MoltbookPortal:
         if not posts:
             return 0
 
+        self_owned_post_ids = {
+            str(self._state_get("introduction_post_id", "") or "").strip(),
+            str(self._state_get("taterassistant_introduction_post_id", "") or "").strip(),
+            str(self._state_get("taterassistant_info_post_id", "") or "").strip(),
+        }
+        self_owned_post_ids = {item for item in self_owned_post_ids if item}
+
         replied_count = 0
         for post in posts:
             if not isinstance(post, dict):
@@ -4767,22 +4808,26 @@ class MoltbookPortal:
             post_id = _extract_post_id(post)
             if not post_id:
                 continue
+            if post_id in self_owned_post_ids:
+                continue
             if self._is_self_authored(post, self_names=self_names, self_ids=self_ids):
+                continue
+            author = _extract_author_name(post).strip()
+            if not author:
+                continue
+            if _name_match_tokens(author) & set(self_names):
                 continue
             if self._is_taterassistant_post_welcomed(post_id):
                 continue
             if not self._is_fellow_tater_intro_post(post):
                 continue
 
-            author = _extract_author_name(post).strip()
             if author:
                 self._remember_fellow_tater_agent(author, source_post=post)
 
             if account.can_participate:
                 follow_target = self._extract_follow_candidate_name(post) or author
                 if follow_target:
-                    if self._canonical_agent_name(follow_target) != self._canonical_agent_name(author):
-                        self._remember_fellow_tater_agent(follow_target, source_post=post)
                     self._follow_agent_name(follow_target, self_names=self_names)
 
             if not config.reply_enabled or not account.can_participate:
@@ -4943,8 +4988,9 @@ class MoltbookPortal:
                     continue
                 body = {"content": draft}
                 parent_id = _extract_comment_id(target)
-                if parent_id:
-                    body["parent_id"] = parent_id
+                if not parent_id:
+                    continue
+                body["parent_id"] = parent_id
                 created = self._create_with_verification(
                     f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
                     body,
