@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.25"
+__version__ = "1.0.27"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -42,6 +42,8 @@ MOLTBOOK_HOST = "www.moltbook.com"
 MOLTBOOK_SETTINGS_KEY = "moltbook_portal_settings"
 MOLTBOOK_STATE_KEY = "tater:moltbook:state"
 MOLTBOOK_VERIFICATION_ATTEMPTS_KEY = "tater:moltbook:verification:attempts"
+MOLTBOOK_VERIFICATION_ATTEMPT_COUNT_PREFIX = "tater:moltbook:verification:attempt_count:"
+MOLTBOOK_VERIFICATION_FAILED_ANSWERS_PREFIX = "tater:moltbook:verification:failed_answers:"
 MOLTBOOK_UPVOTED_POSTS_KEY = "tater:moltbook:upvoted_posts"
 MOLTBOOK_UPVOTED_COMMENTS_KEY = "tater:moltbook:upvoted_comments"
 MOLTBOOK_FOLLOWED_AGENTS_KEY = "tater:moltbook:followed_agents"
@@ -88,6 +90,8 @@ MAX_UPVOTES_PER_TICK = 4
 MAX_FOLLOWS_PER_TICK = 1
 MAX_SUBSCRIPTIONS_PER_TICK = 2
 MAX_REPLY_PER_TICK = 6
+MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
+VERIFICATION_TRACKING_TTL_SEC = 24 * 60 * 60
 
 CURIOSITY_SEED_CATEGORIES = [
     "architecture",
@@ -1036,6 +1040,13 @@ class MoltbookPortal:
                 "taterassistant_info_posted_at",
                 "taterassistant_info_post_pinned",
                 "taterassistant_info_pin_attempted_at",
+                "verification_pending_code",
+                "verification_pending_expires_at",
+                "verification_pending_detected_at",
+                "verification_pending_attempt_count",
+                "verification_pending_last_answer",
+                "verification_pending_last_error",
+                "verification_pending_challenge_excerpt",
             )
         except Exception:
             pass
@@ -1986,44 +1997,55 @@ class MoltbookPortal:
                 return str(parsed.get("text") or "").strip()
             return text
 
-    def _format_verification_answer(self, value: Any) -> Optional[str]:
-        num: Optional[float] = None
+    def _normalize_verification_answer(self, value: Any, *, mode: str = "auto") -> Optional[str]:
         if isinstance(value, bool) or value is None:
             return None
-        if isinstance(value, (int, float)):
-            num = float(value)
-        else:
-            text = str(value).strip()
-            while text and text[-1] in {".", ",", ";", ":", "!", "?"}:
-                text = text[:-1].rstrip()
-            if not text:
-                return None
+
+        text = str(value).strip()
+        while text and text[-1] in {".", ",", ";", ":", "!", "?"}:
+            text = text[:-1].rstrip()
+        if not text:
+            return None
+
+        mode_token = str(mode or "auto").strip().lower()
+        if mode_token in {"numeric_2dp", "numeric", "auto"}:
             try:
                 num = float(text)
             except Exception:
+                num = None
+            if num is not None and num == num and num not in (float("inf"), float("-inf")):
+                if mode_token in {"numeric_2dp", "auto"}:
+                    return f"{num:.2f}"
+                return str(num)
+            if mode_token in {"numeric_2dp", "numeric"}:
                 return None
 
-        if num is None or num != num or num in (float("inf"), float("-inf")):
-            return None
-        return f"{num:.2f}"
+        # Text-mode challenge support for future non-math verification prompts.
+        return _limit_text(text, 240)
 
-    def _solve_verification_challenge_with_llm(self, challenge_text: str) -> Optional[str]:
+    def _solve_verification_challenge_with_llm(self, challenge_text: str, instructions: str = "") -> Optional[str]:
         if self.llm_client is None:
             return None
         challenge = str(challenge_text or "").strip()
         if not challenge:
             return None
+        guide = str(instructions or "").strip()
 
         system_prompt = (
-            "You solve Moltbook verification math challenges.\n"
-            "Return strict JSON only with shape: {\"answer\":\"15.00\"}\n"
+            "You solve Moltbook verification challenges.\n"
+            "Return strict JSON only with shape: {\"answer\":\"...\",\"answer_mode\":\"numeric_2dp|numeric|text\"}\n"
             "Rules:\n"
             "- Parse obfuscated text carefully.\n"
-            "- Solve the math exactly.\n"
-            "- answer must be numeric formatted to 2 decimals.\n"
+            "- Follow the challenge instructions exactly.\n"
+            "- For numeric/math answers or when instructions demand decimals, use answer_mode=\"numeric_2dp\".\n"
+            "- For other challenge types that require non-numeric answers, use answer_mode=\"text\".\n"
             "- No explanation, no extra keys."
         )
-        user_prompt = f"Challenge:\n{challenge}"
+        user_prompt = (
+            f"Challenge:\n{challenge}\n\n"
+            f"Instructions:\n{guide or '(none)'}\n\n"
+            "Provide the final answer now."
+        )
         parsed = self._llm_json(system_prompt=system_prompt, user_prompt=user_prompt, default={}, max_tokens=200)
         raw_answer = _coalesce_str(
             parsed.get("answer") if isinstance(parsed, dict) else "",
@@ -2032,10 +2054,120 @@ class MoltbookPortal:
             parsed.get("number") if isinstance(parsed, dict) else "",
             default="",
         )
-        return self._format_verification_answer(raw_answer)
+        answer_mode = _coalesce_str(
+            parsed.get("answer_mode") if isinstance(parsed, dict) else "",
+            parsed.get("mode") if isinstance(parsed, dict) else "",
+            default="auto",
+        )
+        return self._normalize_verification_answer(raw_answer, mode=answer_mode)
 
-    def _solve_verification_challenge(self, challenge_text: str) -> Optional[str]:
-        return self._solve_verification_challenge_with_llm(challenge_text)
+    def _solve_verification_challenge(self, challenge_text: str, instructions: str = "") -> Optional[str]:
+        return self._solve_verification_challenge_with_llm(challenge_text, instructions)
+
+    def _verification_attempt_count_key(self, verification_code: str) -> str:
+        return f"{MOLTBOOK_VERIFICATION_ATTEMPT_COUNT_PREFIX}{_safe_key_token(verification_code)}"
+
+    def _verification_failed_answers_key(self, verification_code: str) -> str:
+        return f"{MOLTBOOK_VERIFICATION_FAILED_ANSWERS_PREFIX}{_safe_key_token(verification_code)}"
+
+    def _get_verification_attempt_count(self, verification_code: str) -> int:
+        code = str(verification_code or "").strip()
+        if not code:
+            return 0
+        key = self._verification_attempt_count_key(code)
+        try:
+            return _parse_int(self.redis.get(key), 0, min_value=0, max_value=999)
+        except Exception:
+            return 0
+
+    def _inc_verification_attempt_count(self, verification_code: str) -> int:
+        code = str(verification_code or "").strip()
+        if not code:
+            return 0
+        key = self._verification_attempt_count_key(code)
+        try:
+            value = int(self.redis.incr(key))
+            self.redis.expire(key, VERIFICATION_TRACKING_TTL_SEC)
+            return value
+        except Exception:
+            return 0
+
+    def _has_failed_verification_answer(self, verification_code: str, answer: str) -> bool:
+        code = str(verification_code or "").strip()
+        normalized_answer = str(answer or "").strip()
+        if not code or not normalized_answer:
+            return False
+        key = self._verification_failed_answers_key(code)
+        try:
+            return bool(self.redis.sismember(key, normalized_answer))
+        except Exception:
+            return False
+
+    def _mark_failed_verification_answer(self, verification_code: str, answer: str) -> None:
+        code = str(verification_code or "").strip()
+        normalized_answer = str(answer or "").strip()
+        if not code or not normalized_answer:
+            return
+        key = self._verification_failed_answers_key(code)
+        try:
+            self.redis.sadd(key, normalized_answer)
+            self.redis.expire(key, VERIFICATION_TRACKING_TTL_SEC)
+        except Exception:
+            return
+
+    def _clear_verification_challenge_tracking(self, verification_code: str) -> None:
+        code = str(verification_code or "").strip()
+        if not code:
+            return
+        try:
+            self.redis.delete(
+                self._verification_attempt_count_key(code),
+                self._verification_failed_answers_key(code),
+            )
+        except Exception:
+            pass
+
+    def _set_pending_verification_state(
+        self,
+        *,
+        verification_code: str,
+        challenge_text: str,
+        expires_at: str,
+        attempt_count: int,
+        last_answer: str = "",
+        last_error: str = "",
+    ) -> None:
+        code = str(verification_code or "").strip()
+        if not code:
+            return
+        self._state_set_many(
+            {
+                "verification_pending_code": code,
+                "verification_pending_expires_at": _limit_text(expires_at, 120),
+                "verification_pending_detected_at": _iso_utc_now(),
+                "verification_pending_attempt_count": str(max(0, int(attempt_count))),
+                "verification_pending_last_answer": _limit_text(last_answer, 120),
+                "verification_pending_last_error": _limit_text(last_error, 220),
+                "verification_pending_challenge_excerpt": _limit_text(challenge_text, 320),
+            }
+        )
+
+    def _clear_pending_verification_state(self, verification_code: str = "") -> None:
+        code = str(verification_code or "").strip()
+        current = str(self._state_get("verification_pending_code", "") or "").strip()
+        if code and current and code != current:
+            return
+        self._state_set_many(
+            {
+                "verification_pending_code": "",
+                "verification_pending_expires_at": "",
+                "verification_pending_detected_at": "",
+                "verification_pending_attempt_count": "0",
+                "verification_pending_last_answer": "",
+                "verification_pending_last_error": "",
+                "verification_pending_challenge_excerpt": "",
+            }
+        )
 
     def _record_verification_attempt(self, ok: bool) -> None:
         try:
@@ -2100,21 +2232,21 @@ class MoltbookPortal:
 
         return verification_required, verification_blob, selected_container
 
-    def _submit_verification(self, verification_code: str, answer: str) -> bool:
+    def _submit_verification(self, verification_code: str, answer: str) -> Tuple[bool, Dict[str, Any]]:
         payload = {"verification_code": str(verification_code or "").strip(), "answer": str(answer or "").strip()}
         if not payload["verification_code"] or not payload["answer"]:
-            return False
+            return False, {}
         result = self._api_post(f"{MOLTBOOK_API_PREFIX}verify", body=payload, auth_required=True)
         if not isinstance(result, dict):
-            return False
+            return False, {}
         if result.get("success") is True:
-            return True
+            return True, result
         status = str(result.get("verification_status") or result.get("status") or "").strip().lower()
         if status in {"verified", "success", "passed"}:
-            return True
+            return True, result
         if result.get("ok") is True or result.get("verified") is True:
-            return True
-        return False
+            return True, result
+        return False, result
 
     def _maybe_handle_verification(self, result: Any, *, config: MoltbookConfig) -> bool:
         if not isinstance(result, dict):
@@ -2150,20 +2282,135 @@ class MoltbookPortal:
             result.get("expires_at"),
             default="",
         )
+        instructions = _coalesce_str(
+            verification.get("instructions") if isinstance(verification, dict) else "",
+            container.get("instructions") if isinstance(container, dict) else "",
+            result.get("instructions"),
+            default="",
+        )
+        if not code:
+            self._record_verification_attempt(False)
+            return False
+
+        attempt_count = self._get_verification_attempt_count(code)
+        if attempt_count >= MAX_VERIFY_ATTEMPTS_PER_CHALLENGE:
+            logger.warning(
+                "[Moltbook] Verification skipped: max attempts reached for this challenge code (%s).",
+                _safe_key_token(code),
+            )
+            self._set_pending_verification_state(
+                verification_code=code,
+                challenge_text=challenge,
+                expires_at=expires_at,
+                attempt_count=attempt_count,
+                last_error="max_attempts_reached",
+            )
+            return False
+
+        self._set_pending_verification_state(
+            verification_code=code,
+            challenge_text=challenge,
+            expires_at=expires_at,
+            attempt_count=attempt_count,
+            last_error="awaiting_verify",
+        )
         if expires_at:
             expires_dt = _parse_datetime(expires_at)
             if expires_dt is not None and _utc_now() >= expires_dt:
                 logger.info("[Moltbook] Verification challenge already expired; skipping verify.")
                 self._record_verification_attempt(False)
+                self._set_pending_verification_state(
+                    verification_code=code,
+                    challenge_text=challenge,
+                    expires_at=expires_at,
+                    attempt_count=attempt_count,
+                    last_error="challenge_expired",
+                )
                 return False
 
-        answer = self._solve_verification_challenge(challenge)
-        if not code or not answer:
+        answer = self._solve_verification_challenge(challenge, instructions)
+        if not answer:
             self._record_verification_attempt(False)
+            self._set_pending_verification_state(
+                verification_code=code,
+                challenge_text=challenge,
+                expires_at=expires_at,
+                attempt_count=attempt_count,
+                last_error="solver_no_answer",
+            )
             return False
 
-        ok = self._submit_verification(code, answer)
+        if self._has_failed_verification_answer(code, answer):
+            logger.warning(
+                "[Moltbook] Verification skipped: duplicate previously-failed answer for challenge code (%s).",
+                _safe_key_token(code),
+            )
+            self._set_pending_verification_state(
+                verification_code=code,
+                challenge_text=challenge,
+                expires_at=expires_at,
+                attempt_count=attempt_count,
+                last_answer=answer,
+                last_error="duplicate_failed_answer",
+            )
+            return False
+
+        ok, verify_result = self._submit_verification(code, answer)
         self._record_verification_attempt(ok)
+        if ok:
+            self._clear_verification_challenge_tracking(code)
+            self._clear_pending_verification_state(code)
+            return True
+
+        self._mark_failed_verification_answer(code, answer)
+        attempt_count = self._inc_verification_attempt_count(code)
+
+        next_code = ""
+        next_challenge = challenge
+        next_expires_at = expires_at
+        error_text = ""
+        if isinstance(verify_result, dict):
+            error_text = _coalesce_str(verify_result.get("error"), verify_result.get("message"), default="")
+            _, nested_verification, nested_container = self._extract_verification_context(verify_result)
+            next_code = _coalesce_str(
+                nested_verification.get("verification_code") if isinstance(nested_verification, dict) else "",
+                nested_verification.get("code") if isinstance(nested_verification, dict) else "",
+                verify_result.get("verification_code"),
+                verify_result.get("code"),
+                default="",
+            ).strip()
+            if next_code:
+                next_challenge = _coalesce_str(
+                    nested_verification.get("challenge_text") if isinstance(nested_verification, dict) else "",
+                    nested_verification.get("challenge") if isinstance(nested_verification, dict) else "",
+                    nested_container.get("challenge_text") if isinstance(nested_container, dict) else "",
+                    nested_container.get("challenge") if isinstance(nested_container, dict) else "",
+                    next_challenge,
+                    default=next_challenge,
+                )
+                next_expires_at = _coalesce_str(
+                    nested_verification.get("expires_at") if isinstance(nested_verification, dict) else "",
+                    nested_container.get("expires_at") if isinstance(nested_container, dict) else "",
+                    next_expires_at,
+                    default=next_expires_at,
+                )
+
+        pending_code = next_code or code
+        pending_attempts = attempt_count if pending_code == code else self._get_verification_attempt_count(pending_code)
+        self._set_pending_verification_state(
+            verification_code=pending_code,
+            challenge_text=next_challenge,
+            expires_at=next_expires_at,
+            attempt_count=pending_attempts,
+            last_answer=answer,
+            last_error=error_text or "verify_failed",
+        )
+
+        if attempt_count >= MAX_VERIFY_ATTEMPTS_PER_CHALLENGE:
+            logger.warning(
+                "[Moltbook] Verification paused for challenge code (%s): attempt limit reached.",
+                _safe_key_token(code),
+            )
         return ok
 
     def _create_with_verification(self, path: str, payload: Dict[str, Any], *, config: MoltbookConfig) -> Optional[Dict[str, Any]]:
