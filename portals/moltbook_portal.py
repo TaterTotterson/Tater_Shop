@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.27"
+__version__ = "1.0.28"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -4728,71 +4728,9 @@ class MoltbookPortal:
         return {"title": title, "content": content}
 
     def _ensure_taterassistant_info_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
-        if not self._ensure_taterassistant_submolt(config, account):
-            return False
-
-        detail = self._fetch_taterassistant_submolt_details()
-        role = self._extract_taterassistant_role(detail)
-        if not role:
-            role = str(self._state_get("taterassistant_submolt_role", "") or "").strip().lower()
-        if role:
-            updates = {"taterassistant_submolt_role": role}
-            if role == "owner":
-                updates["taterassistant_submolt_owned"] = "true"
-                updates["taterassistant_submolt_created_by_this_agent"] = "true"
-            self._state_set_many(updates)
-
-        if not account.can_participate:
-            return False
-        self._ensure_taterassistant_submolt_settings(role)
-
-        if self._is_taterassistant_info_posted():
-            return False
-        if not config.posting_enabled:
-            return False
-
-        created_by_this_agent = _parse_bool(self._state_get("taterassistant_submolt_created_by_this_agent", "false"), False)
-        owns_submolt = _parse_bool(self._state_get("taterassistant_submolt_owned", "false"), False)
-        if not created_by_this_agent and not owns_submolt:
-            return False
-
-        allowed, reason = self._should_attempt_post(config, account)
-        if not allowed:
-            logger.info("[Moltbook] Tater community info post delayed: %s", reason)
-            return False
-
-        draft = self._draft_taterassistant_info_post(config)
-        if not isinstance(draft, dict):
-            logger.info("[Moltbook] Tater community info post delayed: info_draft_unavailable")
-            return False
-        title = _limit_text(draft.get("title"), 300)
-        content = _limit_text(draft.get("content"), 7000)
-        if not title or not content:
-            return False
-
-        payload = {
-            "submolt_name": MOLTBOOK_TATER_COMMUNITY_SUBMOLT,
-            "title": title,
-            "content": content,
-            "type": "text",
-        }
-        created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
-        if not isinstance(created, dict):
-            return False
-
-        post_id = _extract_post_id(created)
-        pinned = False
-        if role in {"owner", "moderator"} and post_id:
-            self._state_set("taterassistant_info_pin_attempted_at", _iso_utc_now())
-            pin_result = self._api_post(f"{MOLTBOOK_API_PREFIX}posts/{post_id}/pin", body={}, auth_required=True)
-            pinned = isinstance(pin_result, dict)
-
-        self._set_last_action_ts("post")
-        self._inc_daily_counter("posts")
-        self._remember_posted_content(title=title, content=content, submolt=MOLTBOOK_TATER_COMMUNITY_SUBMOLT, url="")
-        self._mark_taterassistant_info_posted(post_id=post_id, title=title, pinned=pinned)
-        logger.info("[Moltbook] Posted one-time community info in m/%s (pinned=%s).", MOLTBOOK_TATER_COMMUNITY_SUBMOLT, pinned)
-        return True
+        # Moderator/info-post foundation flow intentionally disabled.
+        # We keep one-time introductions only (m/introductions + m/taterassistant).
+        return False
 
     def _draft_taterassistant_introduction_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
         if self.llm_client is None:
@@ -5326,8 +5264,6 @@ class MoltbookPortal:
         self._ensure_introduction_post(config, account)
         # One-time first introduction post in m/taterassistant (create submolt if needed).
         self._ensure_taterassistant_introduction_post(config, account)
-        # One-time community foundation info post in m/taterassistant (pin when mod access allows).
-        self._ensure_taterassistant_info_post(config, account)
 
         # Stage 3: activity on own posts
         replied_count = 0
