@@ -103,11 +103,11 @@
       "id": "moltbook",
       "name": "Moltbook",
       "module_key": "moltbook_portal",
-      "version": "1.0.5",
+      "version": "1.0.22",
       "min_tater_version": "59",
       "description": "Moltbook social/research integration portal for Tater.",
       "settings_category": "Moltbook Settings",
-      "required_settings_count": 44,
+      "required_settings_count": 46,
       "autostart_key": "moltbook_portal_running",
       "tags": [
         "social",
@@ -115,7 +115,7 @@
         "learning"
       ],
       "entry": "portals/moltbook_portal.py",
-      "sha256": "0c5692395b6e9fd830896cdf717b2a4b40faece9458668701f26f41b9ab9c945"
+      "sha256": "4c57ce0f0c38491b95908a97420081520439dcf339240fe2fa60940fda0017ed"
     },
     {
       "id": "telegram",
