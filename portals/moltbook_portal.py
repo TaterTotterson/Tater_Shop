@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.24"
+__version__ = "1.0.25"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -692,6 +692,15 @@ def _extract_submolt(post: Dict[str, Any]) -> str:
     )
 
 
+def _normalize_submolt_slug(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if not token:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9\-]{1,29}", token):
+        return ""
+    return token
+
+
 def _flatten_comment_tree(value: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     stack: List[Dict[str, Any]] = [item for item in _as_list(value) if isinstance(item, dict)]
@@ -1194,6 +1203,8 @@ class MoltbookPortal:
 
         # Required community watchlist: keep taterassistant monitored.
         self._ensure_monitored_submolt(config, MOLTBOOK_TATER_COMMUNITY_SUBMOLT, persist=True)
+        # Keep preferred posting targets aligned with monitored communities (avoid getting stuck on only m/general).
+        self._sync_preferred_posting_submolts(config, persist=True)
 
         self.client.set_api_key(config.api_key)
         self.client.set_policy(
@@ -1204,13 +1215,13 @@ class MoltbookPortal:
         return config
 
     def _ensure_monitored_submolt(self, config: MoltbookConfig, submolt_name: str, *, persist: bool = False) -> None:
-        token = str(submolt_name or "").strip().lower()
+        token = _normalize_submolt_slug(submolt_name)
         if not token:
             return
         merged: List[str] = []
         seen = set()
         for item in config.submolts_to_monitor:
-            name = str(item or "").strip().lower()
+            name = _normalize_submolt_slug(item)
             if not name or name in seen:
                 continue
             seen.add(name)
@@ -1224,6 +1235,88 @@ class MoltbookPortal:
         if persist:
             try:
                 self.redis.hset(MOLTBOOK_SETTINGS_KEY, "submolts_to_monitor", ",".join(merged))
+            except Exception:
+                pass
+
+    def _ensure_preferred_posting_submolt(self, config: MoltbookConfig, submolt_name: str, *, persist: bool = False) -> None:
+        token = _normalize_submolt_slug(submolt_name)
+        if not token or token in set(config.submolts_to_avoid):
+            return
+
+        cap = max(3, min(20, int(config.submolt_monitor_max_count)))
+        merged: List[str] = []
+        seen = set()
+        for item in config.submolts_to_prefer_for_posting:
+            name = _normalize_submolt_slug(item)
+            if not name or name in seen or name in set(config.submolts_to_avoid):
+                continue
+            seen.add(name)
+            merged.append(name)
+
+        if token not in seen:
+            if token == "general":
+                if not merged:
+                    merged.append(token)
+            else:
+                merged.append(token)
+
+        if "general" in merged and len(merged) > 1:
+            merged = [name for name in merged if name != "general"] + ["general"]
+
+        merged = merged[:cap]
+        config.submolts_to_prefer_for_posting = merged
+        if persist:
+            try:
+                self.redis.hset(MOLTBOOK_SETTINGS_KEY, "submolts_to_prefer_for_posting", ",".join(merged))
+            except Exception:
+                pass
+
+    def _sync_preferred_posting_submolts(self, config: MoltbookConfig, *, persist: bool = False) -> None:
+        prefer: List[str] = []
+        seen = set()
+        avoid = set(config.submolts_to_avoid)
+        for item in config.submolts_to_prefer_for_posting:
+            token = _normalize_submolt_slug(item)
+            if not token or token in seen or token in avoid:
+                continue
+            seen.add(token)
+            prefer.append(token)
+
+        monitored_candidates: List[str] = []
+        for item in config.submolts_to_monitor:
+            token = _normalize_submolt_slug(item)
+            if not token or token in avoid:
+                continue
+            if token in monitored_candidates:
+                continue
+            monitored_candidates.append(token)
+
+        non_general_count = len([name for name in prefer if name != "general"])
+        for token in monitored_candidates:
+            if token == "general":
+                continue
+            if token in seen:
+                continue
+            if non_general_count >= 2:
+                break
+            seen.add(token)
+            prefer.append(token)
+            non_general_count += 1
+
+        if not prefer:
+            prefer = ["general"]
+        elif "general" in prefer and len(prefer) > 1:
+            prefer = [name for name in prefer if name != "general"] + ["general"]
+
+        cap = max(3, min(20, int(config.submolt_monitor_max_count)))
+        prefer = prefer[:cap]
+        if prefer == list(config.submolts_to_prefer_for_posting):
+            return
+
+        config.submolts_to_prefer_for_posting = prefer
+        if persist:
+            try:
+                self.redis.hset(MOLTBOOK_SETTINGS_KEY, "submolts_to_prefer_for_posting", ",".join(prefer))
             except Exception:
                 pass
 
@@ -2551,6 +2644,7 @@ class MoltbookPortal:
             except Exception:
                 pass
             config.submolts_to_monitor = merged
+            self._sync_preferred_posting_submolts(config, persist=True)
 
         self._state_set("submolt_monitor_last_refresh_ts", str(now))
         self._state_set("submolt_monitor_last_reason", _limit_text(decision.get("reason"), 260))
@@ -3116,9 +3210,7 @@ class MoltbookPortal:
         if not isinstance(draft, dict):
             return False
 
-        submolt = _coalesce_str(draft.get("submolt_name"), preferred, default="general").lower()
-        if submolt in config.submolts_to_avoid:
-            return False
+        submolt = _normalize_submolt_slug(_coalesce_str(draft.get("submolt_name"), preferred, default="general")) or "general"
 
         title = _limit_text(draft.get("title"), 300)
         content = _limit_text(draft.get("content"), 7000)
@@ -3126,6 +3218,17 @@ class MoltbookPortal:
             return False
 
         seed_topic = _coalesce_str(seed.get("seed_topic"), title, default=title)
+        submolt, fit_ok = self._enforce_post_submolt_fit(
+            config,
+            topic=seed_topic,
+            title=title,
+            content=content,
+            submolt=submolt,
+        )
+        if not fit_ok:
+            return False
+        if submolt in config.submolts_to_avoid:
+            return False
         if not self._anti_repeat_ok(config, title=title, content=content):
             return False
         if not self._semantic_duplicate_ok(config, topic=seed_topic, title=title):
@@ -3146,6 +3249,7 @@ class MoltbookPortal:
         self._inc_daily_counter("posts")
         self._state_set("last_post_submolt", submolt)
         self._remember_posted_content(title=title, content=content, submolt=submolt, url="")
+        self._record_successful_post_submolt(config, submolt=submolt, topic=seed_topic, title=title)
         self._mark_curiosity_seed_used(seed, post_id=post_id, title=title, submolt=submolt)
         self._push_json(
             LEARNING_IDEAS_KEY,
@@ -3375,6 +3479,64 @@ class MoltbookPortal:
             "suggested_submolt": suggested_submolt,
             "submolt_name": submolt,
         }
+
+    def _enforce_post_submolt_fit(
+        self,
+        config: MoltbookConfig,
+        *,
+        topic: str,
+        title: str,
+        content: str,
+        submolt: str,
+    ) -> Tuple[str, bool]:
+        candidate = _normalize_submolt_slug(submolt) or "general"
+        fit = self._classify_post_submolt_relevance(
+            {
+                "submolt_name": candidate,
+                "title": title,
+                "content": content,
+                "topic": topic,
+            }
+        )
+        if not _parse_bool(fit.get("is_clear_mismatch"), False):
+            return candidate, True
+
+        suggested = _normalize_submolt_slug(fit.get("suggested_submolt"))
+        reason = _coalesce_str(fit.get("reason"), default="")
+        if suggested and suggested not in set(config.submolts_to_avoid):
+            self._ensure_monitored_submolt(config, suggested, persist=True)
+            return suggested, True
+
+        logger.info(
+            "[Moltbook] Post skipped: submolt_topic_mismatch m/%s (%s)",
+            candidate,
+            reason or "no_suggested_submolt",
+        )
+        return candidate, False
+
+    def _record_successful_post_submolt(
+        self,
+        config: MoltbookConfig,
+        *,
+        submolt: str,
+        topic: str = "",
+        title: str = "",
+    ) -> None:
+        token = _normalize_submolt_slug(submolt)
+        if not token:
+            return
+        self._ensure_monitored_submolt(config, token, persist=True)
+        if token != "general" or not config.submolts_to_prefer_for_posting:
+            self._ensure_preferred_posting_submolt(config, token, persist=True)
+        self._sync_preferred_posting_submolts(config, persist=True)
+        self._state_set_many(
+            {
+                "posting_submolt_last_success": token,
+                "posting_submolt_last_success_at": _iso_utc_now(),
+                "posting_submolt_last_topic": _limit_text(topic, 240),
+                "posting_submolt_last_title": _limit_text(title, 300),
+            }
+        )
 
     def _build_reply_style(
         self,
@@ -3913,6 +4075,7 @@ class MoltbookPortal:
             recent_counts[submolt] = recent_counts.get(submolt, 0) + 1
 
         last_post_submolt = self._state_get("last_post_submolt", "").strip().lower()
+        recent_general_posts = int(recent_counts.get("general", 0))
 
         best_name = candidate_pool[0]
         best_score = float("-inf")
@@ -3926,6 +4089,9 @@ class MoltbookPortal:
                 score -= 0.80
             if name == "general":
                 score -= 0.15
+                score -= min(1.4, float(recent_general_posts) * 0.22)
+            else:
+                score += min(1.2, float(recent_general_posts) * 0.18)
             score += self.random.random() * 0.08
             if score > best_score:
                 best_score = score
@@ -3968,13 +4134,23 @@ class MoltbookPortal:
         if not draft:
             return False
 
-        submolt = _coalesce_str(draft.get("submolt_name"), preferred, default="general").lower()
-        if submolt in config.submolts_to_avoid:
-            return False
+        submolt = _normalize_submolt_slug(_coalesce_str(draft.get("submolt_name"), preferred, default="general")) or "general"
 
         title = _limit_text(draft.get("title"), 300)
         content = _limit_text(draft.get("content"), 7000)
         if not title or not content:
+            return False
+
+        submolt, fit_ok = self._enforce_post_submolt_fit(
+            config,
+            topic=topic,
+            title=title,
+            content=content,
+            submolt=submolt,
+        )
+        if not fit_ok:
+            return False
+        if submolt in config.submolts_to_avoid:
             return False
 
         if not self._anti_repeat_ok(config, title=title, content=content):
@@ -3996,6 +4172,7 @@ class MoltbookPortal:
         self._inc_daily_counter("posts")
         self._state_set("last_post_submolt", submolt)
         self._remember_posted_content(title=title, content=content, submolt=submolt, url="")
+        self._record_successful_post_submolt(config, submolt=submolt, topic=topic, title=title)
 
         if experiment_result and isinstance(experiment_result, dict):
             experiment_result["posted"] = True
