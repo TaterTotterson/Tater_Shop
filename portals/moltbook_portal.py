@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import redis
 import requests
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.47"
+__version__ = "1.0.49"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -96,6 +96,7 @@ MOLTBOOK_RSS_POSTED_ARTICLES_SET = "tater:moltbook:rss_articles:posted"
 MOLTBOOK_RSS_HISTORY_KEY = "tater:moltbook:rss_articles:history"
 MOLTBOOK_WORLD_NEWS_POSTED_SET = "tater:moltbook:world_news:posted"
 MOLTBOOK_WORLD_NEWS_HISTORY_KEY = "tater:moltbook:world_news:history"
+MOLTBOOK_POSTED_SOURCE_URLS_SET = "tater:moltbook:source_urls:posted"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -740,6 +741,83 @@ def _flatten_comment_tree(value: Any) -> List[Dict[str, Any]]:
 def _post_hash(title: str, content: str, url: str) -> str:
     blob = "\n".join([title.strip().lower(), content.strip().lower(), url.strip().lower()])
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _extract_urls_from_text(text: Any, *, max_urls: int = 20) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    matches = re.findall(r"https?://[^\s<>\]\)\"']+", raw, flags=re.IGNORECASE)
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in matches:
+        token = str(item or "").strip()
+        while token and token[-1] in {".", ",", ";", ":", "!", "?"}:
+            token = token[:-1]
+        if not token:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= max(1, int(max_urls)):
+            break
+    return out
+
+
+def _canonical_external_url(url: Any) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    scheme = str(parsed.scheme or "").strip().lower()
+    if scheme not in {"http", "https"}:
+        return ""
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return ""
+
+    port = parsed.port
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        netloc = f"{host}:{int(port)}"
+    else:
+        netloc = host
+
+    path = str(parsed.path or "").strip() or "/"
+    path = re.sub(r"/{2,}", "/", path)
+    if path != "/" and path.endswith("/"):
+        path = path[:-1]
+
+    drop_keys = {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "utm_id",
+        "utm_name",
+        "fbclid",
+        "gclid",
+        "mc_cid",
+        "mc_eid",
+        "igshid",
+    }
+    query_items = []
+    try:
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+            key_l = str(key or "").strip().lower()
+            if not key_l or key_l in drop_keys or key_l.startswith("utm_"):
+                continue
+            query_items.append((key_l, str(value or "").strip()))
+    except Exception:
+        query_items = []
+    query_items.sort(key=lambda pair: (pair[0], pair[1]))
+    query = urlencode(query_items, doseq=True) if query_items else ""
+
+    return urlunparse((scheme, netloc, path, "", query, ""))
 
 
 def _humanize_capability_id(value: str, *, uppercase_tokens: Optional[Iterable[str]] = None) -> str:
@@ -1496,8 +1574,13 @@ class MoltbookPortal:
         article_id = _coalesce_str(entry.get("id"), entry.get("guid"), default="")
         link = _coalesce_str(entry.get("link"), default="")
         title = _coalesce_str(entry.get("title"), default="")
-        published = _coalesce_str(entry.get("published"), entry.get("updated"), default="")
-        blob = "|".join([feed_url.strip().lower(), feed_title.strip().lower(), article_id, link, title, published])
+        canonical_link = _canonical_external_url(link)
+        if canonical_link:
+            blob = canonical_link
+            if article_id:
+                blob = f"{blob}|{article_id.strip().lower()}"
+        else:
+            blob = "|".join([feed_url.strip().lower(), feed_title.strip().lower(), article_id.strip().lower(), title.strip().lower()])
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
     def _fetch_rss_article_text(self, article_url: str) -> str:
@@ -1542,6 +1625,91 @@ class MoltbookPortal:
             return _limit_text(compact, 24000)
         except Exception:
             return ""
+
+    def _is_source_url_posted(self, source_url: str) -> bool:
+        canonical = _canonical_external_url(source_url)
+        if not canonical:
+            return False
+        try:
+            return bool(self.redis.sismember(MOLTBOOK_POSTED_SOURCE_URLS_SET, canonical))
+        except Exception:
+            return False
+
+    def _mark_source_url_posted(self, source_url: str) -> None:
+        canonical = _canonical_external_url(source_url)
+        if not canonical:
+            return
+        try:
+            self.redis.sadd(MOLTBOOK_POSTED_SOURCE_URLS_SET, canonical)
+        except Exception:
+            return
+
+    def _rss_article_recently_covered(
+        self,
+        config: MoltbookConfig,
+        *,
+        entry_title: str,
+        topic: str,
+        article_url: str,
+    ) -> bool:
+        canonical_url = _canonical_external_url(article_url)
+        if canonical_url and self._is_source_url_posted(canonical_url):
+            return True
+
+        query = _limit_text(_coalesce_str(entry_title, topic, default=""), 220)
+        if not query:
+            return False
+
+        payload = self._api_get(
+            f"{MOLTBOOK_API_PREFIX}search",
+            params={"q": query, "type": "posts", "limit": 30},
+            auth_required=True,
+        )
+        candidates = self._extract_posts(payload)
+        if not candidates:
+            return False
+
+        self_tokens: set[str] = set()
+        for value in (
+            config.agent_name,
+            config.display_name,
+            self._state_get("agent_name", ""),
+        ):
+            self_tokens |= _name_match_tokens(value)
+        if not self_tokens:
+            return False
+
+        now = _utc_now()
+        title_seed = _limit_text(entry_title, 400)
+        topic_seed = _limit_text(topic, 400)
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            author_tokens = _name_match_tokens(_extract_author_name(item))
+            if not (author_tokens & self_tokens):
+                continue
+
+            created_at = _parse_datetime(item.get("created_at") or item.get("createdAt"))
+            if created_at is not None:
+                age_days = (now - created_at).total_seconds() / 86400.0
+                if age_days > 45:
+                    continue
+
+            existing_title = _extract_post_title(item)
+            existing_content = _extract_post_content(item)
+            existing_urls = {_canonical_external_url(url) for url in _extract_urls_from_text(existing_content, max_urls=12)}
+            existing_urls = {url for url in existing_urls if url}
+            if canonical_url and canonical_url in existing_urls:
+                return True
+
+            similarity = max(
+                _jaccard(existing_title, title_seed),
+                _jaccard(existing_title, topic_seed),
+                _jaccard(f"{existing_title}\n{existing_content}", f"{title_seed}\n{topic_seed}"),
+            )
+            if similarity >= 0.44:
+                return True
+        return False
 
     def _latest_rss_candidates(self, *, max_feeds: int = 10, max_candidates: int = 16) -> List[Dict[str, Any]]:
         if feedparser is None:
@@ -1598,11 +1766,14 @@ class MoltbookPortal:
             )
             entry_ts = self._rss_entry_timestamp(first)
             uid = self._rss_entry_uid(feed_url=feed_url, feed_title=feed_title, entry=first)
+            canonical_link = _canonical_external_url(link)
             try:
                 if self.redis.sismember(MOLTBOOK_RSS_POSTED_ARTICLES_SET, uid):
                     continue
             except Exception:
                 pass
+            if canonical_link and self._is_source_url_posted(canonical_link):
+                continue
             out.append(
                 {
                     "uid": uid,
@@ -1610,6 +1781,7 @@ class MoltbookPortal:
                     "feed_title": _limit_text(feed_title, 180),
                     "entry_title": _limit_text(title, 260),
                     "entry_link": _limit_text(link, 1200),
+                    "canonical_link": _limit_text(canonical_link, 1200),
                     "entry_summary": _limit_text(summary, 800),
                     "entry_ts": entry_ts,
                     "last_ts": _parse_float(cfg.get("last_ts"), 0.0, min_value=0.0),
@@ -1663,6 +1835,11 @@ class MoltbookPortal:
             return None
         selected = candidates[selected_index]
         article_url = _coalesce_str(selected.get("entry_link"), default="")
+        canonical_article_url = _coalesce_str(selected.get("canonical_link"), default="")
+        if not canonical_article_url:
+            canonical_article_url = _canonical_external_url(article_url)
+        if canonical_article_url and self._is_source_url_posted(canonical_article_url):
+            return None
         article_text = self._fetch_rss_article_text(article_url)
         if len(article_text.strip()) < 400:
             return None
@@ -1703,6 +1880,13 @@ class MoltbookPortal:
             sub_hint = "general"
         if not topic or not summary_seed:
             return None
+        if self._rss_article_recently_covered(
+            config,
+            entry_title=_coalesce_str(selected.get("entry_title"), default=""),
+            topic=topic,
+            article_url=article_url,
+        ):
+            return None
         return {
             "source": "rss_article",
             "topic": topic,
@@ -1730,6 +1914,7 @@ class MoltbookPortal:
         token = str(uid or "").strip().lower()
         if not token:
             return
+        self._mark_source_url_posted(entry_link)
         try:
             self.redis.sadd(MOLTBOOK_RSS_POSTED_ARTICLES_SET, token)
         except Exception:
@@ -1802,6 +1987,8 @@ class MoltbookPortal:
 
         source_url = _coalesce_str(picked.get("source_url"), default="").strip()
         if not (source_url.startswith("http://") or source_url.startswith("https://")):
+            return None
+        if self._is_source_url_posted(source_url):
             return None
         headline = _coalesce_str(picked.get("headline"), default="")
         source_title = _coalesce_str(picked.get("source_title"), default="")
@@ -1878,6 +2065,7 @@ class MoltbookPortal:
         token = str(uid or "").strip().lower()
         if not token:
             return
+        self._mark_source_url_posted(source_url)
         try:
             self.redis.sadd(MOLTBOOK_WORLD_NEWS_POSTED_SET, token)
         except Exception:
@@ -1920,6 +2108,7 @@ class MoltbookPortal:
             self.redis.delete(MOLTBOOK_CAPABILITY_POSTED_SET)
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
             self.redis.delete(MOLTBOOK_WORLD_NEWS_POSTED_SET)
+            self.redis.delete(MOLTBOOK_POSTED_SOURCE_URLS_SET)
             self.redis.delete(MOLTBOOK_REPLIED_TARGETS_ZSET)
         except Exception:
             pass
@@ -3108,7 +3297,73 @@ class MoltbookPortal:
         # Text-mode challenge support for future non-math verification prompts.
         return _limit_text(text, 240)
 
-    def _solve_verification_challenge_with_llm(self, challenge_text: str, instructions: str = "") -> Optional[str]:
+    def _normalize_verification_mode(self, value: Any, *, default: str = "numeric_2dp") -> str:
+        token = str(value or "").strip().lower()
+        if token in {"numeric_2dp", "numeric2dp", "2dp", "decimal", "number", "numeric_decimal"}:
+            return "numeric_2dp"
+        if token in {"numeric", "number_raw", "float", "integer"}:
+            return "numeric"
+        if token in {"text", "string"}:
+            return "text"
+        return self._normalize_verification_mode(default, default="numeric_2dp") if token else "numeric_2dp"
+
+    def _normalize_verification_operation(self, value: Any) -> str:
+        token = str(value or "").strip().lower()
+        if token in {"add", "plus", "+", "sum", "addition"}:
+            return "add"
+        if token in {"sub", "subtract", "minus", "-", "difference", "decrease"}:
+            return "sub"
+        if token in {"mul", "multiply", "times", "*", "x", "product"}:
+            return "mul"
+        if token in {"div", "divide", "/", "quotient"}:
+            return "div"
+        return ""
+
+    def _compute_verification_answer_from_structure(
+        self,
+        *,
+        operation: Any,
+        operands: Any,
+        mode: str,
+    ) -> Optional[str]:
+        op = self._normalize_verification_operation(operation)
+        if not op:
+            return None
+
+        values: List[float] = []
+        for item in _as_list(operands):
+            if isinstance(item, bool) or item is None:
+                return None
+            raw = str(item).strip()
+            if not raw:
+                return None
+            try:
+                num = float(raw)
+            except Exception:
+                return None
+            if num != num or num in (float("inf"), float("-inf")):
+                return None
+            values.append(num)
+
+        if len(values) < 2:
+            return None
+
+        result = values[0]
+        for next_value in values[1:]:
+            if op == "add":
+                result += next_value
+            elif op == "sub":
+                result -= next_value
+            elif op == "mul":
+                result *= next_value
+            elif op == "div":
+                if next_value == 0:
+                    return None
+                result /= next_value
+
+        return self._normalize_verification_answer(result, mode=mode)
+
+    def _solve_verification_direct_with_llm(self, challenge_text: str, instructions: str = "", *, mode: str = "numeric_2dp") -> Optional[str]:
         if self.llm_client is None:
             return None
         challenge = str(challenge_text or "").strip()
@@ -3117,11 +3372,94 @@ class MoltbookPortal:
         guide = str(instructions or "").strip()
 
         system_prompt = (
+            "Solve this Moltbook verification challenge.\n"
+            "Return strict JSON only with shape: {\"answer\":\"...\"}\n"
+            "Rules:\n"
+            "- Parse obfuscated text carefully.\n"
+            "- Follow instructions exactly.\n"
+            "- Return only the final answer value in the answer field.\n"
+            "- No explanation, no extra keys."
+        )
+        user_prompt = (
+            f"Challenge:\n{challenge}\n\n"
+            f"Instructions:\n{guide or '(none)'}\n\n"
+            "Answer now."
+        )
+        parsed = self._llm_json(system_prompt=system_prompt, user_prompt=user_prompt, default={}, max_tokens=160)
+        raw_answer = _coalesce_str(
+            parsed.get("answer") if isinstance(parsed, dict) else "",
+            parsed.get("result") if isinstance(parsed, dict) else "",
+            parsed.get("value") if isinstance(parsed, dict) else "",
+            parsed.get("number") if isinstance(parsed, dict) else "",
+            default="",
+        )
+        return self._normalize_verification_answer(raw_answer, mode=mode)
+
+    def _select_verification_candidate_with_llm(
+        self,
+        *,
+        challenge_text: str,
+        instructions: str,
+        candidates: List[str],
+        mode: str,
+    ) -> Optional[str]:
+        if self.llm_client is None:
+            return None
+        unique: List[str] = []
+        for item in candidates:
+            token = str(item or "").strip()
+            if token and token not in unique:
+                unique.append(token)
+        if len(unique) <= 1:
+            return unique[0] if unique else None
+
+        choices = "\n".join([f"{idx + 1}. {value}" for idx, value in enumerate(unique)])
+        system_prompt = (
+            "Choose the correct answer candidate for this Moltbook verification challenge.\n"
+            "Return strict JSON only with shape: {\"selected_index\":N,\"selected_answer\":\"...\"}\n"
+            "Rules:\n"
+            "- selected_answer must be exactly one provided candidate.\n"
+            "- Do not invent a new answer.\n"
+            "- No explanation, no extra keys."
+        )
+        user_prompt = (
+            f"Challenge:\n{str(challenge_text or '').strip()}\n\n"
+            f"Instructions:\n{str(instructions or '').strip() or '(none)'}\n\n"
+            f"Candidates:\n{choices}\n\n"
+            "Select the single best candidate."
+        )
+        parsed = self._llm_json(system_prompt=system_prompt, user_prompt=user_prompt, default={}, max_tokens=140)
+
+        selected_answer = self._normalize_verification_answer(parsed.get("selected_answer"), mode=mode)
+        if selected_answer and selected_answer in set(unique):
+            return selected_answer
+
+        selected_idx_raw = _parse_int(parsed.get("selected_index"), 0, min_value=0, max_value=len(unique))
+        if selected_idx_raw > 0:
+            return unique[selected_idx_raw - 1]
+        return None
+
+    def _solve_verification_challenge_with_llm(self, challenge_text: str, instructions: str = "") -> Optional[str]:
+        if self.llm_client is None:
+            return None
+        challenge = str(challenge_text or "").strip()
+        if not challenge:
+            return None
+        guide = str(instructions or "").strip()
+        guide_lower = guide.lower()
+        mode_default = "numeric_2dp"
+        if any(token in guide_lower for token in ("text answer", "reply with text", "word answer", "non-numeric")):
+            mode_default = "text"
+
+        system_prompt = (
             "You solve Moltbook verification challenges.\n"
-            "Return strict JSON only with shape: {\"answer\":\"...\",\"answer_mode\":\"numeric_2dp|numeric|text\"}\n"
+            "Return strict JSON only with shape:\n"
+            "{\"answer\":\"...\",\"answer_mode\":\"numeric_2dp|numeric|text\",\"operation\":\"add|sub|mul|div|none\",\"operands\":[...],\"confidence\":0.0}\n"
             "Rules:\n"
             "- Parse obfuscated text carefully.\n"
             "- Follow the challenge instructions exactly.\n"
+            "- If challenge is arithmetic, set operation and operands in exact calculation order.\n"
+            "- For number words (e.g. 'twenty three'), convert them into numeric operands.\n"
             "- For numeric/math answers or when instructions demand decimals, use answer_mode=\"numeric_2dp\".\n"
             "- For other challenge types that require non-numeric answers, use answer_mode=\"text\".\n"
             "- No explanation, no extra keys."
@@ -3139,12 +3477,57 @@ class MoltbookPortal:
             parsed.get("number") if isinstance(parsed, dict) else "",
             default="",
         )
-        answer_mode = _coalesce_str(
+        answer_mode_raw = _coalesce_str(
             parsed.get("answer_mode") if isinstance(parsed, dict) else "",
             parsed.get("mode") if isinstance(parsed, dict) else "",
-            default="auto",
+            default=mode_default,
         )
-        return self._normalize_verification_answer(raw_answer, mode=answer_mode)
+        answer_mode = self._normalize_verification_mode(answer_mode_raw, default=mode_default)
+        structured_answer = self._normalize_verification_answer(raw_answer, mode=answer_mode)
+        structured_computed_answer = self._compute_verification_answer_from_structure(
+            operation=parsed.get("operation") if isinstance(parsed, dict) else "",
+            operands=parsed.get("operands") if isinstance(parsed, dict) else [],
+            mode=answer_mode,
+        )
+        independent_direct_answer = self._solve_verification_direct_with_llm(
+            challenge,
+            guide,
+            mode=answer_mode,
+        )
+
+        candidates_raw = [
+            structured_computed_answer,
+            structured_answer,
+            independent_direct_answer,
+        ]
+        candidate_counts: Dict[str, int] = {}
+        ordered_candidates: List[str] = []
+        for candidate in candidates_raw:
+            token = str(candidate or "").strip()
+            if not token:
+                continue
+            candidate_counts[token] = candidate_counts.get(token, 0) + 1
+            if token not in ordered_candidates:
+                ordered_candidates.append(token)
+
+        if not ordered_candidates:
+            return None
+
+        winning_answer = max(ordered_candidates, key=lambda item: candidate_counts.get(item, 0))
+        if candidate_counts.get(winning_answer, 0) >= 2:
+            return winning_answer
+
+        selected = self._select_verification_candidate_with_llm(
+            challenge_text=challenge,
+            instructions=guide,
+            candidates=ordered_candidates,
+            mode=answer_mode,
+        )
+        if selected:
+            return selected
+
+        logger.info("[Moltbook] Verification solver no-consensus; delaying verify for this challenge.")
+        return None
 
     def _solve_verification_challenge(self, challenge_text: str, instructions: str = "") -> Optional[str]:
         return self._solve_verification_challenge_with_llm(challenge_text, instructions)
@@ -4899,6 +5282,19 @@ class MoltbookPortal:
             self.redis.sadd(MOLTBOOK_POST_HASHES_KEY, digest)
         except Exception:
             pass
+
+        candidate_urls: List[str] = []
+        if url:
+            candidate_urls.append(url)
+        candidate_urls.extend(_extract_urls_from_text(content, max_urls=24))
+        seen_urls: set[str] = set()
+        for raw_url in candidate_urls:
+            canonical = _canonical_external_url(raw_url)
+            if not canonical or canonical in seen_urls:
+                continue
+            seen_urls.add(canonical)
+            self._mark_source_url_posted(canonical)
+
         now_iso = _iso_utc_now()
         self._push_json(
             MOLTBOOK_RECENT_POSTS_KEY,
