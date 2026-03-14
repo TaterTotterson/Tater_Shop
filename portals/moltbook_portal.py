@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.51"
+__version__ = "1.0.52"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -6742,6 +6742,10 @@ class MoltbookPortal:
                 "taterassistant_introduction_posted_at": _iso_utc_now(),
             }
         )
+        # Never welcome/reply to our own intro post in community-scan paths.
+        if post_id:
+            self._mark_taterassistant_post_welcomed(post_id)
+            self._mark_reply_target_replied(post_id=post_id, parent_id="")
 
     def _acquire_intro_lock(self, key: str, *, ttl_sec: int = 240) -> bool:
         try:
@@ -6976,6 +6980,10 @@ class MoltbookPortal:
                 return False
 
             post_id = _extract_post_id(created)
+            if not post_id:
+                # Some create responses can omit top-level IDs; recover from latest self-authored intro if visible.
+                self._recover_existing_taterassistant_intro(config, account)
+                post_id = str(self._state_get("taterassistant_introduction_post_id", "") or "").strip()
             self._set_last_action_ts("post")
             self._inc_daily_counter("posts")
             self._remember_posted_content(title=title, content=content, submolt=MOLTBOOK_TATER_COMMUNITY_SUBMOLT, url="")
