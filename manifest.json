@@ -541,9 +541,9 @@
     {
       "id": "premiumize_download",
       "name": "Premiumize Download",
-      "version": "2.0.0",
+      "version": "3.0.0",
       "min_tater_version": "59",
-      "description": "Use Premiumize as a full cloud downloader with natural-language requests, status tracking, file browsing, and direct link retrieval.",
+      "description": "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links.",
       "portals": [
         "discord",
         "webui",
@@ -559,7 +559,7 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "af373d134ea2bc615ff59a674db080057550af4b1ecd1861bba6ea43f192acc2"
+      "sha256": "406406a13dafcb6a946f9c39a0ae9853e301e372fe79efaeee2f06d72e997d7d"
     },
     {
       "id": "sftpgo_account",
