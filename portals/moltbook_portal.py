@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.37"
+__version__ = "1.0.38"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -130,13 +130,6 @@ CURIOSITY_SEED_CATEGORIES = [
 PORTAL_SETTINGS = {
     "category": "Moltbook Settings",
     "required": {
-        "enabled": {
-            "label": "Enable Moltbook Portal",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Master toggle for the Moltbook portal loop.",
-        },
         "claim_url": {
             "label": "Claim Link",
             "type": "string",
@@ -177,25 +170,11 @@ PORTAL_SETTINGS = {
             "default": "false",
             "description": "If true, portal may call setup-owner-email when owner_email is set.",
         },
-        "auto_register_if_missing": {
-            "label": "Auto Register If Missing Key",
-            "type": "select",
-            "options": ["false", "true"],
-            "default": "false",
-            "description": "If true, portal will register an agent when no key is configured.",
-        },
         "activity_interval_minutes": {
             "label": "Activity Interval Minutes",
             "type": "number",
             "default": 30,
             "description": "How often the check-in loop should run.",
-        },
-        "heartbeat_enabled": {
-            "label": "Heartbeat Enabled",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Fetch /heartbeat.md before periodic check-ins.",
         },
         "home_check_enabled": {
             "label": "Home Check Enabled",
@@ -231,20 +210,6 @@ PORTAL_SETTINGS = {
             "options": ["true", "false"],
             "default": "true",
             "description": "Allow creating comments/replies.",
-        },
-        "voting_enabled": {
-            "label": "Voting Enabled",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Allow upvoting useful posts/comments.",
-        },
-        "follow_enabled": {
-            "label": "Follow Enabled",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Allow follow actions.",
         },
         "subscribe_enabled": {
             "label": "Subscribe Enabled",
@@ -2086,8 +2051,13 @@ class MoltbookPortal:
         try:
             self.redis.hdel(
                 MOLTBOOK_SETTINGS_KEY,
+                "enabled",
                 "agent_name",
                 "display_name",
+                "auto_register_if_missing",
+                "heartbeat_enabled",
+                "voting_enabled",
+                "follow_enabled",
                 "strict_rate_limit_mode",
                 "conservative_new_agent_mode",
                 "use_www_only_enforcement",
@@ -2109,23 +2079,23 @@ class MoltbookPortal:
         )
 
         config = MoltbookConfig(
-            enabled=_parse_bool(raw.get("enabled"), True),
+            enabled=True,
             api_key=api_key,
             agent_name=agent_name,
             display_name=display_name,
             profile_description=profile_description,
             owner_email=_coalesce_str(raw.get("owner_email"), default=""),
             owner_email_setup_enabled=_parse_bool(raw.get("owner_email_setup_enabled"), False),
-            auto_register_if_missing=_parse_bool(raw.get("auto_register_if_missing"), False),
+            auto_register_if_missing=True,
             activity_interval_minutes=_parse_int(raw.get("activity_interval_minutes"), 30, min_value=5, max_value=360),
-            heartbeat_enabled=_parse_bool(raw.get("heartbeat_enabled"), True),
+            heartbeat_enabled=True,
             home_check_enabled=_parse_bool(raw.get("home_check_enabled"), True),
             personalized_feed_enabled=_parse_bool(raw.get("personalized_feed_enabled"), True),
             broad_feed_enabled=_parse_bool(raw.get("broad_feed_enabled"), True),
             posting_enabled=_parse_bool(raw.get("posting_enabled"), True),
             reply_enabled=_parse_bool(raw.get("reply_enabled"), True),
-            voting_enabled=_parse_bool(raw.get("voting_enabled"), True),
-            follow_enabled=_parse_bool(raw.get("follow_enabled"), True),
+            voting_enabled=True,
+            follow_enabled=True,
             subscribe_enabled=_parse_bool(raw.get("subscribe_enabled"), True),
             discovery_enabled=_parse_bool(raw.get("discovery_enabled"), True),
             experiments_enabled=_parse_bool(raw.get("experiments_enabled"), True),
