@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.35"
+__version__ = "1.0.36"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -76,6 +76,7 @@ MOLTBOOK_HEARTBEAT_KEY = "lastMoltbookCheck"
 MOLTBOOK_OUTBOUND_COMMENTS_ZSET = "tater:moltbook:outbound_comments:zset"
 MOLTBOOK_OUTBOUND_COMMENT_PREFIX = "tater:moltbook:outbound_comment:"
 MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET = "tater:moltbook:handled_reply_comments:zset"
+MOLTBOOK_REPLIED_TARGETS_ZSET = "tater:moltbook:replied_targets:zset"
 MOLTBOOK_THREAD_REPLY_COUNT_PREFIX = "tater:moltbook:thread_reply_count:"
 MOLTBOOK_INTRO_POSTED_KEY = "tater:moltbook:introduction_posted"
 MOLTBOOK_TATER_COMMUNITY_SUBMOLT = "taterassistant"
@@ -1963,6 +1964,7 @@ class MoltbookPortal:
             self.redis.delete(MOLTBOOK_CAPABILITY_POSTED_SET)
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
             self.redis.delete(MOLTBOOK_WORLD_NEWS_POSTED_SET)
+            self.redis.delete(MOLTBOOK_REPLIED_TARGETS_ZSET)
         except Exception:
             pass
 
@@ -2493,6 +2495,55 @@ class MoltbookPortal:
             self.redis.zremrangebyscore(MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET, 0, cutoff)
         except Exception:
             return
+
+    def _reply_target_member(self, *, post_id: str, parent_id: str = "") -> str:
+        parent = str(parent_id or "").strip()
+        post = str(post_id or "").strip()
+        if parent:
+            return f"c:{_safe_key_token(parent)}"
+        if post:
+            return f"p:{_safe_key_token(post)}"
+        return ""
+
+    def _is_reply_target_replied(self, *, post_id: str, parent_id: str = "") -> bool:
+        member = self._reply_target_member(post_id=post_id, parent_id=parent_id)
+        if not member:
+            return False
+        try:
+            return self.redis.zscore(MOLTBOOK_REPLIED_TARGETS_ZSET, member) is not None
+        except Exception:
+            return False
+
+    def _mark_reply_target_replied(self, *, post_id: str, parent_id: str = "") -> None:
+        member = self._reply_target_member(post_id=post_id, parent_id=parent_id)
+        if not member:
+            return
+        now = time.time()
+        ttl_sec = 180 * 24 * 60 * 60
+        cutoff = now - ttl_sec
+        try:
+            self.redis.zadd(MOLTBOOK_REPLIED_TARGETS_ZSET, {member: now})
+            self.redis.zremrangebyscore(MOLTBOOK_REPLIED_TARGETS_ZSET, 0, cutoff)
+        except Exception:
+            return
+
+    def _sync_replied_targets_from_thread(
+        self,
+        *,
+        post_id: str,
+        flat_comments: List[Dict[str, Any]],
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> None:
+        if not post_id or not flat_comments:
+            return
+        for comment in flat_comments:
+            if not isinstance(comment, dict):
+                continue
+            if not self._is_self_authored(comment, self_names=self_names, self_ids=self_ids):
+                continue
+            parent_id = _extract_parent_comment_id(comment)
+            self._mark_reply_target_replied(post_id=post_id, parent_id=parent_id)
 
     def _canonical_agent_name(self, value: Any) -> str:
         return str(value or "").strip().lstrip("@").lower()
@@ -5228,6 +5279,13 @@ class MoltbookPortal:
             if cid and cid not in comment_by_id:
                 comment_by_id[cid] = comment
 
+        self._sync_replied_targets_from_thread(
+            post_id=post_id,
+            flat_comments=flat_comments,
+            self_names=self_names,
+            self_ids=self_ids,
+        )
+
         thread_reply_count = self._observe_thread_reply_count(
             post_id,
             flat_comments=flat_comments,
@@ -5247,6 +5305,8 @@ class MoltbookPortal:
             if self._is_self_authored(c, self_names=self_names, self_ids=self_ids):
                 continue
             if self._is_reply_comment_handled(comment_id):
+                continue
+            if self._is_reply_target_replied(post_id=post_id, parent_id=comment_id):
                 continue
             if not self._is_direct_reply_to_self_content(
                 post=post_payload,
@@ -5306,6 +5366,8 @@ class MoltbookPortal:
             if not parent_id:
                 # Reply-stage comments must target a specific comment; never emit top-level here.
                 continue
+            if self._is_reply_target_replied(post_id=post_id, parent_id=parent_id):
+                continue
             body = {"content": draft}
             body["parent_id"] = parent_id
             created = self._create_with_verification(
@@ -5323,6 +5385,7 @@ class MoltbookPortal:
                     self_ids=self_ids,
                 )
                 self._mark_reply_comment_handled(parent_id)
+                self._mark_reply_target_replied(post_id=post_id, parent_id=parent_id)
                 thread_reply_count = self._record_thread_reply(post_id)
                 replied_any = True
                 self._set_last_action_ts("comment")
@@ -5584,10 +5647,18 @@ class MoltbookPortal:
 
             if not config.reply_enabled or not account.can_participate:
                 continue
+            if self._is_reply_target_replied(post_id=post_id, parent_id=""):
+                continue
             if self._thread_reply_cap_reached(post_id):
                 continue
 
             flat_comments = self._fetch_post_comments_for_tracking(post_id, requester_id=requester_id)
+            self._sync_replied_targets_from_thread(
+                post_id=post_id,
+                flat_comments=flat_comments,
+                self_names=self_names,
+                self_ids=self_ids,
+            )
             thread_reply_count = self._observe_thread_reply_count(
                 post_id,
                 flat_comments=flat_comments,
@@ -5622,6 +5693,7 @@ class MoltbookPortal:
                 self_names=self_names,
                 self_ids=self_ids,
             )
+            self._mark_reply_target_replied(post_id=post_id, parent_id="")
             thread_reply_count = self._record_thread_reply(post_id)
             self._set_last_action_ts("comment")
             self._inc_daily_counter("comments")
@@ -6508,6 +6580,13 @@ class MoltbookPortal:
             if not flat_comments:
                 continue
 
+            self._sync_replied_targets_from_thread(
+                post_id=post_id,
+                flat_comments=flat_comments,
+                self_names=self_names,
+                self_ids=self_ids,
+            )
+
             thread_reply_count = self._observe_thread_reply_count(
                 post_id,
                 flat_comments=flat_comments,
@@ -6529,6 +6608,8 @@ class MoltbookPortal:
                 if self._is_self_authored(comment, self_names=self_names, self_ids=self_ids):
                     continue
                 if self._is_reply_comment_handled(comment_id):
+                    continue
+                if self._is_reply_target_replied(post_id=post_id, parent_id=comment_id):
                     continue
                 body = _coalesce_str(comment.get("content"), comment.get("text"), comment.get("body"), default="")
                 if len(body.strip()) < 8:
@@ -6578,6 +6659,8 @@ class MoltbookPortal:
                 if not target_id:
                     # Reply-stage comments must target a specific comment; never emit top-level here.
                     continue
+                if self._is_reply_target_replied(post_id=post_id, parent_id=target_id):
+                    continue
                 body = {"content": draft}
                 body["parent_id"] = target_id
                 created = self._create_with_verification(
@@ -6597,6 +6680,7 @@ class MoltbookPortal:
                     self_ids=self_ids,
                 )
                 self._mark_reply_comment_handled(target_id)
+                self._mark_reply_target_replied(post_id=post_id, parent_id=target_id)
                 thread_reply_count = self._record_thread_reply(post_id)
                 self._set_last_action_ts("comment")
                 self._inc_daily_counter("comments")
@@ -6683,6 +6767,8 @@ class MoltbookPortal:
                 logger.info("[Moltbook] Fellow welcome reply delayed: %s", reason)
                 return replied_count
 
+            if self._is_reply_target_replied(post_id=post_id, parent_id=""):
+                continue
             if self._get_thread_reply_count(post_id) >= MAX_REPLIES_PER_THREAD:
                 logger.info("[Moltbook] Fellow welcome skipped for %s: thread_reply_cap_reached", post_id)
                 continue
@@ -6707,6 +6793,7 @@ class MoltbookPortal:
                 self_names=self_names,
                 self_ids=self_ids,
             )
+            self._mark_reply_target_replied(post_id=post_id, parent_id="")
             self._record_thread_reply(post_id)
             self._set_last_action_ts("comment")
             self._inc_daily_counter("comments")
@@ -6827,6 +6914,12 @@ class MoltbookPortal:
                     max_pages=1,
                 )
                 flat_comments = _flatten_comment_tree(roots)
+                self._sync_replied_targets_from_thread(
+                    post_id=post_id,
+                    flat_comments=flat_comments,
+                    self_names=self_names,
+                    self_ids=self_ids,
+                )
                 thread_reply_count = self._observe_thread_reply_count(
                     post_id,
                     flat_comments=flat_comments,
@@ -6844,6 +6937,8 @@ class MoltbookPortal:
                     if self._is_self_authored(c, self_names=self_names, self_ids=self_ids):
                         continue
                     if self._is_reply_comment_handled(comment_id):
+                        continue
+                    if self._is_reply_target_replied(post_id=post_id, parent_id=comment_id):
                         continue
                     body = _coalesce_str(c.get("content"), c.get("text"), default="")
                     if len(body.strip()) >= 12:
@@ -6864,6 +6959,8 @@ class MoltbookPortal:
                 parent_id = _extract_comment_id(target)
                 if not parent_id:
                     continue
+                if self._is_reply_target_replied(post_id=post_id, parent_id=parent_id):
+                    continue
                 body["parent_id"] = parent_id
                 created = self._create_with_verification(
                     f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
@@ -6880,6 +6977,7 @@ class MoltbookPortal:
                         self_ids=self_ids,
                     )
                     self._mark_reply_comment_handled(parent_id)
+                    self._mark_reply_target_replied(post_id=post_id, parent_id=parent_id)
                     thread_reply_count = self._record_thread_reply(post_id)
                     self._set_last_action_ts("comment")
                     self._inc_daily_counter("comments")
