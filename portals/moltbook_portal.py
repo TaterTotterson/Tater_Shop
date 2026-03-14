@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.50"
+__version__ = "1.0.51"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -1854,6 +1854,7 @@ class MoltbookPortal:
             "- Read and reason about the article content.\n"
             "- topic must be specific and discussion-worthy.\n"
             "- summary must be grounded in the article and mention why it matters.\n"
+            "- summary should feel like a personal insight seed, not a neutral news recap.\n"
             "- submolt_hint must be the best-fit submolt slug from monitored options when possible."
         )
         analysis_user = (
@@ -2013,6 +2014,7 @@ class MoltbookPortal:
             "- Read and reason about the article text.\n"
             "- topic should be specific and discussion-worthy.\n"
             "- summary should explain what happened and why it matters.\n"
+            "- summary should read like a perspective seed for discussion, not a straight report.\n"
             "- submolt_hint should best match the topic and monitored options."
         )
         analysis_user = (
@@ -5747,6 +5749,9 @@ class MoltbookPortal:
         post_source: str = "discovery",
         capability_name: str = "",
         capability_kind: str = "",
+        source_url: str = "",
+        source_title: str = "",
+        source_headline: str = "",
         experiment_result: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not topic:
@@ -5765,6 +5770,17 @@ class MoltbookPortal:
                 "- Avoid ad-like phrasing: no slogans, no product pitch, no hype terms like 'revolutionary', 'instant', 'game-changing', or 'bonus'.\n"
                 "- Mention limitations/tradeoffs briefly when relevant."
             )
+        article_reflection_rules = ""
+        if source_token in {"rss_article", "world_news"}:
+            article_reflection_rules = (
+                "\nArticle-source style rules:\n"
+                "- Write as a personal reaction after reading the article, not as a news wire recap.\n"
+                "- Use first person perspective ('I read...', 'what stood out to me...', 'I think...').\n"
+                "- Include one concrete takeaway and one thoughtful question/opinion for discussion.\n"
+                "- Keep the post grounded in article details, but prioritize your interpretation.\n"
+                "- Avoid broadcaster/reporter framing, headlines-as-copy, and marketing language.\n"
+                "- Keep tone curious and conversational with other agents."
+            )
         system_prompt = (
             "Draft one valuable Moltbook post.\n"
             "Return strict JSON only with shape:\n"
@@ -5776,6 +5792,7 @@ class MoltbookPortal:
             "- do not start title/content with your name, 'X here', or a speaker label like 'Name:'\n"
             "- no API keys or secret handling content\n"
             + capability_style_rules
+            + article_reflection_rules
             + f"- {self._build_identity_context(config)}"
             + (f"\n{capability_context}" if capability_context else "")
         )
@@ -5787,8 +5804,12 @@ class MoltbookPortal:
             f"Post source: {source_token or 'discovery'}\n"
             f"Capability name (if source=capability): {capability_name_text or '(none)'}\n"
             f"Capability kind (if source=capability): {_limit_text(str(capability_kind or '').strip(), 60) or '(none)'}\n"
+            f"Source headline/title (if article-based): {_limit_text(source_headline or source_title, 280) or '(none)'}\n"
+            f"Source URL (if article-based): {_limit_text(source_url, 1200) or '(none)'}\n"
             f"Experiment context (if any): {exp_text or '(none)'}\n"
-            "Produce one post draft now. If source=capability, make it a practical \"here is how I use it\" post."
+            "Produce one post draft now.\n"
+            "- If source=capability, make it a practical \"here is how I use it\" post.\n"
+            "- If source is rss_article or world_news, make it a \"I just read this and here is my take\" post."
         )
         raw = self._llm_with_web_search(
             system_prompt=system_prompt,
@@ -6477,6 +6498,9 @@ class MoltbookPortal:
             post_source=plan_source,
             capability_name=capability_name,
             capability_kind=capability_kind,
+            source_url=(rss_entry_link if plan_source == "rss_article" else world_news_source_url),
+            source_title=(rss_feed_title if plan_source == "rss_article" else world_news_source_title),
+            source_headline=(rss_entry_title if plan_source == "rss_article" else world_news_headline),
             experiment_result=experiment_result,
         )
         if not draft:
