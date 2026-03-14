@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.49"
+__version__ = "1.0.50"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -1469,6 +1469,8 @@ class MoltbookPortal:
             "- Pick one capability from the provided list.\n"
             "- Topic must be specific and discussion-worthy.\n"
             "- Summary should explain practical value in 1-2 sentences.\n"
+            "- Keep framing personal and practical (how the assistant actually uses it), not promotional.\n"
+            "- Avoid ad/marketing language, slogans, and hype words.\n"
             "- Do not invent capabilities not in the list."
         )
         user_prompt = (
@@ -1484,7 +1486,7 @@ class MoltbookPortal:
         default_topic = f"How I use {selected.get('name')} in my Tater workflow"
         default_summary = _coalesce_str(
             selected.get("description"),
-            default=f"Enabled {selected.get('kind')} capability available in my runtime.",
+            default=f"I use this enabled {selected.get('kind')} capability in day-to-day assistant tasks.",
         )
         topic = _limit_text(_coalesce_str(decision.get("topic"), default_topic, default=default_topic), 260)
         summary = _limit_text(_coalesce_str(decision.get("summary"), default_summary, default=default_summary), 420)
@@ -5742,11 +5744,27 @@ class MoltbookPortal:
         topic: str,
         discovery_summary: str,
         preferred_submolt: str,
+        post_source: str = "discovery",
+        capability_name: str = "",
+        capability_kind: str = "",
         experiment_result: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not topic:
             return None
         capability_context = self._build_capability_context(config)
+        source_token = str(post_source or "").strip().lower()
+        capability_name_text = _limit_text(str(capability_name or "").strip(), 120)
+        capability_style_rules = ""
+        if source_token == "capability":
+            capability_style_rules = (
+                "\nCapability-source style rules:\n"
+                "- Write in first person as lived usage, not an announcement.\n"
+                "- Explain one concrete task/workflow you personally do with this capability.\n"
+                "- Include at least one practical detail (trigger, input, output, or constraint).\n"
+                "- Keep tone grounded and conversational, not salesy.\n"
+                "- Avoid ad-like phrasing: no slogans, no product pitch, no hype terms like 'revolutionary', 'instant', 'game-changing', or 'bonus'.\n"
+                "- Mention limitations/tradeoffs briefly when relevant."
+            )
         system_prompt = (
             "Draft one valuable Moltbook post.\n"
             "Return strict JSON only with shape:\n"
@@ -5757,7 +5775,8 @@ class MoltbookPortal:
             "- thoughtful, non-repetitive, non-spammy\n"
             "- do not start title/content with your name, 'X here', or a speaker label like 'Name:'\n"
             "- no API keys or secret handling content\n"
-            f"- {self._build_identity_context(config)}"
+            + capability_style_rules
+            + f"- {self._build_identity_context(config)}"
             + (f"\n{capability_context}" if capability_context else "")
         )
         exp_text = _safe_json_dumps(experiment_result) if isinstance(experiment_result, dict) else ""
@@ -5765,8 +5784,11 @@ class MoltbookPortal:
             f"Topic: {topic}\n"
             f"Discovery summary: {discovery_summary}\n"
             f"Preferred submolt: {preferred_submolt or 'general'}\n"
+            f"Post source: {source_token or 'discovery'}\n"
+            f"Capability name (if source=capability): {capability_name_text or '(none)'}\n"
+            f"Capability kind (if source=capability): {_limit_text(str(capability_kind or '').strip(), 60) or '(none)'}\n"
             f"Experiment context (if any): {exp_text or '(none)'}\n"
-            "Produce one post draft now."
+            "Produce one post draft now. If source=capability, make it a practical \"here is how I use it\" post."
         )
         raw = self._llm_with_web_search(
             system_prompt=system_prompt,
@@ -6452,6 +6474,9 @@ class MoltbookPortal:
             topic=topic,
             discovery_summary=summary,
             preferred_submolt=preferred,
+            post_source=plan_source,
+            capability_name=capability_name,
+            capability_kind=capability_kind,
             experiment_result=experiment_result,
         )
         if not draft:
