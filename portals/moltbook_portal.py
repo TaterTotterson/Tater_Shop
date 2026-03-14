@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.42"
+__version__ = "1.0.44"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -85,6 +85,7 @@ MOLTBOOK_TATER_COMMUNITY_DESCRIPTION = (
     "A home for agents running Tater Assistant to introduce themselves, share local model details, and collaborate."
 )
 MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY = "tater:moltbook:taterassistant_intro_posted"
+MOLTBOOK_TATER_COMMUNITY_INTRO_LOCK_KEY = "tater:moltbook:taterassistant_intro_lock"
 MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY = "tater:moltbook:taterassistant_info_posted"
 MOLTBOOK_TATER_WELCOMED_POSTS_ZSET = "tater:moltbook:taterassistant_welcomed_posts:zset"
 MOLTBOOK_TATER_FELLOW_AGENTS_SET = "tater:moltbook:fellow_tater_agents"
@@ -6236,19 +6237,29 @@ class MoltbookPortal:
         return True
 
     def _is_taterassistant_introduction_posted(self) -> bool:
+        posted = False
         try:
             stored = _parse_bool(self.redis.get(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY), False)
-            if stored:
-                return True
         except Exception:
             stored = False
+        if stored:
+            posted = True
+
         state_value = _parse_bool(self._state_get("taterassistant_introduction_posted", ""), False)
-        if state_value and not stored:
+        if state_value:
+            posted = True
+        state_post_id = str(self._state_get("taterassistant_introduction_post_id", "") or "").strip()
+        if state_post_id:
+            posted = True
+
+        if posted and not stored:
             try:
                 self.redis.set(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY, "true")
             except Exception:
                 pass
-        return state_value
+        if posted and not state_value:
+            self._state_set("taterassistant_introduction_posted", "true")
+        return posted
 
     def _mark_taterassistant_introduction_posted(self, *, post_id: str, title: str) -> None:
         try:
@@ -6263,6 +6274,19 @@ class MoltbookPortal:
                 "taterassistant_introduction_posted_at": _iso_utc_now(),
             }
         )
+
+    def _acquire_intro_lock(self, key: str, *, ttl_sec: int = 240) -> bool:
+        try:
+            return bool(self.redis.set(key, "1", nx=True, ex=max(30, int(ttl_sec))))
+        except Exception:
+            # If Redis lock path fails, do not block progress.
+            return True
+
+    def _release_intro_lock(self, key: str) -> None:
+        try:
+            self.redis.delete(key)
+        except Exception:
+            return
 
     def _is_taterassistant_info_posted(self) -> bool:
         try:
@@ -6544,44 +6568,51 @@ class MoltbookPortal:
     def _ensure_taterassistant_introduction_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
         if self._is_taterassistant_introduction_posted():
             return False
-        if not config.posting_enabled:
+        if not self._acquire_intro_lock(MOLTBOOK_TATER_COMMUNITY_INTRO_LOCK_KEY):
             return False
-        if not account.can_participate:
-            return False
-        if not self._ensure_taterassistant_submolt(config, account):
-            return False
+        try:
+            if self._is_taterassistant_introduction_posted():
+                return False
+            if not config.posting_enabled:
+                return False
+            if not account.can_participate:
+                return False
+            if not self._ensure_taterassistant_submolt(config, account):
+                return False
 
-        allowed, reason = self._should_attempt_post(config, account)
-        if not allowed:
-            logger.info("[Moltbook] Tater community intro delayed: %s", reason)
-            return False
+            allowed, reason = self._should_attempt_post(config, account)
+            if not allowed:
+                logger.info("[Moltbook] Tater community intro delayed: %s", reason)
+                return False
 
-        draft = self._draft_taterassistant_introduction_post(config)
-        if not isinstance(draft, dict):
-            logger.info("[Moltbook] Tater community intro delayed: intro_draft_unavailable")
-            return False
-        title = _limit_text(draft.get("title"), 300)
-        content = _limit_text(draft.get("content"), 7000)
-        if not title or not content:
-            return False
+            draft = self._draft_taterassistant_introduction_post(config)
+            if not isinstance(draft, dict):
+                logger.info("[Moltbook] Tater community intro delayed: intro_draft_unavailable")
+                return False
+            title = _limit_text(draft.get("title"), 300)
+            content = _limit_text(draft.get("content"), 7000)
+            if not title or not content:
+                return False
 
-        payload = {
-            "submolt_name": MOLTBOOK_TATER_COMMUNITY_SUBMOLT,
-            "title": title,
-            "content": content,
-            "type": "text",
-        }
-        created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
-        if not isinstance(created, dict):
-            return False
+            payload = {
+                "submolt_name": MOLTBOOK_TATER_COMMUNITY_SUBMOLT,
+                "title": title,
+                "content": content,
+                "type": "text",
+            }
+            created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
+            if not isinstance(created, dict):
+                return False
 
-        post_id = _extract_post_id(created)
-        self._set_last_action_ts("post")
-        self._inc_daily_counter("posts")
-        self._remember_posted_content(title=title, content=content, submolt=MOLTBOOK_TATER_COMMUNITY_SUBMOLT, url="")
-        self._mark_taterassistant_introduction_posted(post_id=post_id, title=title)
-        logger.info("[Moltbook] Posted first-time introduction in m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
-        return True
+            post_id = _extract_post_id(created)
+            self._set_last_action_ts("post")
+            self._inc_daily_counter("posts")
+            self._remember_posted_content(title=title, content=content, submolt=MOLTBOOK_TATER_COMMUNITY_SUBMOLT, url="")
+            self._mark_taterassistant_introduction_posted(post_id=post_id, title=title)
+            logger.info("[Moltbook] Posted first-time introduction in m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
+            return True
+        finally:
+            self._release_intro_lock(MOLTBOOK_TATER_COMMUNITY_INTRO_LOCK_KEY)
 
     def _is_fellow_tater_intro_post(self, post: Dict[str, Any]) -> bool:
         if self.llm_client is None:
