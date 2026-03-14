@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.46"
+__version__ = "1.0.47"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -2170,13 +2170,20 @@ class MoltbookPortal:
         token = _normalize_submolt_slug(submolt_name)
         if not token or token in set(config.submolts_to_avoid):
             return
+        if token == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            return
 
         cap = max(3, min(20, int(config.submolt_monitor_max_count)))
         merged: List[str] = []
         seen = set()
         for item in config.submolts_to_prefer_for_posting:
             name = _normalize_submolt_slug(item)
-            if not name or name in seen or name in set(config.submolts_to_avoid):
+            if (
+                not name
+                or name in seen
+                or name in set(config.submolts_to_avoid)
+                or name == MOLTBOOK_TATER_COMMUNITY_SUBMOLT
+            ):
                 continue
             seen.add(name)
             merged.append(name)
@@ -2205,7 +2212,7 @@ class MoltbookPortal:
         avoid = set(config.submolts_to_avoid)
         for item in config.submolts_to_prefer_for_posting:
             token = _normalize_submolt_slug(item)
-            if not token or token in seen or token in avoid:
+            if not token or token in seen or token in avoid or token == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
                 continue
             seen.add(token)
             prefer.append(token)
@@ -2213,7 +2220,7 @@ class MoltbookPortal:
         monitored_candidates: List[str] = []
         for item in config.submolts_to_monitor:
             token = _normalize_submolt_slug(item)
-            if not token or token in avoid:
+            if not token or token in avoid or token == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
                 continue
             if token in monitored_candidates:
                 continue
@@ -4791,6 +4798,10 @@ class MoltbookPortal:
         )
         if not fit_ok:
             return False
+        if submolt == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            fallback_submolt = self._choose_post_target_submolt(config, posts)
+            submolt = fallback_submolt if fallback_submolt != MOLTBOOK_TATER_COMMUNITY_SUBMOLT else "general"
+            logger.info("[Moltbook] Curiosity seed post rerouted away from m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
         if submolt in config.submolts_to_avoid:
             return False
         if not self._anti_repeat_ok(config, title=title, content=content):
@@ -5100,6 +5111,8 @@ class MoltbookPortal:
         submolt: str,
     ) -> Tuple[str, bool]:
         candidate = _normalize_submolt_slug(submolt) or "general"
+        if candidate == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            candidate = "general"
         fit = self._classify_post_submolt_relevance(
             {
                 "submolt_name": candidate,
@@ -5112,6 +5125,8 @@ class MoltbookPortal:
             return candidate, True
 
         suggested = _normalize_submolt_slug(fit.get("suggested_submolt"))
+        if suggested == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            suggested = ""
         reason = _coalesce_str(fit.get("reason"), default="")
         if suggested and suggested not in set(config.submolts_to_avoid):
             self._ensure_monitored_submolt(config, suggested, persist=True)
@@ -5134,6 +5149,8 @@ class MoltbookPortal:
     ) -> None:
         token = _normalize_submolt_slug(submolt)
         if not token:
+            return
+        if token == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
             return
         self._ensure_monitored_submolt(config, token, persist=True)
         if token != "general" or not config.submolts_to_prefer_for_posting:
@@ -5926,13 +5943,18 @@ class MoltbookPortal:
         preferred_order: List[str] = []
         for name in config.submolts_to_prefer_for_posting:
             token = str(name or "").strip().lower()
-            if token and token not in config.submolts_to_avoid and token not in preferred_order:
+            if (
+                token
+                and token not in config.submolts_to_avoid
+                and token != MOLTBOOK_TATER_COMMUNITY_SUBMOLT
+                and token not in preferred_order
+            ):
                 preferred_order.append(token)
 
         candidate_pool: List[str] = []
         for name in preferred_order + list(config.submolts_to_monitor):
             token = str(name or "").strip().lower()
-            if not token or token in config.submolts_to_avoid:
+            if not token or token in config.submolts_to_avoid or token == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
                 continue
             if token in candidate_pool:
                 continue
@@ -6055,6 +6077,10 @@ class MoltbookPortal:
         )
         if not fit_ok:
             return False
+        if submolt == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            fallback_submolt = self._choose_post_target_submolt(config, posts)
+            submolt = fallback_submolt if fallback_submolt != MOLTBOOK_TATER_COMMUNITY_SUBMOLT else "general"
+            logger.info("[Moltbook] Post rerouted away from m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
         if submolt in config.submolts_to_avoid:
             return False
 
@@ -6276,8 +6302,8 @@ class MoltbookPortal:
         try:
             return bool(self.redis.set(key, "1", nx=True, ex=max(30, int(ttl_sec))))
         except Exception:
-            # If Redis lock path fails, do not block progress.
-            return True
+            logger.warning("[Moltbook] Intro lock unavailable; skipping intro post to avoid duplicates.")
+            return False
 
     def _release_intro_lock(self, key: str) -> None:
         try:
@@ -6418,6 +6444,51 @@ class MoltbookPortal:
             return None
         return {"title": title, "content": content}
 
+    def _recover_existing_taterassistant_intro(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
+        if self._is_taterassistant_introduction_posted():
+            return True
+        posts = self._fetch_taterassistant_posts_for_review()
+        if not posts:
+            return False
+
+        self_names = self._collect_self_names(config, account)
+        self_ids = self._collect_self_ids(account)
+        self_posts: List[Tuple[float, Dict[str, Any]]] = []
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            if _extract_submolt(post).strip().lower() != MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+                continue
+            if not self._is_self_authored(post, self_names=self_names, self_ids=self_ids):
+                continue
+            post_id = _extract_post_id(post)
+            if not post_id:
+                continue
+            created_at = _parse_datetime(post.get("created_at") or post.get("createdAt"))
+            ts = created_at.timestamp() if created_at is not None else float("inf")
+            self_posts.append((ts, post))
+
+        if not self_posts:
+            return False
+        self_posts.sort(key=lambda item: item[0])
+
+        chosen: Optional[Dict[str, Any]] = None
+        for _, post in self_posts:
+            if self._is_fellow_tater_intro_post(post):
+                chosen = post
+                break
+        if chosen is None:
+            # If classifier is uncertain, still avoid duplicate intros by anchoring to oldest self-authored post.
+            chosen = self_posts[0][1]
+
+        post_id = _extract_post_id(chosen)
+        if not post_id:
+            return False
+        title = _extract_post_title(chosen) or "Tater Assistant introduction"
+        self._mark_taterassistant_introduction_posted(post_id=post_id, title=title)
+        logger.info("[Moltbook] Recovered existing m/%s intro state from post %s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT, post_id)
+        return True
+
     def _ensure_taterassistant_introduction_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
         if self._is_taterassistant_introduction_posted():
             return False
@@ -6431,6 +6502,8 @@ class MoltbookPortal:
             if not account.can_participate:
                 return False
             if not _parse_bool(self._state_get("taterassistant_submolt_ready", "false"), False):
+                return False
+            if self._recover_existing_taterassistant_intro(config, account):
                 return False
 
             allowed, reason = self._should_attempt_post(config, account)
