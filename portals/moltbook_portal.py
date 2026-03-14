@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.52"
+__version__ = "1.0.53"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -3100,6 +3100,21 @@ class MoltbookPortal:
         if not post_id:
             return False
         return self._get_thread_reply_count(post_id) >= MAX_REPLIES_PER_THREAD
+
+    def _filter_uncapped_post_ids(self, post_ids: Iterable[str]) -> Tuple[List[str], int]:
+        uncapped: List[str] = []
+        seen: set[str] = set()
+        capped_count = 0
+        for raw_post_id in post_ids:
+            post_id = str(raw_post_id or "").strip()
+            if not post_id or post_id in seen:
+                continue
+            seen.add(post_id)
+            if self._thread_reply_cap_reached(post_id):
+                capped_count += 1
+                continue
+            uncapped.append(post_id)
+        return uncapped, capped_count
 
     def _api_get(self, path: str, *, params: Optional[Dict[str, Any]] = None, auth_required: bool = True) -> Any:
         try:
@@ -7124,11 +7139,11 @@ class MoltbookPortal:
         activity_ids = self._extract_activity_post_ids(home)
         if not activity_ids:
             return 0
+        eligible_post_ids, capped_count = self._filter_uncapped_post_ids(activity_ids)
+        if capped_count:
+            logger.info("[Moltbook] Activity stage pruned %d capped threads before scan.", capped_count)
         replied_count = 0
-        for post_id in activity_ids[:MAX_ACTIVITY_POSTS_PER_TICK]:
-            if self._thread_reply_cap_reached(post_id):
-                logger.info("[Moltbook] Activity thread skipped for %s: thread_reply_cap_reached", post_id)
-                continue
+        for post_id in eligible_post_ids[:MAX_ACTIVITY_POSTS_PER_TICK]:
             replied = self._reply_to_post_activity(
                 config,
                 account,
@@ -7166,14 +7181,14 @@ class MoltbookPortal:
                 by_post[post_id] = set()
             by_post[post_id].add(comment_id)
 
+        eligible_post_ids, capped_count = self._filter_uncapped_post_ids(by_post.keys())
+        if capped_count:
+            logger.info("[Moltbook] Outbound-reply stage pruned %d capped threads before scan.", capped_count)
+
         replied_count = 0
-        scanned_posts = 0
-        for post_id, tracked_comment_ids in by_post.items():
-            if scanned_posts >= MAX_ACTIVITY_POSTS_PER_TICK:
-                break
-            scanned_posts += 1
-            if self._thread_reply_cap_reached(post_id):
-                logger.info("[Moltbook] Outbound thread skipped for %s: thread_reply_cap_reached", post_id)
+        for post_id in eligible_post_ids[:MAX_ACTIVITY_POSTS_PER_TICK]:
+            tracked_comment_ids = by_post.get(post_id, set())
+            if not tracked_comment_ids:
                 continue
 
             post_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}posts/{post_id}", auth_required=True)
