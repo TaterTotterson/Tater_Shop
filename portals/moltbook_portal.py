@@ -76,6 +76,7 @@ MOLTBOOK_HEARTBEAT_KEY = "lastMoltbookCheck"
 MOLTBOOK_OUTBOUND_COMMENTS_ZSET = "tater:moltbook:outbound_comments:zset"
 MOLTBOOK_OUTBOUND_COMMENT_PREFIX = "tater:moltbook:outbound_comment:"
 MOLTBOOK_HANDLED_REPLY_COMMENT_ZSET = "tater:moltbook:handled_reply_comments:zset"
+MOLTBOOK_THREAD_REPLY_COUNT_PREFIX = "tater:moltbook:thread_reply_count:"
 MOLTBOOK_INTRO_POSTED_KEY = "tater:moltbook:introduction_posted"
 MOLTBOOK_TATER_COMMUNITY_SUBMOLT = "taterassistant"
 MOLTBOOK_TATER_COMMUNITY_DISPLAY_NAME = "Tater Assistant Community"
@@ -107,6 +108,7 @@ MAX_UPVOTES_PER_TICK = 4
 MAX_FOLLOWS_PER_TICK = 1
 MAX_SUBSCRIPTIONS_PER_TICK = 2
 MAX_REPLY_PER_TICK = 6
+MAX_REPLIES_PER_THREAD = 5
 MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
 VERIFICATION_TRACKING_TTL_SEC = 24 * 60 * 60
 
@@ -2585,6 +2587,8 @@ class MoltbookPortal:
             return False
         if not re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", candidate):
             return False
+        if not self._is_known_fellow_tater_agent(candidate):
+            return False
         candidate_tokens = _name_match_tokens(candidate)
         if candidate_tokens & set(self_names):
             return False
@@ -2601,6 +2605,57 @@ class MoltbookPortal:
                 pass
             return True
         return False
+
+    def _unfollow_agent_name(self, agent_name: str) -> bool:
+        candidate = str(agent_name or "").strip().lstrip("@")
+        if not candidate:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", candidate):
+            try:
+                self.redis.srem(MOLTBOOK_FOLLOWED_AGENTS_KEY, agent_name)
+            except Exception:
+                pass
+            return False
+        result = self._api_delete(f"{MOLTBOOK_API_PREFIX}agents/{candidate}/follow")
+        if result is None:
+            return False
+        try:
+            self.redis.srem(MOLTBOOK_FOLLOWED_AGENTS_KEY, candidate)
+            self.redis.srem(MOLTBOOK_FOLLOWED_AGENTS_KEY, agent_name)
+        except Exception:
+            pass
+        return True
+
+    def _cleanup_non_fellow_follows(self, *, self_names: set[str]) -> int:
+        try:
+            raw_members = self.redis.smembers(MOLTBOOK_FOLLOWED_AGENTS_KEY) or set()
+        except Exception:
+            raw_members = set()
+
+        removed = 0
+        for raw in list(raw_members)[:200]:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            tokens = _name_match_tokens(name)
+            is_self = bool(tokens & set(self_names))
+            is_fellow = self._is_known_fellow_tater_agent(name)
+            if is_fellow and not is_self:
+                continue
+
+            # Force older installs back to "fellow Tater only" following behavior.
+            if self._unfollow_agent_name(name):
+                removed += 1
+                continue
+
+            # If the API unfollow fails but this is self/invalid local residue, clear local cache anyway.
+            if is_self or not re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", name):
+                try:
+                    self.redis.srem(MOLTBOOK_FOLLOWED_AGENTS_KEY, name)
+                except Exception:
+                    pass
+                removed += 1
+        return removed
 
     def _fetch_agent_profile(self, agent_name: str) -> Dict[str, Any]:
         candidate = str(agent_name or "").strip().lstrip("@")
@@ -2782,6 +2837,65 @@ class MoltbookPortal:
             self.redis.set(key, str(float(value)))
         except Exception:
             return
+
+    def _thread_reply_count_key(self, post_id: str) -> str:
+        return f"{MOLTBOOK_THREAD_REPLY_COUNT_PREFIX}{_safe_key_token(post_id)}"
+
+    def _get_thread_reply_count(self, post_id: str) -> int:
+        if not post_id:
+            return 0
+        key = self._thread_reply_count_key(post_id)
+        try:
+            return _parse_int(self.redis.get(key), 0, min_value=0)
+        except Exception:
+            return 0
+
+    def _set_thread_reply_count(self, post_id: str, count: int) -> None:
+        if not post_id:
+            return
+        key = self._thread_reply_count_key(post_id)
+        safe = max(0, int(count))
+        try:
+            # Keep for a long horizon so the per-thread cap survives restarts and normal churn.
+            self.redis.set(key, str(safe))
+            self.redis.expire(key, 365 * 24 * 60 * 60)
+        except Exception:
+            return
+
+    def _observe_thread_reply_count(
+        self,
+        post_id: str,
+        *,
+        flat_comments: List[Dict[str, Any]],
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> int:
+        if not post_id:
+            return 0
+        stored = self._get_thread_reply_count(post_id)
+        observed = 0
+        for comment in flat_comments:
+            if not isinstance(comment, dict):
+                continue
+            if self._is_self_authored(comment, self_names=self_names, self_ids=self_ids):
+                observed += 1
+        merged = max(stored, observed)
+        if merged != stored:
+            self._set_thread_reply_count(post_id, merged)
+        return merged
+
+    def _record_thread_reply(self, post_id: str) -> int:
+        if not post_id:
+            return 0
+        current = self._get_thread_reply_count(post_id)
+        new_value = current + 1
+        self._set_thread_reply_count(post_id, new_value)
+        return new_value
+
+    def _thread_reply_cap_reached(self, post_id: str) -> bool:
+        if not post_id:
+            return False
+        return self._get_thread_reply_count(post_id) >= MAX_REPLIES_PER_THREAD
 
     def _api_get(self, path: str, *, params: Optional[Dict[str, Any]] = None, auth_required: bool = True) -> Any:
         try:
@@ -4601,24 +4715,37 @@ class MoltbookPortal:
     def _classify_comment_tone(self, post: Dict[str, Any], comment: Dict[str, Any]) -> Dict[str, Any]:
         comment_text = _coalesce_str(comment.get("content"), comment.get("text"), comment.get("body"), default="")
         if not comment_text:
-            return {"tone": "neutral", "is_corrective": False, "is_agreeing": False, "confidence": 0.0}
+            return {
+                "tone": "neutral",
+                "is_corrective": False,
+                "is_agreeing": False,
+                "is_question": False,
+                "confidence": 0.0,
+            }
 
         system_prompt = (
             "Classify the stance/tone of a reply directed at us.\n"
             "Return strict JSON only:\n"
-            '{"tone":"positive|neutral|negative","is_corrective":true|false,"is_agreeing":true|false,"confidence":0.0}'
+            '{"tone":"positive|neutral|negative","is_corrective":true|false,"is_agreeing":true|false,'
+            '"is_question":true|false,"confidence":0.0}'
         )
         user_prompt = (
             f"Post title: {_limit_text(_extract_post_title(post), 220)}\n"
             f"Post content: {_limit_text(_extract_post_content(post), 700)}\n"
             f"Reply author: {_extract_author_name(comment)}\n"
             f"Reply text: {_limit_text(comment_text, 1200)}\n"
-            "Classify whether this reply is agreeing/supportive vs corrective/disagreeing."
+            "Classify whether this reply is agreeing/supportive vs corrective/disagreeing, and whether it is a question."
         )
         parsed = self._llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            default={"tone": "neutral", "is_corrective": False, "is_agreeing": False, "confidence": 0.0},
+            default={
+                "tone": "neutral",
+                "is_corrective": False,
+                "is_agreeing": False,
+                "is_question": False,
+                "confidence": 0.0,
+            },
             max_tokens=220,
         )
         tone = str(parsed.get("tone") or "neutral").strip().lower()
@@ -4626,14 +4753,47 @@ class MoltbookPortal:
             tone = "neutral"
         is_corrective = _parse_bool(parsed.get("is_corrective"), False)
         is_agreeing = _parse_bool(parsed.get("is_agreeing"), False)
+        is_question = _parse_bool(parsed.get("is_question"), False)
         if is_corrective:
             is_agreeing = False
         return {
             "tone": tone,
             "is_corrective": is_corrective,
             "is_agreeing": is_agreeing,
+            "is_question": is_question,
             "confidence": _parse_float(parsed.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
         }
+
+    def _is_direct_reply_to_self_content(
+        self,
+        *,
+        post: Dict[str, Any],
+        comment: Dict[str, Any],
+        comment_by_id: Dict[str, Dict[str, Any]],
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> bool:
+        parent_id = _extract_parent_comment_id(comment)
+        if parent_id:
+            parent = comment_by_id.get(parent_id)
+            if not isinstance(parent, dict):
+                return False
+            return self._is_self_authored(parent, self_names=self_names, self_ids=self_ids)
+        return self._is_self_authored(post, self_names=self_names, self_ids=self_ids)
+
+    def _passes_direct_reply_guard(
+        self,
+        *,
+        post: Dict[str, Any],
+        comment: Dict[str, Any],
+        tone: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Dict[str, Any], str]:
+        classified = tone if isinstance(tone, dict) else self._classify_comment_tone(post, comment)
+        is_question = _parse_bool(classified.get("is_question"), False)
+        is_corrective = _parse_bool(classified.get("is_corrective"), False)
+        if is_question or is_corrective:
+            return True, classified, ""
+        return False, classified, "direct_reply_not_question_or_corrective"
 
     def _classify_post_submolt_relevance(self, post: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(post, dict):
@@ -4990,6 +5150,10 @@ class MoltbookPortal:
         self_names: set[str],
         self_ids: set[str],
     ) -> bool:
+        if self._thread_reply_cap_reached(post_id):
+            logger.info("[Moltbook] Reply skipped for %s: thread_reply_cap_reached", post_id)
+            self._mark_notifications_read(config, post_id=post_id, replied=False, reviewed=True)
+            return False
         post_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}posts/{post_id}", auth_required=True)
         if not isinstance(post_payload, dict):
             return False
@@ -5008,6 +5172,23 @@ class MoltbookPortal:
             self._mark_notifications_read(config, post_id=post_id, replied=False, reviewed=True)
             return False
 
+        comment_by_id: Dict[str, Dict[str, Any]] = {}
+        for comment in flat_comments:
+            cid = _extract_comment_id(comment)
+            if cid and cid not in comment_by_id:
+                comment_by_id[cid] = comment
+
+        thread_reply_count = self._observe_thread_reply_count(
+            post_id,
+            flat_comments=flat_comments,
+            self_names=self_names,
+            self_ids=self_ids,
+        )
+        if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+            logger.info("[Moltbook] Reply skipped for %s: thread_reply_cap_reached(%d)", post_id, thread_reply_count)
+            self._mark_notifications_read(config, post_id=post_id, replied=False, reviewed=True)
+            return False
+
         candidates = []
         for c in flat_comments:
             comment_id = _extract_comment_id(c)
@@ -5016,6 +5197,14 @@ class MoltbookPortal:
             if self._is_self_authored(c, self_names=self_names, self_ids=self_ids):
                 continue
             if self._is_reply_comment_handled(comment_id):
+                continue
+            if not self._is_direct_reply_to_self_content(
+                post=post_payload,
+                comment=c,
+                comment_by_id=comment_by_id,
+                self_names=self_names,
+                self_ids=self_ids,
+            ):
                 continue
             body = _coalesce_str(c.get("content"), c.get("text"), c.get("body"), default="")
             if len(body.strip()) < 8:
@@ -5041,6 +5230,16 @@ class MoltbookPortal:
             if self.random.random() > config.reply_probability:
                 continue
 
+            tone = self._classify_comment_tone(post_payload, comment)
+            passes_guard, tone, guard_reason = self._passes_direct_reply_guard(
+                post=post_payload,
+                comment=comment,
+                tone=tone,
+            )
+            if not passes_guard:
+                logger.info("[Moltbook] Reply skipped for %s: %s", post_id, guard_reason)
+                continue
+
             decision = self._decide_reply(config, post_payload, comment)
             if not decision.get("reply"):
                 continue
@@ -5048,7 +5247,6 @@ class MoltbookPortal:
             if decision.get("value_score", 0.0) < 0.35:
                 continue
 
-            tone = self._classify_comment_tone(post_payload, comment)
             style = self._build_reply_style(author_name=_extract_author_name(comment), post=post_payload, tone=tone)
             draft = self._draft_reply(config, post_payload, comment, thread_context=flat_comments, style=style)
             if not draft:
@@ -5075,6 +5273,7 @@ class MoltbookPortal:
                     self_ids=self_ids,
                 )
                 self._mark_reply_comment_handled(parent_id)
+                thread_reply_count = self._record_thread_reply(post_id)
                 replied_any = True
                 self._set_last_action_ts("comment")
                 self._inc_daily_counter("comments")
@@ -5088,6 +5287,8 @@ class MoltbookPortal:
                     },
                     max_len=120,
                 )
+                if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                    logger.info("[Moltbook] Thread reply cap reached for %s (%d).", post_id, thread_reply_count)
                 break
 
         self._mark_notifications_read(config, post_id=post_id, replied=replied_any, reviewed=True)
@@ -5115,7 +5316,10 @@ class MoltbookPortal:
                     pass
                 if _parse_bool(result.get("already_following"), False):
                     try:
-                        self.redis.sadd(MOLTBOOK_FOLLOWED_AGENTS_KEY, hint_author)
+                        if self._is_known_fellow_tater_agent(hint_author):
+                            self.redis.sadd(MOLTBOOK_FOLLOWED_AGENTS_KEY, hint_author)
+                        else:
+                            self.redis.srem(MOLTBOOK_FOLLOWED_AGENTS_KEY, hint_author)
                     except Exception:
                         pass
             return True
@@ -5141,19 +5345,28 @@ class MoltbookPortal:
     def _vote_on_feed(self, config: MoltbookConfig, posts: List[Dict[str, Any]], *, self_names: set[str]) -> None:
         if not config.voting_enabled:
             return
-        scored = sorted(posts, key=self._post_value_score, reverse=True)
-        used = 0
-        for post in scored:
-            if used >= MAX_UPVOTES_PER_TICK:
-                break
-            author = _extract_author_name(post).strip().lower()
-            if author and author in self_names:
-                continue
-            if self._post_value_score(post) < 1.5:
+        seen_post_ids: set[str] = set()
+        upvoted = 0
+        for post in posts:
+            if not isinstance(post, dict):
                 continue
             post_id = _extract_post_id(post)
+            if not post_id or post_id in seen_post_ids:
+                continue
+            seen_post_ids.add(post_id)
+
+            author_name = _extract_author_name(post).strip()
+            if not author_name:
+                continue
+            if _name_match_tokens(author_name) & set(self_names):
+                continue
+            if not self._is_known_fellow_tater_agent(author_name):
+                continue
+
             if self._upvote_post_if_useful(post_id):
-                used += 1
+                upvoted += 1
+        if upvoted > 0:
+            logger.info("[Moltbook] Upvoted %d fellow Tater post(s).", upvoted)
 
     def _select_follow_candidates(self, config: MoltbookConfig, *, self_names: set[str]) -> List[str]:
         try:
@@ -5170,6 +5383,8 @@ class MoltbookPortal:
                 continue
             if config.follow_only_high_radar_agents and score < config.agent_radar_threshold:
                 continue
+            if not self._is_known_fellow_tater_agent(name):
+                continue
             try:
                 if self.redis.sismember(MOLTBOOK_FOLLOWED_AGENTS_KEY, name):
                     continue
@@ -5183,6 +5398,9 @@ class MoltbookPortal:
     def _maybe_follow_agents(self, config: MoltbookConfig, account: AccountSnapshot, *, self_names: set[str]) -> None:
         if not config.follow_enabled or not account.can_participate:
             return
+        removed = self._cleanup_non_fellow_follows(self_names=self_names)
+        if removed > 0:
+            logger.info("[Moltbook] Unfollowed %d non-fellow agents to enforce fellow-only follow policy.", removed)
         followed = 0
         for name in self._select_follow_candidates(config, self_names=self_names):
             if followed >= MAX_FOLLOWS_PER_TICK:
@@ -5228,6 +5446,143 @@ class MoltbookPortal:
                     self.redis.sadd(MOLTBOOK_SUBSCRIBED_SUBMOLTS_KEY, submolt)
                 except Exception:
                     pass
+
+    def _draft_fellow_tater_post_reply(
+        self,
+        config: MoltbookConfig,
+        post: Dict[str, Any],
+        *,
+        thread_context: List[Dict[str, Any]],
+    ) -> str:
+        title = _extract_post_title(post)
+        content = _extract_post_content(post)
+        author = _extract_author_name(post)
+        submolt = _extract_submolt(post)
+
+        thread_excerpt: List[str] = []
+        for item in thread_context[:DEFAULT_REPLY_CONTEXT_LIMIT]:
+            actor = _extract_author_name(item)
+            body = _coalesce_str(item.get("content"), item.get("text"), item.get("body"), default="")
+            if not body:
+                continue
+            thread_excerpt.append(f"- {actor or 'unknown'}: {_limit_text(body, 220)}")
+
+        capability_context = self._build_capability_context(config)
+        system_prompt = (
+            "Write one thoughtful Moltbook comment on a fellow Tater agent's post.\n"
+            "Rules:\n"
+            "- Keep it concise, useful, and friendly.\n"
+            "- Add value (insight, question, or concrete follow-up), not generic praise.\n"
+            "- No spammy filler and no repeated slogans.\n"
+            "- Do not ask for or reveal secrets.\n"
+            "- Return plain text only.\n"
+            f"- {self._build_identity_context(config)}\n"
+            + (f"{capability_context}\n" if capability_context else "")
+        )
+        user_prompt = (
+            f"Post author: {author or '(unknown)'}\n"
+            f"Submolt: {submolt or '(unknown)'}\n"
+            f"Post title: {_limit_text(title, 300)}\n"
+            f"Post content: {_limit_text(content, 1300)}\n"
+            f"Thread context:\n{chr(10).join(thread_excerpt) if thread_excerpt else '- (none)'}\n"
+            "Draft one high-value top-level comment."
+        )
+        return _limit_text(
+            self._llm_with_web_search(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                web_search_enabled=config.web_search_enabled,
+                max_tool_calls=1,
+                max_tokens=520,
+            ),
+            1800,
+        )
+
+    def _run_stage_fellow_tater_posts(
+        self,
+        config: MoltbookConfig,
+        account: AccountSnapshot,
+        *,
+        posts: List[Dict[str, Any]],
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> int:
+        if not posts:
+            return 0
+
+        requester_id = self._account_requester_id(account)
+        replied_count = 0
+        seen_post_ids: set[str] = set()
+
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            post_id = _extract_post_id(post)
+            if not post_id or post_id in seen_post_ids:
+                continue
+            seen_post_ids.add(post_id)
+
+            if self._is_self_authored(post, self_names=self_names, self_ids=self_ids):
+                continue
+
+            author_name = _extract_author_name(post).strip()
+            if not author_name or not self._is_known_fellow_tater_agent(author_name):
+                continue
+
+            # Fellow Tater posts are always upvoted when seen.
+            self._upvote_post_if_useful(post_id)
+
+            if not config.reply_enabled or not account.can_participate:
+                continue
+            if self._thread_reply_cap_reached(post_id):
+                continue
+
+            flat_comments = self._fetch_post_comments_for_tracking(post_id, requester_id=requester_id)
+            thread_reply_count = self._observe_thread_reply_count(
+                post_id,
+                flat_comments=flat_comments,
+                self_names=self_names,
+                self_ids=self_ids,
+            )
+            if thread_reply_count > 0:
+                continue
+
+            ok, reason = self._should_attempt_reply(config, account)
+            if not ok:
+                logger.info("[Moltbook] Fellow-post reply skipped: %s", reason)
+                return replied_count
+
+            draft = self._draft_fellow_tater_post_reply(config, post, thread_context=flat_comments)
+            if not draft:
+                continue
+
+            created = self._create_with_verification(
+                f"{MOLTBOOK_API_PREFIX}posts/{post_id}/comments",
+                {"content": draft},
+                config=config,
+            )
+            if not isinstance(created, dict):
+                continue
+
+            self._track_created_outbound_comment(
+                post=post,
+                post_id=post_id,
+                created_payload=created,
+                parent_id="",
+                self_names=self_names,
+                self_ids=self_ids,
+            )
+            thread_reply_count = self._record_thread_reply(post_id)
+            self._set_last_action_ts("comment")
+            self._inc_daily_counter("comments")
+            replied_count += 1
+
+            if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                logger.info("[Moltbook] Thread reply cap reached for %s (%d).", post_id, thread_reply_count)
+            if replied_count >= MAX_REPLY_PER_TICK:
+                break
+
+        return replied_count
 
     def _plan_post_topic(
         self,
@@ -6041,6 +6396,9 @@ class MoltbookPortal:
             return 0
         replied_count = 0
         for post_id in activity_ids[:MAX_ACTIVITY_POSTS_PER_TICK]:
+            if self._thread_reply_cap_reached(post_id):
+                logger.info("[Moltbook] Activity thread skipped for %s: thread_reply_cap_reached", post_id)
+                continue
             replied = self._reply_to_post_activity(
                 config,
                 account,
@@ -6084,6 +6442,9 @@ class MoltbookPortal:
             if scanned_posts >= MAX_ACTIVITY_POSTS_PER_TICK:
                 break
             scanned_posts += 1
+            if self._thread_reply_cap_reached(post_id):
+                logger.info("[Moltbook] Outbound thread skipped for %s: thread_reply_cap_reached", post_id)
+                continue
 
             post_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}posts/{post_id}", auth_required=True)
             if not isinstance(post_payload, dict):
@@ -6095,6 +6456,16 @@ class MoltbookPortal:
 
             flat_comments = self._fetch_post_comments_for_tracking(post_id, requester_id=requester_id)
             if not flat_comments:
+                continue
+
+            thread_reply_count = self._observe_thread_reply_count(
+                post_id,
+                flat_comments=flat_comments,
+                self_names=self_names,
+                self_ids=self_ids,
+            )
+            if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                logger.info("[Moltbook] Outbound-thread reply skipped for %s: thread_reply_cap_reached(%d)", post_id, thread_reply_count)
                 continue
 
             candidates: List[Dict[str, Any]] = []
@@ -6128,13 +6499,26 @@ class MoltbookPortal:
                     logger.info("[Moltbook] Outbound-thread reply skipped: %s", reason)
                     return replied_count
 
+                if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                    logger.info("[Moltbook] Outbound-thread reply skipped for %s: thread_reply_cap_reached(%d)", post_id, thread_reply_count)
+                    break
+
+                tone = self._classify_comment_tone(post_payload, target)
+                passes_guard, tone, guard_reason = self._passes_direct_reply_guard(
+                    post=post_payload,
+                    comment=target,
+                    tone=tone,
+                )
+                if not passes_guard:
+                    logger.info("[Moltbook] Outbound-thread reply skipped for %s: %s", post_id, guard_reason)
+                    continue
+
                 decision = self._decide_reply(config, post_payload, target)
                 if not decision.get("reply"):
                     continue
                 if decision.get("value_score", 0.0) < 0.30:
                     continue
 
-                tone = self._classify_comment_tone(post_payload, target)
                 style = self._build_reply_style(author_name=_extract_author_name(target), post=post_payload, tone=tone)
                 draft = self._draft_reply(config, post_payload, target, thread_context=flat_comments, style=style)
                 if not draft:
@@ -6163,9 +6547,14 @@ class MoltbookPortal:
                     self_ids=self_ids,
                 )
                 self._mark_reply_comment_handled(target_id)
+                thread_reply_count = self._record_thread_reply(post_id)
                 self._set_last_action_ts("comment")
                 self._inc_daily_counter("comments")
                 replied_count += 1
+
+                if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                    logger.info("[Moltbook] Thread reply cap reached for %s (%d).", post_id, thread_reply_count)
+                    break
 
                 if replied_count >= MAX_REPLY_PER_TICK:
                     return replied_count
@@ -6244,6 +6633,10 @@ class MoltbookPortal:
                 logger.info("[Moltbook] Fellow welcome reply delayed: %s", reason)
                 return replied_count
 
+            if self._get_thread_reply_count(post_id) >= MAX_REPLIES_PER_THREAD:
+                logger.info("[Moltbook] Fellow welcome skipped for %s: thread_reply_cap_reached", post_id)
+                continue
+
             reply = self._draft_taterassistant_welcome_reply(config, post)
             if not reply:
                 continue
@@ -6264,6 +6657,7 @@ class MoltbookPortal:
                 self_names=self_names,
                 self_ids=self_ids,
             )
+            self._record_thread_reply(post_id)
             self._set_last_action_ts("comment")
             self._inc_daily_counter("comments")
             self._mark_taterassistant_post_welcomed(post_id)
@@ -6343,6 +6737,15 @@ class MoltbookPortal:
         posts = self._fetch_posts_for_discovery(config, home=home)
         self._update_radar(posts)
 
+        # Stage 5b: ensure fellow Tater agents get at least one reply on their posts.
+        replied_count += self._run_stage_fellow_tater_posts(
+            config,
+            account,
+            posts=posts,
+            self_names=self_names,
+            self_ids=self_ids,
+        )
+
         # Stage 6/7/8/9/10/11/12/23: discovery + learning + experiments
         discoveries = self._run_stage_discovery(config, posts)
 
@@ -6363,6 +6766,9 @@ class MoltbookPortal:
                 post_id = _extract_post_id(post)
                 if not post_id:
                     continue
+                if self._thread_reply_cap_reached(post_id):
+                    logger.info("[Moltbook] Opportunistic thread skipped for %s: thread_reply_cap_reached", post_id)
+                    continue
                 roots = self._fetch_post_comment_roots(
                     post_id,
                     sort="best",
@@ -6371,6 +6777,15 @@ class MoltbookPortal:
                     max_pages=1,
                 )
                 flat_comments = _flatten_comment_tree(roots)
+                thread_reply_count = self._observe_thread_reply_count(
+                    post_id,
+                    flat_comments=flat_comments,
+                    self_names=self_names,
+                    self_ids=self_ids,
+                )
+                if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                    logger.info("[Moltbook] Opportunistic reply skipped for %s: thread_reply_cap_reached(%d)", post_id, thread_reply_count)
+                    continue
                 candidates = []
                 for c in flat_comments:
                     comment_id = _extract_comment_id(c)
@@ -6415,9 +6830,12 @@ class MoltbookPortal:
                         self_ids=self_ids,
                     )
                     self._mark_reply_comment_handled(parent_id)
+                    thread_reply_count = self._record_thread_reply(post_id)
                     self._set_last_action_ts("comment")
                     self._inc_daily_counter("comments")
                     replied_count += 1
+                    if thread_reply_count >= MAX_REPLIES_PER_THREAD:
+                        logger.info("[Moltbook] Thread reply cap reached for %s (%d).", post_id, thread_reply_count)
                     break
 
         curiosity_posted = self._maybe_post_curiosity_seed(
