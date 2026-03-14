@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.45"
+__version__ = "1.0.46"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -1916,8 +1916,6 @@ class MoltbookPortal:
             self.redis.hdel(MOLTBOOK_SETTINGS_KEY, "api_key")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "claim_url", "")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "clear_api_key_now", "false")
-            self.redis.delete(MOLTBOOK_INTRO_POSTED_KEY)
-            self.redis.delete(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY)
             self.redis.delete(MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY)
             self.redis.delete(MOLTBOOK_CAPABILITY_POSTED_SET)
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
@@ -1934,10 +1932,6 @@ class MoltbookPortal:
                 "last_successful_auth_check",
                 "claim_url",
                 "verification_code",
-                "introduction_posted",
-                "introduction_post_id",
-                "introduction_post_title",
-                "introduction_posted_at",
                 "taterassistant_submolt_ready",
                 "taterassistant_submolt_created_at",
                 "taterassistant_submolt_create_last_attempt_ts",
@@ -1946,10 +1940,6 @@ class MoltbookPortal:
                 "taterassistant_submolt_role",
                 "taterassistant_submolt_settings_configured",
                 "taterassistant_submolt_settings_configured_at",
-                "taterassistant_introduction_posted",
-                "taterassistant_introduction_post_id",
-                "taterassistant_introduction_post_title",
-                "taterassistant_introduction_posted_at",
                 "taterassistant_info_posted",
                 "taterassistant_info_post_id",
                 "taterassistant_info_post_title",
@@ -4177,6 +4167,7 @@ class MoltbookPortal:
             auth_required=True,
         )
         if isinstance(payload, dict):
+            self._state_set("taterassistant_submolt_ready", "true")
             return payload
 
         fallback_params: Dict[str, Any] = {
@@ -4192,6 +4183,7 @@ class MoltbookPortal:
             auth_required=True,
         )
         if isinstance(fallback, dict):
+            self._state_set("taterassistant_submolt_ready", "true")
             return fallback
         return None
 
@@ -6323,71 +6315,6 @@ class MoltbookPortal:
             }
         )
 
-    def _extract_taterassistant_role(self, payload: Dict[str, Any]) -> str:
-        if not isinstance(payload, dict):
-            return ""
-        membership = payload.get("membership") if isinstance(payload.get("membership"), dict) else {}
-        viewer = payload.get("viewer") if isinstance(payload.get("viewer"), dict) else {}
-        for candidate in (
-            payload.get("your_role"),
-            payload.get("role"),
-            membership.get("role"),
-            viewer.get("role"),
-        ):
-            role = str(candidate or "").strip().lower()
-            if role in {"owner", "moderator", "member", "subscriber"}:
-                return role
-        return ""
-
-    def _fetch_taterassistant_submolt_details(self) -> Dict[str, Any]:
-        payload = self._api_get(f"{MOLTBOOK_API_PREFIX}submolts/{MOLTBOOK_TATER_COMMUNITY_SUBMOLT}", auth_required=True)
-        if not isinstance(payload, dict):
-            return {}
-        detail: Dict[str, Any] = {}
-        nested = payload.get("submolt")
-        if isinstance(nested, dict):
-            detail.update(nested)
-        if not detail:
-            detail.update(payload)
-        for key in (
-            "name",
-            "display_name",
-            "description",
-            "your_role",
-            "role",
-            "member_count",
-            "members",
-            "subscriber_count",
-            "subscribers",
-            "is_subscribed",
-            "created_at",
-        ):
-            if key in payload and key not in detail:
-                detail[key] = payload.get(key)
-        return detail
-
-    def _ensure_taterassistant_submolt_settings(self, role: str) -> None:
-        if role not in {"owner", "moderator"}:
-            return
-        if _parse_bool(self._state_get("taterassistant_submolt_settings_configured", "false"), False):
-            return
-        payload = {
-            "description": (
-                "A home for fellow Tater Assistant agents to introduce themselves, compare local models, "
-                "share experiments, and collaborate."
-            ),
-            "banner_color": "#16324a",
-            "theme_color": "#2a9d8f",
-        }
-        result = self._api_patch(f"{MOLTBOOK_API_PREFIX}submolts/{MOLTBOOK_TATER_COMMUNITY_SUBMOLT}/settings", payload)
-        if isinstance(result, dict):
-            self._state_set_many(
-                {
-                    "taterassistant_submolt_settings_configured": "true",
-                    "taterassistant_submolt_settings_configured_at": _iso_utc_now(),
-                }
-            )
-
     def _draft_taterassistant_info_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
         if self.llm_client is None:
             return None
@@ -6491,87 +6418,6 @@ class MoltbookPortal:
             return None
         return {"title": title, "content": content}
 
-    def _ensure_taterassistant_submolt(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
-        self._ensure_monitored_submolt(config, MOLTBOOK_TATER_COMMUNITY_SUBMOLT, persist=True)
-        ready = _parse_bool(self._state_get("taterassistant_submolt_ready", "false"), False)
-        if ready:
-            return True
-
-        # First try direct lookup by name; this avoids missing existing submolts when catalog views are partial.
-        details = self._fetch_taterassistant_submolt_details()
-        if self._submolt_name(details) == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
-            role = self._extract_taterassistant_role(details)
-            state_map = {
-                "taterassistant_submolt_ready": "true",
-                "taterassistant_submolt_role": role or "",
-                "taterassistant_submolt_owned": "true" if role == "owner" else "false",
-            }
-            self._state_set_many(state_map)
-            self._ensure_taterassistant_submolt_settings(role)
-            return True
-
-        catalog_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}submolts", auth_required=True)
-        catalog = self._extract_submolts(catalog_payload)
-        for item in catalog:
-            if self._submolt_name(item) == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
-                self._state_set("taterassistant_submolt_ready", "true")
-                return True
-
-        if not account.can_participate:
-            return False
-
-        now = time.time()
-        last_attempt = _parse_float(self._state_get("taterassistant_submolt_create_last_attempt_ts", "0"), 0.0, min_value=0.0)
-        if last_attempt > 0 and (now - last_attempt) < 6 * 60 * 60:
-            return False
-        self._state_set("taterassistant_submolt_create_last_attempt_ts", str(now))
-
-        payload = {
-            "name": MOLTBOOK_TATER_COMMUNITY_SUBMOLT,
-            "display_name": MOLTBOOK_TATER_COMMUNITY_DISPLAY_NAME,
-            "description": MOLTBOOK_TATER_COMMUNITY_DESCRIPTION,
-        }
-        created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}submolts", payload, config=config)
-        if not isinstance(created, dict):
-            # If create failed because it already exists or ownership is restricted, try direct lookup again.
-            details = self._fetch_taterassistant_submolt_details()
-            if self._submolt_name(details) == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
-                role = self._extract_taterassistant_role(details)
-                state_map = {
-                    "taterassistant_submolt_ready": "true",
-                    "taterassistant_submolt_role": role or "",
-                    "taterassistant_submolt_owned": "true" if role == "owner" else "false",
-                }
-                self._state_set_many(state_map)
-                self._ensure_taterassistant_submolt_settings(role)
-                return True
-            return False
-
-        self._state_set_many(
-            {
-                "taterassistant_submolt_ready": "true",
-                "taterassistant_submolt_created_at": _iso_utc_now(),
-                "taterassistant_submolt_created_by_this_agent": "true",
-                "taterassistant_submolt_owned": "true",
-                "taterassistant_submolt_role": "owner",
-            }
-        )
-        self._ensure_taterassistant_submolt_settings("owner")
-        logger.info("[Moltbook] Created m/%s community submolt.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
-
-        if config.subscribe_enabled:
-            result = self._api_post(
-                f"{MOLTBOOK_API_PREFIX}submolts/{MOLTBOOK_TATER_COMMUNITY_SUBMOLT}/subscribe",
-                body={},
-                auth_required=True,
-            )
-            if isinstance(result, dict):
-                try:
-                    self.redis.sadd(MOLTBOOK_SUBSCRIBED_SUBMOLTS_KEY, MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
-                except Exception:
-                    pass
-        return True
-
     def _ensure_taterassistant_introduction_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
         if self._is_taterassistant_introduction_posted():
             return False
@@ -6584,7 +6430,7 @@ class MoltbookPortal:
                 return False
             if not account.can_participate:
                 return False
-            if not self._ensure_taterassistant_submolt(config, account):
+            if not _parse_bool(self._state_get("taterassistant_submolt_ready", "false"), False):
                 return False
 
             allowed, reason = self._should_attempt_post(config, account)
@@ -6939,9 +6785,8 @@ class MoltbookPortal:
         self_names: set[str],
         self_ids: set[str],
     ) -> int:
-        # Keep this community in the monitor list and ensure the submolt exists when possible.
+        # Keep this community in the monitor list.
         self._ensure_monitored_submolt(config, MOLTBOOK_TATER_COMMUNITY_SUBMOLT, persist=True)
-        self._ensure_taterassistant_submolt(config, account)
 
         posts = self._fetch_taterassistant_posts_for_review()
         if not posts:
@@ -7179,7 +7024,7 @@ class MoltbookPortal:
 
         # One-time first introduction post in m/introductions.
         self._ensure_introduction_post(config, account)
-        # One-time first introduction post in m/taterassistant (create submolt if needed).
+        # One-time first introduction post in m/taterassistant (only when submolt is already available).
         self._ensure_taterassistant_introduction_post(config, account)
 
         # Stage 3: activity on own posts
