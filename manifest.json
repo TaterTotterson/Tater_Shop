@@ -541,7 +541,7 @@
     {
       "id": "premiumize_download",
       "name": "Premiumize Download",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "min_tater_version": "59",
       "description": "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links.",
       "portals": [
@@ -559,7 +559,7 @@
       "settings_category": "Premiumize",
       "tags": [],
       "entry": "plugins/premiumize_download.py",
-      "sha256": "406406a13dafcb6a946f9c39a0ae9853e301e372fe79efaeee2f06d72e997d7d"
+      "sha256": "fcbc0f5ff88b3648fa1b3f7b6acfade9ac4011c4c3343b3f4678dbdce7277aeb"
     },
     {
       "id": "sftpgo_account",

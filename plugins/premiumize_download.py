@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
-    version = "3.0.0"
+    version = "3.1.0"
     min_tater_version = "59"
     pretty_name = "Premiumize Cloud Downloader"
     settings_category = "Premiumize"
@@ -235,15 +235,18 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             "\"index\":0"
             "}\n"
             "Rules:\n"
-            "1) If user asks to download/send/add in Premiumize, action=add_transfer.\n"
-            "2) If user asks what is downloading/active, action=list_transfers.\n"
-            "3) If user asks progress/did finish, action=check_transfer.\n"
-            "4) If user asks for files/folders/cloud browse, action=list_files.\n"
-            "5) If user asks for download or stream link, action=get_links.\n"
-            "6) Put magnet or URL in source only if explicitly present in user text.\n"
-            "7) Never invent or paraphrase source values; source must be a literal URI.\n"
-            "8) Use name_query for transfer/file names when referenced.\n"
-            "9) If unknown field, use empty string or 0.\n"
+            "0) Always choose exactly one action from the allowed action enum.\n"
+            "1) Priority: if the user asks for a download/direct/stream/Premiumize link, action=get_links.\n"
+            "2) If user asks to download/send/add in Premiumize, action=add_transfer.\n"
+            "3) If user asks what is downloading/active, action=list_transfers.\n"
+            "4) If user asks progress/did finish, action=check_transfer.\n"
+            "5) If user asks for files/folders/cloud browse, action=list_files.\n"
+            "6) If user asks for download or stream link, action=get_links.\n"
+            "7) Put magnet or URL in source only if explicitly present in user text.\n"
+            "8) Never invent or paraphrase source values; source must be a literal URI.\n"
+            "9) Use name_query for transfer/file names when referenced.\n"
+            "10) If unknown field, use empty string or 0.\n"
+            "11) If the request mixes link intent with add/search words, keep action=get_links.\n"
             f'User request: "{query}"\n'
         )
         try:
@@ -260,68 +263,36 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             logger.debug("[premiumize] llm intent fallback: %s", exc)
             return {}
 
-    def _heuristic_action(self, query: str) -> str:
-        text = query.lower()
-        if re.search(r"\b(download link|stream link|get .*link|link for that file|stream-ready)\b", text):
-            return "get_links"
-        if re.search(r"\b(show|list|browse|open)\b.*\b(files?|folders?|cloud)\b", text):
-            return "list_files"
-        if re.search(r"\b(what.*downloading|active transfers?|queued|transfers? right now)\b", text):
-            return "list_transfers"
-        if re.search(r"\b(did .*finish|finish yet|how far|progress|status)\b", text):
-            return "check_transfer"
-        if re.search(r"\b(send|add|download)\b", text):
-            return "add_transfer"
-        if self._extract_first_source(query):
-            return "add_transfer"
-        return "list_transfers"
-
-    def _heuristic_status_filter(self, query: str) -> str:
-        text = query.lower()
-        if re.search(r"\b(active|running|queued|in progress)\b", text):
-            return "active"
-        if re.search(r"\b(finished|completed|done|complete)\b", text):
-            return "finished"
-        if re.search(r"\b(failed|error)\b", text):
-            return "failed"
-        if re.search(r"\b(all)\b", text):
-            return "all"
-        return ""
-
-    def _heuristic_name_query(self, query: str) -> str:
-        text = str(query or "").strip()
-        low = text.lower()
-        quoted = re.findall(r"['\"]([^'\"]{2,160})['\"]", text)
-        if quoted:
-            return quoted[0].strip()
-        m = re.search(r"\bmy\s+(.+?)\s+download\b", low)
-        if m:
-            return m.group(1).strip()
-        m = re.search(r"\bfor\s+(.+)$", low)
-        if m and len(m.group(1).strip()) >= 3:
-            candidate = re.sub(r"\b(file|folder|transfer|link)\b", "", m.group(1)).strip()
-            if candidate:
-                return candidate
-        return ""
-
     async def _resolve_intent(self, query: str, args: Dict[str, Any], llm_client) -> Dict[str, Any]:
         llm_intent = await self._parse_intent_with_llm(query, llm_client)
-        action = self._normalize_action(llm_intent.get("action")) or self._heuristic_action(query)
-        status_filter = self._normalize_status_filter(llm_intent.get("status_filter")) or self._heuristic_status_filter(query)
-        source = self._safe_text(llm_intent.get("source")) or self._extract_first_source(query)
-        source_type = self._source_type(source) if source else ""
-        name_query = self._safe_text(llm_intent.get("name_query")) or self._heuristic_name_query(query)
-        transfer_id = self._safe_text(llm_intent.get("transfer_id"))
-        folder_id = self._safe_text(llm_intent.get("folder_id"))
-        item_id = self._safe_text(llm_intent.get("item_id"))
-        index = self._clamp_int(llm_intent.get("index"), 0, 500, 0)
+        action = self._normalize_action(llm_intent.get("action")) or self._normalize_action((args or {}).get("action"))
+        status_filter = self._normalize_status_filter(llm_intent.get("status_filter")) or self._normalize_status_filter(
+            (args or {}).get("status_filter")
+        )
 
-        # Explicit source fields can force add-transfer even if query text is terse.
+        source = self._safe_text(llm_intent.get("source"))
+        if source:
+            source = self._extract_first_source(source) or source
+        if not source:
+            source = self._extract_first_source(query)
+
+        source_type = self._source_type(source) if source else ""
+        name_query = self._safe_text(llm_intent.get("name_query")) or self._safe_text((args or {}).get("name_query"))
+        transfer_id = self._safe_text(llm_intent.get("transfer_id")) or self._safe_text((args or {}).get("transfer_id"))
+        folder_id = self._safe_text(llm_intent.get("folder_id")) or self._safe_text((args or {}).get("folder_id"))
+        item_id = self._safe_text(llm_intent.get("item_id")) or self._safe_text((args or {}).get("item_id"))
+        index = self._clamp_int(
+            llm_intent.get("index") if llm_intent.get("index") is not None else (args or {}).get("index"),
+            0,
+            500,
+            0,
+        )
+
+        # Accept explicit source args but do not force route changes; action must come from LLM/structured action.
         explicit_source = self._explicit_source_from_args(args or {})
         if explicit_source and not source:
             source = explicit_source
             source_type = self._source_type(source)
-            action = "add_transfer"
 
         return {
             "action": action,
@@ -930,6 +901,37 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         settings: Dict[str, Any],
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        source_info = await self._resolve_source(args, intent, context)
+        source = self._safe_text(source_info.get("source"))
+        if source:
+            links, err = await self._api_directdl(settings, source)
+            if err:
+                return action_failure(
+                    code="premiumize_directdl_failed",
+                    message=err,
+                    diagnosis=self._diagnosis(),
+                    say_hint="Explain direct link retrieval failed and suggest retrying.",
+                )
+            normalized_links = self._normalize_direct_links(links)
+            if not normalized_links:
+                return action_failure(
+                    code="no_links_available",
+                    message="Premiumize did not return direct links for that source yet.",
+                    say_hint="Explain no direct links are available yet and suggest checking transfer progress.",
+                )
+            self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
+            summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
+            return action_success(
+                facts={
+                    "action": "get_links",
+                    "source_type": source_info.get("source_type"),
+                    "link_count": len(normalized_links),
+                },
+                data={"links": normalized_links, "source": source_info},
+                summary_for_user=summary,
+                say_hint="Return the direct/stream links and identify the best link-ready file.",
+            )
+
         cache = self._load_cache()
         files = [f for f in cache.get("last_files") or [] if isinstance(f, dict)]
         target = self._select_file(files, intent, cache) if files else None
@@ -942,37 +944,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
                     target = self._normalize_file_item(item)
 
         if not target:
-            source_info = await self._resolve_source(args, intent, context)
-            source = self._safe_text(source_info.get("source"))
-            if source:
-                links, err = await self._api_directdl(settings, source)
-                if err:
-                    return action_failure(
-                        code="premiumize_directdl_failed",
-                        message=err,
-                        diagnosis=self._diagnosis(),
-                        say_hint="Explain direct link retrieval failed and suggest retrying.",
-                    )
-                normalized_links = self._normalize_direct_links(links)
-                if not normalized_links:
-                    return action_failure(
-                        code="no_links_available",
-                        message="Premiumize did not return direct links for that source yet.",
-                        say_hint="Explain no direct links are available yet and suggest checking transfer progress.",
-                    )
-                self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
-                summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
-                return action_success(
-                    facts={
-                        "action": "get_links",
-                        "source_type": source_info.get("source_type"),
-                        "link_count": len(normalized_links),
-                    },
-                    data={"links": normalized_links, "source": source_info},
-                    summary_for_user=summary,
-                    say_hint="Return the direct/stream links and identify the best link-ready file.",
-                )
-
             return action_failure(
                 code="link_target_not_found",
                 message="No Premiumize file or source could be resolved for link retrieval.",
@@ -1039,7 +1010,17 @@ class PremiumizeDownloadPlugin(ToolPlugin):
 
         intent = await self._resolve_intent(query, args or {}, llm_client)
 
-        action = intent.get("action") or "list_transfers"
+        action = self._safe_text(intent.get("action"))
+        if not action:
+            return action_failure(
+                code="intent_unresolved",
+                message="Could not determine the Premiumize action from the request.",
+                needs=[
+                    "Say one clear action: add transfer, list transfers, check transfer status, list files, or get links.",
+                ],
+                say_hint="Explain the request could not be routed and ask for a clearer Premiumize action.",
+            )
+
         if action == "add_transfer":
             return await self._act_add_transfer(args=args or {}, intent=intent, settings=settings, context=context)
         if action == "list_transfers":
