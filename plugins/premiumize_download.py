@@ -1,14 +1,11 @@
 import aiohttp
-import base64
-import bencodepy
-import hashlib
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from helpers import extract_json, get_latest_file_from_history, redis_client
+from helpers import extract_json, redis_client
 from plugin_base import ToolPlugin
 from plugin_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from plugin_result import action_failure, action_success
@@ -20,20 +17,21 @@ logger.setLevel(logging.INFO)
 class PremiumizeDownloadPlugin(ToolPlugin):
     name = "premiumize_download"
     plugin_name = "Premiumize Download"
-    version = "2.0.0"
+    version = "3.0.0"
     min_tater_version = "59"
     pretty_name = "Premiumize Cloud Downloader"
     settings_category = "Premiumize"
     usage = (
-        '{"function":"premiumize_download","arguments":{"query":"send this magnet to Premiumize"}}'
+        '{"function":"premiumize_download","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
     )
     description = (
-        "Natural-language Premiumize cloud transfer plugin: add transfers from magnet/URL/files/handoff, "
-        "track transfer status, browse cloud files, and return download or stream-ready links."
+        "Premiumize transfer manager plugin: add transfers, list/check transfers, browse cloud files, and get "
+        "direct/stream links. For add-transfer and source-based link retrieval, include a literal "
+        "`magnet:?` or `http(s)://` URI in the tool call."
     )
     plugin_dec = (
-        "Use Premiumize as a full cloud downloader with natural-language requests, status tracking, file browsing, "
-        "and direct link retrieval."
+        "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and "
+        "retrieve direct or stream links."
     )
     waiting_prompt_template = (
         "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
@@ -61,20 +59,25 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         },
     }
     when_to_use = (
-        "Use for natural-language Premiumize tasks: add transfer, check progress, list transfers, browse files, "
-        "and get download/stream links."
+        "Use when the user wants to send a magnet/URL to Premiumize, check transfer progress, list transfers, "
+        "browse Premiumize files, or retrieve direct/stream links."
     )
     how_to_use = (
-        "Pass one natural-language request in query. The plugin can infer magnets/links, use attached torrent files "
-        "where supported, and consume internal handoff payloads."
+        "Pass one request in query. For add-transfer or get-links by source, include the full literal `magnet:?` "
+        "or `http(s)://...` URI in query (or explicit source/src/url/magnet/link arg). Do not rely on vague text "
+        "like 'this torrent' or on chat context/attachments/handoff payloads."
     )
-    common_needs = ["A natural-language Premiumize request."]
-    missing_info_prompts = ["What should I do in Premiumize?"]
+    common_needs = [
+        "A Premiumize action request.",
+        "For add-transfer or source-based get-links: the exact `magnet:?` or `http(s)://` URI.",
+    ]
+    missing_info_prompts = ["What exact magnet or URL should I send to Premiumize?"]
     example_calls = [
-        '{"function":"premiumize_download","arguments":{"query":"send this magnet to Premiumize"}}',
+        '{"function":"premiumize_download","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
+        '{"function":"premiumize_download","arguments":{"query":"give me direct links for magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
         '{"function":"premiumize_download","arguments":{"query":"what is Premiumize downloading right now"}}',
         '{"function":"premiumize_download","arguments":{"query":"show my Premiumize files"}}',
-        '{"function":"premiumize_download","arguments":{"query":"get me the download link for that file"}}',
+        '{"function":"premiumize_download","arguments":{"query":"get me the download link for item 2"}}',
     ]
 
     CACHE_KEY = "tater:premiumize:last_context"
@@ -181,11 +184,6 @@ class PremiumizeDownloadPlugin(ToolPlugin):
                 if isinstance(value, str) and value.strip():
                     return value.strip()
 
-        if isinstance(context, dict):
-            for key in ("request_text", "query", "text", "content", "message", "raw_message", "body"):
-                value = context.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
         return ""
 
     def _extract_first_source(self, text: str) -> str:
@@ -206,6 +204,19 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         if src.startswith("http://") or src.startswith("https://"):
             return "url"
         return "unknown"
+
+    def _explicit_source_from_args(self, args: Dict[str, Any]) -> str:
+        data = args or {}
+        for key in ("source", "src", "url", "magnet", "link"):
+            value = self._safe_text(data.get(key))
+            if not value:
+                continue
+            extracted = self._extract_first_source(value)
+            if extracted:
+                return extracted
+            if self._source_type(value) != "unknown":
+                return value
+        return ""
 
     async def _parse_intent_with_llm(self, query: str, llm_client) -> Dict[str, Any]:
         if not query or not llm_client:
@@ -229,9 +240,10 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             "3) If user asks progress/did finish, action=check_transfer.\n"
             "4) If user asks for files/folders/cloud browse, action=list_files.\n"
             "5) If user asks for download or stream link, action=get_links.\n"
-            "6) Put magnet or URL in source if present.\n"
-            "7) Use name_query for transfer/file names when referenced.\n"
-            "8) If unknown field, use empty string or 0.\n"
+            "6) Put magnet or URL in source only if explicitly present in user text.\n"
+            "7) Never invent or paraphrase source values; source must be a literal URI.\n"
+            "8) Use name_query for transfer/file names when referenced.\n"
+            "9) If unknown field, use empty string or 0.\n"
             f'User request: "{query}"\n'
         )
         try:
@@ -304,14 +316,8 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         item_id = self._safe_text(llm_intent.get("item_id"))
         index = self._clamp_int(llm_intent.get("index"), 0, 500, 0)
 
-        # Internal handoff can explicitly provide source even without user text.
-        explicit_source = (
-            self._safe_text((args or {}).get("source"))
-            or self._safe_text((args or {}).get("src"))
-            or self._safe_text((args or {}).get("url"))
-            or self._safe_text((args or {}).get("magnet"))
-            or self._safe_text((args or {}).get("link"))
-        )
+        # Explicit source fields can force add-transfer even if query text is terse.
+        explicit_source = self._explicit_source_from_args(args or {})
         if explicit_source and not source:
             source = explicit_source
             source_type = self._source_type(source)
@@ -350,135 +356,14 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         except Exception as exc:
             logger.debug("[premiumize] cache save skipped: %s", exc)
 
-    @staticmethod
-    def _extract_file_payload(args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        args = args or {}
-        for key in ("file", "file_payload", "attachment", "artifact", "source_file"):
-            value = args.get(key)
-            if isinstance(value, dict):
-                return value
-            if isinstance(value, list) and value and isinstance(value[0], dict):
-                return value[0]
-        return None
-
-    @staticmethod
-    def _file_bytes_from_payload(file_data: Dict[str, Any]) -> bytes:
-        data = file_data.get("data")
-        if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
-        if isinstance(data, str) and data:
-            try:
-                return base64.b64decode(data)
-            except Exception:
-                return b""
-        data = file_data.get("bytes")
-        if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
-        return b""
-
-    @staticmethod
-    def _extract_torrent_hash_from_bytes(torrent_bytes: bytes) -> Optional[str]:
-        try:
-            decoded = bencodepy.decode(torrent_bytes)
-            info_dict = decoded[b"info"]
-            encoded_info = bencodepy.encode(info_dict)
-            return hashlib.sha1(encoded_info).hexdigest().upper()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _magnet_from_hash(torrent_hash: str) -> str:
-        return f"magnet:?xt=urn:btih:{torrent_hash}"
-
-    def _source_from_file_payload(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(file_data, dict):
-            return {}
-        filename = self._safe_text(file_data.get("name"), "").lower()
-        payload_bytes = self._file_bytes_from_payload(file_data)
-        if not payload_bytes:
-            return {}
-
-        if filename.endswith(".torrent"):
-            thash = self._extract_torrent_hash_from_bytes(payload_bytes)
-            if thash:
-                return {
-                    "source": self._magnet_from_hash(thash),
-                    "source_type": "torrent_file",
-                    "filename": self._safe_text(file_data.get("name"), "file.torrent"),
-                }
-
-        try:
-            text = payload_bytes.decode("utf-8", "ignore")
-        except Exception:
-            text = ""
-        src = self._extract_first_source(text)
-        if src:
-            return {
-                "source": src,
-                "source_type": "file_link",
-                "filename": self._safe_text(file_data.get("name"), "attachment"),
-            }
-        return {}
-
-    def _extract_handoff_source(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        args = args or {}
-        candidates: List[Dict[str, Any]] = []
-        for key in ("handoff", "result", "selected_result", "payload"):
-            value = args.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-                nested = value.get("payload")
-                if isinstance(nested, dict):
-                    candidates.append(nested)
-        data_obj = args.get("data")
-        if isinstance(data_obj, dict):
-            candidates.append(data_obj)
-
-        for block in candidates:
-            for key in ("magnet_url", "torrent_url", "url", "link", "source", "src", "preferred_uri"):
-                source = self._safe_text(block.get(key))
-                if source:
-                    return {
-                        "source": source,
-                        "source_type": self._source_type(source) if self._source_type(source) != "unknown" else "handoff",
-                        "handoff": True,
-                        "name": self._safe_text(block.get("title") or block.get("name")),
-                    }
-        return {}
-
     async def _resolve_source(self, args: Dict[str, Any], intent: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        handoff = self._extract_handoff_source(args or {})
-        if handoff:
-            return handoff
-
         src = self._safe_text(intent.get("source"))
         if src:
             return {"source": src, "source_type": intent.get("source_type") or self._source_type(src)}
 
-        explicit = (
-            self._safe_text((args or {}).get("source"))
-            or self._safe_text((args or {}).get("src"))
-            or self._safe_text((args or {}).get("url"))
-            or self._safe_text((args or {}).get("magnet"))
-            or self._safe_text((args or {}).get("link"))
-        )
+        explicit = self._explicit_source_from_args(args or {})
         if explicit:
             return {"source": explicit, "source_type": self._source_type(explicit)}
-
-        payload = self._extract_file_payload(args or {})
-        if payload:
-            from_payload = self._source_from_file_payload(payload)
-            if from_payload:
-                return from_payload
-
-        channel_id = self._safe_text((context or {}).get("channel_id"))
-        if channel_id:
-            latest = get_latest_file_from_history(channel_id, filetype="file", extensions=[".torrent", ".magnet", ".txt", ".url"])
-            if latest:
-                from_history = self._source_from_file_payload(latest)
-                if from_history:
-                    from_history["from_history"] = True
-                    return from_history
 
         return {}
 
@@ -799,9 +684,9 @@ class PremiumizeDownloadPlugin(ToolPlugin):
         if not source:
             return action_failure(
                 code="missing_source",
-                message="No magnet, URL, handoff payload, or supported attached file was found for Premiumize transfer.",
-                needs=["Share a magnet/URL, attach a torrent-style file, or pass a handoff result."],
-                say_hint="Explain that no transfer source was found and ask for a magnet, URL, file, or handoff payload.",
+                message="No explicit magnet or URL was provided for Premiumize transfer.",
+                needs=["Pass the full magnet:? or http(s):// URI directly in query or source arguments."],
+                say_hint="Explain that a literal source URI is required and paraphrases like 'this magnet' are not valid.",
             )
 
         created, create_err = await self._api_transfer_create(settings, source)
@@ -1091,8 +976,8 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             return action_failure(
                 code="link_target_not_found",
                 message="No Premiumize file or source could be resolved for link retrieval.",
-                needs=["Ask for a file name, item id, or provide a source magnet/URL."],
-                say_hint="Explain a specific file/source is needed to fetch links.",
+                needs=["Provide a file name/item id, or pass the exact magnet/URL URI in the request."],
+                say_hint="Explain a specific file target or literal source URI is required to fetch links.",
             )
 
         self._save_cache(
@@ -1141,20 +1026,18 @@ class PremiumizeDownloadPlugin(ToolPlugin):
             )
 
         query = self._query_from_args(args or {}, context=context)
-        handoff = self._extract_handoff_source(args or {})
-        if not query and not handoff:
+        explicit_source = self._explicit_source_from_args(args or {})
+        if not query and explicit_source:
+            query = explicit_source
+        if not query:
             return action_failure(
                 code="missing_request",
                 message="No Premiumize request text was provided.",
-                needs=["What should I do in Premiumize?"],
-                say_hint="Ask what Premiumize action is needed.",
+                needs=["Provide a Premiumize request. For transfers/links by source, include the exact magnet or URL URI."],
+                say_hint="Ask for a concrete Premiumize request and require a literal magnet/URL URI when needed.",
             )
 
         intent = await self._resolve_intent(query, args or {}, llm_client)
-        if handoff and not intent.get("source"):
-            intent["source"] = handoff.get("source")
-            intent["source_type"] = handoff.get("source_type")
-            intent["action"] = "add_transfer"
 
         action = intent.get("action") or "list_transfers"
         if action == "add_transfer":

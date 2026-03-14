@@ -61,7 +61,7 @@
 | `overseerr_details` | Fetch details for a specific movie or TV show from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
 | `overseerr_request` | Request a movie or TV show in Overseerr by title. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
 | `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `premiumize_download` | Use Premiumize as a full cloud downloader with natural-language requests, status tracking, file browsing, and direct link retrieval. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_download` | Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, matrix, telegram |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, macos, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, macos, discord, irc, matrix, telegram |
