@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.34"
+__version__ = "1.0.35"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -3877,16 +3877,28 @@ class MoltbookPortal:
             return
 
         avoid = set(config.submolts_to_avoid)
-        existing = list(config.submolts_to_monitor)
+        existing: List[str] = []
+        seen_existing = set()
+        for raw in config.submolts_to_monitor:
+            token = _normalize_submolt_slug(raw)
+            if not token or token in avoid or token in seen_existing:
+                continue
+            seen_existing.add(token)
+            existing.append(token)
         existing_set = set(existing)
-        candidates: Dict[str, Dict[str, Any]] = {}
+
+        catalog: Dict[str, Dict[str, Any]] = {}
         for item in entries:
             name = self._submolt_name(item)
             if not name or name in avoid:
                 continue
-            if name in existing_set:
+            if name in catalog:
                 continue
-            if name in candidates:
+            catalog[name] = item
+
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for name, item in catalog.items():
+            if name in existing_set:
                 continue
             candidates[name] = item
 
@@ -3920,6 +3932,7 @@ class MoltbookPortal:
             "Rules:\n"
             "- Pick communities likely to produce useful technical/research discussions.\n"
             "- Do not pick spammy/low-signal or repetitive communities.\n"
+            "- If the current monitor list is full, choose communities that are strong enough to replace weaker monitored ones.\n"
             f"- Pick at most {pick_count} names."
         )
         user_prompt = (
@@ -3948,16 +3961,47 @@ class MoltbookPortal:
             self._state_set("submolt_monitor_last_reason", "llm_no_selection")
             return
 
-        merged: List[str] = []
-        seen = set()
-        for name in existing + selected_names:
-            token = str(name or "").strip().lower()
-            if not token or token in seen or token in avoid:
-                continue
-            seen.add(token)
-            merged.append(token)
-            if len(merged) >= max(1, int(config.submolt_monitor_max_count)):
+        cap = max(1, int(config.submolt_monitor_max_count))
+        protected = {MOLTBOOK_TATER_COMMUNITY_SUBMOLT}
+        merged: List[str] = list(existing)[:cap]
+
+        additions = [name for name in selected_names if name not in set(merged)]
+        additions_added: List[str] = []
+        replacements: List[str] = []
+
+        def submolt_score(name: str) -> float:
+            item = catalog.get(name)
+            if not isinstance(item, dict):
+                return -1.0
+            return self._submolt_score(item)
+
+        # Fill empty room first.
+        for name in list(additions):
+            if len(merged) >= cap:
                 break
+            merged.append(name)
+            additions_added.append(name)
+        additions = [name for name in additions if name not in set(additions_added)]
+
+        # If full, replace weakest removable monitored submolts with stronger selected ones.
+        for incoming in additions:
+            if incoming in merged:
+                continue
+            removable = [name for name in merged if name not in protected and name != incoming]
+            if not removable:
+                break
+
+            weakest = min(removable, key=submolt_score)
+            weakest_score = submolt_score(weakest)
+            incoming_score = submolt_score(incoming)
+
+            # Replace when incoming is at least as strong, or weakest lacks catalog support.
+            if incoming_score < weakest_score and weakest_score >= 0.0:
+                continue
+
+            idx = merged.index(weakest)
+            merged[idx] = incoming
+            replacements.append(f"{weakest}->{incoming}")
 
         if merged and merged != existing:
             try:
@@ -3966,6 +4010,12 @@ class MoltbookPortal:
                 pass
             config.submolts_to_monitor = merged
             self._sync_preferred_posting_submolts(config, persist=True)
+            if additions_added or replacements:
+                logger.info(
+                    "[Moltbook] Updated monitored submolts (added=%s replaced=%s).",
+                    ",".join(additions_added) if additions_added else "none",
+                    ",".join(replacements) if replacements else "none",
+                )
 
         self._state_set("submolt_monitor_last_refresh_ts", str(now))
         self._state_set("submolt_monitor_last_reason", _limit_text(decision.get("reason"), 260))
