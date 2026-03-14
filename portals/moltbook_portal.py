@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.36"
+__version__ = "1.0.37"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -6295,6 +6295,19 @@ class MoltbookPortal:
         if ready:
             return True
 
+        # First try direct lookup by name; this avoids missing existing submolts when catalog views are partial.
+        details = self._fetch_taterassistant_submolt_details()
+        if self._submolt_name(details) == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+            role = self._extract_taterassistant_role(details)
+            state_map = {
+                "taterassistant_submolt_ready": "true",
+                "taterassistant_submolt_role": role or "",
+                "taterassistant_submolt_owned": "true" if role == "owner" else "false",
+            }
+            self._state_set_many(state_map)
+            self._ensure_taterassistant_submolt_settings(role)
+            return True
+
         catalog_payload = self._api_get(f"{MOLTBOOK_API_PREFIX}submolts", auth_required=True)
         catalog = self._extract_submolts(catalog_payload)
         for item in catalog:
@@ -6318,6 +6331,18 @@ class MoltbookPortal:
         }
         created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}submolts", payload, config=config)
         if not isinstance(created, dict):
+            # If create failed because it already exists or ownership is restricted, try direct lookup again.
+            details = self._fetch_taterassistant_submolt_details()
+            if self._submolt_name(details) == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+                role = self._extract_taterassistant_role(details)
+                state_map = {
+                    "taterassistant_submolt_ready": "true",
+                    "taterassistant_submolt_role": role or "",
+                    "taterassistant_submolt_owned": "true" if role == "owner" else "false",
+                }
+                self._state_set_many(state_map)
+                self._ensure_taterassistant_submolt_settings(role)
+                return True
             return False
 
         self._state_set_many(
@@ -6329,6 +6354,7 @@ class MoltbookPortal:
                 "taterassistant_submolt_role": "owner",
             }
         )
+        self._ensure_taterassistant_submolt_settings("owner")
         logger.info("[Moltbook] Created m/%s community submolt.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
 
         if config.subscribe_enabled:
