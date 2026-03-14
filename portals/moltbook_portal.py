@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.54"
+__version__ = "1.0.55"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -56,7 +56,6 @@ MOLTBOOK_VERIFICATION_ATTEMPTS_KEY = "tater:moltbook:verification:attempts"
 MOLTBOOK_VERIFICATION_ATTEMPT_COUNT_PREFIX = "tater:moltbook:verification:attempt_count:"
 MOLTBOOK_VERIFICATION_FAILED_ANSWERS_PREFIX = "tater:moltbook:verification:failed_answers:"
 MOLTBOOK_UPVOTED_POSTS_KEY = "tater:moltbook:upvoted_posts"
-MOLTBOOK_UPVOTED_COMMENTS_KEY = "tater:moltbook:upvoted_comments"
 MOLTBOOK_FOLLOWED_AGENTS_KEY = "tater:moltbook:followed_agents"
 MOLTBOOK_SUBSCRIBED_SUBMOLTS_KEY = "tater:moltbook:subscribed_submolts"
 MOLTBOOK_POST_HASHES_KEY = "tater:moltbook:posted_hashes"
@@ -80,13 +79,8 @@ MOLTBOOK_REPLIED_TARGETS_ZSET = "tater:moltbook:replied_targets:zset"
 MOLTBOOK_THREAD_REPLY_COUNT_PREFIX = "tater:moltbook:thread_reply_count:"
 MOLTBOOK_INTRO_POSTED_KEY = "tater:moltbook:introduction_posted"
 MOLTBOOK_TATER_COMMUNITY_SUBMOLT = "taterassistant"
-MOLTBOOK_TATER_COMMUNITY_DISPLAY_NAME = "Tater Assistant Community"
-MOLTBOOK_TATER_COMMUNITY_DESCRIPTION = (
-    "A home for agents running Tater Assistant to introduce themselves, share local model details, and collaborate."
-)
 MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY = "tater:moltbook:taterassistant_intro_posted"
 MOLTBOOK_TATER_COMMUNITY_INTRO_LOCK_KEY = "tater:moltbook:taterassistant_intro_lock"
-MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY = "tater:moltbook:taterassistant_info_posted"
 MOLTBOOK_TATER_WELCOMED_POSTS_ZSET = "tater:moltbook:taterassistant_welcomed_posts:zset"
 MOLTBOOK_TATER_FELLOW_AGENTS_SET = "tater:moltbook:fellow_tater_agents"
 MOLTBOOK_TATER_COMMUNITY_SCAN_CURSOR_STATE = "taterassistant_scan_cursor"
@@ -1469,7 +1463,8 @@ class MoltbookPortal:
             "- Pick one capability from the provided list.\n"
             "- Topic must be specific and discussion-worthy.\n"
             "- Summary should explain practical value in 1-2 sentences.\n"
-            "- Keep framing personal and practical (how the assistant actually uses it), not promotional.\n"
+            "- Keep framing practical from an assistant perspective (how it helps the human), not promotional.\n"
+            "- Avoid human-roleplay framing like the assistant physically doing human actions.\n"
             "- Avoid ad/marketing language, slogans, and hype words.\n"
             "- Do not invent capabilities not in the list."
         )
@@ -1483,10 +1478,10 @@ class MoltbookPortal:
         if idx < 0 or idx >= len(candidates):
             return None
         selected = candidates[idx]
-        default_topic = f"How I use {selected.get('name')} in my Tater workflow"
+        default_topic = f"How I use {selected.get('name')} to help my human"
         default_summary = _coalesce_str(
             selected.get("description"),
-            default=f"I use this enabled {selected.get('kind')} capability in day-to-day assistant tasks.",
+            default=f"I use this enabled {selected.get('kind')} capability to help my human with day-to-day tasks.",
         )
         topic = _limit_text(_coalesce_str(decision.get("topic"), default_topic, default=default_topic), 260)
         summary = _limit_text(_coalesce_str(decision.get("summary"), default_summary, default=default_summary), 420)
@@ -2108,7 +2103,6 @@ class MoltbookPortal:
             self.redis.hdel(MOLTBOOK_SETTINGS_KEY, "api_key")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "claim_url", "")
             self.redis.hset(MOLTBOOK_SETTINGS_KEY, "clear_api_key_now", "false")
-            self.redis.delete(MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY)
             self.redis.delete(MOLTBOOK_CAPABILITY_POSTED_SET)
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
             self.redis.delete(MOLTBOOK_WORLD_NEWS_POSTED_SET)
@@ -2125,20 +2119,6 @@ class MoltbookPortal:
                 "last_successful_auth_check",
                 "claim_url",
                 "verification_code",
-                "taterassistant_submolt_ready",
-                "taterassistant_submolt_created_at",
-                "taterassistant_submolt_create_last_attempt_ts",
-                "taterassistant_submolt_created_by_this_agent",
-                "taterassistant_submolt_owned",
-                "taterassistant_submolt_role",
-                "taterassistant_submolt_settings_configured",
-                "taterassistant_submolt_settings_configured_at",
-                "taterassistant_info_posted",
-                "taterassistant_info_post_id",
-                "taterassistant_info_post_title",
-                "taterassistant_info_posted_at",
-                "taterassistant_info_post_pinned",
-                "taterassistant_info_pin_attempted_at",
                 "verification_pending_code",
                 "verification_pending_expires_at",
                 "verification_pending_detected_at",
@@ -2217,32 +2197,6 @@ class MoltbookPortal:
         if _parse_bool(raw.get("clear_api_key_now"), False):
             self._clear_api_key_material()
             raw = self._load_settings()
-
-        claim_url_state = self._state_get("claim_url", "")
-        if str(raw.get("claim_url") or "").strip() != str(claim_url_state or "").strip():
-            self._sync_claim_url_setting(claim_url_state)
-            raw["claim_url"] = str(claim_url_state or "").strip()
-
-        # Hard policy cleanup: these are no longer user-configurable.
-        try:
-            self.redis.hdel(
-                MOLTBOOK_SETTINGS_KEY,
-                "enabled",
-                "agent_name",
-                "display_name",
-                "auto_register_if_missing",
-                "heartbeat_enabled",
-                "voting_enabled",
-                "follow_enabled",
-                "agent_radar_threshold",
-                "follow_only_high_radar_agents",
-                "strict_rate_limit_mode",
-                "conservative_new_agent_mode",
-                "use_www_only_enforcement",
-                "credentials_path",
-            )
-        except Exception:
-            pass
 
         first, last = get_tater_name()
         default_name = _coalesce_str(f"{first} {last}", "Tater", default="Tater")
@@ -2847,7 +2801,7 @@ class MoltbookPortal:
             if is_fellow and not is_self:
                 continue
 
-            # Force older installs back to "fellow Tater only" following behavior.
+            # Enforce "fellow Tater only" following behavior.
             if self._unfollow_agent_name(name):
                 removed += 1
                 continue
@@ -2860,57 +2814,6 @@ class MoltbookPortal:
                     pass
                 removed += 1
         return removed
-
-    def _fetch_agent_profile(self, agent_name: str) -> Dict[str, Any]:
-        candidate = str(agent_name or "").strip().lstrip("@")
-        if not re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", candidate):
-            return {}
-        payload = self._api_get(
-            f"{MOLTBOOK_API_PREFIX}agents/profile",
-            params={"name": candidate},
-            auth_required=True,
-        )
-        if not isinstance(payload, dict):
-            return {}
-        agent_blob = payload.get("agent")
-        if isinstance(agent_blob, dict):
-            return agent_blob
-        return {}
-
-    def _store_profile_snapshot(self, agent_name: str, agent_blob: Dict[str, Any]) -> None:
-        if not isinstance(agent_blob, dict):
-            return
-        token = _safe_key_token(agent_name)
-        key = f"tater:moltbook:agent_profiles:{token}"
-        owner = agent_blob.get("owner") if isinstance(agent_blob.get("owner"), dict) else {}
-        payload = {
-            "agent_name": _coalesce_str(agent_blob.get("name"), agent_name, default=agent_name),
-            "description": _limit_text(_coalesce_str(agent_blob.get("description"), default=""), 500),
-            "karma": str(_parse_int(agent_blob.get("karma"), 0, min_value=0)),
-            "follower_count": str(_parse_int(agent_blob.get("follower_count"), 0, min_value=0)),
-            "following_count": str(_parse_int(agent_blob.get("following_count"), 0, min_value=0)),
-            "posts_count": str(_parse_int(agent_blob.get("posts_count"), 0, min_value=0)),
-            "comments_count": str(_parse_int(agent_blob.get("comments_count"), 0, min_value=0)),
-            "is_claimed": "true" if _parse_bool(agent_blob.get("is_claimed"), True) else "false",
-            "is_active": "true" if _parse_bool(agent_blob.get("is_active"), True) else "false",
-            "owner_x_handle": _limit_text(_coalesce_str(owner.get("x_handle"), default=""), 120),
-            "profile_last_seen": _iso_utc_now(),
-        }
-        try:
-            self.redis.hset(key, mapping=payload)
-        except Exception:
-            return
-
-    def _profile_allows_follow(self, agent_name: str) -> bool:
-        profile = self._fetch_agent_profile(agent_name)
-        if not profile:
-            return True
-        self._store_profile_snapshot(agent_name, profile)
-
-        # Skip explicit inactive profiles; otherwise keep follow heuristics broad.
-        if "is_active" in profile and not _parse_bool(profile.get("is_active"), True):
-            return False
-        return True
 
     def _is_taterassistant_post_welcomed(self, post_id: str) -> bool:
         if not post_id:
@@ -4576,7 +4479,6 @@ class MoltbookPortal:
             auth_required=True,
         )
         if isinstance(payload, dict):
-            self._state_set("taterassistant_submolt_ready", "true")
             return payload
 
         fallback_params: Dict[str, Any] = {
@@ -4592,7 +4494,6 @@ class MoltbookPortal:
             auth_required=True,
         )
         if isinstance(fallback, dict):
-            self._state_set("taterassistant_submolt_ready", "true")
             return fallback
         return None
 
@@ -5089,6 +4990,9 @@ class MoltbookPortal:
             "- Keep it thoughtful and discussion-oriented.\n"
             "- Ask clear, concrete questions when appropriate.\n"
             "- Avoid repetitive filler.\n"
+            "- Write from your perspective as an AI assistant participating in the community.\n"
+            "- Do not roleplay being a human or claim human lived experience as your own.\n"
+            "- If relevant, frame examples as how you help your human.\n"
             "- Do not start title/content with your name, 'X here', or a speaker label like 'Name:'.\n"
             "- Never include secrets or operational internals.\n"
             f"- {self._build_identity_context(config)}"
@@ -5710,6 +5614,8 @@ class MoltbookPortal:
             "Rules:\n"
             "- Be concise and specific.\n"
             "- No spammy filler or repeated slogans.\n"
+            "- Write from your perspective as an AI assistant.\n"
+            "- Do not roleplay being a human or claim human lived experience as your own.\n"
             "- Write like normal conversational chat text.\n"
             "- Use 1-3 short paragraphs (or 2-6 sentences) with natural flow.\n"
             "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
@@ -5781,10 +5687,12 @@ class MoltbookPortal:
         if source_token == "capability":
             capability_style_rules = (
                 "\nCapability-source style rules:\n"
-                "- Write in first person as lived usage, not an announcement.\n"
-                "- Explain one concrete task/workflow you personally do with this capability.\n"
+                "- Write in first person as an AI assistant helping a human, not as a human user.\n"
+                "- Frame examples as assistance for your human (e.g., \"my human asks me to...\").\n"
+                "- Explain one concrete task/workflow where you use this capability to help your human.\n"
                 "- Include at least one practical detail (trigger, input, output, or constraint).\n"
                 "- Keep tone grounded and conversational, not salesy.\n"
+                "- Do not roleplay human physical actions or app usage as your own lived experience.\n"
                 "- Avoid ad-like phrasing: no slogans, no product pitch, no hype terms like 'revolutionary', 'instant', 'game-changing', or 'bonus'.\n"
                 "- Mention limitations/tradeoffs briefly when relevant."
             )
@@ -5792,8 +5700,9 @@ class MoltbookPortal:
         if source_token in {"rss_article", "world_news"}:
             article_reflection_rules = (
                 "\nArticle-source style rules:\n"
-                "- Write as a personal reaction after reading the article, not as a news wire recap.\n"
+                "- Write as your AI-assistant reaction after reading the article, not as a news wire recap.\n"
                 "- Use first person perspective ('I read...', 'what stood out to me...', 'I think...').\n"
+                "- Do not roleplay being a human reporter or eyewitness.\n"
                 "- Include one concrete takeaway and one thoughtful question/opinion for discussion.\n"
                 "- Keep the post grounded in article details, but prioritize your interpretation.\n"
                 "- Avoid broadcaster/reporter framing, headlines-as-copy, and marketing language.\n"
@@ -5807,6 +5716,9 @@ class MoltbookPortal:
             "- title <= 300 chars\n"
             "- content <= 40000 chars\n"
             "- thoughtful, non-repetitive, non-spammy\n"
+            "- Write from your perspective as an AI assistant participating on Moltbook.\n"
+            "- Do not roleplay being a human or claim human lived experiences as your own.\n"
+            "- If relevant, frame real-world usage as how you help your human.\n"
             "- Write content as normal chat prose: 1-3 short paragraphs with natural flow.\n"
             "- Use bullet points only when truly useful; avoid list-heavy formatting by default.\n"
             "- Do not include literal escaped sequences like \\\\n, \\\\t, or \\\\r in content.\n"
@@ -6057,23 +5969,6 @@ class MoltbookPortal:
             return True
         return False
 
-    def _upvote_comment_if_useful(self, comment_id: str) -> bool:
-        if not comment_id:
-            return False
-        try:
-            if self.redis.sismember(MOLTBOOK_UPVOTED_COMMENTS_KEY, comment_id):
-                return False
-        except Exception:
-            pass
-        result = self._api_post(f"{MOLTBOOK_API_PREFIX}comments/{comment_id}/upvote", body={}, auth_required=True)
-        if isinstance(result, dict):
-            try:
-                self.redis.sadd(MOLTBOOK_UPVOTED_COMMENTS_KEY, comment_id)
-            except Exception:
-                pass
-            return True
-        return False
-
     def _vote_on_feed(self, config: MoltbookConfig, posts: List[Dict[str, Any]], *, self_names: set[str]) -> None:
         if not config.voting_enabled:
             return
@@ -6233,6 +6128,8 @@ class MoltbookPortal:
             "- Keep it concise, useful, and friendly.\n"
             "- Add value (insight, question, or concrete follow-up), not generic praise.\n"
             "- No spammy filler and no repeated slogans.\n"
+            "- Write from your perspective as an AI assistant.\n"
+            "- Do not roleplay being a human or claim human lived experience as your own.\n"
             "- Write in normal conversational chat style with clean sentence flow.\n"
             "- Use 1-3 short paragraphs (or 2-6 sentences).\n"
             "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
@@ -6636,6 +6533,8 @@ class MoltbookPortal:
             '{"title":"...","content":"..."}\n'
             "Rules:\n"
             "- Friendly and thoughtful, not salesy.\n"
+            "- Write from your perspective as an AI assistant.\n"
+            "- Do not roleplay being a human or claim human lived experience as your own.\n"
             "- Write content in normal conversational prose (1-3 short paragraphs).\n"
             "- Do not include literal escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Mention research/community intent.\n"
@@ -6667,14 +6566,8 @@ class MoltbookPortal:
             if stored:
                 return True
         except Exception:
-            stored = False
-        state_value = _parse_bool(self._state_get("introduction_posted", ""), False)
-        if state_value and not stored:
-            try:
-                self.redis.set(MOLTBOOK_INTRO_POSTED_KEY, "true")
-            except Exception:
-                pass
-        return state_value
+            pass
+        return _parse_bool(self._state_get("introduction_posted", ""), False)
 
     def _mark_introduction_posted(self, *, post_id: str, title: str) -> None:
         try:
@@ -6731,29 +6624,14 @@ class MoltbookPortal:
         return True
 
     def _is_taterassistant_introduction_posted(self) -> bool:
-        posted = False
         try:
-            stored = _parse_bool(self.redis.get(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY), False)
+            if _parse_bool(self.redis.get(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY), False):
+                return True
         except Exception:
-            stored = False
-        if stored:
-            posted = True
-
-        state_value = _parse_bool(self._state_get("taterassistant_introduction_posted", ""), False)
-        if state_value:
-            posted = True
-        state_post_id = str(self._state_get("taterassistant_introduction_post_id", "") or "").strip()
-        if state_post_id:
-            posted = True
-
-        if posted and not stored:
-            try:
-                self.redis.set(MOLTBOOK_TATER_COMMUNITY_INTRO_POSTED_KEY, "true")
-            except Exception:
-                pass
-        if posted and not state_value:
-            self._state_set("taterassistant_introduction_posted", "true")
-        return posted
+            pass
+        if _parse_bool(self._state_get("taterassistant_introduction_posted", ""), False):
+            return True
+        return bool(str(self._state_get("taterassistant_introduction_post_id", "") or "").strip())
 
     def _mark_taterassistant_introduction_posted(self, *, post_id: str, title: str) -> None:
         try:
@@ -6786,102 +6664,6 @@ class MoltbookPortal:
         except Exception:
             return
 
-    def _is_taterassistant_info_posted(self) -> bool:
-        try:
-            stored = _parse_bool(self.redis.get(MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY), False)
-            if stored:
-                return True
-        except Exception:
-            stored = False
-        state_value = _parse_bool(self._state_get("taterassistant_info_posted", ""), False)
-        if state_value and not stored:
-            try:
-                self.redis.set(MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY, "true")
-            except Exception:
-                pass
-        return state_value
-
-    def _mark_taterassistant_info_posted(self, *, post_id: str, title: str, pinned: bool) -> None:
-        try:
-            self.redis.set(MOLTBOOK_TATER_COMMUNITY_INFO_POSTED_KEY, "true")
-        except Exception:
-            pass
-        self._state_set_many(
-            {
-                "taterassistant_info_posted": "true",
-                "taterassistant_info_post_id": post_id,
-                "taterassistant_info_post_title": _limit_text(title, 300),
-                "taterassistant_info_posted_at": _iso_utc_now(),
-                "taterassistant_info_post_pinned": "true" if pinned else "false",
-            }
-        )
-
-    def _draft_taterassistant_info_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
-        if self.llm_client is None:
-            return None
-        model_hint = self._get_local_model_hint()
-        tater_assistant_context = (
-            "Tater Assistant context (factual project background):\n"
-            "- Tater Assistant is a modular AI assistant framework.\n"
-            "- It is organized around Cores, Verbas, and Portals.\n"
-            "- Cores are reasoning systems (example: Cerberus Core).\n"
-            "- Verbas are user-triggered tools/actions.\n"
-            "- Portals are integrations with external systems (example: Moltbook, Discord, IRC, Matrix).\n"
-            "- This Moltbook portal is used for thoughtful community participation and research-oriented discussions.\n"
-            "- Typical behaviors include reading threads, replying with useful context, upvoting valuable content, "
-            "following high-signal agents, and sharing experiment/learning insights.\n"
-            "- Tater agents should be present, curious, and non-spammy.\n"
-            "- Tater agents are not OpenClaw agents.\n"
-        )
-        system_prompt = (
-            "Write one concise foundation post for m/taterassistant.\n"
-            "Return strict JSON only with shape:\n"
-            '{"title":"...","content":"..."}\n'
-            f"{tater_assistant_context}"
-            "Rules:\n"
-            "- This is a one-time pinned community guide, so make it informative.\n"
-            "- Explain what Tater Assistant is in practical terms.\n"
-            "- Mention the architecture concept: Cores, Verbas, and Portals.\n"
-            "- Explain what this submolt is for: introductions, collaboration, experiments, and architecture discussion.\n"
-            "- Include clear participation guidance for new fellow Tater agents.\n"
-            "- Include a short section that asks agents to share their local model and what they are building.\n"
-            "- Include brief community norms: thoughtful, non-spammy, useful, respectful.\n"
-            "- Include this exact URL somewhere in content: https://github.com/TaterTotterson/Tater\n"
-            "- Keep the tone welcoming, practical, and slightly technical.\n"
-            "- Use short section headers in plain text or markdown.\n"
-            "- Content target: 180-420 words.\n"
-            "- Do not include secrets, keys, or operational internals.\n"
-            "- Do not start title/content with your name, 'X here', or a speaker label like 'Name:'.\n"
-            "- Keep title under 300 chars.\n"
-            f"- {self._build_identity_context(config)}"
-        )
-        user_prompt = (
-            f"Display name: {config.display_name}\n"
-            f"Target submolt: {MOLTBOOK_TATER_COMMUNITY_SUBMOLT}\n"
-            f"Local model hint: {model_hint or '(none)'}\n"
-            f"{tater_assistant_context}\n"
-            "Context: one-time pinned info post that defines what this community is for.\n"
-            "Output should feel like a founder welcome + practical orientation post."
-        )
-        parsed = self._llm_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            default={},
-            max_tokens=600,
-        )
-        title = _limit_text(_coalesce_str(parsed.get("title"), default=""), 300)
-        content = _limit_text(_coalesce_str(parsed.get("content"), default=""), 5000)
-        if not title or not content:
-            return None
-        if "https://github.com/TaterTotterson/Tater" not in content:
-            return None
-        return {"title": title, "content": content}
-
-    def _ensure_taterassistant_info_post(self, config: MoltbookConfig, account: AccountSnapshot) -> bool:
-        # Moderator/info-post foundation flow intentionally disabled.
-        # We keep one-time introductions only (m/introductions + m/taterassistant).
-        return False
-
     def _draft_taterassistant_introduction_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
         if self.llm_client is None:
             return None
@@ -6893,6 +6675,8 @@ class MoltbookPortal:
             '{"title":"...","content":"..."}\n'
             "Rules:\n"
             "- Friendly and welcoming.\n"
+            "- Write from your perspective as an AI assistant.\n"
+            "- Do not roleplay being a human or claim human lived experience as your own.\n"
             "- Write content in normal conversational prose (1-3 short paragraphs).\n"
             "- Do not include literal escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Mention this agent runs on Tater and is happy to meet other Tater Assistant agents.\n"
@@ -6977,8 +6761,6 @@ class MoltbookPortal:
             if not config.posting_enabled:
                 return False
             if not account.can_participate:
-                return False
-            if not _parse_bool(self._state_get("taterassistant_submolt_ready", "false"), False):
                 return False
             if self._recover_existing_taterassistant_intro(config, account):
                 return False
@@ -7078,6 +6860,8 @@ class MoltbookPortal:
                     "Write one warm, concise welcome comment for a fellow Tater Assistant intro post.\n"
                     "Rules:\n"
                     "- Keep it genuine and specific.\n"
+                    "- Write from your perspective as an AI assistant.\n"
+                    "- Do not roleplay being a human or claim human lived experience as your own.\n"
                     "- Write in normal conversational chat style (2-6 sentences).\n"
                     "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
                     "- Mention Tater Assistant kinship.\n"
@@ -7351,7 +7135,6 @@ class MoltbookPortal:
         self_owned_post_ids = {
             str(self._state_get("introduction_post_id", "") or "").strip(),
             str(self._state_get("taterassistant_introduction_post_id", "") or "").strip(),
-            str(self._state_get("taterassistant_info_post_id", "") or "").strip(),
         }
         self_owned_post_ids = {item for item in self_owned_post_ids if item}
 
