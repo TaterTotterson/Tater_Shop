@@ -13,6 +13,7 @@ import imghdr
 import hashlib
 import uuid
 from io import BytesIO
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -183,14 +184,21 @@ PORTAL_SETTINGS = {
         "matrix_store_path": {
             "label": "Store Path",
             "type": "string",
-            "default": "/app/matrix-store",
-            "description": "Persistent path for nio store (devices, sessions, etc.)"
+            "default": "",
+            "description": "Persistent path for nio store. Leave blank to auto-use agent_lab/matrix-store."
         },
         "matrix_pickle_key": {
             "label": "Pickle Key",
             "type": "string",
             "default": "",
             "description": "Secret used to encrypt local store; fallback to MATRIX_PICKLE_KEY env"
+        },
+        "matrix_encryption_mode": {
+            "label": "Encryption Mode",
+            "type": "select",
+            "options": ["auto", "on", "off"],
+            "default": "auto",
+            "description": "auto = use E2EE if dependencies exist, otherwise continue unencrypted."
         },
         "trust_unverified_devices": {
             "label": "Trust Unverified Devices",
@@ -352,6 +360,77 @@ def _get_bool_setting(key: str, fallback: bool) -> bool:
     if s is None or s == "":
         return fallback
     return str(s).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _app_root_dir() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _agent_lab_dir() -> Path:
+    raw = str(os.getenv("TATER_AGENT_LAB_DIR", "") or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (_app_root_dir() / candidate).resolve()
+        return candidate
+
+    container_default = Path("/app/agent_lab")
+    if container_default.exists():
+        return container_default
+    return (_app_root_dir() / "agent_lab").resolve()
+
+
+def _normalize_store_path(raw_path: str) -> str:
+    value = str(raw_path or "").strip()
+    if not value:
+        return ""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (_app_root_dir() / candidate).resolve()
+    return str(candidate)
+
+
+def _default_matrix_store_path() -> str:
+    return str((_agent_lab_dir() / "matrix-store").resolve())
+
+
+def _store_candidates(requested: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for raw in (
+        requested,
+        os.getenv("MATRIX_STORE_PATH", ""),
+        _default_matrix_store_path(),
+        "/tmp/matrix-store",
+    ):
+        candidate = _normalize_store_path(str(raw or ""))
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+    return out
+
+
+def _resolve_store_path(requested: str) -> tuple[str, List[str]]:
+    failures: List[str] = []
+    for candidate in _store_candidates(requested):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe = os.path.join(candidate, ".tater-write-test")
+            with open(probe, "a", encoding="utf-8"):
+                pass
+            with contextlib.suppress(Exception):
+                os.remove(probe)
+            with contextlib.suppress(Exception):
+                os.chmod(candidate, 0o700)
+            return candidate, failures
+        except Exception as exc:
+            failures.append(f"{candidate}: {exc}")
+
+    raise RuntimeError(
+        "Could not create a writable Matrix store path. Tried: "
+        + (" | ".join(failures) if failures else "no candidates")
+    )
 
 def _matrix_user_tokens(value: str) -> set[str]:
     raw = str(value or "").strip().lower()
@@ -583,27 +662,58 @@ class MatrixPlatform:
         self.device_name = _get_setting("matrix_device_name", "TaterBot")
         self.response_policy = _get_setting("response_policy", "mention_only")
         self.max_chunk = _get_int_setting("max_response_length", 4000)
-        self.store_path = _get_setting("matrix_store_path", "/app/matrix-store")
+        self.requested_store_path = _get_setting("matrix_store_path", "")
         self.pickle_key = _get_setting("matrix_pickle_key", os.getenv("MATRIX_PICKLE_KEY", ""))
+        self.encryption_mode = str(_get_setting("matrix_encryption_mode", "auto") or "auto").strip().lower()
+        if self.encryption_mode not in {"auto", "on", "off"}:
+            self.encryption_mode = "auto"
         self.resume_mode = _get_setting("resume_mode", "from_now")
         self.trust_unverified_devices = _get_bool_setting("trust_unverified_devices", True)
         self.ready_ts_ms: Optional[int] = None
 
-        try:
-            os.makedirs(self.store_path, exist_ok=True)
-            os.chmod(self.store_path, 0o700)
-        except Exception as e:
-            logger.error(f"[Matrix] Could not create store path {self.store_path}: {e}")
-            self.store_path = "/tmp/matrix-store"
-            os.makedirs(self.store_path, exist_ok=True)
-            os.chmod(self.store_path, 0o700)
-            logger.warning(f"[Matrix] Falling back to {self.store_path}")
+        self.store_path, failures = _resolve_store_path(self.requested_store_path)
+        if failures:
+            logger.warning("[Matrix] Store path retries: %s", " | ".join(failures))
+        if self.requested_store_path and _normalize_store_path(self.requested_store_path) != self.store_path:
+            logger.warning(
+                "[Matrix] Using writable store path %s (requested: %s)",
+                self.store_path,
+                self.requested_store_path,
+            )
+            if str(self.requested_store_path).strip() == "/app/matrix-store":
+                with contextlib.suppress(Exception):
+                    redis_client.hset("matrix_portal_settings", "matrix_store_path", self.store_path)
+                    logger.info("[Matrix] Updated matrix_store_path to %s", self.store_path)
+        elif not self.requested_store_path:
+            logger.info("[Matrix] Store path auto-selected: %s", self.store_path)
 
-        cfg = AsyncClientConfig(
-            store_sync_tokens=True,
-            encryption_enabled=True,
-            pickle_key=self.pickle_key or None,
-        )
+        want_encryption = self.encryption_mode != "off"
+        self.encryption_enabled = bool(want_encryption)
+        try:
+            cfg = AsyncClientConfig(
+                store_sync_tokens=True,
+                encryption_enabled=want_encryption,
+                pickle_key=(self.pickle_key or None),
+            )
+        except Exception as exc:
+            msg = str(exc or "")
+            missing_e2ee = "encryption is enabled" in msg.lower() and "dependencies" in msg.lower()
+            if want_encryption and missing_e2ee and self.encryption_mode == "auto":
+                logger.warning(
+                    "[Matrix] E2EE dependencies not installed; continuing with encryption disabled. "
+                    "Install `matrix-nio[e2e]` to enable encryption."
+                )
+                cfg = AsyncClientConfig(
+                    store_sync_tokens=True,
+                    encryption_enabled=False,
+                    pickle_key=None,
+                )
+                self.encryption_enabled = False
+                if self.trust_unverified_devices:
+                    self.trust_unverified_devices = False
+            else:
+                raise
+
         self.client = AsyncClient(
             self.homeserver,
             self.user_id,

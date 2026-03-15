@@ -1279,7 +1279,7 @@ def run(stop_event: Optional[threading.Event] = None):
         logger.warning(f"[macOS] Invalid bind_port '{raw_port}', defaulting to {DEFAULT_PORT}")
         port = DEFAULT_PORT
 
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info")
+    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
 
     def _serve():
