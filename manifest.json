@@ -418,6 +418,29 @@
       "sha256": "285e6a4a0daf31790e45870380ba4fd7072ec89f39a5738e1ab34797e7f92897"
     },
     {
+      "id": "moltbook_info",
+      "name": "Moltbook Info",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Natural-language Moltbook account intelligence and status lookups.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [],
+      "entry": "plugins/moltbook_info.py",
+      "sha256": "38ebcbd6878654564f0e33f76b207745d05747847c849c7f802b90a994c7c853"
+    },
+    {
       "id": "music_assistant",
       "name": "Music Assistant",
       "version": "1.0.10",
