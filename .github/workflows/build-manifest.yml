@@ -1,10 +1,14 @@
-name: Build manifest
+name: Build manifests
 
 on:
   push:
     paths:
-      - "plugins/**.py"
+      - "plugins/**/*.py"
+      - "cores/**/*.py"
+      - "portals/**/*.py"
       - "tools/generate_manifest.py"
+      - "tools/generate_core_manifest.py"
+      - "tools/generate_portal_manifest.py"
       - "tools/generate_readme.py"
       - ".github/workflows/build-manifest.yml"
   workflow_dispatch:
@@ -24,20 +28,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate manifest
+      - name: Generate plugin manifest
         run: python tools/generate_manifest.py
+
+      - name: Generate core manifest
+        run: python tools/generate_core_manifest.py
+
+      - name: Generate portal manifest
+        run: python tools/generate_portal_manifest.py
 
       - name: Generate README
         run: python tools/generate_readme.py
 
-      - name: Commit manifest + README if changed
+      - name: Commit manifests + README if changed
         run: |
-          if git diff --quiet manifest.json README.md; then
+          if git diff --quiet manifest.json core_manifest.json portal_manifest.json README.md; then
             echo "No changes."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add manifest.json README.md
-          git commit -m "chore: update manifest and README"
+          git add manifest.json core_manifest.json portal_manifest.json README.md
+          git commit -m "chore: update manifests and README"
           git push
