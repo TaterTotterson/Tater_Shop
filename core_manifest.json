@@ -13,7 +13,7 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "82de1860de6f93bedcc6eb7cb5a28b95d55d08c9d8e48bb776ea3e6a4a12e9e8"
+      "sha256": "4c5280833de8d938d9b811581be9584d3e889fbc63775179f58011d5401b7311"
     },
     {
       "id": "memory",
@@ -27,7 +27,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "d29e31010739a70094769f9616e1f3a4263397210c77374757bb577177317c22"
+      "sha256": "3dfc15e2e573310d7271d7837c60f5ce7cedeadc50e54c5a5b85f6186fae66ba"
     },
     {
       "id": "rss",
@@ -41,7 +41,7 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "597a9285af8f4d94e28975589a1df418ca959e462114e0679be7b79328bcdde6"
+      "sha256": "f8f49d6d5ff289659aaaf645f699c9a08bacabfc5d406b9cf5086a3584baa61a"
     }
   ]
 }
