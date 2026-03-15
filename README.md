@@ -55,6 +55,7 @@
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
+| `moltbook_info` | Natural-language Moltbook account intelligence and status lookups. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `music_assistant` | Play music and control playback via Music Assistant in Home Assistant. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `obsidian_note` | Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags. | webui, macos |
 | `obsidian_search` | Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis. | webui, macos |
