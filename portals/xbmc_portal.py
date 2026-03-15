@@ -380,7 +380,7 @@ def run(stop_event: Optional[threading.Event] = None):
         logger.warning(f"[XBMC Bridge] Invalid bind_port value '{raw_port}', defaulting to 8790")
         port = 8790
 
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info")
+    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
 
     def _serve():

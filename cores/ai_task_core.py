@@ -5,12 +5,12 @@ import logging
 import os
 import re
 import time
+import uuid
 from bisect import bisect_left
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import redis
-import streamlit as st
 
 import plugin_registry as pr
 from plugin_base import ToolPlugin
@@ -641,11 +641,75 @@ async def _render_scheduled_message(
     return text, attachments
 
 
-def render_webui_tab(*, redis_client=None, **_kwargs):
+def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client if redis_client is not None else globals().get("redis_client")
     if client is None:
-        raise ValueError("render_webui_tab requires redis_client")
-    render_ai_tasks_page(redis_client=client)
+        return {
+            "summary": "Redis connection is unavailable.",
+            "stats": [],
+            "items": [],
+            "empty_message": "Cannot load scheduled tasks without Redis.",
+        }
+
+    schedules = _ai_tasks_ui_load_schedules(client)
+    total_count = len(schedules)
+    enabled_count = sum(1 for row in schedules if _ai_tasks_ui_is_enabled(row.get("_enabled"), True))
+    disabled_count = total_count - enabled_count
+
+    sort_rows = sorted(
+        schedules,
+        key=lambda item: (
+            0 if _ai_tasks_ui_is_enabled(item.get("_enabled"), True) else 1,
+            float(item.get("_due_ts") or 0.0) if float(item.get("_due_ts") or 0.0) > 0 else float("inf"),
+        ),
+    )
+
+    items: List[Dict[str, str]] = []
+    for row in sort_rows[:25]:
+        rid = str(row.get("_id") or "").strip()
+        if not rid:
+            continue
+        schedule = row.get("schedule") if isinstance(row.get("schedule"), dict) else {}
+        interval = _ai_tasks_ui_as_float(schedule.get("interval_sec"), 0.0)
+        enabled = _ai_tasks_ui_is_enabled(row.get("enabled", row.get("_enabled")), True)
+        platform = str(row.get("platform") or "").strip() or "unknown"
+        title = str(row.get("title") or "").strip()
+        task_prompt = str(row.get("task_prompt") or "").strip()
+        message = str(row.get("message") or "").strip()
+        command_text = task_prompt or message
+        recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
+        status_label = "Enabled" if enabled else "Disabled"
+
+        due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
+        if due_ts > 0:
+            due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
+            due_text = f"{due_local} ({_ai_tasks_ui_format_relative_due(due_ts)})"
+        else:
+            due_text = "n/a"
+
+        preview = " ".join(command_text.split()).strip() or "(empty)"
+        if len(preview) > 220:
+            preview = preview[:217].rstrip() + "..."
+
+        items.append(
+            {
+                "title": _ai_tasks_ui_derive_title(title, command_text),
+                "subtitle": f"{platform} · {status_label} · {recurrence_text}",
+                "detail": f"Next run: {due_text} · {preview}",
+            }
+        )
+
+    return {
+        "summary": "Scheduled AI tasks and upcoming run queue.",
+        "stats": [
+            {"label": "Total", "value": total_count},
+            {"label": "Enabled", "value": enabled_count},
+            {"label": "Disabled", "value": disabled_count},
+        ],
+        "items": items,
+        "empty_message": "No scheduled AI tasks found.",
+        "ui": _ai_tasks_ui_manager_payload(sort_rows),
+    }
 
 
 # ---- Embedded AI Tasks UI (migrated from webui/webui_ai_tasks.py) ----
@@ -1000,249 +1064,383 @@ def _ai_tasks_ui_recurrence_label(schedule: Dict[str, Any], interval: float) -> 
 
 def _ai_tasks_ui_derive_title(raw_title: str, command_text: str) -> str:
     title = str(raw_title or "").strip()
-    if title:
-        return title
     seed = " ".join(str(command_text or "").split()).strip()
+    if title:
+        # Older titles may be auto-truncated (ending in "..."). Prefer the full prompt when available.
+        if title.endswith("...") and seed and len(seed) > len(title):
+            return seed
+        return title
     if not seed:
         return "Scheduled task"
-    if len(seed) > 80:
-        return seed[:77].rstrip() + "..."
     return seed
 
 
-def render_ai_tasks_page(*, redis_client, embedded: bool = False):
-    if embedded:
-        st.subheader("AI Tasks")
+def _ai_tasks_ui_clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _ai_tasks_ui_platform_options(schedules: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, str]]:
+    names: List[str] = []
+    for token in _AI_TASKS_UI_DEFAULT_PORTALS + ["webui"]:
+        name = _ai_tasks_ui_clean_text(token).lower()
+        if name and name not in names:
+            names.append(name)
+    for row in schedules or []:
+        name = _ai_tasks_ui_clean_text(row.get("platform")).lower()
+        if name and name not in names:
+            names.append(name)
+    return [{"value": name, "label": name} for name in names]
+
+
+def _ai_tasks_ui_target_to_text(platform: str, targets: Dict[str, Any]) -> str:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    payload = targets if isinstance(targets, dict) else {}
+    candidates: List[Any]
+    if platform_name == "discord":
+        candidates = [payload.get("channel_id"), payload.get("channel")]
+    elif platform_name == "irc":
+        candidates = [payload.get("channel")]
+    elif platform_name == "matrix":
+        candidates = [payload.get("room_id"), payload.get("channel")]
+    elif platform_name == "telegram":
+        candidates = [payload.get("chat_id")]
+    elif platform_name == "homeassistant":
+        candidates = [payload.get("device_service")]
     else:
-        st.title("AI Tasks")
-    st.caption("Manage AI tasks and reminders.")
+        candidates = [payload.get("channel"), payload.get("room_id"), payload.get("chat_id")]
 
-    schedules = _ai_tasks_ui_load_schedules(redis_client)
-    total_count = len(schedules)
-    enabled_count = sum(1 for row in schedules if _ai_tasks_ui_is_enabled(row.get("_enabled"), True))
-    disabled_count = total_count - enabled_count
+    for candidate in candidates:
+        text = _ai_tasks_ui_clean_text(candidate)
+        if text:
+            return text
+    return ""
 
-    metrics = st.columns(3)
-    metrics[0].metric("Total", str(total_count))
-    metrics[1].metric("Enabled", str(enabled_count))
-    metrics[2].metric("Disabled", str(disabled_count))
 
-    tasks_tab, add_tab = st.tabs(["Scheduled Tasks", "Add Task"])
+def _ai_tasks_ui_target_from_text(platform: str, target_text: str) -> Dict[str, Any]:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    target = _ai_tasks_ui_clean_text(target_text)
+    if not target:
+        return {}
 
-    with tasks_tab:
-        if not schedules:
-            st.info("No schedules yet.")
+    if platform_name == "discord":
+        if target.isdigit():
+            return {"channel_id": target}
+        return {"channel": target}
+    if platform_name == "irc":
+        return {"channel": target if target.startswith("#") else f"#{target}"}
+    if platform_name == "matrix":
+        return {"room_id": target}
+    if platform_name == "telegram":
+        return {"chat_id": target}
+    if platform_name == "homeassistant":
+        return {"device_service": target}
+    return {"channel": target}
+
+
+def _ai_tasks_ui_load_reminder(redis_client, reminder_id: str) -> Optional[Dict[str, Any]]:
+    rid = _ai_tasks_ui_clean_text(reminder_id)
+    if not rid:
+        return None
+    raw = redis_client.get(f"reminders:{rid}")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    parsed["_id"] = rid
+    return parsed
+
+
+def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = list(schedules or [])
+    platform_options = _ai_tasks_ui_platform_options(rows)
+    forms: List[Dict[str, Any]] = []
+
+    for row in rows[:120]:
+        reminder_id = _ai_tasks_ui_clean_text(row.get("_id"))
+        if not reminder_id:
+            continue
+        schedule = row.get("schedule") if isinstance(row.get("schedule"), dict) else {}
+        interval = _ai_tasks_ui_as_float(schedule.get("interval_sec"), 0.0)
+        enabled = _ai_tasks_ui_is_enabled(row.get("enabled", row.get("_enabled")), True)
+        platform = _ai_tasks_ui_clean_text(row.get("platform")).lower() or "homeassistant"
+        title = _ai_tasks_ui_clean_text(row.get("title"))
+        task_prompt = _ai_tasks_ui_clean_text(row.get("task_prompt") or row.get("message"))
+        recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
+        schedule_text = _ai_tasks_ui_schedule_edit_text(schedule)
+        target_text = _ai_tasks_ui_target_to_text(platform, row.get("targets") if isinstance(row.get("targets"), dict) else {})
+
+        due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
+        if due_ts > 0:
+            due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
+            due_text = f"{due_local} ({_ai_tasks_ui_format_relative_due(due_ts)})"
         else:
-            sort_rows = sorted(
-                schedules,
-                key=lambda item: (
-                    0 if _ai_tasks_ui_is_enabled(item.get("_enabled"), True) else 1,
-                    float(item.get("_due_ts") or 0.0) if float(item.get("_due_ts") or 0.0) > 0 else float("inf"),
-                ),
-            )
-            for row in sort_rows:
-                rid = str(row.get("_id") or "").strip()
-                if not rid:
-                    continue
+            due_text = "n/a"
 
-                schedule = row.get("schedule") if isinstance(row.get("schedule"), dict) else {}
-                interval = _ai_tasks_ui_as_float(schedule.get("interval_sec"), 0.0)
-                enabled = _ai_tasks_ui_is_enabled(row.get("enabled", row.get("_enabled")), True)
-                platform = str(row.get("platform") or "").strip() or "unknown"
-                title = str(row.get("title") or "").strip()
-                task_prompt = str(row.get("task_prompt") or "").strip()
-                message = str(row.get("message") or "").strip()
-                command_text = task_prompt or message
-                preview = command_text or "(empty)"
-                if len(preview) > 180:
-                    preview = preview[:177].rstrip() + "..."
-                display_title = _ai_tasks_ui_derive_title(title, command_text)
-                due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
-
-                if due_ts > 0:
-                    due_local = datetime.fromtimestamp(due_ts).strftime("%Y-%m-%d %H:%M:%S")
-                    due_relative = _ai_tasks_ui_format_relative_due(due_ts)
-                    due_text = f"{due_local} ({due_relative})"
-                else:
-                    due_text = "n/a"
-
-                recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
-                status_label = "Enabled" if enabled else "Disabled"
-
-                with st.container():
-                    top_cols = st.columns([7, 4])
-                    with top_cols[0]:
-                        st.markdown(f"**{display_title}**")
-                        st.caption(f"{platform} · {status_label} · {recurrence_text}")
-                        st.write(preview)
-                        st.caption(f"Next run: {due_text}")
-                    with top_cols[1]:
-                        if hasattr(st, "toggle"):
-                            toggled_enabled = st.toggle("Enabled", value=enabled, key=f"enabled_toggle_{rid}")
-                        else:
-                            toggled_enabled = st.checkbox("Enabled", value=enabled, key=f"enabled_toggle_{rid}")
-
-                        if toggled_enabled != enabled:
-                            if toggled_enabled:
-                                row["enabled"] = True
-                                next_run = _ai_tasks_ui_recompute_next_run(schedule, now_ts=time.time())
-                                if next_run > 0:
-                                    schedule["next_run_ts"] = float(next_run)
-                                    row["schedule"] = schedule
-                                    row["_due_ts"] = float(next_run)
-                                    _ai_tasks_ui_set_due(redis_client, rid, float(next_run))
-                                _ai_tasks_ui_save_reminder(redis_client, rid, row)
-                                st.success("Task enabled.")
-                            else:
-                                row["enabled"] = False
-                                _ai_tasks_ui_save_reminder(redis_client, rid, row)
-                                _ai_tasks_ui_set_due(redis_client, rid, 0.0)
-                                st.success("Task disabled.")
-                            st.rerun()
-
-                        action_cols = st.columns(2)
-                        with action_cols[0]:
-                            if st.button(
-                                "Run Now",
-                                key=f"run_sched_{rid}",
-                                disabled=not toggled_enabled,
-                                type="primary",
-                                use_container_width=True,
-                            ):
-                                _ai_tasks_ui_set_due(redis_client, rid, float(time.time()))
-                                st.success("Task queued to run now.")
-                                st.rerun()
-                        with action_cols[1]:
-                            if st.button(
-                                "Delete Task",
-                                key=f"del_sched_{rid}",
-                                type="secondary",
-                                use_container_width=True,
-                            ):
-                                _ai_tasks_ui_delete_schedule(redis_client, rid)
-                                st.success("Task removed.")
-                                st.rerun()
-
-                with st.expander("Edit task", expanded=False):
-                    with st.form(key=f"edit_form_{rid}"):
-                        new_title = st.text_input("Title", value=title, key=f"title_{rid}")
-                        new_command = st.text_area(
-                            "Command",
-                            value=command_text,
-                            height=110,
-                            key=f"command_{rid}",
-                            help="This is what will run each time.",
-                        )
-                        new_schedule_input = st.text_input(
-                            "Schedule (natural or cron)",
-                            value=_ai_tasks_ui_schedule_edit_text(schedule),
-                            key=f"schedule_{rid}",
-                            help="Examples: weekdays at 8am, on monday and wednesday each week at 6:30pm, on the 10th of every month, or 0 30 18 * * mon,wed",
-                        )
-                        submit_edit = st.form_submit_button("Save changes")
-
-                    if submit_edit:
-                        command_clean = str(new_command or "").strip()
-                        if not command_clean:
-                            st.error("Command is required.")
-                        else:
-                            parsed_schedule, parse_error = _ai_tasks_ui_parse_schedule_input(new_schedule_input)
-                            if not parsed_schedule:
-                                st.error(parse_error or "Could not parse schedule.")
-                            else:
-                                row["title"] = str(new_title or "").strip()
-                                row["task_prompt"] = command_clean
-                                if "message" in row:
-                                    row["message"] = command_clean
-                                row["schedule"] = parsed_schedule
-                                row["updated_at"] = float(time.time())
-                                if enabled:
-                                    next_run = _ai_tasks_ui_as_float(parsed_schedule.get("next_run_ts"), 0.0)
-                                    _ai_tasks_ui_set_due(redis_client, rid, next_run)
-                                else:
-                                    _ai_tasks_ui_set_due(redis_client, rid, 0.0)
-                                _ai_tasks_ui_save_reminder(redis_client, rid, row)
-                                st.success("Task updated.")
-                                st.rerun()
-
-                st.markdown("---")
-
-    with add_tab:
-        st.markdown("### Add AI Task")
-        st.caption("Create a task manually with a command and schedule.")
-        existing_platforms = sorted(
-            set(
-                str(row.get("platform") or "").strip().lower()
-                for row in schedules
-                if str(row.get("platform") or "").strip()
-            )
+        forms.append(
+            {
+                "id": reminder_id,
+                "title": _ai_tasks_ui_derive_title(title, task_prompt),
+                "subtitle": f"{platform} · {'Enabled' if enabled else 'Disabled'} · {recurrence_text} · next: {due_text}",
+                "save_action": "ai_tasks_save_schedule",
+                "remove_action": "ai_tasks_remove_schedule",
+                "remove_confirm": f"Remove scheduled task {reminder_id}?",
+                "fields": [
+                    {
+                        "key": "enabled",
+                        "label": "Enabled",
+                        "type": "checkbox",
+                        "value": bool(enabled),
+                    },
+                    {
+                        "key": "title",
+                        "label": "Title",
+                        "type": "text",
+                        "value": title,
+                    },
+                    {
+                        "key": "task_prompt",
+                        "label": "Task Prompt",
+                        "type": "textarea",
+                        "value": task_prompt,
+                    },
+                    {
+                        "key": "schedule_text",
+                        "label": "Schedule",
+                        "type": "text",
+                        "description": "Examples: weekdays at 8am, every hour, on the 10th of every month, or 0 0 6 * * *",
+                        "value": schedule_text,
+                    },
+                    {
+                        "key": "platform",
+                        "label": "Portal",
+                        "type": "select",
+                        "options": platform_options,
+                        "value": platform,
+                    },
+                    {
+                        "key": "target",
+                        "label": "Target (optional)",
+                        "type": "text",
+                        "description": "Discord channel ID, IRC channel, Matrix room ID, Telegram chat ID, or Home Assistant service.",
+                        "value": target_text,
+                    },
+                ],
+            }
         )
-        platform_options = existing_platforms + [p for p in _AI_TASKS_UI_DEFAULT_PORTALS if p not in existing_platforms]
-        if not platform_options:
-            platform_options = list(_AI_TASKS_UI_DEFAULT_PORTALS)
 
-        with st.form("add_ai_task_form"):
-            add_title = st.text_input("Title (optional)", value="")
-            add_command = st.text_area(
-                "Command",
-                value="",
-                height=120,
-                help="What the AI task should do when it runs.",
-            )
-            add_schedule = st.text_input(
-                "Schedule (natural or cron)",
-                value="",
-                help="Examples: weekdays at 8am, on the 10th of every month at 9:15am, every hour, or 0 0 6 * * *",
-            )
-            add_platform = st.selectbox("Destination portal", options=platform_options, index=0)
-            add_targets = st.text_area(
-                "Targets JSON (optional)",
-                value="{}",
-                height=90,
-                help="Leave {} for default destination. Example: {\"channel\":\"#general\"}",
-            )
-            add_enabled = st.checkbox("Enabled", value=True)
-            submit_add = st.form_submit_button("Add task")
+    return {
+        "kind": "settings_manager",
+        "title": "AI Task Scheduler",
+        "empty_message": "No scheduled AI tasks found.",
+        "use_tabs": True,
+        "create_tab_label": "Create Task",
+        "items_tab_label": "Current Tasks",
+        "item_fields_dropdown": True,
+        "item_fields_dropdown_label": "Task Settings",
+        "add_form": {
+            "action": "ai_tasks_add_schedule",
+            "submit_label": "Add Task",
+            "fields": [
+                {
+                    "key": "title",
+                    "label": "Title (optional)",
+                    "type": "text",
+                    "value": "",
+                },
+                {
+                    "key": "task_prompt",
+                    "label": "Task Prompt",
+                    "type": "textarea",
+                    "description": "What should run each time the task triggers.",
+                    "value": "",
+                },
+                {
+                    "key": "schedule_text",
+                    "label": "Schedule",
+                    "type": "text",
+                    "description": "Examples: weekdays at 8am, every hour, on the 10th of every month, or 0 0 6 * * *",
+                    "value": "",
+                },
+                {
+                    "key": "platform",
+                    "label": "Portal",
+                    "type": "select",
+                    "options": platform_options,
+                    "value": "homeassistant",
+                },
+                {
+                    "key": "target",
+                    "label": "Target (optional)",
+                    "type": "text",
+                    "value": "",
+                },
+                {
+                    "key": "enabled",
+                    "label": "Enabled",
+                    "type": "checkbox",
+                    "value": True,
+                },
+            ],
+        },
+        "item_forms": forms,
+    }
 
-        if submit_add:
-            command_clean = str(add_command or "").strip()
-            if not command_clean:
-                st.error("Command is required.")
-            else:
-                parsed_schedule, parse_error = _ai_tasks_ui_parse_schedule_input(add_schedule)
-                if not parsed_schedule:
-                    st.error(parse_error or "Could not parse schedule.")
+
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client if redis_client is not None else globals().get("redis_client")
+    if client is None:
+        raise ValueError("Redis connection is unavailable.")
+
+    body = payload if isinstance(payload, dict) else {}
+    values = body.get("values") if isinstance(body.get("values"), dict) else {}
+    action_name = _ai_tasks_ui_clean_text(action).lower()
+
+    def _value(key: str, default: Any = "") -> Any:
+        if key in values:
+            return values.get(key)
+        return body.get(key, default)
+
+    def _parse_schedule_text(schedule_text: str) -> Dict[str, Any]:
+        parsed, error_text = _ai_tasks_ui_parse_schedule_input(schedule_text)
+        if not isinstance(parsed, dict):
+            raise ValueError(error_text or "Could not parse schedule.")
+        recurrence = parsed.get("recurrence") if isinstance(parsed.get("recurrence"), dict) else {}
+        next_run = _ai_tasks_ui_as_float(parsed.get("next_run_ts"), 0.0)
+        interval = _ai_tasks_ui_as_float(parsed.get("interval_sec"), 0.0)
+        if next_run <= 0 or not recurrence:
+            raise ValueError("Could not compute next run from schedule.")
+        schedule_payload: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": float(interval),
+            "anchor_ts": float(next_run),
+            "recurrence": dict(recurrence),
+        }
+        cron_text = _ai_tasks_ui_clean_text(parsed.get("cron") or recurrence.get("cron"))
+        if cron_text:
+            schedule_payload["cron"] = cron_text
+        return schedule_payload
+
+    if action_name == "ai_tasks_add_schedule":
+        task_prompt = _ai_tasks_ui_clean_text(_value("task_prompt"))
+        if not task_prompt:
+            raise ValueError("Task prompt is required.")
+
+        schedule_text = _ai_tasks_ui_clean_text(_value("schedule_text"))
+        if not schedule_text:
+            raise ValueError("Schedule is required.")
+        schedule_payload = _parse_schedule_text(schedule_text)
+
+        platform = _ai_tasks_ui_clean_text(_value("platform")).lower() or "homeassistant"
+        allowed_platforms = {str(item.get("value") or "").strip().lower() for item in _ai_tasks_ui_platform_options([])}
+        if platform not in allowed_platforms:
+            raise ValueError(f"Unsupported portal: {platform}")
+
+        target_text = _ai_tasks_ui_clean_text(_value("target"))
+        enabled = _ai_tasks_ui_is_enabled(_value("enabled", True), True)
+        title = _ai_tasks_ui_clean_text(_value("title"))
+        if not title:
+            title = _ai_tasks_ui_derive_title("", task_prompt)
+
+        reminder_id = str(uuid.uuid4())
+        reminder = {
+            "id": reminder_id,
+            "created_at": float(time.time()),
+            "platform": platform,
+            "title": title,
+            "task_prompt": task_prompt,
+            "targets": _ai_tasks_ui_target_from_text(platform, target_text),
+            "origin": {},
+            "meta": {},
+            "schedule": schedule_payload,
+            "enabled": bool(enabled),
+        }
+        _ai_tasks_ui_save_reminder(client, reminder_id, reminder)
+        due_ts = _ai_tasks_ui_as_float(schedule_payload.get("next_run_ts"), 0.0)
+        _ai_tasks_ui_set_due(client, reminder_id, due_ts if enabled else 0.0)
+        return {"ok": True, "message": f"Scheduled task added ({title}).", "id": reminder_id}
+
+    if action_name == "ai_tasks_save_schedule":
+        reminder_id = _ai_tasks_ui_clean_text(_value("id"))
+        if not reminder_id:
+            raise ValueError("Task id is required.")
+        current = _ai_tasks_ui_load_reminder(client, reminder_id)
+        if not isinstance(current, dict):
+            raise KeyError("Scheduled task not found.")
+
+        task_prompt = _ai_tasks_ui_clean_text(_value("task_prompt"))
+        if not task_prompt:
+            task_prompt = _ai_tasks_ui_clean_text(current.get("task_prompt") or current.get("message"))
+        if not task_prompt:
+            raise ValueError("Task prompt is required.")
+
+        platform = _ai_tasks_ui_clean_text(_value("platform")).lower() or _ai_tasks_ui_clean_text(current.get("platform")).lower()
+        allowed_platforms = {str(item.get("value") or "").strip().lower() for item in _ai_tasks_ui_platform_options([])}
+        if platform not in allowed_platforms:
+            raise ValueError(f"Unsupported portal: {platform}")
+
+        schedule_text = _ai_tasks_ui_clean_text(_value("schedule_text"))
+        current_schedule = current.get("schedule") if isinstance(current.get("schedule"), dict) else {}
+        current_schedule_text = _ai_tasks_ui_schedule_edit_text(current_schedule)
+        if schedule_text:
+            try:
+                schedule_payload = _parse_schedule_text(schedule_text)
+            except ValueError:
+                if schedule_text == current_schedule_text:
+                    schedule_payload = dict(current_schedule)
                 else:
-                    targets_raw = str(add_targets or "").strip() or "{}"
-                    try:
-                        parsed_targets = json.loads(targets_raw)
-                    except Exception as exc:
-                        parsed_targets = None
-                        st.error(f"Targets JSON is invalid: {exc}")
+                    raise
+        else:
+            schedule_payload = dict(current_schedule)
+            next_run = _ai_tasks_ui_recompute_next_run(schedule_payload, now_ts=time.time())
+            if next_run > 0:
+                schedule_payload["next_run_ts"] = float(next_run)
+                schedule_payload.setdefault("anchor_ts", float(next_run))
 
-                    if isinstance(parsed_targets, dict):
-                        now_ts = float(time.time())
-                        reminder_id = str(uuid.uuid4())
-                        reminder = {
-                            "id": reminder_id,
-                            "created_at": now_ts,
-                            "platform": str(add_platform or "").strip().lower(),
-                            "title": _ai_tasks_ui_derive_title(str(add_title or "").strip(), command_clean),
-                            "task_prompt": command_clean,
-                            "targets": parsed_targets,
-                            "origin": {"platform": "webui", "scope": "ai_tasks_ui"},
-                            "meta": {},
-                            "schedule": parsed_schedule,
-                            "enabled": bool(add_enabled),
-                        }
-                        _ai_tasks_ui_save_reminder(redis_client, reminder_id, reminder)
-                        if bool(add_enabled):
-                            next_run = _ai_tasks_ui_as_float(parsed_schedule.get("next_run_ts"), 0.0)
-                            _ai_tasks_ui_set_due(redis_client, reminder_id, next_run)
-                        else:
-                            _ai_tasks_ui_set_due(redis_client, reminder_id, 0.0)
-                        st.success("AI task added.")
-                        st.rerun()
+        title = _ai_tasks_ui_clean_text(_value("title"))
+        if not title:
+            title = _ai_tasks_ui_derive_title(_ai_tasks_ui_clean_text(current.get("title")), task_prompt)
+
+        target_changed = ("target" in values) or ("target" in body)
+        if target_changed:
+            targets = _ai_tasks_ui_target_from_text(platform, _ai_tasks_ui_clean_text(_value("target")))
+        else:
+            targets = current.get("targets") if isinstance(current.get("targets"), dict) else {}
+            if not targets and platform != _ai_tasks_ui_clean_text(current.get("platform")).lower():
+                targets = _ai_tasks_ui_target_from_text(platform, "")
+
+        enabled = _ai_tasks_ui_is_enabled(_value("enabled", current.get("enabled")), True)
+        current.update(
+            {
+                "platform": platform,
+                "title": title,
+                "task_prompt": task_prompt,
+                "targets": targets,
+                "schedule": schedule_payload,
+                "enabled": bool(enabled),
+            }
+        )
+        _ai_tasks_ui_save_reminder(client, reminder_id, current)
+        due_ts = _ai_tasks_ui_as_float(schedule_payload.get("next_run_ts"), 0.0)
+        _ai_tasks_ui_set_due(client, reminder_id, due_ts if enabled else 0.0)
+        return {"ok": True, "message": f"Saved task {title}.", "id": reminder_id}
+
+    if action_name == "ai_tasks_remove_schedule":
+        reminder_id = _ai_tasks_ui_clean_text(_value("id"))
+        if not reminder_id:
+            raise ValueError("Task id is required.")
+        existing = _ai_tasks_ui_load_reminder(client, reminder_id)
+        if not isinstance(existing, dict):
+            raise KeyError("Scheduled task not found.")
+        _ai_tasks_ui_delete_schedule(client, reminder_id)
+        title = _ai_tasks_ui_clean_text(existing.get("title")) or reminder_id
+        return {"ok": True, "message": f"Removed task {title}.", "id": reminder_id}
+
+    raise ValueError(f"Unknown action: {action_name}")
+
 
 def run(stop_event: Optional[object] = None):
     logger.info("[AI Tasks] Scheduler service started.")

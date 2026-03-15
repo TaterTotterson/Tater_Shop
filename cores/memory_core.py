@@ -2,15 +2,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import textwrap
 import hashlib
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import redis
-import streamlit as st
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env
@@ -1428,6 +1429,8 @@ _LEGACY_MEMORY_GLOBAL_KEY = f"{_LEGACY_MEMORY_HASH_PREFIX}:global"
 _LEGACY_MEMORY_USER_PREFIX = f"{_LEGACY_MEMORY_HASH_PREFIX}:user:"
 _LEGACY_MEMORY_ROOM_PREFIX = f"{_LEGACY_MEMORY_HASH_PREFIX}:room:"
 _LEGACY_MEMORY_DEFAULT_TTL_KEY = "tater:memory:default_ttl_sec"
+_MEMORY_CORE_UI_LAST_TOOL_HASH = "mem:ui:memory_core:last_tool"
+_MEMORY_CORE_EXPORT_DIR_DEFAULT = "agent_lab/memory_core_exports"
 
 
 def _memory_core_room_label_key(platform: Any, room_id: Any) -> str:
@@ -3029,677 +3032,1222 @@ def _legacy_memory_discovery() -> Dict[str, Any]:
     }
 
 
-def render_memory_page():
-    st.title("Memory")
-    st.caption("Durable memory extracted by the Memory Core.")
-
-    stats = _memory_core_stats()
-    discovery = _memory_core_doc_discovery()
-    user_rows = list(discovery.get("users") or [])
-    room_rows = list(discovery.get("rooms") or [])
-    tab_stats, tab_users, tab_rooms, tab_legacy, tab_export = st.tabs(["Stats", "Users", "Rooms", "Legacy", "Export"])
-
-    with tab_stats:
-        metric_cols_top = st.columns(4)
-        metric_cols_top[0].metric("Users", int(discovery.get("user_count") or 0))
-        metric_cols_top[1].metric("Rooms", int(discovery.get("room_count") or 0))
-        metric_cols_top[2].metric("Facts", int(discovery.get("fact_count") or 0))
-        metric_cols_top[3].metric("Processed Msgs", int(stats.get("processed_messages") or 0))
-
-        metric_cols_bottom = st.columns(4)
-        metric_cols_bottom[0].metric("Updated Facts", int(stats.get("updated_facts") or 0))
-        metric_cols_bottom[1].metric("Updated Docs", int(stats.get("updated_docs") or 0))
-        metric_cols_bottom[2].metric("Scanned Scopes", int(stats.get("scanned_scopes") or 0))
-        metric_cols_bottom[3].metric("Enabled Portals", int(stats.get("enabled_platform_count") or 0))
-
-        last_run = str(stats.get("last_run_text") or "").strip()
-        if last_run:
-            st.caption(f"Memory core last run: {last_run}")
-        else:
-            st.caption("Memory core has not reported stats yet.")
-
-        if not user_rows and not room_rows:
-            st.info("No core memory documents with facts yet.")
-        else:
-            st.caption(f"Found {len(user_rows)} users and {len(room_rows)} rooms with stored facts.")
-
-        insights = _memory_core_insight_frames(user_rows, room_rows)
-        st.markdown("**Insights**")
-        if not insights:
-            st.info("No fact data available for graphs yet.")
-        else:
-            def _render_key_table(
-                title: str,
-                frame: Any,
-                *,
-                count_label: str = "count",
-                key_label: str = "key",
-            ) -> None:
-                if not isinstance(frame, pd.DataFrame) or frame.empty:
-                    return
-                table_df = frame.reset_index()
-                if "key" not in table_df.columns:
-                    if "index" in table_df.columns:
-                        table_df = table_df.rename(columns={"index": "key"})
-                    else:
-                        first_col = str(table_df.columns[0]) if len(table_df.columns) > 0 else ""
-                        if first_col:
-                            table_df = table_df.rename(columns={first_col: "key"})
-
-                if count_label not in table_df.columns:
-                    if "count" in table_df.columns:
-                        table_df = table_df.rename(columns={"count": count_label})
-                    elif "facts" in table_df.columns and count_label != "facts":
-                        table_df = table_df.rename(columns={"facts": count_label})
-                    elif "updates" in table_df.columns and count_label != "updates":
-                        table_df = table_df.rename(columns={"updates": count_label})
-                    else:
-                        candidate_cols: List[str] = []
-                        for col in list(table_df.columns):
-                            col_name = str(col)
-                            if col_name in {"key", "Rank"}:
-                                continue
-                            try:
-                                if pd.api.types.is_numeric_dtype(table_df[col]):
-                                    candidate_cols.append(col_name)
-                            except Exception:
-                                continue
-                        if not candidate_cols:
-                            for col in list(table_df.columns):
-                                col_name = str(col)
-                                if col_name not in {"key", "Rank"}:
-                                    candidate_cols.append(col_name)
-                        if candidate_cols:
-                            table_df = table_df.rename(columns={candidate_cols[0]: count_label})
-                        else:
-                            table_df[count_label] = 0
-
-                if count_label not in table_df.columns:
-                    table_df[count_label] = 0
-                try:
-                    table_df[count_label] = pd.to_numeric(table_df[count_label], errors="coerce").fillna(0).astype(int)
-                except Exception:
-                    pass
-
-                table_df.insert(0, "Rank", list(range(1, len(table_df) + 1)))
-                ordered_cols = [col for col in ("Rank", "key", count_label) if col in table_df.columns]
-                if ordered_cols:
-                    table_df = table_df[ordered_cols]
-                st.caption(title)
-                column_config: Dict[str, Any] = {}
-                if "Rank" in table_df.columns:
-                    column_config["Rank"] = st.column_config.NumberColumn("Rank", width="small", format="%d")
-                if "key" in table_df.columns:
-                    column_config["key"] = st.column_config.TextColumn(key_label, width="medium")
-                if count_label in table_df.columns:
-                    column_config[count_label] = st.column_config.NumberColumn(count_label, width="small", format="%d")
-                try:
-                    st.dataframe(
-                        table_df,
-                        width="stretch",
-                        hide_index=True,
-                        column_config=column_config if column_config else None,
-                    )
-                except TypeError:
-                    st.dataframe(table_df, width="stretch")
-
-            platform_df = insights.get("platform_df")
-            if isinstance(platform_df, pd.DataFrame) and not platform_df.empty:
-                st.caption("Facts by portal")
-                st.bar_chart(platform_df, width="stretch")
-
-            trending_user_df = insights.get("trending_user_df")
-            if isinstance(trending_user_df, pd.DataFrame) and not trending_user_df.empty:
-                _render_key_table(
-                    "Trending shared user facts",
-                    trending_user_df,
-                    count_label="users",
-                    key_label="shared fact",
-                )
-                if not bool(insights.get("trending_user_has_data")):
-                    st.caption("No trending shared user facts yet.")
-                else:
-                    st.caption("Counts show how many users share the same fact key and value.")
-
-            top_user_df = insights.get("top_user_df")
-            top_room_df = insights.get("top_room_df")
-            top_key_cols = st.columns(2)
-            with top_key_cols[0]:
-                _render_key_table("Top user fact keys", top_user_df, count_label="facts")
-            with top_key_cols[1]:
-                _render_key_table("Top room fact keys", top_room_df, count_label="facts")
-
-            recent_key_df = insights.get("recent_key_df")
-            _render_key_table("Most updated keys (last 7 days)", recent_key_df, count_label="updates")
-
-            updates_df = insights.get("updates_df")
-            if isinstance(updates_df, pd.DataFrame) and not updates_df.empty:
-                st.caption("Fact updates (last 14 days)")
-                st.line_chart(updates_df, width="stretch")
-
-    with tab_users:
-        user_platforms = sorted({str(row.get("platform") or "") for row in user_rows if row.get("platform")})
-        user_platform_filter = st.selectbox(
-            "User Portal Filter",
-            options=["all", *user_platforms],
-            key="memory_core_user_filter",
-        )
-        filtered_users = [
-            row
-            for row in user_rows
-            if user_platform_filter == "all" or str(row.get("platform") or "") == user_platform_filter
-        ]
-        if not filtered_users:
-            st.info("No user memory entries for the selected filter.")
-        else:
-            st.dataframe(
-                [
-                    {
-                        "platform": row.get("platform"),
-                        "user": row.get("user_name") or row.get("user_id"),
-                        "facts": row.get("fact_count"),
-                        "fact_keys": row.get("fact_keys"),
-                        "last_updated": row.get("last_updated"),
-                    }
-                    for row in filtered_users
-                ],
-                width="stretch",
-            )
-            selected_user_idx = st.selectbox(
-                "Inspect User Memory Document",
-                options=list(range(len(filtered_users))),
-                format_func=lambda i: (
-                    f"{filtered_users[i].get('platform')} / "
-                    f"{filtered_users[i].get('user_name') or filtered_users[i].get('user_id')} "
-                    f"({filtered_users[i].get('fact_count')} facts)"
-                ),
-                key="memory_core_user_doc_select",
-            )
-            selected_user = filtered_users[int(selected_user_idx)]
-            selected_user_doc = selected_user.get("doc") if isinstance(selected_user.get("doc"), dict) else {}
-            user_fact_rows = _memory_core_fact_rows(selected_user_doc)
-            if user_fact_rows:
-                grouped_rows = _memory_core_user_fact_rows_by_category(selected_user_doc)
-                for category in _MEMORY_USER_PROFILE_CATEGORIES:
-                    label = str(category.get("label") or "").strip()
-                    if not label:
-                        continue
-                    category_rows = list(grouped_rows.get(label) or [])
-                    if not category_rows:
-                        continue
-                    st.markdown(f"**{label}**")
-                    st.dataframe(category_rows, width="stretch")
-                uncategorized_rows = list(grouped_rows.get("Uncategorized") or [])
-                if uncategorized_rows:
-                    st.markdown("**Uncategorized**")
-                    st.dataframe(uncategorized_rows, width="stretch")
-            else:
-                st.info("No facts stored in this user memory document.")
-            with st.expander("Raw memory document", expanded=False):
-                st.json(selected_user_doc)
-            selected_user_platform = str(selected_user.get("platform") or "").strip()
-            selected_user_id = str(selected_user.get("user_id") or "").strip()
-            user_fact_keys = sorted(
-                list((selected_user_doc.get("facts") or {}).keys())
-            ) if isinstance(selected_user_doc.get("facts"), dict) else []
-            user_token = _memory_core_ui_token("user", selected_user_platform, selected_user_id)
-
-            st.markdown("Remove user memory")
-            selected_user_keys = st.multiselect(
-                "Select user fact keys to delete",
-                options=user_fact_keys,
-                key=f"memory_core_user_delete_keys_{user_token}",
-            )
-            if st.button(
-                "Delete Selected User Fact Keys",
-                key=f"memory_core_user_delete_button_{user_token}",
-                disabled=not selected_user_keys,
-            ):
-                delete_result = _memory_core_forget_fact_keys(
-                    "user",
-                    selected_user_platform,
-                    selected_user_id,
-                    selected_user_keys,
-                )
-                if delete_result.get("ok"):
-                    st.success(
-                        f"Deleted {int(delete_result.get('deleted') or 0)} user memory "
-                        f"{'key' if int(delete_result.get('deleted') or 0) == 1 else 'keys'}."
-                    )
-                    st.rerun()
-                else:
-                    st.error(delete_result.get("error") or "Failed to delete selected user keys.")
-
-            confirm_user_doc_delete = st.checkbox(
-                "Confirm delete full user memory document",
-                value=False,
-                key=f"memory_core_user_delete_doc_confirm_{user_token}",
-            )
-            if st.button(
-                "Delete Entire User Memory Document",
-                key=f"memory_core_user_delete_doc_button_{user_token}",
-                disabled=not confirm_user_doc_delete,
-            ):
-                delete_result = _memory_core_forget_doc(
-                    "user",
-                    selected_user_platform,
-                    selected_user_id,
-                )
-                if delete_result.get("ok"):
-                    st.success("Deleted user memory document.")
-                    st.rerun()
-                else:
-                    st.error(delete_result.get("error") or "Failed to delete user memory document.")
-
-    with tab_rooms:
-        room_platforms = sorted({str(row.get("platform") or "") for row in room_rows if row.get("platform")})
-        room_platform_filter = st.selectbox(
-            "Room Portal Filter",
-            options=["all", *room_platforms],
-            key="memory_core_room_filter",
-        )
-        filtered_rooms = [
-            row
-            for row in room_rows
-            if room_platform_filter == "all" or str(row.get("platform") or "") == room_platform_filter
-        ]
-        if not filtered_rooms:
-            st.info("No room memory entries for the selected filter.")
-        else:
-            st.dataframe(
-                [
-                    {
-                        "platform": row.get("platform"),
-                        "room": row.get("room_name") or row.get("room_id"),
-                        "facts": row.get("fact_count"),
-                        "fact_keys": row.get("fact_keys"),
-                        "last_updated": row.get("last_updated"),
-                    }
-                    for row in filtered_rooms
-                ],
-                width="stretch",
-            )
-            selected_room_idx = st.selectbox(
-                "Inspect Room Memory Document",
-                options=list(range(len(filtered_rooms))),
-                format_func=lambda i: (
-                    f"{filtered_rooms[i].get('platform')} / "
-                    f"{_memory_core_room_display_name_from_row(filtered_rooms[i])} "
-                    f"({filtered_rooms[i].get('fact_count')} facts)"
-                ),
-                key="memory_core_room_doc_select",
-            )
-            selected_room = filtered_rooms[int(selected_room_idx)]
-            selected_room_doc = selected_room.get("doc") if isinstance(selected_room.get("doc"), dict) else {}
-            room_fact_rows = _memory_core_fact_rows(selected_room_doc)
-            if room_fact_rows:
-                grouped_rows = _memory_core_room_fact_rows_by_category(selected_room_doc)
-                for category in _MEMORY_ROOM_PROFILE_CATEGORIES:
-                    label = str(category.get("label") or "").strip()
-                    if not label:
-                        continue
-                    category_rows = list(grouped_rows.get(label) or [])
-                    if not category_rows:
-                        continue
-                    st.markdown(f"**{label}**")
-                    st.dataframe(category_rows, width="stretch")
-                uncategorized_rows = list(grouped_rows.get("Uncategorized") or [])
-                if uncategorized_rows:
-                    st.markdown("**Uncategorized**")
-                    st.dataframe(uncategorized_rows, width="stretch")
-            else:
-                st.info("No facts stored in this room memory document.")
-            with st.expander("Raw memory document", expanded=False):
-                st.json(selected_room_doc)
-            selected_room_platform = str(selected_room.get("platform") or "").strip()
-            selected_room_id = str(selected_room.get("room_id") or "").strip()
-            room_fact_keys = sorted(
-                list((selected_room_doc.get("facts") or {}).keys())
-            ) if isinstance(selected_room_doc.get("facts"), dict) else []
-            room_token = _memory_core_ui_token("room", selected_room_platform, selected_room_id)
-
-            st.markdown("Remove room memory")
-            selected_room_keys = st.multiselect(
-                "Select room fact keys to delete",
-                options=room_fact_keys,
-                key=f"memory_core_room_delete_keys_{room_token}",
-            )
-            if st.button(
-                "Delete Selected Room Fact Keys",
-                key=f"memory_core_room_delete_button_{room_token}",
-                disabled=not selected_room_keys,
-            ):
-                delete_result = _memory_core_forget_fact_keys(
-                    "room",
-                    selected_room_platform,
-                    selected_room_id,
-                    selected_room_keys,
-                )
-                if delete_result.get("ok"):
-                    st.success(
-                        f"Deleted {int(delete_result.get('deleted') or 0)} room memory "
-                        f"{'key' if int(delete_result.get('deleted') or 0) == 1 else 'keys'}."
-                    )
-                    st.rerun()
-                else:
-                    st.error(delete_result.get("error") or "Failed to delete selected room keys.")
-
-            confirm_room_doc_delete = st.checkbox(
-                "Confirm delete full room memory document",
-                value=False,
-                key=f"memory_core_room_delete_doc_confirm_{room_token}",
-            )
-            if st.button(
-                "Delete Entire Room Memory Document",
-                key=f"memory_core_room_delete_doc_button_{room_token}",
-                disabled=not confirm_room_doc_delete,
-            ):
-                delete_result = _memory_core_forget_doc(
-                    "room",
-                    selected_room_platform,
-                    selected_room_id,
-                )
-                if delete_result.get("ok"):
-                    st.success("Deleted room memory document.")
-                    st.rerun()
-                else:
-                    st.error(delete_result.get("error") or "Failed to delete room memory document.")
-
-    with tab_legacy:
-        st.caption("Legacy key-value memory used by `memory_get` and `memory_set`.")
-        legacy_discovery = _legacy_memory_discovery()
-        legacy_rows = list(legacy_discovery.get("scopes") or [])
-
-        explicit_text = "false (always)"
-
-        default_ttl_raw = str(redis_client.get(_LEGACY_MEMORY_DEFAULT_TTL_KEY) or "").strip()
-        default_ttl_text = default_ttl_raw or "0"
-
-        legacy_metric_cols = st.columns(3)
-        legacy_metric_cols[0].metric("Scopes", int(legacy_discovery.get("scope_count") or 0))
-        legacy_metric_cols[1].metric("Entries", int(legacy_discovery.get("entry_count") or 0))
-        legacy_metric_cols[2].metric("Explicit Only", explicit_text)
-        st.caption(f"Default TTL (legacy): {default_ttl_text}s (applies to volatile keys only).")
-
-        if not legacy_rows:
-            st.info("No legacy memory scopes found.")
-        else:
-            st.dataframe(
-                [
-                    {
-                        "scope": row.get("scope"),
-                        "platform": row.get("platform"),
-                        "user_id": row.get("user_id"),
-                        "room_id": row.get("room_id"),
-                        "entries": row.get("entry_count"),
-                        "active": row.get("active_count"),
-                        "expired": row.get("expired_count"),
-                        "last_updated": row.get("last_updated"),
-                        "redis_key": row.get("redis_key"),
-                    }
-                    for row in legacy_rows
-                ],
-                width="stretch",
-            )
-
-            selected_legacy_idx = st.selectbox(
-                "Inspect Legacy Memory Scope",
-                options=list(range(len(legacy_rows))),
-                format_func=lambda i: (
-                    f"{_legacy_memory_scope_display_name(legacy_rows[i])} "
-                    f"({int(legacy_rows[i].get('entry_count') or 0)} entries)"
-                ),
-                key="legacy_memory_scope_select",
-            )
-            selected_legacy_scope = legacy_rows[int(selected_legacy_idx)]
-            selected_legacy_items = list(selected_legacy_scope.get("items") or [])
-
-            if selected_legacy_items:
-                st.dataframe(
-                    [
-                        {
-                            "key": item.get("key"),
-                            "value": memory_core_value_to_text(item.get("value"), max_chars=160),
-                            "source": item.get("source"),
-                            "updated_at": item.get("updated_at"),
-                            "expires_at": item.get("expires_at"),
-                            "status": "expired" if bool(item.get("is_expired")) else "active",
-                        }
-                        for item in selected_legacy_items
-                    ],
-                    width="stretch",
-                )
-            else:
-                st.info("No key/value entries in this legacy memory scope.")
-
-            legacy_scope_token = _memory_core_ui_token("legacy", selected_legacy_scope.get("redis_key"))
-            legacy_key_options = [str(item.get("key") or "") for item in selected_legacy_items if str(item.get("key") or "").strip()]
-
-            selected_legacy_keys = st.multiselect(
-                "Select legacy keys to delete",
-                options=legacy_key_options,
-                key=f"legacy_memory_delete_keys_{legacy_scope_token}",
-            )
-            if st.button(
-                "Delete Selected Legacy Keys",
-                key=f"legacy_memory_delete_keys_button_{legacy_scope_token}",
-                disabled=not selected_legacy_keys,
-            ):
-                try:
-                    deleted = int(
-                        redis_client.hdel(str(selected_legacy_scope.get("redis_key") or ""), *selected_legacy_keys) or 0
-                    )
-                    if deleted > 0:
-                        st.success(
-                            f"Deleted {deleted} legacy memory "
-                            f"{'key' if deleted == 1 else 'keys'}."
-                        )
-                        st.rerun()
-                    else:
-                        st.error("No matching legacy memory keys were deleted.")
-                except Exception as exc:
-                    st.error(f"Legacy memory delete failed: {exc}")
-
-            confirm_delete_scope = st.checkbox(
-                "Confirm delete entire legacy memory scope",
-                value=False,
-                key=f"legacy_memory_delete_scope_confirm_{legacy_scope_token}",
-            )
-            if st.button(
-                "Delete Entire Legacy Scope",
-                key=f"legacy_memory_delete_scope_button_{legacy_scope_token}",
-                disabled=not confirm_delete_scope,
-            ):
-                try:
-                    deleted = int(redis_client.delete(str(selected_legacy_scope.get("redis_key") or "")) or 0)
-                    if deleted > 0:
-                        st.success("Deleted legacy memory scope.")
-                        st.rerun()
-                    else:
-                        st.error("Legacy memory scope was already empty.")
-                except Exception as exc:
-                    st.error(f"Legacy scope delete failed: {exc}")
-
-            with st.expander("Raw legacy scope entries", expanded=False):
-                st.json(
-                    {
-                        "scope": selected_legacy_scope.get("scope"),
-                        "platform": selected_legacy_scope.get("platform"),
-                        "user_id": selected_legacy_scope.get("user_id"),
-                        "room_id": selected_legacy_scope.get("room_id"),
-                        "redis_key": selected_legacy_scope.get("redis_key"),
-                        "entries": {
-                            str(item.get("key") or ""): {
-                                "value": item.get("value"),
-                                "source": item.get("source"),
-                                "updated_at": item.get("updated_at"),
-                                "expires_at": item.get("expires_at"),
-                                "is_expired": bool(item.get("is_expired")),
-                            }
-                            for item in selected_legacy_items
-                        },
-                    }
-                )
-
-    with tab_export:
-        st.caption("Export the current memory snapshot as a PDF report.")
-        total_docs = int(len(user_rows) + len(room_rows))
-        total_facts = int(discovery.get("fact_count") or 0)
-        st.caption(f"Current snapshot: {total_docs} docs, {total_facts} facts.")
-
-        if st.button("Generate Memory PDF", key="memory_core_export_generate_pdf"):
-            pdf_bytes = _memory_core_export_pdf(
-                stats=stats,
-                user_rows=user_rows,
-                room_rows=room_rows,
-            )
-            st.session_state["memory_core_export_pdf_bytes"] = pdf_bytes
-            st.session_state["memory_core_export_pdf_name"] = (
-                f"memory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-            )
-            size_kb = len(pdf_bytes) / 1024.0
-            st.success(f"PDF generated ({size_kb:.1f} KB).")
-
-        pdf_payload = st.session_state.get("memory_core_export_pdf_bytes")
-        if isinstance(pdf_payload, (bytes, bytearray)) and len(pdf_payload) > 0:
-            export_name = str(
-                st.session_state.get("memory_core_export_pdf_name")
-                or f"memory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-            )
-            st.download_button(
-                "Download Memory PDF",
-                data=bytes(pdf_payload),
-                file_name=export_name,
-                mime="application/pdf",
-                key="memory_core_export_download_pdf",
-                width="stretch",
-            )
-
-        st.markdown("---")
-        st.subheader("Backup and Restore (JSON)")
-        st.caption(
-            "Backup includes user docs, room docs, cursors, identity alias/name maps, room labels, user labels, memory stats, and memory core settings."
-        )
-
-        if st.button("Generate Memory Backup (JSON)", key="memory_core_backup_generate_json"):
-            backup_bytes = _memory_core_backup_json_bytes()
-            st.session_state["memory_core_backup_json_bytes"] = backup_bytes
-            st.session_state["memory_core_backup_json_name"] = (
-                f"memory_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            )
-            st.success(f"Backup generated ({len(backup_bytes) / 1024.0:.1f} KB).")
-
-        backup_payload = st.session_state.get("memory_core_backup_json_bytes")
-        if isinstance(backup_payload, (bytes, bytearray)) and len(backup_payload) > 0:
-            backup_name = str(
-                st.session_state.get("memory_core_backup_json_name")
-                or f"memory_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            )
-            st.download_button(
-                "Download Memory Backup JSON",
-                data=bytes(backup_payload),
-                file_name=backup_name,
-                mime="application/json",
-                key="memory_core_backup_download_json",
-                width="stretch",
-            )
-
-        import_file = st.file_uploader(
-            "Import Memory Backup JSON",
-            type=["json"],
-            key="memory_core_backup_import_file",
-        )
-        replace_existing = st.checkbox(
-            "Replace existing memory before import",
-            value=False,
-            key="memory_core_backup_replace_existing",
-        )
-        restore_settings = st.checkbox(
-            "Restore memory core settings from backup",
-            value=True,
-            key="memory_core_backup_restore_settings",
-        )
-        if st.button(
-            "Import Memory Backup",
-            key="memory_core_backup_import_button",
-            disabled=import_file is None,
-        ):
-            if import_file is None:
-                st.error("Choose a backup JSON file first.")
-            else:
-                try:
-                    import_text = import_file.read().decode("utf-8", errors="replace")
-                    payload = json.loads(import_text)
-                except Exception as exc:
-                    st.error(f"Invalid backup JSON: {exc}")
-                    payload = None
-
-                if payload is not None:
-                    result = _memory_core_import_backup_payload(
-                        payload,
-                        replace_existing=bool(replace_existing),
-                        restore_settings=bool(restore_settings),
-                    )
-                    if result.get("ok"):
-                        st.success(
-                            "Import complete. "
-                            f"user_docs={int(result.get('imported_user_docs') or 0)}, "
-                            f"room_docs={int(result.get('imported_room_docs') or 0)}, "
-                            f"cursors={int(result.get('imported_cursors') or 0)}, "
-                            f"identity_aliases={int(result.get('imported_identity_aliases') or 0)}, "
-                            f"identity_names={int(result.get('imported_identity_names') or 0)}, "
-                            f"room_labels={int(result.get('imported_room_labels') or 0)}, "
-                            f"user_labels={int(result.get('imported_user_labels') or 0)}, "
-                            f"stats_fields={int(result.get('imported_stats_fields') or 0)}, "
-                            f"settings_fields={int(result.get('imported_settings_fields') or 0)}"
-                        )
-                        st.rerun()
-                    else:
-                        st.error(result.get("error") or "Backup import failed.")
-
-
 def wipe_memory_core_data() -> Dict[str, Any]:
     return _memory_core_wipe_all_data()
 
 
-def render_webui_tab(**_kwargs):
-    render_memory_page()
+def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    del redis_client
+    stats = _memory_core_stats()
+    discovery = _memory_core_doc_discovery()
+    legacy = _legacy_memory_discovery()
+    user_rows = list(discovery.get("users") or [])
+    room_rows = list(discovery.get("rooms") or [])
 
-def render_core_manager_extras(
-    *,
-    core=None,
-    surface_kind: str = "core",
-    **_kwargs,
-):
-    core = core if isinstance(core, dict) else {}
-    key = str(core.get("key") or "memory_core").strip() or "memory_core"
-    surface_text = "core" if str(surface_kind or "").strip().lower() == "core" else "surface"
+    top_rows: List[Dict[str, Any]] = []
+    for row in user_rows:
+        top_rows.append(
+            {
+                "scope": "User",
+                "name": str(row.get("user_name") or row.get("user_id") or "unknown"),
+                "platform": str(row.get("platform") or "unknown"),
+                "fact_count": int(row.get("fact_count") or 0),
+                "last_updated": str(row.get("last_updated") or ""),
+                "preview": str(row.get("preview") or ""),
+            }
+        )
+    for row in room_rows:
+        top_rows.append(
+            {
+                "scope": "Room",
+                "name": str(row.get("room_name") or row.get("room_id") or "unknown"),
+                "platform": str(row.get("platform") or "unknown"),
+                "fact_count": int(row.get("fact_count") or 0),
+                "last_updated": str(row.get("last_updated") or ""),
+                "preview": str(row.get("preview") or ""),
+            }
+        )
 
-    st.subheader("Danger Zone")
-    st.caption(f"Wipe all Memory {surface_text.capitalize()} data (user docs, room docs, cursors, and runtime stats).")
-
-    confirm_wipe = st.checkbox(
-        f"Confirm wipe all memory {surface_text} data",
-        value=False,
-        key=f"{key}_wipe_all_confirm",
+    top_rows.sort(
+        key=lambda row: (
+            -int(row.get("fact_count") or 0),
+            str(row.get("scope") or ""),
+            str(row.get("platform") or ""),
+            str(row.get("name") or ""),
+        )
     )
-    if st.button(
-        "Wipe All Memory Data",
-        key=f"{key}_wipe_all_button",
-        disabled=not confirm_wipe,
-    ):
-        wipe_result = wipe_memory_core_data()
-        if wipe_result.get("ok"):
-            deleted_total = int(wipe_result.get("deleted_total") or 0)
-            deleted_by_pattern = wipe_result.get("deleted_by_pattern") or {}
-            stats_key = "mem:stats:memory_core"
-            detail = (
-                f"user={int(deleted_by_pattern.get('mem:user:*') or 0)}, "
-                f"room={int(deleted_by_pattern.get('mem:room:*') or 0)}, "
-                f"cursor={int(deleted_by_pattern.get('mem:cursor:*') or 0)}, "
-                f"stats={int(deleted_by_pattern.get(stats_key) or 0)}"
-            )
-            st.success(f"Wiped memory {surface_text} data. Deleted {deleted_total} keys ({detail}).")
-            st.rerun()
+
+    items: List[Dict[str, str]] = []
+    for row in top_rows[:25]:
+        preview = str(row.get("preview") or "").strip()
+        if len(preview) > 240:
+            preview = preview[:237].rstrip() + "..."
+        detail = f"Last updated: {row.get('last_updated') or 'n/a'}"
+        if preview:
+            detail = f"{detail} · {preview}"
+        items.append(
+            {
+                "title": f"{row.get('scope')}: {row.get('name')}",
+                "subtitle": f"{row.get('platform')} · facts: {int(row.get('fact_count') or 0)}",
+                "detail": detail,
+            }
+        )
+
+    return {
+        "summary": "Memory index across user, room, and legacy memory datasets.",
+        "stats": [
+            {"label": "Users", "value": int(discovery.get("user_count") or 0)},
+            {"label": "Rooms", "value": int(discovery.get("room_count") or 0)},
+            {"label": "Facts", "value": int(discovery.get("fact_count") or 0)},
+            {"label": "Legacy Scopes", "value": int(legacy.get("scope_count") or 0)},
+            {"label": "Processed", "value": int(stats.get("processed_messages") or 0)},
+            {"label": "Updated Docs", "value": int(stats.get("updated_docs") or 0)},
+        ],
+        "items": items,
+        "empty_message": "No memory documents found yet.",
+        "ui": _memory_core_ui_manager_payload(discovery=discovery, stats=stats, legacy=legacy),
+    }
+
+
+def _memory_core_ui_clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _memory_core_ui_split_keys(value: Any) -> List[str]:
+    text = _memory_core_ui_clean_text(value)
+    if not text:
+        return []
+    rows: List[str] = []
+    seen = set()
+    for token in re.split(r"[,\n]+", text):
+        key = _memory_core_ui_clean_text(token)
+        if not key or key in seen:
+            continue
+        rows.append(key)
+        seen.add(key)
+    return rows
+
+
+def _memory_core_ui_scope_token(scope: str, platform: str, scope_id: str) -> str:
+    payload = {
+        "scope": _memory_core_ui_clean_text(scope).lower(),
+        "platform": _memory_core_ui_clean_text(platform),
+        "scope_id": _memory_core_ui_clean_text(scope_id),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _memory_core_ui_parse_scope_token(token: str) -> Tuple[str, str, str]:
+    raw = _memory_core_ui_clean_text(token)
+    if not raw:
+        raise ValueError("Missing memory scope id.")
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(f"Invalid memory scope id: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Invalid memory scope id payload.")
+    scope = _memory_core_ui_clean_text(parsed.get("scope")).lower()
+    platform = _memory_core_ui_clean_text(parsed.get("platform"))
+    scope_id = _memory_core_ui_clean_text(parsed.get("scope_id"))
+    if scope not in {"user", "room"}:
+        raise ValueError("Invalid memory scope.")
+    if not scope_id:
+        raise ValueError("Missing memory scope identifier.")
+    return scope, platform, scope_id
+
+
+def _memory_core_ui_truncate_text(value: Any, max_chars: int = 12_000) -> str:
+    text = str(value or "")
+    cap = max(512, int(max_chars))
+    if len(text) <= cap:
+        return text
+    return f"{text[: cap - 64].rstrip()}\n\n... (truncated {len(text) - cap + 64} chars)"
+
+
+def _memory_core_ui_json_text(value: Any, *, max_chars: int = 12_000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception:
+        text = str(value or "")
+    return _memory_core_ui_truncate_text(text, max_chars=max_chars)
+
+
+def _memory_core_ui_full_preview_text(
+    doc: Dict[str, Any],
+    *,
+    max_items: int = 50_000,
+) -> str:
+    if not isinstance(doc, dict):
+        return "(no preview)"
+    cap = max(1, int(max_items))
+    facts = doc.get("facts")
+    if isinstance(facts, dict):
+        cap = max(cap, len(facts))
+    rows = summarize_memory_core_doc(doc, max_items=cap, min_confidence=0.0)
+    if not rows:
+        return "(no preview)"
+
+    lines: List[str] = []
+    for row in rows:
+        key = _memory_core_ui_clean_text(row.get("key"))
+        if not key:
+            continue
+        raw_value = row.get("value")
+        if isinstance(raw_value, str):
+            value_text = raw_value
         else:
-            st.error(wipe_result.get("error") or f"Failed to wipe memory {surface_text} data.")
+            try:
+                value_text = json.dumps(raw_value, ensure_ascii=False, indent=2, sort_keys=True)
+            except Exception:
+                value_text = str(raw_value or "")
+        if "\n" in value_text:
+            lines.append(f"{key}=")
+            lines.extend(f"  {line}" for line in value_text.splitlines())
+        else:
+            lines.append(f"{key}={value_text}")
+
+    return "\n".join(lines) if lines else "(no preview)"
+
+
+def _memory_core_ui_set_last_tool(
+    *,
+    action: str,
+    message: str,
+    artifact_path: str = "",
+    artifact_size: int = 0,
+) -> None:
+    mapping = {
+        "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "action": _memory_core_ui_clean_text(action),
+        "message": _memory_core_ui_clean_text(message),
+        "artifact_path": _memory_core_ui_clean_text(artifact_path),
+        "artifact_size": str(max(0, int(artifact_size))),
+    }
+    try:
+        redis_client.hset(_MEMORY_CORE_UI_LAST_TOOL_HASH, mapping=mapping)
+    except Exception:
+        pass
+
+
+def _memory_core_ui_export_dir() -> Path:
+    app_root = Path(__file__).resolve().parent.parent
+    raw = _memory_core_ui_clean_text(os.getenv("TATER_MEMORY_EXPORT_DIR", ""))
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (app_root / path).resolve()
+    else:
+        path = (app_root / _MEMORY_CORE_EXPORT_DIR_DEFAULT).resolve()
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        fallback = Path("/tmp/tater_memory_core_exports").resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _memory_core_ui_write_export_bytes(kind: str, suffix: str, payload: bytes) -> Dict[str, Any]:
+    safe_kind = re.sub(r"[^a-z0-9_]+", "_", _memory_core_ui_clean_text(kind).lower()).strip("_") or "export"
+    safe_suffix = re.sub(r"[^a-z0-9]+", "", _memory_core_ui_clean_text(suffix).lower()) or "txt"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"memory_{safe_kind}_{stamp}.{safe_suffix}"
+    target = _memory_core_ui_export_dir() / file_name
+    target.write_bytes(bytes(payload or b""))
+    size_bytes = len(payload or b"")
+    return {
+        "file_name": file_name,
+        "file_path": str(target),
+        "size_bytes": size_bytes,
+    }
+
+
+def _memory_core_ui_fact_rows_text(rows: List[Dict[str, Any]], *, max_rows: int = 140) -> str:
+    fact_rows = list(rows or [])
+    if not fact_rows:
+        return "(no facts)"
+    lines: List[str] = []
+    for row in fact_rows[: max(1, int(max_rows))]:
+        key = _memory_core_ui_clean_text(row.get("key")) or "unknown"
+        value = _memory_core_ui_clean_text(row.get("value"))
+        confidence = _memory_core_ui_clean_text(row.get("confidence")) or "0.00"
+        evidence_count = _memory_core_ui_clean_text(row.get("evidence_count")) or "0"
+        updated_at = _memory_core_ui_clean_text(row.get("updated_at")) or "n/a"
+        lines.append(f"- {key}: {value} (conf={confidence}, evidence={evidence_count}, updated={updated_at})")
+    if len(fact_rows) > max_rows:
+        lines.append(f"... +{len(fact_rows) - max_rows} more fact row(s)")
+    return _memory_core_ui_truncate_text("\n".join(lines), max_chars=14_000)
+
+
+def _memory_core_ui_category_rows_text(
+    grouped: Dict[str, List[Dict[str, Any]]],
+    *,
+    max_rows_per_category: int = 12,
+) -> str:
+    if not isinstance(grouped, dict):
+        return "(no categorized facts)"
+    lines: List[str] = []
+    for category, rows in grouped.items():
+        category_rows = list(rows or [])
+        if not category_rows:
+            continue
+        lines.append(f"{_memory_core_ui_clean_text(category) or 'Uncategorized'}:")
+        for row in category_rows[: max(1, int(max_rows_per_category))]:
+            key = _memory_core_ui_clean_text(row.get("key")) or "unknown"
+            value = _memory_core_ui_clean_text(row.get("value"))
+            lines.append(f"- {key}: {value}")
+        if len(category_rows) > max_rows_per_category:
+            lines.append(f"... +{len(category_rows) - max_rows_per_category} more")
+        lines.append("")
+    if not lines:
+        return "(no categorized facts)"
+    return _memory_core_ui_truncate_text("\n".join(lines).strip(), max_chars=14_000)
+
+
+def _memory_core_ui_dataframe_rank_lines(
+    frame: Any,
+    *,
+    label_col: str,
+    value_col: str,
+    max_rows: int = 12,
+) -> List[str]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    table_df = frame.reset_index()
+    if label_col not in table_df.columns:
+        if "index" in table_df.columns:
+            table_df = table_df.rename(columns={"index": label_col})
+        elif len(table_df.columns) > 0:
+            first_col = str(table_df.columns[0])
+            if first_col:
+                table_df = table_df.rename(columns={first_col: label_col})
+    if value_col not in table_df.columns:
+        for candidate in ("count", "facts", "updates", "users"):
+            if candidate in table_df.columns:
+                table_df = table_df.rename(columns={candidate: value_col})
+                break
+    if label_col not in table_df.columns:
+        return []
+    if value_col not in table_df.columns:
+        table_df[value_col] = 0
+
+    lines: List[str] = []
+    for idx, (_, row) in enumerate(table_df.head(max(1, int(max_rows))).iterrows(), start=1):
+        label = _memory_core_ui_clean_text(row.get(label_col)) or "n/a"
+        try:
+            value = int(float(row.get(value_col) or 0))
+        except Exception:
+            value = 0
+        lines.append(f"{idx}. {label} ({value})")
+    return lines
+
+
+def _memory_core_ui_insights_text(user_rows: List[Dict[str, Any]], room_rows: List[Dict[str, Any]]) -> str:
+    insights = _memory_core_insight_frames(user_rows, room_rows)
+    if not isinstance(insights, dict) or not insights:
+        return "No fact data available for insights yet."
+
+    lines: List[str] = []
+
+    platform_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("platform_df"),
+        label_col="platform",
+        value_col="user_facts",
+        max_rows=12,
+    )
+    if platform_lines:
+        lines.append("Facts By Platform (user_facts count):")
+        lines.extend([f"- {line}" for line in platform_lines])
+        lines.append("")
+
+    top_user_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("top_user_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=12,
+    )
+    if top_user_lines:
+        lines.append("Top User Fact Keys:")
+        lines.extend([f"- {line}" for line in top_user_lines])
+        lines.append("")
+
+    top_room_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("top_room_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=12,
+    )
+    if top_room_lines:
+        lines.append("Top Room Fact Keys:")
+        lines.extend([f"- {line}" for line in top_room_lines])
+        lines.append("")
+
+    recent_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("recent_key_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=12,
+    )
+    if recent_lines:
+        lines.append("Most Updated Keys (last 7 days):")
+        lines.extend([f"- {line}" for line in recent_lines])
+        lines.append("")
+
+    trending_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("trending_user_df"),
+        label_col="trend",
+        value_col="users",
+        max_rows=10,
+    )
+    if trending_lines:
+        lines.append("Trending Shared User Facts:")
+        lines.extend([f"- {line}" for line in trending_lines])
+        lines.append("")
+
+    updates_df = insights.get("updates_df")
+    if isinstance(updates_df, pd.DataFrame) and not updates_df.empty:
+        updates_rows = updates_df.reset_index()
+        if "date" not in updates_rows.columns and "index" in updates_rows.columns:
+            updates_rows = updates_rows.rename(columns={"index": "date"})
+        lines.append("Fact Updates (last 14 days):")
+        for _, row in updates_rows.iterrows():
+            day = _memory_core_ui_clean_text(row.get("date")) or "unknown"
+            try:
+                updates = int(float(row.get("updates") or 0))
+            except Exception:
+                updates = 0
+            lines.append(f"- {day}: {updates}")
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+    return _memory_core_ui_truncate_text(text or "No insights available.", max_chars=14_000)
+
+
+def _memory_core_ui_legacy_scope_key(value: Any) -> str:
+    key = _memory_core_ui_clean_text(value)
+    if not key or key == _LEGACY_MEMORY_DEFAULT_TTL_KEY:
+        return ""
+    if not key.startswith(f"{_LEGACY_MEMORY_HASH_PREFIX}:"):
+        return ""
+    if not isinstance(_legacy_memory_parse_scope_key(key), dict):
+        return ""
+    return key
+
+
+def _memory_core_ui_legacy_preview_text(items: List[Dict[str, Any]], *, max_rows: int = 60) -> str:
+    rows = list(items or [])
+    if not rows:
+        return "(no legacy entries)"
+    lines: List[str] = []
+    for row in rows[: max(1, int(max_rows))]:
+        key = _memory_core_ui_clean_text(row.get("key")) or "unknown"
+        value = memory_core_value_to_text(row.get("value"), max_chars=160)
+        source = _memory_core_ui_clean_text(row.get("source")) or "n/a"
+        updated = _memory_core_ui_clean_text(row.get("updated_at")) or "n/a"
+        expires = _memory_core_ui_clean_text(row.get("expires_at")) or "n/a"
+        status = "expired" if _as_bool(row.get("is_expired"), False) else "active"
+        lines.append(f"- {key}: {value} (source={source}, status={status}, updated={updated}, expires={expires})")
+    if len(rows) > max_rows:
+        lines.append(f"... +{len(rows) - max_rows} more legacy entrie(s)")
+    return _memory_core_ui_truncate_text("\n".join(lines), max_chars=14_000)
+
+
+def _memory_core_ui_table_columns(keys: List[str], labels: List[str]) -> List[Dict[str, str]]:
+    columns: List[Dict[str, str]] = []
+    for idx, key in enumerate(list(keys or [])):
+        key_name = _memory_core_ui_clean_text(key)
+        if not key_name:
+            continue
+        label_name = _memory_core_ui_clean_text(labels[idx] if idx < len(labels) else key_name) or key_name
+        columns.append({"key": key_name, "label": label_name})
+    return columns
+
+
+def _memory_core_ui_fact_table_rows(
+    fact_rows: List[Dict[str, Any]],
+    *,
+    max_rows: int = 220,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in list(fact_rows or [])[: max(1, int(max_rows))]:
+        rows.append(
+            {
+                "key": _memory_core_ui_clean_text(row.get("key")) or "unknown",
+                "value": _memory_core_ui_clean_text(row.get("value")),
+                "confidence": _memory_core_ui_clean_text(row.get("confidence")) or "0.00",
+                "evidence": str(int(float(row.get("evidence_count") or 0))),
+                "updated": _memory_core_ui_clean_text(row.get("updated_at")) or "n/a",
+            }
+        )
+    return rows
+
+
+def _memory_core_ui_category_table_rows(
+    grouped_rows: Dict[str, List[Dict[str, Any]]],
+    *,
+    max_rows_per_category: int = 18,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not isinstance(grouped_rows, dict):
+        return rows
+    for category, facts in grouped_rows.items():
+        category_name = _memory_core_ui_clean_text(category) or "Uncategorized"
+        for fact in list(facts or [])[: max(1, int(max_rows_per_category))]:
+            rows.append(
+                {
+                    "category": category_name,
+                    "key": _memory_core_ui_clean_text(fact.get("key")) or "unknown",
+                    "value": _memory_core_ui_clean_text(fact.get("value")),
+                    "confidence": _memory_core_ui_clean_text(fact.get("confidence")) or "0.00",
+                    "updated": _memory_core_ui_clean_text(fact.get("updated_at")) or "n/a",
+                }
+            )
+    return rows
+
+
+def _memory_core_ui_category_chart_points(grouped_rows: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    if not isinstance(grouped_rows, dict):
+        return points
+    for category, rows in grouped_rows.items():
+        category_name = _memory_core_ui_clean_text(category) or "Uncategorized"
+        points.append({"label": category_name, "value": int(len(list(rows or [])))})
+    points.sort(key=lambda item: (-int(item.get("value") or 0), _memory_core_ui_clean_text(item.get("label"))))
+    return points
+
+
+def _memory_core_ui_manager_payload(
+    *,
+    discovery: Dict[str, Any],
+    stats: Dict[str, Any],
+    legacy: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_rows = list((discovery or {}).get("users") or [])
+    room_rows = list((discovery or {}).get("rooms") or [])
+    forms: List[Dict[str, Any]] = []
+    export_dir_text = str(_memory_core_ui_export_dir())
+
+    insights = _memory_core_insight_frames(user_rows, room_rows)
+    platform_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("platform_df"),
+        label_col="platform",
+        value_col="user_facts",
+        max_rows=16,
+    )
+    top_user_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("top_user_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=16,
+    )
+    top_room_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("top_room_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=16,
+    )
+    recent_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("recent_key_df"),
+        label_col="key",
+        value_col="count",
+        max_rows=16,
+    )
+    trending_lines = _memory_core_ui_dataframe_rank_lines(
+        insights.get("trending_user_df"),
+        label_col="trend",
+        value_col="users",
+        max_rows=12,
+    )
+
+    updates_text = "No update-series data available."
+    updates_df = insights.get("updates_df")
+    if isinstance(updates_df, pd.DataFrame) and not updates_df.empty:
+        updates_rows = updates_df.reset_index()
+        if "date" not in updates_rows.columns and "index" in updates_rows.columns:
+            updates_rows = updates_rows.rename(columns={"index": "date"})
+        lines: List[str] = []
+        for _, row in updates_rows.iterrows():
+            day = _memory_core_ui_clean_text(row.get("date")) or "unknown"
+            try:
+                updates = int(float(row.get("updates") or 0))
+            except Exception:
+                updates = 0
+            lines.append(f"- {day}: {updates}")
+        if lines:
+            updates_text = "\n".join(lines)
+
+    overview_text = "\n".join(
+        [
+            f"Users with memory: {int(discovery.get('user_count') or 0)}",
+            f"Rooms with memory: {int(discovery.get('room_count') or 0)}",
+            f"Facts total: {int(discovery.get('fact_count') or 0)}",
+            f"Legacy scopes: {int(legacy.get('scope_count') or 0)}",
+            f"Legacy entries: {int(legacy.get('entry_count') or 0)}",
+            f"Processed (last run): {int(stats.get('processed_messages') or 0)}",
+            f"Updated facts (last run): {int(stats.get('updated_facts') or 0)}",
+            f"Updated docs (last run): {int(stats.get('updated_docs') or 0)}",
+            f"Scanned scopes (last run): {int(stats.get('scanned_scopes') or 0)}",
+            f"Enabled portals (last run): {int(stats.get('enabled_platform_count') or 0)}",
+            f"Last run: {_memory_core_ui_clean_text(stats.get('last_run_text')) or 'n/a'}",
+        ]
+    )
+
+    forms.append(
+        {
+            "id": "__memory_overview__",
+            "title": "Overview + Insights",
+            "group": "overview",
+            "subtitle": "Memory stats and insight summaries",
+            "sections": [
+                {
+                    "label": "Memory Summary",
+                    "fields": [
+                        {
+                            "key": "overview_text",
+                            "label": "Summary",
+                            "type": "textarea",
+                            "value": overview_text,
+                        },
+                    ],
+                },
+                {
+                    "label": "Facts By Platform",
+                    "fields": [
+                        {
+                            "key": "insights_platform_chart",
+                            "label": "Platform Comparison",
+                            "type": "bar_chart",
+                            "points": [
+                                {
+                                    "label": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "value": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for line in platform_lines
+                            ],
+                        },
+                        {
+                            "key": "insights_platform",
+                            "label": "Platform Ranking",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["rank", "platform", "facts"], ["Rank", "Platform", "Facts"]),
+                            "rows": [
+                                {
+                                    "rank": idx + 1,
+                                    "platform": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "facts": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for idx, line in enumerate(platform_lines)
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+                {
+                    "label": "Top User Fact Keys",
+                    "fields": [
+                        {
+                            "key": "insights_top_user",
+                            "label": "Top User Keys",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["rank", "key", "facts"], ["Rank", "Key", "Facts"]),
+                            "rows": [
+                                {
+                                    "rank": idx + 1,
+                                    "key": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "facts": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for idx, line in enumerate(top_user_lines)
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+                {
+                    "label": "Top Room Fact Keys",
+                    "fields": [
+                        {
+                            "key": "insights_top_room",
+                            "label": "Top Room Keys",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["rank", "key", "facts"], ["Rank", "Key", "Facts"]),
+                            "rows": [
+                                {
+                                    "rank": idx + 1,
+                                    "key": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "facts": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for idx, line in enumerate(top_room_lines)
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+                {
+                    "label": "Most Updated Keys (7 days)",
+                    "fields": [
+                        {
+                            "key": "insights_recent",
+                            "label": "Recent Key Updates",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["rank", "key", "updates"], ["Rank", "Key", "Updates"]),
+                            "rows": [
+                                {
+                                    "rank": idx + 1,
+                                    "key": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "updates": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for idx, line in enumerate(recent_lines)
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+                {
+                    "label": "Trending Shared User Facts",
+                    "fields": [
+                        {
+                            "key": "insights_trending",
+                            "label": "Trending",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["rank", "trend", "users"], ["Rank", "Trend", "Users"]),
+                            "rows": [
+                                {
+                                    "rank": idx + 1,
+                                    "trend": _memory_core_ui_clean_text(line.split("(", 1)[0].split(". ", 1)[-1]),
+                                    "users": int(float(line.rsplit("(", 1)[-1].rstrip(")"))),
+                                }
+                                for idx, line in enumerate(trending_lines)
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+                {
+                    "label": "Fact Updates (14 days)",
+                    "fields": [
+                        {
+                            "key": "insights_updates",
+                            "label": "Updates Timeline",
+                            "type": "table",
+                            "columns": _memory_core_ui_table_columns(["date", "updates"], ["Date", "Updates"]),
+                            "rows": [
+                                {
+                                    "date": _memory_core_ui_clean_text(line.split(":", 1)[0].replace("-", "", 1).strip()),
+                                    "updates": int(float(_memory_core_ui_clean_text(line.split(":", 1)[1]) or 0)),
+                                }
+                                for line in updates_text.splitlines()
+                                if ":" in line
+                            ],
+                        },
+                    ],
+                    "inline": True,
+                },
+            ],
+        }
+    )
+
+    ranked: List[Dict[str, Any]] = []
+    for row in user_rows:
+        row_copy = dict(row or {})
+        row_copy["_scope"] = "user"
+        ranked.append(row_copy)
+    for row in room_rows:
+        row_copy = dict(row or {})
+        row_copy["_scope"] = "room"
+        ranked.append(row_copy)
+
+    ranked.sort(
+        key=lambda row: (
+            -int(row.get("fact_count") or 0),
+            str(row.get("_scope") or ""),
+            str(row.get("platform") or ""),
+            str(row.get("user_name") or row.get("room_name") or row.get("user_id") or row.get("room_id") or ""),
+        )
+    )
+
+    for row in ranked[:120]:
+        scope = str(row.get("_scope") or "").strip().lower()
+        if scope not in {"user", "room"}:
+            continue
+        platform = _memory_core_ui_clean_text(row.get("platform")) or "unknown"
+        if scope == "user":
+            scope_id = _memory_core_ui_clean_text(row.get("user_id"))
+            name = _memory_core_ui_clean_text(row.get("user_name") or scope_id or "unknown")
+            title = f"User: {name}"
+        else:
+            scope_id = _memory_core_ui_clean_text(row.get("room_id"))
+            name = _memory_core_ui_clean_text(row.get("room_name") or scope_id or "unknown")
+            title = f"Room: {name}"
+        if not scope_id:
+            continue
+
+        doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
+        fact_rows = _memory_core_fact_rows(doc, max_items=500, value_max_chars=180)
+        if scope == "user":
+            grouped_rows = _memory_core_user_fact_rows_by_category(doc)
+        else:
+            grouped_rows = _memory_core_room_fact_rows_by_category(doc)
+        grouped_table_rows = _memory_core_ui_category_table_rows(grouped_rows, max_rows_per_category=24)
+        fact_table_rows = _memory_core_ui_fact_table_rows(fact_rows, max_rows=260)
+        category_chart_points = _memory_core_ui_category_chart_points(grouped_rows)
+        raw_doc_text = _memory_core_ui_json_text(doc, max_chars=16_000)
+        preview = _memory_core_ui_full_preview_text(doc)
+
+        fact_count = int(row.get("fact_count") or 0)
+        last_updated = _memory_core_ui_clean_text(row.get("last_updated")) or "n/a"
+        fact_keys_preview = _memory_core_ui_clean_text(row.get("fact_keys"))
+        forget_desc = "Comma-separated keys to remove."
+        if fact_keys_preview:
+            forget_desc = f"{forget_desc} Available: {fact_keys_preview}"
+
+        forms.append(
+            {
+                "id": _memory_core_ui_scope_token(scope, platform, scope_id),
+                "title": title,
+                "group": scope,
+                "subtitle": f"{platform} · facts: {fact_count} · updated: {last_updated}",
+                "save_action": "memory_forget_keys",
+                "save_label": "Delete Selected Keys",
+                "remove_action": "memory_remove_doc",
+                "remove_label": "Delete Document",
+                "remove_confirm": f"Delete this {scope} memory document?",
+                "fields": [],
+                "sections": [
+                    {
+                        "label": "Fact Distribution",
+                        "inline": True,
+                        "fields": [
+                            {
+                                "key": "category_chart",
+                                "label": "Facts By Category",
+                                "type": "bar_chart",
+                                "points": category_chart_points,
+                            }
+                        ],
+                    },
+                    {
+                        "label": "Facts By Category",
+                        "inline": True,
+                        "fields": [
+                            {
+                                "key": "facts_by_category",
+                                "label": "Category Table",
+                                "type": "table",
+                                "columns": _memory_core_ui_table_columns(
+                                    ["category", "key", "value", "confidence", "updated"],
+                                    ["Category", "Key", "Value", "Conf", "Updated"],
+                                ),
+                                "rows": grouped_table_rows,
+                            }
+                        ],
+                    },
+                    {
+                        "label": "Fact Rows",
+                        "inline": True,
+                        "fields": [
+                            {
+                                "key": "fact_rows",
+                                "label": "Flat Fact Table",
+                                "type": "table",
+                                "columns": _memory_core_ui_table_columns(
+                                    ["key", "value", "confidence", "evidence", "updated"],
+                                    ["Key", "Value", "Conf", "Evidence", "Updated"],
+                                ),
+                                "rows": fact_table_rows,
+                            }
+                        ],
+                    },
+                    {
+                        "label": "Preview + Raw Document",
+                        "inline": True,
+                        "fields": [
+                            {
+                                "key": "preview_text",
+                                "label": "Current Fact Preview",
+                                "type": "textarea",
+                                "value": preview or "(no preview)",
+                            },
+                            {
+                                "key": "raw_doc_json",
+                                "label": "Raw JSON",
+                                "type": "textarea",
+                                "value": raw_doc_text,
+                            }
+                        ],
+                    },
+                    {
+                        "label": "Delete Fact Keys",
+                        "inline": True,
+                        "tone": "danger",
+                        "fields": [
+                            {
+                                "key": "forget_keys",
+                                "label": "Fact Keys To Delete",
+                                "type": "text",
+                                "description": (
+                                    "Enter one or more keys, comma-separated, then click 'Delete Selected Keys'. "
+                                    + forget_desc
+                                ),
+                                "value": "",
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+    return {
+        "kind": "settings_manager",
+        "title": "Memory Manager",
+        "empty_message": "No memory documents or legacy scopes found yet.",
+        "default_tab": "overview",
+        "manager_tabs": [
+            {
+                "key": "overview",
+                "label": "Overview + Insights",
+                "source": "items",
+                "item_group": "overview",
+                "empty_message": "No overview data available.",
+            },
+            {
+                "key": "data",
+                "label": "Data",
+                "source": "grouped_items",
+                "groups": [
+                    {
+                        "key": "users",
+                        "label": "Users",
+                        "item_group": "user",
+                        "selector": True,
+                        "selector_label": "Select User",
+                        "empty_message": "No user memory documents found.",
+                    },
+                    {
+                        "key": "rooms",
+                        "label": "Rooms",
+                        "item_group": "room",
+                        "selector": True,
+                        "selector_label": "Select Room",
+                        "empty_message": "No room memory documents found.",
+                    },
+                ],
+            },
+            {
+                "key": "tools",
+                "label": "Tools",
+                "source": "add_form",
+            },
+        ],
+        "item_fields_dropdown": False,
+        "item_fields_dropdown_label": "Actions",
+        "add_form": {
+            "action": "memory_run_tool",
+            "submit_label": "Run Tool Action",
+            "fields": [
+                {
+                    "key": "tool_action",
+                    "label": "Tool Action",
+                    "type": "select",
+                    "value": "export_report_pdf",
+                    "options": [
+                        {"value": "export_report_txt", "label": "Export Memory Report (TXT)"},
+                        {"value": "export_report_pdf", "label": "Export Memory Report (PDF)"},
+                        {"value": "export_backup_json", "label": "Export Memory Backup (JSON)"},
+                        {"value": "import_backup_json", "label": "Import Memory Backup (JSON)"},
+                        {"value": "wipe_all_memory", "label": "Wipe All Memory Data"},
+                    ],
+                    "description": f"Export artifacts are saved under: {export_dir_text}",
+                },
+                {
+                    "key": "import_backup_path",
+                    "label": "Import Backup File Path (optional)",
+                    "type": "text",
+                    "value": "",
+                    "placeholder": "agent_lab/memory_core_exports/memory_backup_YYYYMMDD_HHMMSS.json",
+                    "description": "Used only for import action. Relative paths are resolved from repo root.",
+                },
+                {
+                    "key": "import_backup_json",
+                    "label": "Import Backup JSON (optional)",
+                    "type": "textarea",
+                    "value": "",
+                    "description": "Paste backup JSON here (used only for import action).",
+                },
+                {
+                    "key": "replace_existing",
+                    "label": "Replace Existing Memory On Import",
+                    "type": "checkbox",
+                    "value": False,
+                },
+                {
+                    "key": "restore_settings",
+                    "label": "Restore Memory Core Settings From Backup",
+                    "type": "checkbox",
+                    "value": True,
+                },
+                {
+                    "key": "confirm_text",
+                    "label": "Type WIPE To Confirm Full Wipe",
+                    "type": "text",
+                    "value": "",
+                    "placeholder": "WIPE",
+                    "description": "Used only when tool action is 'Wipe All Memory Data'.",
+                },
+            ],
+        },
+        "item_forms": forms,
+    }
+
+
+def _memory_core_ui_run_tool_action(
+    *,
+    tool_action: Any,
+    import_backup_json: Any,
+    import_backup_path: Any,
+    replace_existing: Any,
+    restore_settings: Any,
+    confirm_text: Any,
+) -> str:
+    action_name = _memory_core_ui_clean_text(tool_action).lower()
+    if not action_name:
+        raise ValueError("Select a tool action.")
+
+    if action_name == "export_report_txt":
+        stats = _memory_core_stats()
+        discovery = _memory_core_doc_discovery()
+        user_rows = list(discovery.get("users") or [])
+        room_rows = list(discovery.get("rooms") or [])
+        lines = _memory_core_export_lines(stats=stats, user_rows=user_rows, room_rows=room_rows)
+        payload = "\n".join(lines).encode("utf-8", errors="replace")
+        artifact = _memory_core_ui_write_export_bytes("report", "txt", payload)
+        message = (
+            f"Exported memory report TXT to {artifact.get('file_path')} "
+            f"({int(artifact.get('size_bytes') or 0)} bytes)."
+        )
+        _memory_core_ui_set_last_tool(
+            action=action_name,
+            message=message,
+            artifact_path=str(artifact.get("file_path") or ""),
+            artifact_size=int(artifact.get("size_bytes") or 0),
+        )
+        return message
+
+    if action_name == "export_report_pdf":
+        stats = _memory_core_stats()
+        discovery = _memory_core_doc_discovery()
+        user_rows = list(discovery.get("users") or [])
+        room_rows = list(discovery.get("rooms") or [])
+        payload = _memory_core_export_pdf(stats=stats, user_rows=user_rows, room_rows=room_rows)
+        artifact = _memory_core_ui_write_export_bytes("report", "pdf", payload)
+        message = (
+            f"Exported memory report PDF to {artifact.get('file_path')} "
+            f"({int(artifact.get('size_bytes') or 0)} bytes)."
+        )
+        _memory_core_ui_set_last_tool(
+            action=action_name,
+            message=message,
+            artifact_path=str(artifact.get("file_path") or ""),
+            artifact_size=int(artifact.get("size_bytes") or 0),
+        )
+        return message
+
+    if action_name == "export_backup_json":
+        payload = _memory_core_backup_json_bytes()
+        artifact = _memory_core_ui_write_export_bytes("backup", "json", payload)
+        message = (
+            f"Exported memory backup JSON to {artifact.get('file_path')} "
+            f"({int(artifact.get('size_bytes') or 0)} bytes)."
+        )
+        _memory_core_ui_set_last_tool(
+            action=action_name,
+            message=message,
+            artifact_path=str(artifact.get("file_path") or ""),
+            artifact_size=int(artifact.get("size_bytes") or 0),
+        )
+        return message
+
+    if action_name == "import_backup_json":
+        raw_json_text = _memory_core_ui_clean_text(import_backup_json)
+        import_path = _memory_core_ui_clean_text(import_backup_path)
+
+        if not raw_json_text and import_path:
+            path_obj = Path(import_path).expanduser()
+            if not path_obj.is_absolute():
+                app_root = Path(__file__).resolve().parent.parent
+                path_obj = (app_root / path_obj).resolve()
+            if not path_obj.exists():
+                raise ValueError(f"Backup path does not exist: {path_obj}")
+            if not path_obj.is_file():
+                raise ValueError(f"Backup path is not a file: {path_obj}")
+            try:
+                raw_json_text = path_obj.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                raise ValueError(f"Could not read backup file: {exc}") from exc
+
+        if not raw_json_text:
+            raise ValueError("Provide backup JSON text or a backup file path for import.")
+
+        try:
+            payload = json.loads(raw_json_text)
+        except Exception as exc:
+            raise ValueError(f"Backup JSON is invalid: {exc}") from exc
+
+        result = _memory_core_import_backup_payload(
+            payload,
+            replace_existing=_as_bool(replace_existing, False),
+            restore_settings=_as_bool(restore_settings, True),
+        )
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Backup import failed.")
+
+        message = (
+            "Imported backup: "
+            f"user_docs={int(result.get('imported_user_docs') or 0)}, "
+            f"room_docs={int(result.get('imported_room_docs') or 0)}, "
+            f"cursors={int(result.get('imported_cursors') or 0)}, "
+            f"identity_aliases={int(result.get('imported_identity_aliases') or 0)}, "
+            f"identity_names={int(result.get('imported_identity_names') or 0)}, "
+            f"room_labels={int(result.get('imported_room_labels') or 0)}, "
+            f"user_labels={int(result.get('imported_user_labels') or 0)}, "
+            f"stats_fields={int(result.get('imported_stats_fields') or 0)}, "
+            f"settings_fields={int(result.get('imported_settings_fields') or 0)}"
+        )
+        _memory_core_ui_set_last_tool(action=action_name, message=message)
+        return message
+
+    if action_name == "wipe_all_memory":
+        confirm = _memory_core_ui_clean_text(confirm_text)
+        if confirm.upper() != "WIPE":
+            raise ValueError("Type WIPE to confirm the full memory wipe.")
+        result = _memory_core_wipe_all_data()
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Memory wipe failed.")
+        deleted_total = int(result.get("deleted_total") or 0)
+        message = f"Wiped memory data ({deleted_total} key(s) removed)."
+        _memory_core_ui_set_last_tool(action=action_name, message=message)
+        return message
+
+    raise ValueError(f"Unknown tool action: {action_name}")
+
+
+def _memory_core_legacy_forget_keys(redis_key: Any, keys: List[str]) -> Dict[str, Any]:
+    target_key = _memory_core_ui_legacy_scope_key(redis_key)
+    if not target_key:
+        return {"ok": False, "error": "Invalid legacy memory scope key."}
+    if isinstance(keys, str):
+        requested = _memory_core_ui_split_keys(keys)
+    elif isinstance(keys, list):
+        requested = [_memory_core_ui_clean_text(item) for item in keys if _memory_core_ui_clean_text(item)]
+    else:
+        requested = []
+    if not requested:
+        return {"ok": False, "error": "No legacy keys selected."}
+
+    clean_keys = [_memory_core_ui_clean_text(item) for item in requested if _memory_core_ui_clean_text(item)]
+    if not clean_keys:
+        return {"ok": False, "error": "No valid legacy keys selected."}
+
+    try:
+        deleted = int(redis_client.hdel(target_key, *clean_keys) or 0)
+        if deleted <= 0:
+            return {"ok": False, "error": "No matching legacy keys were deleted.", "deleted": 0}
+        remaining = int(redis_client.hlen(target_key) or 0)
+        deleted_scope = False
+        if remaining <= 0:
+            redis_client.delete(target_key)
+            deleted_scope = True
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "deleted_scope": deleted_scope,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"Legacy memory delete failed: {exc}"}
+
+
+def _memory_core_legacy_delete_scope(redis_key: Any) -> Dict[str, Any]:
+    target_key = _memory_core_ui_legacy_scope_key(redis_key)
+    if not target_key:
+        return {"ok": False, "error": "Invalid legacy memory scope key."}
+    try:
+        deleted = int(redis_client.delete(target_key) or 0)
+    except Exception as exc:
+        return {"ok": False, "error": f"Legacy scope delete failed: {exc}"}
+    if deleted <= 0:
+        return {"ok": False, "error": "Legacy scope was already empty.", "deleted": 0}
+    return {"ok": True, "deleted": deleted}
+
+
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    del redis_client
+    body = payload if isinstance(payload, dict) else {}
+    values = body.get("values") if isinstance(body.get("values"), dict) else {}
+    action_name = _memory_core_ui_clean_text(action).lower()
+
+    def _value(key: str, default: Any = "") -> Any:
+        if key in values:
+            return values.get(key)
+        return body.get(key, default)
+
+    if action_name == "memory_run_tool":
+        message = _memory_core_ui_run_tool_action(
+            tool_action=_value("tool_action"),
+            import_backup_json=_value("import_backup_json"),
+            import_backup_path=_value("import_backup_path"),
+            replace_existing=_value("replace_existing"),
+            restore_settings=_value("restore_settings"),
+            confirm_text=_value("confirm_text"),
+        )
+        return {"ok": True, "message": message}
+
+    if action_name == "memory_forget_keys":
+        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
+        keys = _memory_core_ui_split_keys(_value("forget_keys"))
+        if not keys:
+            raise ValueError("Provide at least one memory key to forget.")
+        result = _memory_core_forget_fact_keys(scope, platform, scope_id, keys)
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not forget memory keys.")
+        deleted = int(result.get("deleted") or 0)
+        return {"ok": True, "message": f"Deleted {deleted} key(s) from {scope} memory."}
+
+    if action_name == "memory_remove_doc":
+        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
+        result = _memory_core_forget_doc(scope, platform, scope_id)
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not delete memory document.")
+        return {"ok": True, "message": f"Deleted {scope} memory document."}
+
+    if action_name == "memory_legacy_forget_keys":
+        legacy_scope_key = _value("id")
+        keys = _memory_core_ui_split_keys(_value("legacy_forget_keys"))
+        if not keys:
+            raise ValueError("Provide at least one legacy key to delete.")
+        result = _memory_core_legacy_forget_keys(legacy_scope_key, keys)
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not delete legacy keys.")
+        deleted = int(result.get("deleted") or 0)
+        if _as_bool(result.get("deleted_scope"), False):
+            return {"ok": True, "message": f"Deleted {deleted} legacy key(s) and removed empty scope."}
+        return {"ok": True, "message": f"Deleted {deleted} legacy key(s)."}
+
+    if action_name == "memory_legacy_delete_scope":
+        legacy_scope_key = _value("id")
+        result = _memory_core_legacy_delete_scope(legacy_scope_key)
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not delete legacy scope.")
+        return {"ok": True, "message": "Deleted legacy scope."}
+
+    if action_name == "memory_wipe_all":
+        confirm_text = _memory_core_ui_clean_text(_value("confirm_text"))
+        if confirm_text.upper() != "WIPE":
+            raise ValueError("Type WIPE to confirm the full memory wipe.")
+        result = _memory_core_wipe_all_data()
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Memory wipe failed.")
+        deleted_total = int(result.get("deleted_total") or 0)
+        return {"ok": True, "message": f"Wiped memory data ({deleted_total} key(s) removed)."}
+
+    raise ValueError(f"Unknown action: {action_name}")

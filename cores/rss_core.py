@@ -6,6 +6,7 @@ import feedparser
 import logging
 import redis
 import requests
+from typing import Any, Dict, List
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env
@@ -43,6 +44,520 @@ CORE_WEBUI_TAB = {
 }
 
 MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model
+_RSS_NTFY_DEFAULT_SERVER = "https://ntfy.sh"
+_RSS_NTFY_DEFAULT_PRIORITY = "3"
+_RSS_WORDPRESS_STATUS_OPTIONS = ["draft", "publish", "pending", "private"]
+
+
+def _as_bool_flag(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _portal_row(portals: Dict[str, Any], portal_key: str) -> Dict[str, Any]:
+    if not isinstance(portals, dict):
+        return {}
+    row = portals.get(portal_key)
+    return row if isinstance(row, dict) else {}
+
+
+def _portal_targets(portals: Dict[str, Any], portal_key: str) -> Dict[str, Any]:
+    row = _portal_row(portals, portal_key)
+    raw_targets = row.get("targets")
+    return raw_targets if isinstance(raw_targets, dict) else {}
+
+
+def _feed_form_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    portals = cfg.get("portals") if isinstance(cfg.get("portals"), dict) else {}
+
+    discord_targets = _portal_targets(portals, "discord")
+    irc_targets = _portal_targets(portals, "irc")
+    matrix_targets = _portal_targets(portals, "matrix")
+    ha_targets = _portal_targets(portals, "homeassistant")
+    ntfy_targets = _portal_targets(portals, "ntfy")
+    telegram_targets = _portal_targets(portals, "telegram")
+    wp_targets = _portal_targets(portals, "wordpress")
+
+    wp_post_status = _clean_text(wp_targets.get("post_status") or "draft").lower()
+    if wp_post_status not in _RSS_WORDPRESS_STATUS_OPTIONS:
+        wp_post_status = "draft"
+
+    persistent_value = ha_targets.get("persistent")
+    if persistent_value is True:
+        ha_persistent_mode = "true"
+    elif persistent_value is False:
+        ha_persistent_mode = "false"
+    else:
+        ha_persistent_mode = "use_default"
+
+    return {
+        "discord": {
+            "enabled": _as_bool_flag(_portal_row(portals, "discord").get("enabled"), True),
+            "channel_id": _clean_text(discord_targets.get("channel_id")),
+        },
+        "irc": {
+            "enabled": _as_bool_flag(_portal_row(portals, "irc").get("enabled"), True),
+            "channel": _clean_text(irc_targets.get("channel")),
+        },
+        "matrix": {
+            "enabled": _as_bool_flag(_portal_row(portals, "matrix").get("enabled"), True),
+            "room_id": _clean_text(matrix_targets.get("room_id")),
+        },
+        "homeassistant": {
+            "enabled": _as_bool_flag(_portal_row(portals, "homeassistant").get("enabled"), True),
+            "device_service": _clean_text(ha_targets.get("device_service")),
+            "persistent_mode": ha_persistent_mode,
+        },
+        "ntfy": {
+            "enabled": _as_bool_flag(_portal_row(portals, "ntfy").get("enabled"), True),
+            "server": _clean_text(ntfy_targets.get("ntfy_server") or _RSS_NTFY_DEFAULT_SERVER),
+            "topic": _clean_text(ntfy_targets.get("ntfy_topic")),
+            "priority": _clean_text(ntfy_targets.get("ntfy_priority") or _RSS_NTFY_DEFAULT_PRIORITY),
+            "tags": _clean_text(ntfy_targets.get("ntfy_tags")),
+            "click_from_first_url": _as_bool_flag(ntfy_targets.get("ntfy_click_from_first_url"), True),
+            "token": _clean_text(ntfy_targets.get("ntfy_token")),
+            "username": _clean_text(ntfy_targets.get("ntfy_username")),
+            "password": _clean_text(ntfy_targets.get("ntfy_password")),
+        },
+        "telegram": {
+            "enabled": _as_bool_flag(_portal_row(portals, "telegram").get("enabled"), True),
+            "chat_id": _clean_text(telegram_targets.get("chat_id")),
+        },
+        "wordpress": {
+            "enabled": _as_bool_flag(_portal_row(portals, "wordpress").get("enabled"), True),
+            "site_url": _clean_text(wp_targets.get("wordpress_site_url")),
+            "username": _clean_text(wp_targets.get("wordpress_username")),
+            "app_password": _clean_text(wp_targets.get("wordpress_app_password")),
+            "post_status": wp_post_status,
+            "category_id": _clean_text(wp_targets.get("category_id")),
+        },
+    }
+
+
+def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    form = portals_form if isinstance(portals_form, dict) else {}
+
+    def _row(portal_key: str) -> Dict[str, Any]:
+        row = form.get(portal_key)
+        return row if isinstance(row, dict) else {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+
+    discord = _row("discord")
+    discord_enabled = _as_bool_flag(discord.get("enabled"), True)
+    discord_channel = _clean_text(discord.get("channel_id"))
+    discord_targets: Dict[str, Any] = {}
+    if discord_channel:
+        discord_targets["channel_id"] = discord_channel
+    if (not discord_enabled) or discord_targets:
+        out["discord"] = {"enabled": discord_enabled, "targets": discord_targets}
+
+    irc = _row("irc")
+    irc_enabled = _as_bool_flag(irc.get("enabled"), True)
+    irc_channel = _clean_text(irc.get("channel"))
+    irc_targets: Dict[str, Any] = {}
+    if irc_channel:
+        irc_targets["channel"] = irc_channel
+    if (not irc_enabled) or irc_targets:
+        out["irc"] = {"enabled": irc_enabled, "targets": irc_targets}
+
+    matrix = _row("matrix")
+    matrix_enabled = _as_bool_flag(matrix.get("enabled"), True)
+    matrix_room = _clean_text(matrix.get("room_id"))
+    matrix_targets: Dict[str, Any] = {}
+    if matrix_room:
+        matrix_targets["room_id"] = matrix_room
+    if (not matrix_enabled) or matrix_targets:
+        out["matrix"] = {"enabled": matrix_enabled, "targets": matrix_targets}
+
+    homeassistant = _row("homeassistant")
+    ha_enabled = _as_bool_flag(homeassistant.get("enabled"), True)
+    ha_device = _clean_text(homeassistant.get("device_service"))
+    ha_persistent_mode = _clean_text(homeassistant.get("persistent_mode")).lower()
+    ha_targets: Dict[str, Any] = {}
+    if ha_device:
+        ha_targets["device_service"] = ha_device
+    if ha_persistent_mode in {"true", "force_on", "on"}:
+        ha_targets["persistent"] = True
+    elif ha_persistent_mode in {"false", "force_off", "off"}:
+        ha_targets["persistent"] = False
+    if (not ha_enabled) or ha_targets:
+        out["homeassistant"] = {"enabled": ha_enabled, "targets": ha_targets}
+
+    ntfy = _row("ntfy")
+    ntfy_enabled = _as_bool_flag(ntfy.get("enabled"), True)
+    ntfy_targets: Dict[str, Any] = {}
+    ntfy_server = _clean_text(ntfy.get("server"))
+    if ntfy_server and ntfy_server != _RSS_NTFY_DEFAULT_SERVER:
+        ntfy_targets["ntfy_server"] = ntfy_server
+    ntfy_topic = _clean_text(ntfy.get("topic"))
+    if ntfy_topic:
+        ntfy_targets["ntfy_topic"] = ntfy_topic
+    ntfy_priority = _clean_text(ntfy.get("priority"))
+    if ntfy_priority and ntfy_priority != _RSS_NTFY_DEFAULT_PRIORITY:
+        ntfy_targets["ntfy_priority"] = ntfy_priority
+    ntfy_tags = _clean_text(ntfy.get("tags"))
+    if ntfy_tags:
+        ntfy_targets["ntfy_tags"] = ntfy_tags
+    ntfy_click = _as_bool_flag(ntfy.get("click_from_first_url"), True)
+    if ntfy_click is not True:
+        ntfy_targets["ntfy_click_from_first_url"] = ntfy_click
+    ntfy_token = _clean_text(ntfy.get("token"))
+    if ntfy_token:
+        ntfy_targets["ntfy_token"] = ntfy_token
+    ntfy_username = _clean_text(ntfy.get("username"))
+    if ntfy_username:
+        ntfy_targets["ntfy_username"] = ntfy_username
+    ntfy_password = _clean_text(ntfy.get("password"))
+    if ntfy_password:
+        ntfy_targets["ntfy_password"] = ntfy_password
+    if (not ntfy_enabled) or ntfy_targets:
+        out["ntfy"] = {"enabled": ntfy_enabled, "targets": ntfy_targets}
+
+    telegram = _row("telegram")
+    telegram_enabled = _as_bool_flag(telegram.get("enabled"), True)
+    telegram_chat = _clean_text(telegram.get("chat_id"))
+    telegram_targets: Dict[str, Any] = {}
+    if telegram_chat:
+        telegram_targets["chat_id"] = telegram_chat
+    if (not telegram_enabled) or telegram_targets:
+        out["telegram"] = {"enabled": telegram_enabled, "targets": telegram_targets}
+
+    wordpress = _row("wordpress")
+    wp_enabled = _as_bool_flag(wordpress.get("enabled"), True)
+    wp_targets: Dict[str, Any] = {}
+    wp_site_url = _clean_text(wordpress.get("site_url"))
+    if wp_site_url:
+        wp_targets["wordpress_site_url"] = wp_site_url
+    wp_username = _clean_text(wordpress.get("username"))
+    if wp_username:
+        wp_targets["wordpress_username"] = wp_username
+    wp_app_password = _clean_text(wordpress.get("app_password"))
+    if wp_app_password:
+        wp_targets["wordpress_app_password"] = wp_app_password
+    wp_post_status = _clean_text(wordpress.get("post_status")).lower()
+    if wp_post_status in _RSS_WORDPRESS_STATUS_OPTIONS and wp_post_status != "draft":
+        wp_targets["post_status"] = wp_post_status
+    wp_category = _clean_text(wordpress.get("category_id"))
+    if wp_category:
+        wp_targets["category_id"] = wp_category
+    if (not wp_enabled) or wp_targets:
+        out["wordpress"] = {"enabled": wp_enabled, "targets": wp_targets}
+
+    return out
+
+
+def _feed_rows(client) -> List[Dict[str, Any]]:
+    feeds = get_all_feeds(client) or {}
+    rows: List[Dict[str, Any]] = []
+    for feed_url, cfg in sorted((feeds or {}).items(), key=lambda item: str(item[0]).lower()):
+        url = _clean_text(feed_url)
+        if not url:
+            continue
+        raw = cfg if isinstance(cfg, dict) else {}
+        try:
+            last_ts = float(raw.get("last_ts") or 0.0)
+        except Exception:
+            last_ts = 0.0
+        last_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts)) if last_ts > 0 else "never"
+        rows.append(
+            {
+                "url": url,
+                "enabled": _as_bool_flag(raw.get("enabled"), True),
+                "last_ts": last_ts,
+                "last_text": last_text,
+                "portals": _feed_form_from_cfg(raw),
+            }
+        )
+    return rows
+
+
+def _as_choices(values: List[str]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for value in values or []:
+        token = _clean_text(value)
+        if not token:
+            continue
+        rows.append({"value": token, "label": token})
+    return rows
+
+
+def _rss_manager_ui(client) -> Dict[str, Any]:
+    forms = []
+    for feed in _feed_rows(client):
+        url = _clean_text(feed.get("url"))
+        portals = feed.get("portals") if isinstance(feed.get("portals"), dict) else {}
+        discord = portals.get("discord") if isinstance(portals.get("discord"), dict) else {}
+        irc = portals.get("irc") if isinstance(portals.get("irc"), dict) else {}
+        matrix = portals.get("matrix") if isinstance(portals.get("matrix"), dict) else {}
+        homeassistant = portals.get("homeassistant") if isinstance(portals.get("homeassistant"), dict) else {}
+        ntfy = portals.get("ntfy") if isinstance(portals.get("ntfy"), dict) else {}
+        telegram = portals.get("telegram") if isinstance(portals.get("telegram"), dict) else {}
+        wordpress = portals.get("wordpress") if isinstance(portals.get("wordpress"), dict) else {}
+
+        forms.append(
+            {
+                "id": url,
+                "title": url,
+                "subtitle": f"Last posted: {_clean_text(feed.get('last_text') or 'never')}",
+                "save_action": "rss_save_feed",
+                "remove_action": "rss_remove_feed",
+                "remove_confirm": f"Remove RSS feed {url}?",
+                "fields": [
+                    {
+                        "key": "enabled",
+                        "label": "Feed Enabled",
+                        "type": "checkbox",
+                        "value": _as_bool_flag(feed.get("enabled"), True),
+                    },
+                ],
+                "sections": [
+                    {
+                        "label": "Discord",
+                        "fields": [
+                            {
+                                "key": "portals.discord.enabled",
+                                "label": "Enable Discord Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(discord.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.discord.channel_id",
+                                "label": "Channel ID",
+                                "type": "text",
+                                "value": _clean_text(discord.get("channel_id")),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "IRC",
+                        "fields": [
+                            {
+                                "key": "portals.irc.enabled",
+                                "label": "Enable IRC Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(irc.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.irc.channel",
+                                "label": "Channel",
+                                "type": "text",
+                                "value": _clean_text(irc.get("channel")),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Matrix",
+                        "fields": [
+                            {
+                                "key": "portals.matrix.enabled",
+                                "label": "Enable Matrix Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(matrix.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.matrix.room_id",
+                                "label": "Room ID",
+                                "type": "text",
+                                "value": _clean_text(matrix.get("room_id")),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Home Assistant",
+                        "fields": [
+                            {
+                                "key": "portals.homeassistant.enabled",
+                                "label": "Enable Home Assistant Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(homeassistant.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.homeassistant.device_service",
+                                "label": "Device Service",
+                                "type": "text",
+                                "value": _clean_text(homeassistant.get("device_service")),
+                            },
+                            {
+                                "key": "portals.homeassistant.persistent_mode",
+                                "label": "Persistent Notification",
+                                "type": "select",
+                                "options": _as_choices(["use_default", "true", "false"]),
+                                "value": _clean_text(homeassistant.get("persistent_mode") or "use_default"),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "ntfy",
+                        "fields": [
+                            {
+                                "key": "portals.ntfy.enabled",
+                                "label": "Enable ntfy Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(ntfy.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.ntfy.server",
+                                "label": "Server",
+                                "type": "text",
+                                "value": _clean_text(ntfy.get("server") or _RSS_NTFY_DEFAULT_SERVER),
+                            },
+                            {
+                                "key": "portals.ntfy.topic",
+                                "label": "Topic",
+                                "type": "text",
+                                "value": _clean_text(ntfy.get("topic")),
+                            },
+                            {
+                                "key": "portals.ntfy.priority",
+                                "label": "Priority",
+                                "type": "select",
+                                "options": _as_choices(["1", "2", "3", "4", "5"]),
+                                "value": _clean_text(ntfy.get("priority") or _RSS_NTFY_DEFAULT_PRIORITY),
+                            },
+                            {
+                                "key": "portals.ntfy.tags",
+                                "label": "Tags (comma-separated)",
+                                "type": "text",
+                                "value": _clean_text(ntfy.get("tags")),
+                            },
+                            {
+                                "key": "portals.ntfy.click_from_first_url",
+                                "label": "Use first article URL as click action",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(ntfy.get("click_from_first_url"), True),
+                            },
+                            {
+                                "key": "portals.ntfy.token",
+                                "label": "Bearer Token",
+                                "type": "password",
+                                "value": _clean_text(ntfy.get("token")),
+                            },
+                            {
+                                "key": "portals.ntfy.username",
+                                "label": "Username",
+                                "type": "text",
+                                "value": _clean_text(ntfy.get("username")),
+                            },
+                            {
+                                "key": "portals.ntfy.password",
+                                "label": "Password",
+                                "type": "password",
+                                "value": _clean_text(ntfy.get("password")),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Telegram",
+                        "fields": [
+                            {
+                                "key": "portals.telegram.enabled",
+                                "label": "Enable Telegram Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(telegram.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.telegram.chat_id",
+                                "label": "Chat ID",
+                                "type": "text",
+                                "value": _clean_text(telegram.get("chat_id")),
+                            },
+                        ],
+                    },
+                    {
+                        "label": "WordPress",
+                        "fields": [
+                            {
+                                "key": "portals.wordpress.enabled",
+                                "label": "Enable WordPress Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(wordpress.get("enabled"), True),
+                            },
+                            {
+                                "key": "portals.wordpress.site_url",
+                                "label": "Site URL",
+                                "type": "text",
+                                "value": _clean_text(wordpress.get("site_url")),
+                            },
+                            {
+                                "key": "portals.wordpress.username",
+                                "label": "Username",
+                                "type": "text",
+                                "value": _clean_text(wordpress.get("username")),
+                            },
+                            {
+                                "key": "portals.wordpress.app_password",
+                                "label": "App Password",
+                                "type": "password",
+                                "value": _clean_text(wordpress.get("app_password")),
+                            },
+                            {
+                                "key": "portals.wordpress.post_status",
+                                "label": "Post Status",
+                                "type": "select",
+                                "options": _as_choices(_RSS_WORDPRESS_STATUS_OPTIONS),
+                                "value": _clean_text(wordpress.get("post_status") or "draft"),
+                            },
+                            {
+                                "key": "portals.wordpress.category_id",
+                                "label": "Category ID",
+                                "type": "text",
+                                "value": _clean_text(wordpress.get("category_id")),
+                            },
+                        ],
+                    },
+                ],
+            }
+        )
+
+    return {
+        "kind": "settings_manager",
+        "title": "RSS Feed Manager",
+        "empty_message": "No RSS feeds configured yet.",
+        "item_fields_dropdown": True,
+        "item_fields_dropdown_label": "Feed Settings",
+        "item_sections_in_dropdown": True,
+        "manager_tabs": [
+            {
+                "key": "create",
+                "label": "Add Feed",
+                "source": "add_form",
+            },
+            {
+                "key": "feeds",
+                "label": "Current Feeds",
+                "source": "items",
+                "empty_message": "No RSS feeds configured yet.",
+            },
+        ],
+        "default_tab": "feeds",
+        "add_form": {
+            "action": "rss_add_feed",
+            "submit_label": "Add Feed",
+            "fields": [
+                {
+                    "key": "url",
+                    "label": "Feed URL",
+                    "type": "text",
+                    "required": True,
+                    "placeholder": "https://example.com/feed.xml",
+                }
+            ],
+        },
+        "item_forms": forms,
+    }
 
 
 def _get_poll_interval() -> int:
@@ -389,377 +904,191 @@ class RSSManager:
             return
 
 
-def render_webui_tab(**_kwargs):
-    import streamlit as st
+def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> dict:
+    client = redis_client or globals().get("redis_client")
+    feeds = get_all_feeds(client) or {}
+    enabled_count = 0
+    items = []
 
-    def _as_bool(value: object, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        token = str(value).strip().lower()
-        if token in ("1", "true", "yes", "on", "enabled"):
-            return True
-        if token in ("0", "false", "no", "off", "disabled"):
-            return False
-        return default
+    for feed_url, cfg in sorted(feeds.items(), key=lambda row: str(row[0]).lower()):
+        feed_url = _clean_text(feed_url)
+        config = cfg if isinstance(cfg, dict) else {}
+        enabled = _as_bool_flag(config.get("enabled"), True)
+        if enabled:
+            enabled_count += 1
 
-    st.title("RSS Feeds")
-    st.caption("Add feeds and customize delivery per feed. Leave targets blank to use default routing.")
+        portals = config.get("portals") if isinstance(config.get("portals"), dict) else {}
+        enabled_portals = sorted(
+            [
+                str(name).strip()
+                for name, portal_cfg in portals.items()
+                if str(name).strip() and isinstance(portal_cfg, dict) and bool(portal_cfg.get("enabled", True))
+            ]
+        )
+        routes_text = ", ".join(enabled_portals) if enabled_portals else "default routing"
 
-    add_url = st.text_input("RSS Feed URL", key="rss_add_url")
-    cols = st.columns([1, 1, 2])
-    if cols[0].button("Add Feed", key="rss_add_btn"):
-        feed_url = (add_url or "").strip()
-        if not feed_url:
-            st.warning("Please enter a feed URL.")
+        try:
+            last_ts = float(config.get("last_ts") or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if last_ts > 0:
+            last_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts))
         else:
-            existing = get_all_feeds(redis_client) or {}
-            if feed_url in existing:
-                st.warning("That feed is already configured.")
-            else:
-                try:
-                    parsed = feedparser.parse(feed_url)
-                except Exception:
-                    parsed = None
-                if not parsed or (getattr(parsed, "bozo", 0) and not getattr(parsed, "entries", None)):
-                    st.error("Failed to parse that feed URL.")
-                else:
-                    # Set last_ts=0 so the poller posts only the newest item once.
-                    set_feed(redis_client, feed_url, {"last_ts": 0.0, "enabled": True, "portals": {}})
-                    st.success("Feed added.")
-                    st.rerun()
+            last_text = "never"
 
-    feeds = get_all_feeds(redis_client) or {}
-    if not feeds:
-        st.info("No feeds configured yet.")
-        return
+        items.append(
+            {
+                "title": feed_url or "(missing feed URL)",
+                "subtitle": f"{'Enabled' if enabled else 'Disabled'} · portals: {routes_text}",
+                "detail": f"Last posted item timestamp: {last_text}",
+            }
+        )
 
-    default_cfg = {
-        "send_discord": True,
-        "discord_channel_id": "",
-        "send_irc": True,
-        "irc_channel": "",
-        "send_matrix": True,
-        "matrix_room_id": "",
-        "send_homeassistant": True,
-        "ha_device_service": "",
-        "send_ntfy": True,
-        "ntfy_server": "https://ntfy.sh",
-        "ntfy_topic": "",
-        "ntfy_priority": "3",
-        "ntfy_tags": "",
-        "ntfy_click_from_first_url": True,
-        "ntfy_token": "",
-        "ntfy_username": "",
-        "ntfy_password": "",
-        "send_telegram": True,
-        "telegram_chat_id": "",
-        "send_wordpress": True,
-        "wordpress_site_url": "",
-        "wordpress_username": "",
-        "wordpress_app_password": "",
-        "wordpress_post_status": "draft",
-        "wordpress_category_id": "",
+    total_count = len(feeds)
+    disabled_count = total_count - enabled_count
+
+    return {
+        "summary": "RSS feed polling and delivery routing overview.",
+        "stats": [
+            {"label": "Feeds", "value": total_count},
+            {"label": "Enabled", "value": enabled_count},
+            {"label": "Disabled", "value": disabled_count},
+            {"label": "Poll (sec)", "value": _get_poll_interval()},
+        ],
+        "items": items,
+        "empty_message": "No RSS feeds configured yet.",
+        "ui": _rss_manager_ui(client),
     }
 
-    for idx, (feed_url, cfg) in enumerate(sorted(feeds.items(), key=lambda kv: kv[0].lower())):
-        exp_key = f"rss_feed_{idx}"
-        with st.expander(feed_url, expanded=False):
-            enabled_val = st.checkbox("Enabled", value=cfg.get("enabled", True), key=f"{exp_key}_enabled")
 
-            portals = cfg.get("portals") or {}
+def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    values = payload.get("values")
+    return values if isinstance(values, dict) else {}
 
-            discord_override = portals.get("discord") or {}
-            discord_enabled = st.checkbox(
-                "Send to Discord",
-                value=discord_override.get("enabled", default_cfg["send_discord"]),
-                key=f"{exp_key}_discord_enabled",
-            )
-            discord_channel_id = st.text_input(
-                "Discord Channel ID",
-                value=(discord_override.get("targets") or {}).get("channel_id", ""),
-                placeholder=default_cfg["discord_channel_id"],
-                key=f"{exp_key}_discord_channel_id",
-            )
 
-            irc_override = portals.get("irc") or {}
-            irc_enabled = st.checkbox(
-                "Send to IRC",
-                value=irc_override.get("enabled", default_cfg["send_irc"]),
-                key=f"{exp_key}_irc_enabled",
-            )
-            irc_channel = st.text_input(
-                "IRC Channel",
-                value=(irc_override.get("targets") or {}).get("channel", ""),
-                placeholder=default_cfg["irc_channel"],
-                key=f"{exp_key}_irc_channel",
-            )
+def _payload_text(payload: Dict[str, Any], key: str) -> str:
+    return _clean_text(payload.get(key))
 
-            matrix_override = portals.get("matrix") or {}
-            matrix_enabled = st.checkbox(
-                "Send to Matrix",
-                value=matrix_override.get("enabled", default_cfg["send_matrix"]),
-                key=f"{exp_key}_matrix_enabled",
-            )
-            matrix_room_id = st.text_input(
-                "Matrix Room ID or Alias",
-                value=(matrix_override.get("targets") or {}).get("room_id", ""),
-                placeholder=default_cfg["matrix_room_id"],
-                key=f"{exp_key}_matrix_room_id",
-            )
 
-            ha_override = portals.get("homeassistant") or {}
-            ha_enabled = st.checkbox(
-                "Send to Home Assistant Notifications",
-                value=ha_override.get("enabled", default_cfg["send_homeassistant"]),
-                key=f"{exp_key}_ha_enabled",
-            )
-            ha_device = st.text_input(
-                "HA Mobile Notify Service (optional override)",
-                value=(ha_override.get("targets") or {}).get("device_service", ""),
-                placeholder=default_cfg["ha_device_service"],
-                key=f"{exp_key}_ha_device_service",
-            )
-            ha_persistent = (ha_override.get("targets") or {}).get("persistent")
-            if isinstance(ha_persistent, str):
-                ha_persistent = ha_persistent.strip().lower() in ("1", "true", "yes", "on")
-            if ha_persistent is True:
-                ha_persist_choice = "Force on"
-            elif ha_persistent is False:
-                ha_persist_choice = "Force off"
-            else:
-                ha_persist_choice = "Use default"
-            ha_persist_choice = st.selectbox(
-                "HA Persistent Notification",
-                options=["Use default", "Force on", "Force off"],
-                index=["Use default", "Force on", "Force off"].index(ha_persist_choice),
-                key=f"{exp_key}_ha_persist_choice",
-            )
+def _payload_value(values: Dict[str, Any], key: str, default: Any = "") -> Any:
+    if key in values:
+        return values.get(key)
+    return default
 
-            ntfy_override = portals.get("ntfy") or {}
-            ntfy_enabled = st.checkbox(
-                "Send to Ntfy",
-                value=ntfy_override.get("enabled", default_cfg["send_ntfy"]),
-                key=f"{exp_key}_ntfy_enabled",
-            )
-            ntfy_targets = ntfy_override.get("targets") or {}
-            ntfy_server = st.text_input(
-                "Ntfy Server",
-                value=str(ntfy_targets.get("ntfy_server") or ntfy_targets.get("server") or ""),
-                placeholder=default_cfg["ntfy_server"],
-                key=f"{exp_key}_ntfy_server",
-            )
-            ntfy_topic = st.text_input(
-                "Ntfy Topic",
-                value=str(ntfy_targets.get("ntfy_topic") or ntfy_targets.get("topic") or ""),
-                placeholder=default_cfg["ntfy_topic"],
-                key=f"{exp_key}_ntfy_topic",
-            )
-            ntfy_priority_options = ["1", "2", "3", "4", "5"]
-            ntfy_priority_current = str(
-                ntfy_targets.get("ntfy_priority") or ntfy_targets.get("priority") or default_cfg["ntfy_priority"]
-            ).strip()
-            if ntfy_priority_current not in ntfy_priority_options:
-                ntfy_priority_current = default_cfg["ntfy_priority"]
-            ntfy_priority = st.selectbox(
-                "Ntfy Priority",
-                options=ntfy_priority_options,
-                index=ntfy_priority_options.index(ntfy_priority_current),
-                key=f"{exp_key}_ntfy_priority",
-            )
-            ntfy_tags = st.text_input(
-                "Ntfy Tags",
-                value=str(ntfy_targets.get("ntfy_tags") or ntfy_targets.get("tags") or ""),
-                placeholder=default_cfg["ntfy_tags"],
-                key=f"{exp_key}_ntfy_tags",
-            )
-            ntfy_click = st.checkbox(
-                "Ntfy Click URL from first link",
-                value=_as_bool(
-                    ntfy_targets.get("ntfy_click_from_first_url", ntfy_targets.get("click_from_first_url")),
-                    default=default_cfg["ntfy_click_from_first_url"],
-                ),
-                key=f"{exp_key}_ntfy_click_from_first_url",
-            )
-            ntfy_token = st.text_input(
-                "Ntfy Token",
-                value=str(ntfy_targets.get("ntfy_token") or ntfy_targets.get("token") or ""),
-                placeholder=default_cfg["ntfy_token"],
-                type="password",
-                key=f"{exp_key}_ntfy_token",
-            )
-            ntfy_username = st.text_input(
-                "Ntfy Username",
-                value=str(ntfy_targets.get("ntfy_username") or ntfy_targets.get("username") or ""),
-                placeholder=default_cfg["ntfy_username"],
-                key=f"{exp_key}_ntfy_username",
-            )
-            ntfy_password = st.text_input(
-                "Ntfy Password",
-                value=str(ntfy_targets.get("ntfy_password") or ntfy_targets.get("password") or ""),
-                placeholder=default_cfg["ntfy_password"],
-                type="password",
-                key=f"{exp_key}_ntfy_password",
-            )
 
-            telegram_override = portals.get("telegram") or {}
-            telegram_enabled = st.checkbox(
-                "Send to Telegram",
-                value=telegram_override.get("enabled", default_cfg["send_telegram"]),
-                key=f"{exp_key}_telegram_enabled",
-            )
-            telegram_targets = telegram_override.get("targets") or {}
-            telegram_chat_id = st.text_input(
-                "Telegram Chat ID / Username",
-                value=str(
-                    telegram_targets.get("chat_id")
-                    or telegram_targets.get("channel_id")
-                    or telegram_targets.get("channel")
-                    or ""
-                ),
-                placeholder=default_cfg["telegram_chat_id"],
-                key=f"{exp_key}_telegram_chat_id",
-            )
+def _payload_portals_from_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "discord": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.discord.enabled", True), True),
+            "channel_id": _clean_text(_payload_value(values, "portals.discord.channel_id", "")),
+        },
+        "irc": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.irc.enabled", True), True),
+            "channel": _clean_text(_payload_value(values, "portals.irc.channel", "")),
+        },
+        "matrix": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.matrix.enabled", True), True),
+            "room_id": _clean_text(_payload_value(values, "portals.matrix.room_id", "")),
+        },
+        "homeassistant": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.homeassistant.enabled", True), True),
+            "device_service": _clean_text(_payload_value(values, "portals.homeassistant.device_service", "")),
+            "persistent_mode": _clean_text(_payload_value(values, "portals.homeassistant.persistent_mode", "use_default")),
+        },
+        "ntfy": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.ntfy.enabled", True), True),
+            "server": _clean_text(_payload_value(values, "portals.ntfy.server", _RSS_NTFY_DEFAULT_SERVER)),
+            "topic": _clean_text(_payload_value(values, "portals.ntfy.topic", "")),
+            "priority": _clean_text(_payload_value(values, "portals.ntfy.priority", _RSS_NTFY_DEFAULT_PRIORITY)),
+            "tags": _clean_text(_payload_value(values, "portals.ntfy.tags", "")),
+            "click_from_first_url": _as_bool_flag(
+                _payload_value(values, "portals.ntfy.click_from_first_url", True),
+                True,
+            ),
+            "token": _clean_text(_payload_value(values, "portals.ntfy.token", "")),
+            "username": _clean_text(_payload_value(values, "portals.ntfy.username", "")),
+            "password": _clean_text(_payload_value(values, "portals.ntfy.password", "")),
+        },
+        "telegram": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.telegram.enabled", True), True),
+            "chat_id": _clean_text(_payload_value(values, "portals.telegram.chat_id", "")),
+        },
+        "wordpress": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.wordpress.enabled", True), True),
+            "site_url": _clean_text(_payload_value(values, "portals.wordpress.site_url", "")),
+            "username": _clean_text(_payload_value(values, "portals.wordpress.username", "")),
+            "app_password": _clean_text(_payload_value(values, "portals.wordpress.app_password", "")),
+            "post_status": _clean_text(_payload_value(values, "portals.wordpress.post_status", "draft")),
+            "category_id": _clean_text(_payload_value(values, "portals.wordpress.category_id", "")),
+        },
+    }
 
-            wp_override = portals.get("wordpress") or {}
-            wp_enabled = st.checkbox(
-                "Send to WordPress",
-                value=wp_override.get("enabled", default_cfg["send_wordpress"]),
-                key=f"{exp_key}_wp_enabled",
-            )
-            wp_targets = wp_override.get("targets") or {}
-            wp_site_url = st.text_input(
-                "WordPress Site URL",
-                value=str(wp_targets.get("wordpress_site_url") or wp_targets.get("site_url") or ""),
-                placeholder=default_cfg["wordpress_site_url"],
-                key=f"{exp_key}_wordpress_site_url",
-            )
-            wp_username = st.text_input(
-                "WordPress Username",
-                value=str(wp_targets.get("wordpress_username") or wp_targets.get("username") or ""),
-                placeholder=default_cfg["wordpress_username"],
-                key=f"{exp_key}_wordpress_username",
-            )
-            wp_app_password = st.text_input(
-                "WordPress App Password",
-                value=str(
-                    wp_targets.get("wordpress_app_password")
-                    or wp_targets.get("app_password")
-                    or wp_targets.get("password")
-                    or ""
-                ),
-                placeholder=default_cfg["wordpress_app_password"],
-                type="password",
-                key=f"{exp_key}_wordpress_app_password",
-            )
-            wp_post_status_options = ["draft", "publish", "pending", "private"]
-            wp_post_status_current = str(
-                wp_targets.get("post_status") or default_cfg["wordpress_post_status"]
-            ).strip().lower()
-            if wp_post_status_current not in wp_post_status_options:
-                wp_post_status_current = default_cfg["wordpress_post_status"]
-            wp_post_status = st.selectbox(
-                "WordPress Post Status",
-                options=wp_post_status_options,
-                index=wp_post_status_options.index(wp_post_status_current),
-                key=f"{exp_key}_wordpress_post_status",
-            )
-            wp_category_id = st.text_input(
-                "WordPress Category ID",
-                value=str(wp_targets.get("category_id") or ""),
-                placeholder=default_cfg["wordpress_category_id"],
-                key=f"{exp_key}_wordpress_category_id",
-            )
 
-            save_cols = st.columns([1, 1, 2])
-            if save_cols[0].button("Save Feed Settings", key=f"{exp_key}_save"):
-                new_portals = {}
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    action_name = _clean_text(action).lower()
+    body = payload if isinstance(payload, dict) else {}
+    values = _payload_values(body)
 
-                if discord_enabled != default_cfg["send_discord"] or discord_channel_id:
-                    new_portals["discord"] = {
-                        "enabled": discord_enabled,
-                        "targets": {"channel_id": discord_channel_id} if discord_channel_id else {},
-                    }
-                if irc_enabled != default_cfg["send_irc"] or irc_channel:
-                    new_portals["irc"] = {
-                        "enabled": irc_enabled,
-                        "targets": {"channel": irc_channel} if irc_channel else {},
-                    }
-                if matrix_enabled != default_cfg["send_matrix"] or matrix_room_id:
-                    new_portals["matrix"] = {
-                        "enabled": matrix_enabled,
-                        "targets": {"room_id": matrix_room_id} if matrix_room_id else {},
-                    }
-                if ha_enabled != default_cfg["send_homeassistant"] or ha_device or ha_persist_choice != "Use default":
-                    targets = {}
-                    if ha_device:
-                        targets["device_service"] = ha_device
-                    if ha_persist_choice == "Force on":
-                        targets["persistent"] = True
-                    elif ha_persist_choice == "Force off":
-                        targets["persistent"] = False
-                    new_portals["homeassistant"] = {
-                        "enabled": ha_enabled,
-                        "targets": targets,
-                    }
-                ntfy_targets: dict[str, object] = {}
-                if ntfy_server:
-                    ntfy_targets["ntfy_server"] = ntfy_server
-                if ntfy_topic:
-                    ntfy_targets["ntfy_topic"] = ntfy_topic
-                if ntfy_priority != default_cfg["ntfy_priority"]:
-                    ntfy_targets["ntfy_priority"] = ntfy_priority
-                if ntfy_tags:
-                    ntfy_targets["ntfy_tags"] = ntfy_tags
-                if ntfy_click != default_cfg["ntfy_click_from_first_url"]:
-                    ntfy_targets["ntfy_click_from_first_url"] = bool(ntfy_click)
-                if ntfy_token:
-                    ntfy_targets["ntfy_token"] = ntfy_token
-                if ntfy_username:
-                    ntfy_targets["ntfy_username"] = ntfy_username
-                if ntfy_password:
-                    ntfy_targets["ntfy_password"] = ntfy_password
-                if ntfy_enabled != default_cfg["send_ntfy"] or ntfy_targets:
-                    new_portals["ntfy"] = {
-                        "enabled": ntfy_enabled,
-                        "targets": ntfy_targets,
-                    }
+    if action_name == "rss_add_feed":
+        feed_url = _payload_text(body, "url") or _clean_text(values.get("url"))
+        if not feed_url:
+            raise ValueError("Feed URL is required.")
 
-                telegram_targets: dict[str, str] = {}
-                if telegram_chat_id:
-                    telegram_targets["chat_id"] = telegram_chat_id
-                if telegram_enabled != default_cfg["send_telegram"] or telegram_targets:
-                    new_portals["telegram"] = {
-                        "enabled": telegram_enabled,
-                        "targets": telegram_targets,
-                    }
+        existing = get_all_feeds(client) or {}
+        if feed_url in existing:
+            raise ValueError("That feed is already configured.")
 
-                wp_targets_save: dict[str, str] = {}
-                if wp_site_url:
-                    wp_targets_save["wordpress_site_url"] = wp_site_url
-                if wp_username:
-                    wp_targets_save["wordpress_username"] = wp_username
-                if wp_app_password:
-                    wp_targets_save["wordpress_app_password"] = wp_app_password
-                if wp_post_status != default_cfg["wordpress_post_status"]:
-                    wp_targets_save["post_status"] = wp_post_status
-                if wp_category_id:
-                    wp_targets_save["category_id"] = wp_category_id
-                if wp_enabled != default_cfg["send_wordpress"] or wp_targets_save:
-                    new_portals["wordpress"] = {
-                        "enabled": wp_enabled,
-                        "targets": wp_targets_save,
-                    }
+        try:
+            parsed = feedparser.parse(feed_url)
+        except Exception:
+            parsed = None
+        if not parsed or (getattr(parsed, "bozo", 0) and not getattr(parsed, "entries", None)):
+            raise ValueError("Failed to parse that feed URL.")
 
-                update_feed(redis_client, feed_url, {"enabled": enabled_val, "portals": new_portals})
-                st.success("Feed settings saved.")
-                st.rerun()
+        set_feed(
+            client,
+            feed_url,
+            {
+                "last_ts": 0.0,
+                "enabled": True,
+                "portals": {},
+            },
+        )
+        return {"ok": True, "url": feed_url, "message": "Feed added."}
 
-            if save_cols[1].button("Remove Feed", key=f"{exp_key}_remove"):
-                delete_feed(redis_client, feed_url)
-                st.success("Feed removed.")
-                st.rerun()
+    if action_name == "rss_save_feed":
+        feed_url = _payload_text(body, "id") or _payload_text(body, "url")
+        if not feed_url:
+            raise ValueError("Feed URL is required.")
+
+        existing = get_all_feeds(client) or {}
+        if feed_url not in existing:
+            raise KeyError("Feed not found.")
+
+        enabled = _as_bool_flag(_payload_value(values, "enabled", True), True)
+        portals = _portals_from_form(_payload_portals_from_values(values))
+        update_feed(
+            client,
+            feed_url,
+            {
+                "enabled": enabled,
+                "portals": portals,
+            },
+        )
+        return {"ok": True, "url": feed_url, "message": "Feed settings saved."}
+
+    if action_name == "rss_remove_feed":
+        feed_url = _payload_text(body, "id") or _payload_text(body, "url")
+        if not feed_url:
+            raise ValueError("Feed URL is required.")
+
+        deleted = delete_feed(client, feed_url)
+        if not deleted:
+            raise KeyError("Feed not found.")
+        return {"ok": True, "url": feed_url, "message": "Feed removed."}
+
+    raise ValueError(f"Unknown action: {action_name}")
 
 
 def run(stop_event=None):

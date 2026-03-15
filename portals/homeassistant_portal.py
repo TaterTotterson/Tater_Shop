@@ -1046,7 +1046,7 @@ def run(stop_event: Optional[threading.Event] = None):
         logger.warning(f"[HA Bridge] Invalid bind_port value '{raw_port}', defaulting to 8787")
         port = 8787
 
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info")
+    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
 
     def _serve():

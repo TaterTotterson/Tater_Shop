@@ -288,7 +288,7 @@ async def call_tool(tool_name: str, payload: ToolCallRequest):
 # -------------------- Runner (mirrors other platforms’ graceful stop) --------------------
 def run(stop_event: Optional[threading.Event] = None):
     port = _get_bind_port()
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info")
+    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
 
     def _serve():
