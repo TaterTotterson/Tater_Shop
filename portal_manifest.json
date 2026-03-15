@@ -27,7 +27,7 @@
       "autostart_key": "ha_automations_portal_running",
       "tags": [],
       "entry": "portals/ha_automations_portal.py",
-      "sha256": "8348fd3d364d63c417eea1d0b2aa747305f363badc480bd5f38437ec808924d9"
+      "sha256": "a21c14362143d9391db4ecaf5e8cc75c78ed680c860681b57c57d5b150a43ffb"
     },
     {
       "id": "homeassistant",
@@ -41,7 +41,7 @@
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "33dc7b5b43cdf949413194e85f4c2e96070d005dff341d7ddd55ba5d64205a39"
+      "sha256": "c753d9b7f436a95148768159ffca393e41619275d735f1fe02026f97af475896"
     },
     {
       "id": "homekit",
@@ -55,7 +55,7 @@
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "cdc6ddfeccceaf8cbabeef148e89d21375bb56a7bf0dd36155b11ce3bd87be6b"
+      "sha256": "4d21dc34ef78779529659cc37a3d24dc312f936a366047bb589ca838e6e5cb1f"
     },
     {
       "id": "irc",
@@ -83,7 +83,7 @@
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "a02f744b1260429db01a981408c142545d7c96892af53dfa8058d7816e19d237"
+      "sha256": "23ae955a5bdc52909328b55a7c376e4ec75db7335d0b0c196e4f99591aa72303"
     },
     {
       "id": "matrix",
@@ -93,11 +93,11 @@
       "min_tater_version": "59",
       "description": "Matrix integration portal for Tater.",
       "settings_category": "Matrix Settings",
-      "required_settings_count": 13,
+      "required_settings_count": 14,
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "e2eb1247b2373e1cf8eec121c940a8f72b0f51a66536f03f815d30737ef623c1"
+      "sha256": "dbfccf684047f5598a4c16234f733e719748de99cb4627c58fe8e7679204a8fd"
     },
     {
       "id": "moltbook",
@@ -143,7 +143,7 @@
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "b23fedcf45d58c0a9151666d7b46f636df5bd469e6ddeeb7a61b4c7a6e901dd4"
+      "sha256": "2effa5e3bba868be872c97643d994ceb1e9d4623eff785a9eb2f1745238fbeaa"
     }
   ]
 }
