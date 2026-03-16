@@ -27,7 +27,6 @@ from admin_gate import (
     is_admin_only_plugin,
 )
 from plugin_result import action_failure
-from plugin_kernel import plugin_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 __version__ = "1.0.0"
@@ -1126,29 +1125,19 @@ class TelegramPlatform:
                 origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
-            async def _wait_callback(func_name, plugin_obj):
-                if not plugin_obj:
-                    return
-                if not plugin_supports_platform(plugin_obj, "telegram"):
-                    return
-                if not hasattr(plugin_obj, "waiting_prompt_template"):
-                    return
-                wait_msg = plugin_obj.waiting_prompt_template.format(mention=username)
-                wait_response = await self.llm.chat(
-                    messages=[
-                        {"role": "system", "content": "Write one short, friendly status line."},
-                        {"role": "user", "content": wait_msg},
-                    ]
+            async def _wait_callback(func_name, plugin_obj, wait_text="", wait_payload=None):
+                del plugin_obj
+                payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+                wait_line = str(wait_text or payload.get("text") or "").strip()
+                if not wait_line:
+                    wait_line = f"Using {str(func_name or 'tool').strip()}..."
+                await self._send_text(chat_id, wait_line)
+                self._save_message(
+                    chat_id,
+                    "assistant",
+                    "assistant",
+                    {"marker": "plugin_wait", "content": wait_line},
                 )
-                wait_text = str((wait_response.get("message", {}) or {}).get("content", "") or "").strip()
-                if wait_text:
-                    await self._send_text(chat_id, wait_text)
-                    self._save_message(
-                        chat_id,
-                        "assistant",
-                        "assistant",
-                        {"marker": "plugin_wait", "content": wait_text},
-                    )
 
             def _admin_guard(func_name):
                 needs_admin = False
