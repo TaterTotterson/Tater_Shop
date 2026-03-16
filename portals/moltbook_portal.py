@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.57"
+__version__ = "1.0.58"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -115,6 +115,11 @@ TATERASSISTANT_SCAN_PAGE_SIZE = 25
 TATERASSISTANT_SCAN_MAX_PAGES_PER_RUN = 8
 MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
 VERIFICATION_TRACKING_TTL_SEC = 24 * 60 * 60
+ANTI_REPEAT_TOPIC_JACCARD = 0.74
+SEMANTIC_TITLE_DUPLICATE_JACCARD = 0.78
+TOPIC_LOOP_GUARD_WINDOW = 45
+TOPIC_LOOP_GUARD_SIMILARITY = 0.66
+TOPIC_LOOP_GUARD_MAX_MATCHES = 2
 
 CURIOSITY_SEED_CATEGORIES = [
     "architecture",
@@ -356,13 +361,13 @@ PORTAL_SETTINGS = {
         "discovery_threshold": {
             "label": "Discovery Threshold",
             "type": "number",
-            "default": 0.55,
+            "default": 0.80,
             "description": "Minimum discovery strength for idea extraction.",
         },
         "minimum_novelty_score_to_post": {
             "label": "Minimum Novelty Score To Post",
             "type": "number",
-            "default": 0.62,
+            "default": 0.80,
             "description": "Minimum novelty score required to publish new posts.",
         },
         "submolts_to_monitor": {
@@ -2252,10 +2257,10 @@ class MoltbookPortal:
             world_news_topic_probability=_parse_float(raw.get("world_news_topic_probability"), 0.08, min_value=0.0, max_value=1.0),
             curiosity_seed_enabled=_parse_bool(raw.get("curiosity_seed_enabled"), True),
             curiosity_seed_probability=_parse_float(raw.get("curiosity_seed_probability"), 0.10, min_value=0.0, max_value=1.0),
-            discovery_threshold=_parse_float(raw.get("discovery_threshold"), 0.55, min_value=0.0, max_value=1.0),
+            discovery_threshold=_parse_float(raw.get("discovery_threshold"), 0.80, min_value=0.0, max_value=1.0),
             minimum_novelty_score_to_post=_parse_float(
                 raw.get("minimum_novelty_score_to_post"),
-                0.62,
+                0.80,
                 min_value=0.0,
                 max_value=1.0,
             ),
@@ -5095,6 +5100,9 @@ class MoltbookPortal:
             return False
 
         seed_topic = _coalesce_str(seed.get("seed_topic"), title, default=title)
+        if not self._topic_loop_guard_ok(topic=seed_topic, summary=_coalesce_str(seed.get("seed_text"), default="")):
+            logger.info("[Moltbook] Curiosity seed skipped: loop_guard (%s)", _limit_text(seed_topic, 120))
+            return False
         submolt, fit_ok = self._enforce_post_submolt_fit(
             config,
             topic=seed_topic,
@@ -5162,6 +5170,29 @@ class MoltbookPortal:
             out.append(topic)
         return out
 
+    def _topic_loop_guard_ok(self, *, topic: str, summary: str = "") -> bool:
+        """
+        Prevent one theme from dominating by blocking topics that are very similar
+        to multiple recent posted-topic blobs.
+        """
+        topic_text = _limit_text(topic, 320)
+        summary_text = _limit_text(summary, 600)
+        candidate_blob = f"{topic_text}\n{summary_text}".strip()
+        if not candidate_blob:
+            return True
+
+        recent_topics = self._extract_recent_topics()
+        if not recent_topics:
+            return True
+
+        similar_matches = 0
+        for prior in recent_topics[:TOPIC_LOOP_GUARD_WINDOW]:
+            if _jaccard(candidate_blob, prior) >= TOPIC_LOOP_GUARD_SIMILARITY:
+                similar_matches += 1
+                if similar_matches >= TOPIC_LOOP_GUARD_MAX_MATCHES:
+                    return False
+        return True
+
     def _anti_repeat_ok(self, config: MoltbookConfig, *, title: str, content: str, url: str = "") -> bool:
         if not config.anti_repeat_enabled:
             return True
@@ -5175,7 +5206,7 @@ class MoltbookPortal:
         recent_topics = self._extract_recent_topics()
         new_topic = f"{title}\n{content}"
         for prior in recent_topics[:30]:
-            if _jaccard(new_topic, prior) >= 0.82:
+            if _jaccard(new_topic, prior) >= ANTI_REPEAT_TOPIC_JACCARD:
                 return False
         return True
 
@@ -5195,7 +5226,7 @@ class MoltbookPortal:
             existing_title = _extract_post_title(item)
             if not existing_title:
                 continue
-            if _jaccard(existing_title, title) >= 0.86:
+            if _jaccard(existing_title, title) >= SEMANTIC_TITLE_DUPLICATE_JACCARD:
                 return False
         return True
 
@@ -6351,6 +6382,9 @@ class MoltbookPortal:
             topic = _coalesce_str(item.get("topic"), default="")
             summary = _coalesce_str(item.get("summary"), default="")
             if topic:
+                if not self._topic_loop_guard_ok(topic=topic, summary=summary):
+                    logger.info("[Moltbook] Discovery topic skipped: loop_guard (%s)", _limit_text(topic, 120))
+                    continue
                 return {"source": "discovery", "topic": topic, "summary": summary}
         return None
 
