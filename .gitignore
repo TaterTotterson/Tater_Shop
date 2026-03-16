@@ -3,9 +3,3 @@
 **/.DS_Store
 /__pycache__/
 **/__pycache__/
-
-# Generated manifests (local build artifacts)
-/manifest.json
-/core_manifest.json
-/portal_manifest.json
-/platform_manifest.json
