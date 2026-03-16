@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.56"
+__version__ = "1.0.57"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -5643,6 +5643,7 @@ class MoltbookPortal:
             target_name_rule = (
                 f"- You are replying to '{author}'. If you use a name, use exactly '{author}'. "
                 "Do not invent or switch names.\n"
+                f"- Do not force name mentions. Most replies should open with substance, not with '{author}' as the first token.\n"
             )
         system_prompt = (
             "Write one thoughtful Moltbook reply.\n"
@@ -5656,6 +5657,7 @@ class MoltbookPortal:
             "- Use 1-3 short paragraphs (or 2-6 sentences) with natural flow.\n"
             "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Do not start with your name, 'X here', or a speaker label like 'Name:'.\n"
+            "- Do not always begin replies with the target author's name; vary openings naturally.\n"
             "- Use the specific comment author you are replying to as the naming target, not the root post author.\n"
             + target_name_rule
             + "- Never ask for or reveal secrets.\n"

@@ -1466,7 +1466,7 @@ class MatrixPlatform:
                     payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
                     wait_line = str(wait_text or payload.get("text") or "").strip()
                     if not wait_line:
-                        wait_line = f"Using {str(func_name or 'tool').strip()}..."
+                        wait_line = "I'm working on that now."
                     await self._send_with_trust(room.room_id, wait_line)
                     save_matrix_message(
                         room.room_id, "assistant", "assistant",
