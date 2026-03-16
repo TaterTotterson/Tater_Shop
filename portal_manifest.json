@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "8d2b2246c823cf54553c31e0d3e50efeb0639b4e387553856253b4a25875f5aa"
+      "sha256": "2d5469f154534ff6f3b5a7822950c65beff0b6b2e0f541c3e7d1a441f2a964b9"
     },
     {
       "id": "ha_automations",
@@ -97,7 +97,7 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "dbfccf684047f5598a4c16234f733e719748de99cb4627c58fe8e7679204a8fd"
+      "sha256": "06804fff75c4f6eb63f1b756a09f3de5b61934fd3f6b71808250333a0791c4cd"
     },
     {
       "id": "moltbook",
@@ -129,7 +129,7 @@
       "autostart_key": "telegram_portal_running",
       "tags": [],
       "entry": "portals/telegram_portal.py",
-      "sha256": "067dce45d5323adcfe292c85b6d4528fe34acc9f950864fc8d432e285b8aa9d5"
+      "sha256": "dbf232f474f989b52e5a6f9e9341e8f69dac71776310c75179e6383191bb1d93"
     },
     {
       "id": "xbmc",
