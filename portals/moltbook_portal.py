@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.58"
+__version__ = "1.0.60"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -91,6 +91,7 @@ MOLTBOOK_RSS_HISTORY_KEY = "tater:moltbook:rss_articles:history"
 MOLTBOOK_WORLD_NEWS_POSTED_SET = "tater:moltbook:world_news:posted"
 MOLTBOOK_WORLD_NEWS_HISTORY_KEY = "tater:moltbook:world_news:history"
 MOLTBOOK_POSTED_SOURCE_URLS_SET = "tater:moltbook:source_urls:posted"
+MOLTBOOK_POSTED_TITLES_SET = "tater:moltbook:posted_titles"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -115,11 +116,14 @@ TATERASSISTANT_SCAN_PAGE_SIZE = 25
 TATERASSISTANT_SCAN_MAX_PAGES_PER_RUN = 8
 MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
 VERIFICATION_TRACKING_TTL_SEC = 24 * 60 * 60
-ANTI_REPEAT_TOPIC_JACCARD = 0.74
-SEMANTIC_TITLE_DUPLICATE_JACCARD = 0.78
-TOPIC_LOOP_GUARD_WINDOW = 45
-TOPIC_LOOP_GUARD_SIMILARITY = 0.66
-TOPIC_LOOP_GUARD_MAX_MATCHES = 2
+TOPIC_LOOP_GUARD_RECENT_LIMIT = 18
+AI_DUPLICATE_RECENT_POST_LIMIT = 18
+AI_SEMANTIC_DUPLICATE_SEARCH_LIMIT = 10
+AI_RSS_COVERAGE_RECENT_LIMIT = 15
+DISCOVERY_SATURATION_SCAN_DISCOVERIES = 120
+DISCOVERY_SATURATION_SCAN_SEEDS = 140
+DISCOVERY_SATURATION_SCAN_POST_TITLES = 120
+DISCOVERY_MEMORY_BACKGROUND_INTERVAL_SEC = 6 * 60
 
 CURIOSITY_SEED_CATEGORIES = [
     "architecture",
@@ -1671,47 +1675,60 @@ class MoltbookPortal:
         if not candidates:
             return False
 
-        self_tokens: set[str] = set()
-        for value in (
-            config.agent_name,
-            config.display_name,
-            self._state_get("agent_name", ""),
-        ):
-            self_tokens |= _name_match_tokens(value)
-        if not self_tokens:
+        if self.llm_client is None:
             return False
 
-        now = _utc_now()
-        title_seed = _limit_text(entry_title, 400)
-        topic_seed = _limit_text(topic, 400)
+        self_names = {
+            str(value or "").strip().lower()
+            for value in (
+                config.agent_name,
+                config.display_name,
+                self._state_get("agent_name", ""),
+            )
+            if str(value or "").strip()
+        }
+        own_posts: List[Dict[str, Any]] = []
         for item in candidates:
             if not isinstance(item, dict):
                 continue
-            author_tokens = _name_match_tokens(_extract_author_name(item))
-            if not (author_tokens & self_tokens):
+            author_name = _extract_author_name(item).strip().lower()
+            if self_names and author_name and author_name not in self_names:
                 continue
+            own_posts.append(item)
+            if len(own_posts) >= AI_RSS_COVERAGE_RECENT_LIMIT:
+                break
+        if not own_posts:
+            return False
 
-            created_at = _parse_datetime(item.get("created_at") or item.get("createdAt"))
-            if created_at is not None:
-                age_days = (now - created_at).total_seconds() / 86400.0
-                if age_days > 45:
-                    continue
-
-            existing_title = _extract_post_title(item)
-            existing_content = _extract_post_content(item)
-            existing_urls = {_canonical_external_url(url) for url in _extract_urls_from_text(existing_content, max_urls=12)}
-            existing_urls = {url for url in existing_urls if url}
-            if canonical_url and canonical_url in existing_urls:
-                return True
-
-            similarity = max(
-                _jaccard(existing_title, title_seed),
-                _jaccard(existing_title, topic_seed),
-                _jaccard(f"{existing_title}\n{existing_content}", f"{title_seed}\n{topic_seed}"),
+        prior_lines: List[str] = []
+        for item in own_posts[:AI_RSS_COVERAGE_RECENT_LIMIT]:
+            prior_title = _extract_post_title(item)
+            prior_content = _extract_post_content(item)
+            prior_lines.append(
+                f"- title={_limit_text(prior_title, 180)} | content={_limit_text(prior_content, 260)}"
             )
-            if similarity >= 0.44:
-                return True
-        return False
+
+        system_prompt = (
+            "You are a strict duplicate detector for RSS-derived post ideas.\n"
+            "Return strict JSON only:\n"
+            '{"already_covered":true|false,"confidence":0.0,"reason":"..."}\n'
+            "Mark already_covered=true when the new article/topic is meaningfully the same as prior posts,\n"
+            "even if wording differs."
+        )
+        user_prompt = (
+            f"Candidate RSS article title: {_limit_text(entry_title, 220)}\n"
+            f"Candidate topic: {_limit_text(topic, 260)}\n"
+            f"Candidate canonical url: {canonical_url or '(none)'}\n"
+            "Recent own posts:\n"
+            + ("\n".join(prior_lines) if prior_lines else "- (none)")
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"already_covered": True, "confidence": 0.0, "reason": "llm_parse_failed"},
+            max_tokens=280,
+        )
+        return bool(decision.get("already_covered"))
 
     def _latest_rss_candidates(self, *, max_feeds: int = 10, max_candidates: int = 16) -> List[Dict[str, Any]]:
         if feedparser is None:
@@ -2112,6 +2129,7 @@ class MoltbookPortal:
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
             self.redis.delete(MOLTBOOK_WORLD_NEWS_POSTED_SET)
             self.redis.delete(MOLTBOOK_POSTED_SOURCE_URLS_SET)
+            self.redis.delete(MOLTBOOK_POSTED_TITLES_SET)
             self.redis.delete(MOLTBOOK_REPLIED_TARGETS_ZSET)
         except Exception:
             pass
@@ -2474,6 +2492,207 @@ class MoltbookPortal:
             if isinstance(item, dict):
                 out.append(item)
         return out
+
+    def _replace_json_list(self, key: str, rows: List[Dict[str, Any]], *, max_len: int) -> None:
+        payload = [_safe_json_dumps(item) for item in rows[: max(0, int(max_len))] if isinstance(item, dict)]
+        try:
+            pipe = self.redis.pipeline()
+            pipe.delete(key)
+            if payload:
+                pipe.rpush(key, *payload)
+            pipe.execute()
+        except Exception:
+            return
+
+    def _prune_discovery_memory_for_post(self, *, posted_topic: str, posted_title: str, posted_content: str) -> None:
+        if self.llm_client is None:
+            return
+        topic = _limit_text(posted_topic, 260)
+        title = _limit_text(posted_title, 260)
+        content = _limit_text(posted_content, 900)
+        if not topic and not title:
+            return
+
+        discoveries = self._load_json_list(MOLTBOOK_DISCOVERIES_KEY, limit=200)
+        idea_seeds = self._load_json_list(MOLTBOOK_IDEA_SEEDS_KEY, limit=240)
+        if not discoveries and not idea_seeds:
+            return
+
+        disc_lines: List[str] = []
+        for idx, row in enumerate(discoveries[:80]):
+            disc_topic = _coalesce_str(row.get("topic"), default="")
+            disc_summary = _coalesce_str(row.get("summary"), default="")
+            disc_lines.append(f"[{idx}] topic={_limit_text(disc_topic, 160)} | summary={_limit_text(disc_summary, 180)}")
+
+        seed_lines: List[str] = []
+        for idx, row in enumerate(idea_seeds[:100]):
+            seed_topic = _coalesce_str(row.get("topic"), default="")
+            seed_seed = _coalesce_str(row.get("seed"), default="")
+            seed_lines.append(f"[{idx}] topic={_limit_text(seed_topic, 160)} | seed={_limit_text(seed_seed, 180)}")
+
+        system_prompt = (
+            "You remove semantic duplicates from discovery memory after a post is published.\n"
+            "Return strict JSON only:\n"
+            '{"drop_discovery_indices":[0],"drop_seed_indices":[1],"reason":"..."}\n'
+            "Drop entries that represent the same core topic/theme/angle as the posted content,\n"
+            "even when wording differs."
+        )
+        user_prompt = (
+            f"Published post title: {title}\n"
+            f"Published post topic: {topic}\n"
+            f"Published post content excerpt: {content}\n\n"
+            "Discovery entries:\n"
+            + ("\n".join(disc_lines) if disc_lines else "- (none)")
+            + "\n\nIdea seed entries:\n"
+            + ("\n".join(seed_lines) if seed_lines else "- (none)")
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"drop_discovery_indices": [], "drop_seed_indices": [], "reason": "llm_parse_failed"},
+            max_tokens=420,
+        )
+
+        drop_discovery = {
+            _parse_int(idx, -1) for idx in _as_list(decision.get("drop_discovery_indices")) if _parse_int(idx, -1) >= 0
+        }
+        drop_seed = {
+            _parse_int(idx, -1) for idx in _as_list(decision.get("drop_seed_indices")) if _parse_int(idx, -1) >= 0
+        }
+        if not drop_discovery and not drop_seed:
+            return
+
+        if drop_discovery:
+            kept_discoveries = [row for idx, row in enumerate(discoveries) if idx not in drop_discovery]
+            self._replace_json_list(MOLTBOOK_DISCOVERIES_KEY, kept_discoveries, max_len=400)
+        if drop_seed:
+            kept_seeds = [row for idx, row in enumerate(idea_seeds) if idx not in drop_seed]
+            self._replace_json_list(MOLTBOOK_IDEA_SEEDS_KEY, kept_seeds, max_len=500)
+
+    def _cleanup_saturated_discovery_memory(self, *, reason: str) -> None:
+        """
+        AI-only saturation cleanup for discovery + idea memory.
+        Decides if repeated variants are overrepresented and drops selected entries.
+        """
+        if self.llm_client is None:
+            return
+
+        discoveries = self._load_json_list(MOLTBOOK_DISCOVERIES_KEY, limit=400)
+        idea_seeds = self._load_json_list(MOLTBOOK_IDEA_SEEDS_KEY, limit=500)
+        if not discoveries and not idea_seeds:
+            return
+
+        scan_discoveries = discoveries[:DISCOVERY_SATURATION_SCAN_DISCOVERIES]
+        scan_seeds = idea_seeds[:DISCOVERY_SATURATION_SCAN_SEEDS]
+
+        recent_posts = self._load_json_list(MOLTBOOK_RECENT_POSTS_KEY, limit=DISCOVERY_SATURATION_SCAN_POST_TITLES)
+        posted_titles: List[str] = []
+        seen_titles: set[str] = set()
+        for row in recent_posts:
+            token = self._posted_title_token(_coalesce_str(row.get("title"), default=""))
+            if not token or token in seen_titles:
+                continue
+            seen_titles.add(token)
+            posted_titles.append(token)
+        try:
+            for raw in self.redis.sscan_iter(MOLTBOOK_POSTED_TITLES_SET, count=120):
+                token = self._posted_title_token(raw)
+                if not token or token in seen_titles:
+                    continue
+                seen_titles.add(token)
+                posted_titles.append(token)
+                if len(posted_titles) >= DISCOVERY_SATURATION_SCAN_POST_TITLES:
+                    break
+        except Exception:
+            pass
+
+        disc_lines: List[str] = []
+        for idx, row in enumerate(scan_discoveries):
+            disc_topic = _coalesce_str(row.get("topic"), default="")
+            disc_seed = _coalesce_str(row.get("seed"), default="")
+            disc_summary = _coalesce_str(row.get("summary"), default="")
+            disc_lines.append(
+                f"[{idx}] topic={_limit_text(disc_topic, 160)} | seed={_limit_text(disc_seed, 130)} | "
+                f"summary={_limit_text(disc_summary, 160)}"
+            )
+
+        seed_lines: List[str] = []
+        for idx, row in enumerate(scan_seeds):
+            seed_topic = _coalesce_str(row.get("topic"), default="")
+            seed_seed = _coalesce_str(row.get("seed"), default="")
+            seed_lines.append(
+                f"[{idx}] topic={_limit_text(seed_topic, 160)} | seed={_limit_text(seed_seed, 180)}"
+            )
+
+        title_lines = [f"- {_limit_text(item, 180)}" for item in posted_titles[:DISCOVERY_SATURATION_SCAN_POST_TITLES]]
+        system_prompt = (
+            "You are a memory saturation cleaner for a social-research agent.\n"
+            "Return strict JSON only:\n"
+            '{"is_saturated":true|false,"drop_discovery_indices":[0],"drop_seed_indices":[1],"reason":"..."}\n'
+            "Rules:\n"
+            "- Use semantic judgment only.\n"
+            "- Mark is_saturated=true if discovery/seed memory is overloaded with repeated variants.\n"
+            "- Drop entries that are semantic repeats of each other or of already-posted titles.\n"
+            "- Prefer keeping diverse, novel entries."
+        )
+        user_prompt = (
+            f"Cleanup reason: {reason}\n"
+            "Already posted titles/topics (recent memory):\n"
+            + ("\n".join(title_lines) if title_lines else "- (none)")
+            + "\n\nDiscovery entries:\n"
+            + ("\n".join(disc_lines) if disc_lines else "- (none)")
+            + "\n\nIdea seed entries:\n"
+            + ("\n".join(seed_lines) if seed_lines else "- (none)")
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={
+                "is_saturated": False,
+                "drop_discovery_indices": [],
+                "drop_seed_indices": [],
+                "reason": "llm_parse_failed",
+            },
+            max_tokens=700,
+        )
+
+        is_saturated = bool(decision.get("is_saturated"))
+        drop_discovery = {
+            _parse_int(idx, -1)
+            for idx in _as_list(decision.get("drop_discovery_indices"))
+            if 0 <= _parse_int(idx, -1) < len(scan_discoveries)
+        }
+        drop_seed = {
+            _parse_int(idx, -1)
+            for idx in _as_list(decision.get("drop_seed_indices"))
+            if 0 <= _parse_int(idx, -1) < len(scan_seeds)
+        }
+        if not is_saturated and not drop_discovery and not drop_seed:
+            return
+
+        if drop_discovery:
+            kept = [row for idx, row in enumerate(scan_discoveries) if idx not in drop_discovery] + discoveries[len(scan_discoveries):]
+            self._replace_json_list(MOLTBOOK_DISCOVERIES_KEY, kept, max_len=400)
+        if drop_seed:
+            kept = [row for idx, row in enumerate(scan_seeds) if idx not in drop_seed] + idea_seeds[len(scan_seeds):]
+            self._replace_json_list(MOLTBOOK_IDEA_SEEDS_KEY, kept, max_len=500)
+
+        self._state_set_many(
+            {
+                "discovery_cleanup_last_ts": str(time.time()),
+                "discovery_cleanup_last_reason": _limit_text(_coalesce_str(decision.get("reason"), default=reason), 220),
+                "discovery_cleanup_last_saturated": "true" if is_saturated else "false",
+                "discovery_cleanup_last_drop_discoveries": str(len(drop_discovery)),
+                "discovery_cleanup_last_drop_seeds": str(len(drop_seed)),
+            }
+        )
+        logger.info(
+            "[Moltbook] Discovery memory cleanup (%s): saturated=%s drop_discoveries=%d drop_seeds=%d",
+            reason,
+            str(is_saturated).lower(),
+            len(drop_discovery),
+            len(drop_seed),
+        )
 
     def _outbound_comment_member(self, post_id: str, comment_id: str) -> str:
         return f"{_safe_key_token(post_id)}:{_safe_key_token(comment_id)}"
@@ -4374,6 +4593,29 @@ class MoltbookPortal:
 
         return self._dedupe_posts(posts, limit=MAX_POSTS_SCANNED_PER_TICK)
 
+    def _filter_posts_for_discovery_inputs(
+        self,
+        posts: List[Dict[str, Any]],
+        *,
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Discovery should be based on external community signals, not our own posts
+        or known fellow Tater assistant posts.
+        """
+        out: List[Dict[str, Any]] = []
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            if self._is_self_authored(post, self_names=self_names, self_ids=self_ids):
+                continue
+            author_name = _extract_author_name(post).strip()
+            if author_name and self._is_known_fellow_tater_agent(author_name):
+                continue
+            out.append(post)
+        return out
+
     def _fetch_following_feed_posts(
         self,
         *,
@@ -4614,19 +4856,104 @@ class MoltbookPortal:
                 radar_delta = min(2.4, radar_delta + 0.35)
             self._store_agent_memory(post, score_delta=radar_delta)
 
+    def _enforce_discovery_distinctness(
+        self,
+        *,
+        source_rows: List[Dict[str, Any]],
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if self.llm_client is None:
+            return []
+        if not source_rows or not candidates:
+            return []
+
+        source_lines: List[str] = []
+        for row in source_rows[:24]:
+            source_id = _parse_int(row.get("source_id"), -1)
+            title = _limit_text(_coalesce_str(row.get("title"), default=""), 220)
+            body = _limit_text(_coalesce_str(row.get("body"), default=""), 320)
+            submolt = _limit_text(_coalesce_str(row.get("submolt"), default=""), 80)
+            source_lines.append(f"[{source_id}] submolt={submolt or 'general'} | title={title} | body={body}")
+
+        candidate_lines: List[str] = []
+        for idx, item in enumerate(candidates[:16]):
+            source_id = _parse_int(item.get("source_id"), -1)
+            topic = _limit_text(_coalesce_str(item.get("topic"), default=""), 180)
+            summary = _limit_text(_coalesce_str(item.get("summary"), default=""), 220)
+            seed = _limit_text(_coalesce_str(item.get("seed"), default=""), 200)
+            strength = _parse_float(item.get("strength"), 0.5, min_value=0.0, max_value=1.0)
+            novelty = _parse_float(item.get("novelty"), 0.5, min_value=0.0, max_value=1.0)
+            candidate_lines.append(
+                f"[{idx}] source_id={source_id} | topic={topic} | summary={summary} | seed={seed} | strength={strength:.2f} | novelty={novelty:.2f}"
+            )
+
+        system_prompt = (
+            "You are a strict discovery quality gate.\n"
+            "Remove discoveries that merely restate or paraphrase the source post title.\n"
+            "Keep only discoveries that add a distinct fact, tradeoff, implication, pattern, or concrete question from the post body/discussion.\n"
+            "Return strict JSON only with this shape:\n"
+            '{"discoveries":[{"source_id":0,"topic":"...","strength":0.0,"novelty":0.0,"summary":"...","seed":"..."}]}\n'
+            "Rules:\n"
+            "- topic must NOT be a rewording of source title\n"
+            "- summary must mention a concrete detail beyond the title\n"
+            "- seed should be an actionable follow-up angle, not a title rewrite\n"
+            "- strength/novelty must be 0..1\n"
+            "- If none qualify, return an empty discoveries list"
+        )
+        user_prompt = (
+            "Source posts:\n"
+            + "\n".join(source_lines)
+            + "\n\nCandidate discoveries to validate/rewrite:\n"
+            + ("\n".join(candidate_lines) if candidate_lines else "- (none)")
+        )
+        parsed = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"discoveries": []},
+            max_tokens=1100,
+        )
+        out: List[Dict[str, Any]] = []
+        for item in _as_list(parsed.get("discoveries")):
+            if not isinstance(item, dict):
+                continue
+            topic = _coalesce_str(item.get("topic"), default="")
+            if not topic:
+                continue
+            out.append(
+                {
+                    "source_id": _parse_int(item.get("source_id"), -1),
+                    "topic": _limit_text(topic, 220),
+                    "strength": _parse_float(item.get("strength"), 0.5, min_value=0.0, max_value=1.0),
+                    "novelty": _parse_float(item.get("novelty"), 0.5, min_value=0.0, max_value=1.0),
+                    "summary": _limit_text(_coalesce_str(item.get("summary"), default=""), 400),
+                    "seed": _limit_text(_coalesce_str(item.get("seed"), topic, default=topic), 220),
+                }
+            )
+        return out
+
     def _build_discoveries(self, config: MoltbookConfig, posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not config.discovery_enabled:
             return []
         snippets: List[str] = []
-        for item in posts[:24]:
+        source_rows: List[Dict[str, Any]] = []
+        for idx, item in enumerate(posts[:24]):
             title = _extract_post_title(item)
             body = _extract_post_content(item)
             author = _extract_author_name(item)
             submolt = _extract_submolt(item)
             if not title and not body:
                 continue
+            source_rows.append(
+                {
+                    "source_id": idx,
+                    "title": title,
+                    "body": body,
+                    "author": author,
+                    "submolt": submolt,
+                }
+            )
             snippets.append(
-                f"- [{submolt or 'general'}] {title or '(untitled)'} by {author or 'unknown'} :: {_limit_text(body, 280)}"
+                f"[{idx}] [{submolt or 'general'}] {title or '(untitled)'} by {author or 'unknown'} :: {_limit_text(body, 280)}"
             )
         if not snippets:
             return []
@@ -4634,8 +4961,13 @@ class MoltbookPortal:
         sys_prompt = (
             "You are a discovery extractor for a social research portal.\n"
             "Return only strict JSON with this shape:\n"
-            '{"discoveries":[{"topic":"...","strength":0.0,"novelty":0.0,"summary":"...","seed":"..."}]}.\n'
-            "strength and novelty must be between 0 and 1."
+            '{"discoveries":[{"source_id":0,"topic":"...","strength":0.0,"novelty":0.0,"summary":"...","seed":"..."}]}.\n'
+            "Rules:\n"
+            "- source_id must reference one of the provided snippets\n"
+            "- topic must be a distinct insight from the post body/discussion, NOT a restatement/paraphrase of the post title\n"
+            "- summary should include concrete specifics beyond title wording\n"
+            "- seed should be a new follow-up question/angle, not title rewording\n"
+            "- strength and novelty must be between 0 and 1."
         )
         user_prompt = (
             "Extract concise emerging topics from these Moltbook snippets.\n"
@@ -4643,9 +4975,28 @@ class MoltbookPortal:
             + "\n".join(snippets)
         )
         parsed = self._llm_json(system_prompt=sys_prompt, user_prompt=user_prompt, default={"discoveries": []}, max_tokens=1200)
-        discoveries = parsed.get("discoveries") if isinstance(parsed, dict) else []
+        raw_discoveries = parsed.get("discoveries") if isinstance(parsed, dict) else []
+        candidates: List[Dict[str, Any]] = []
+        for item in _as_list(raw_discoveries):
+            if not isinstance(item, dict):
+                continue
+            topic = _coalesce_str(item.get("topic"), default="")
+            if not topic:
+                continue
+            candidates.append(
+                {
+                    "source_id": _parse_int(item.get("source_id"), -1),
+                    "topic": _limit_text(topic, 220),
+                    "strength": _parse_float(item.get("strength"), 0.5, min_value=0.0, max_value=1.0),
+                    "novelty": _parse_float(item.get("novelty"), 0.5, min_value=0.0, max_value=1.0),
+                    "summary": _limit_text(_coalesce_str(item.get("summary"), default=""), 400),
+                    "seed": _limit_text(_coalesce_str(item.get("seed"), topic, default=topic), 220),
+                }
+            )
+
+        discoveries = self._enforce_discovery_distinctness(source_rows=source_rows, candidates=candidates)
         out: List[Dict[str, Any]] = []
-        for item in _as_list(discoveries):
+        for item in discoveries:
             if not isinstance(item, dict):
                 continue
             topic = _coalesce_str(item.get("topic"), default="")
@@ -5171,27 +5522,39 @@ class MoltbookPortal:
         return out
 
     def _topic_loop_guard_ok(self, *, topic: str, summary: str = "") -> bool:
-        """
-        Prevent one theme from dominating by blocking topics that are very similar
-        to multiple recent posted-topic blobs.
-        """
+        """AI guard that prevents one theme from dominating recent posts."""
         topic_text = _limit_text(topic, 320)
         summary_text = _limit_text(summary, 600)
         candidate_blob = f"{topic_text}\n{summary_text}".strip()
         if not candidate_blob:
             return True
 
+        if self.llm_client is None:
+            return True
+
         recent_topics = self._extract_recent_topics()
         if not recent_topics:
             return True
 
-        similar_matches = 0
-        for prior in recent_topics[:TOPIC_LOOP_GUARD_WINDOW]:
-            if _jaccard(candidate_blob, prior) >= TOPIC_LOOP_GUARD_SIMILARITY:
-                similar_matches += 1
-                if similar_matches >= TOPIC_LOOP_GUARD_MAX_MATCHES:
-                    return False
-        return True
+        recent_lines = [f"- {_limit_text(item, 280)}" for item in recent_topics[:TOPIC_LOOP_GUARD_RECENT_LIMIT]]
+        system_prompt = (
+            "You are a topic-diversity guard for social posts.\n"
+            "Return strict JSON only:\n"
+            '{"allow":true|false,"reason":"...","similar_recent_count":0}\n'
+            "Set allow=false when the candidate is essentially a repeated theme from recent topics."
+        )
+        user_prompt = (
+            f"Candidate topic/summary:\n{_limit_text(candidate_blob, 900)}\n\n"
+            "Recent posted topics:\n"
+            + ("\n".join(recent_lines) if recent_lines else "- (none)")
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"allow": False, "reason": "llm_parse_failed", "similar_recent_count": 0},
+            max_tokens=260,
+        )
+        return bool(decision.get("allow"))
 
     def _anti_repeat_ok(self, config: MoltbookConfig, *, title: str, content: str, url: str = "") -> bool:
         if not config.anti_repeat_enabled:
@@ -5203,32 +5566,102 @@ class MoltbookPortal:
         except Exception:
             pass
 
-        recent_topics = self._extract_recent_topics()
-        new_topic = f"{title}\n{content}"
-        for prior in recent_topics[:30]:
-            if _jaccard(new_topic, prior) >= ANTI_REPEAT_TOPIC_JACCARD:
-                return False
-        return True
+        if self.llm_client is None:
+            return True
+
+        recent_rows = self._load_json_list(MOLTBOOK_RECENT_POSTS_KEY, limit=80)
+        if not recent_rows:
+            return True
+        prior_lines: List[str] = []
+        for row in recent_rows[:AI_DUPLICATE_RECENT_POST_LIMIT]:
+            prior_title = _coalesce_str(row.get("title"), default="")
+            prior_content = _coalesce_str(row.get("content"), default="")
+            if not prior_title and not prior_content:
+                continue
+            prior_lines.append(
+                f"- title={_limit_text(prior_title, 180)} | content={_limit_text(prior_content, 260)}"
+            )
+        if not prior_lines:
+            return True
+
+        system_prompt = (
+            "You are a strict duplicate detector for posts by the same agent.\n"
+            "Return strict JSON only:\n"
+            '{"is_duplicate":true|false,"confidence":0.0,"reason":"..."}\n'
+            "Treat paraphrases and same-core-topic rewrites as duplicates."
+        )
+        user_prompt = (
+            f"Candidate title: {_limit_text(title, 220)}\n"
+            f"Candidate content: {_limit_text(content, 1800)}\n"
+            f"Candidate source url: {_limit_text(url, 1200) or '(none)'}\n"
+            "Recent own posts:\n"
+            + "\n".join(prior_lines)
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"is_duplicate": True, "confidence": 0.0, "reason": "llm_parse_failed"},
+            max_tokens=300,
+        )
+        return not bool(decision.get("is_duplicate"))
 
     def _semantic_duplicate_ok(self, config: MoltbookConfig, *, topic: str, title: str) -> bool:
         if not config.semantic_duplicate_check_enabled:
+            return True
+        if self.llm_client is None:
             return True
         query = _limit_text(topic or title, 180)
         if not query:
             return True
         payload = self._api_get(
             f"{MOLTBOOK_API_PREFIX}search",
-            params={"q": query, "type": "posts", "limit": 10},
+            params={"q": query, "type": "posts", "limit": AI_SEMANTIC_DUPLICATE_SEARCH_LIMIT},
             auth_required=True,
         )
         posts = self._extract_posts(payload)
-        for item in posts:
-            existing_title = _extract_post_title(item)
-            if not existing_title:
-                continue
-            if _jaccard(existing_title, title) >= SEMANTIC_TITLE_DUPLICATE_JACCARD:
-                return False
-        return True
+        if not posts:
+            return True
+
+        result_lines: List[str] = []
+        for item in posts[:AI_SEMANTIC_DUPLICATE_SEARCH_LIMIT]:
+            result_lines.append(
+                f"- title={_limit_text(_extract_post_title(item), 180)} | "
+                f"content={_limit_text(_extract_post_content(item), 260)}"
+            )
+        if not result_lines:
+            return True
+
+        system_prompt = (
+            "You decide if a candidate post topic is novel vs semantic-search results.\n"
+            "Return strict JSON only:\n"
+            '{"post_is_novel":true|false,"reason":"...","confidence":0.0}\n'
+            "Set post_is_novel=false when the candidate is meaningfully duplicate."
+        )
+        user_prompt = (
+            f"Candidate title: {_limit_text(title, 220)}\n"
+            f"Candidate topic query: {_limit_text(query, 220)}\n"
+            "Semantic search results:\n"
+            + "\n".join(result_lines)
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"post_is_novel": False, "reason": "llm_parse_failed", "confidence": 0.0},
+            max_tokens=280,
+        )
+        return bool(decision.get("post_is_novel"))
+
+    def _posted_title_token(self, title: str) -> str:
+        return " ".join(str(title or "").strip().lower().split())
+
+    def _remember_posted_title(self, title: str) -> None:
+        token = self._posted_title_token(title)
+        if not token:
+            return
+        try:
+            self.redis.sadd(MOLTBOOK_POSTED_TITLES_SET, token)
+        except Exception:
+            return
 
     def _remember_posted_content(self, *, title: str, content: str, submolt: str, url: str = "") -> None:
         digest = _post_hash(title, content, url)
@@ -5236,6 +5669,7 @@ class MoltbookPortal:
             self.redis.sadd(MOLTBOOK_POST_HASHES_KEY, digest)
         except Exception:
             pass
+        self._remember_posted_title(title)
 
         candidate_urls: List[str] = []
         if url:
@@ -6559,6 +6993,12 @@ class MoltbookPortal:
         self._state_set("last_post_submolt", submolt)
         self._remember_posted_content(title=title, content=content, submolt=submolt, url="")
         self._record_successful_post_submolt(config, submolt=submolt, topic=topic, title=title)
+        if plan_source == "discovery":
+            self._prune_discovery_memory_for_post(
+                posted_topic=topic,
+                posted_title=title,
+                posted_content=content,
+            )
         if plan_source == "capability" and capability_unique_id:
             self._mark_capability_topic_posted(
                 unique_id=capability_unique_id,
@@ -7436,9 +7876,17 @@ class MoltbookPortal:
 
         return replied_count
 
-    def _run_stage_discovery(self, config: MoltbookConfig, posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        discoveries = self._build_discoveries(config, posts)
-        self._promote_learning(discoveries, posts)
+    def _run_stage_discovery(
+        self,
+        config: MoltbookConfig,
+        posts: List[Dict[str, Any]],
+        *,
+        self_names: set[str],
+        self_ids: set[str],
+    ) -> List[Dict[str, Any]]:
+        source_posts = self._filter_posts_for_discovery_inputs(posts, self_names=self_names, self_ids=self_ids)
+        discoveries = self._build_discoveries(config, source_posts)
+        self._promote_learning(discoveries, source_posts)
         self._ensure_experiment_proposals(config, discoveries)
         return discoveries
 
@@ -7545,7 +7993,13 @@ class MoltbookPortal:
             )
 
         # Stage 6/7/8/9/10/11/12/23: discovery + learning + experiments
-        discoveries = self._run_stage_discovery(config, posts)
+        discoveries = self._run_stage_discovery(
+            config,
+            posts,
+            self_names=self_names,
+            self_ids=self_ids,
+        )
+        self._cleanup_saturated_discovery_memory(reason="run_once")
 
         # Stage 17: voting
         self._vote_on_feed(config, posts, self_names=self_names)
@@ -7567,6 +8021,19 @@ class MoltbookPortal:
         self._state_set("last_check_completed_ts", str(time.time()))
         self._state_set(MOLTBOOK_HEARTBEAT_KEY, str(time.time()))
 
+    def _maybe_run_background_discovery_cleanup(self, config: MoltbookConfig) -> None:
+        if self.llm_client is None:
+            return
+        if not config.enabled:
+            return
+        now = time.time()
+        last = _parse_float(self._state_get("discovery_cleanup_last_ts", "0"), 0.0, min_value=0.0)
+        if (now - last) < float(DISCOVERY_MEMORY_BACKGROUND_INTERVAL_SEC):
+            return
+        # Throttle before work so we do not spam LLM calls if a run fails.
+        self._state_set("discovery_cleanup_last_ts", str(now))
+        self._cleanup_saturated_discovery_memory(reason="background_between_checkins")
+
     def run_loop(self, stop_event: Optional[threading.Event] = None) -> None:
         while True:
             if stop_event and stop_event.is_set():
@@ -7587,6 +8054,11 @@ class MoltbookPortal:
                     self.run_once()
                 except Exception:
                     logger.exception("[Moltbook] Check-in failed unexpectedly.")
+            else:
+                try:
+                    self._maybe_run_background_discovery_cleanup(config)
+                except Exception:
+                    logger.exception("[Moltbook] Background discovery cleanup failed.")
 
             sleep_for = 2.0
             if stop_event and stop_event.wait(sleep_for):
