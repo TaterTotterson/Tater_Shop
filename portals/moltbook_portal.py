@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.61"
+__version__ = "1.0.64"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -114,6 +114,7 @@ RESERVED_NON_FELLOW_REPLY_SLOTS = 1
 MAX_FELLOW_REPLIES_PER_TICK = max(1, MAX_REPLY_PER_TICK - RESERVED_NON_FELLOW_REPLY_SLOTS)
 TATERASSISTANT_SCAN_PAGE_SIZE = 25
 TATERASSISTANT_SCAN_MAX_PAGES_PER_RUN = 8
+MOLTBOOK_HTTP_TIMEOUT_SEC = 120.0
 GET_REQUEST_MAX_ATTEMPTS = 2
 GET_REQUEST_RETRY_SLEEP_SEC = 0.8
 MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
@@ -1152,7 +1153,7 @@ class MoltbookClient:
         auth_required: bool = True,
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
-        timeout_sec: float = 20.0,
+        timeout_sec: float = MOLTBOOK_HTTP_TIMEOUT_SEC,
     ) -> Tuple[Any, requests.Response]:
         method_norm = str(method or "GET").strip().upper()
         self._wait_for_rate_budget(method_norm)
@@ -3325,9 +3326,22 @@ class MoltbookPortal:
         *,
         max_tokens: int = 900,
         temperature: float = 0.25,
+        stage: str = "",
     ) -> str:
         if self.llm_client is None:
             return ""
+        stage_label = str(stage or "").strip() or "unspecified"
+
+        def _is_bad_request(exc: Exception) -> bool:
+            token = f"{type(exc).__name__}:{exc}".lower()
+            if "badrequesterror" in token:
+                return True
+            if "error code: 400" in token:
+                return True
+            if "http/1.1 400" in token:
+                return True
+            return False
+
         try:
             result = self._run_async(
                 self.llm_client.chat(
@@ -3336,8 +3350,31 @@ class MoltbookPortal:
                     temperature=float(temperature),
                 )
             )
-        except Exception:
-            logger.exception("[Moltbook] LLM call failed")
+        except Exception as exc:
+            if _is_bad_request(exc):
+                message_count = 0
+                prompt_chars = 0
+                for msg in messages if isinstance(messages, list) else []:
+                    if not isinstance(msg, dict):
+                        continue
+                    message_count += 1
+                    prompt_chars += len(str(msg.get("content") or ""))
+                approx_prompt_tokens = max(1, int(round(prompt_chars / 4.0)))
+                requested_max_tokens = max(100, int(max_tokens))
+                approx_total_tokens_needed = approx_prompt_tokens + requested_max_tokens
+                logger.warning(
+                    "[Moltbook] LLM 400 bad request (stage=%s). requested_max_tokens=%s messages=%s prompt_chars=%s approx_prompt_tokens=%s approx_total_tokens_needed=%s. "
+                    "Likely model context-window limit; increase context length. error=%s",
+                    stage_label,
+                    requested_max_tokens,
+                    message_count,
+                    prompt_chars,
+                    approx_prompt_tokens,
+                    approx_total_tokens_needed,
+                    _limit_text(str(exc), 260),
+                )
+                return ""
+            logger.exception("[Moltbook] LLM call failed (stage=%s)", stage_label)
             return ""
         message = (result or {}).get("message") if isinstance(result, dict) else {}
         return str((message or {}).get("content") or "").strip()
@@ -3349,12 +3386,17 @@ class MoltbookPortal:
         user_prompt: str,
         default: Optional[Dict[str, Any]] = None,
         max_tokens: int = 900,
+        stage: str = "",
     ) -> Dict[str, Any]:
+        stage_label = str(stage or "").strip()
+        if not stage_label:
+            first_line = str(system_prompt or "").splitlines()[0] if str(system_prompt or "").strip() else ""
+            stage_label = _limit_text(first_line.strip(), 90) or "json_prompt"
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        text = self._llm_chat_text(messages, max_tokens=max_tokens, temperature=0.15)
+        text = self._llm_chat_text(messages, max_tokens=max_tokens, temperature=0.15, stage=stage_label)
         parsed = _extract_json_object(text)
         if isinstance(parsed, dict):
             return parsed
@@ -3405,7 +3447,7 @@ class MoltbookPortal:
         remaining_tool_calls = max(0, int(max_tool_calls))
 
         while True:
-            text = self._llm_chat_text(messages, max_tokens=max_tokens, temperature=0.2)
+            text = self._llm_chat_text(messages, max_tokens=max_tokens, temperature=0.2, stage="tool_router_web_search")
             parsed = _extract_json_object(text)
             if not isinstance(parsed, dict):
                 return text
@@ -7440,7 +7482,10 @@ class MoltbookPortal:
                 ),
             },
         ]
-        return _limit_text(self._llm_chat_text(messages, max_tokens=420, temperature=0.28), 1600)
+        return _limit_text(
+            self._llm_chat_text(messages, max_tokens=420, temperature=0.28, stage="taterassistant_welcome_reply"),
+            1600,
+        )
 
     def _collect_self_ids(self, account: AccountSnapshot) -> set[str]:
         values = {
