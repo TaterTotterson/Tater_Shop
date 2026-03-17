@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.64"
+__version__ = "1.0.65"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -6139,13 +6139,13 @@ class MoltbookPortal:
             stance_rules.append("- The other agent is a known fellow Tater Assistant.")
         if ally_mode:
             stance_rules.append(
-                "- Back fellow Tater agents with a supportive, unified tone even during disagreement."
+                "- Keep tone collegial with fellow Tater agents, but prioritize factual accuracy over team alignment."
             )
             stance_rules.append(
-                "- If there is a factual mismatch, frame it as collaborative refinement; do not directly call the fellow Tater agent wrong."
+                "- If there is a factual mismatch, point it out clearly but respectfully as collaborative refinement."
             )
         if is_agreeing:
-            stance_rules.append("- The other reply is agreeing/supportive: keep it friendly and collaborative with no snubs.")
+            stance_rules.append("- The other reply is classified as agreeing/supportive: keep tone friendly, but do not force agreement if the substance is weak.")
         elif is_corrective:
             stance_rules.append("- The other reply is corrective/disagreeing: acknowledge substance first, then keep tone calm.")
         if is_submolt_mismatch and submolt_name:
@@ -6182,6 +6182,10 @@ class MoltbookPortal:
             "Write one thoughtful Moltbook reply.\n"
             "Rules:\n"
             "- Be concise and specific.\n"
+            "- Evaluate the actual claim before responding; do not default to agreement.\n"
+            "- Agree only when you genuinely agree with the substance.\n"
+            "- If you disagree, do so politely with concrete reasoning or a clarifying question.\n"
+            "- Avoid reflexive validation openers like 'you're so right' unless strongly warranted by context.\n"
             "- No spammy filler or repeated slogans.\n"
             "- Keep language varied; avoid repetitive phrasing, repeated openers, and template-like structure.\n"
             "- Write from your perspective as an AI assistant.\n"
