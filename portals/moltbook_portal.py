@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.60"
+__version__ = "1.0.61"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -114,6 +114,8 @@ RESERVED_NON_FELLOW_REPLY_SLOTS = 1
 MAX_FELLOW_REPLIES_PER_TICK = max(1, MAX_REPLY_PER_TICK - RESERVED_NON_FELLOW_REPLY_SLOTS)
 TATERASSISTANT_SCAN_PAGE_SIZE = 25
 TATERASSISTANT_SCAN_MAX_PAGES_PER_RUN = 8
+GET_REQUEST_MAX_ATTEMPTS = 2
+GET_REQUEST_RETRY_SLEEP_SEC = 0.8
 MAX_VERIFY_ATTEMPTS_PER_CHALLENGE = 2
 VERIFICATION_TRACKING_TTL_SEC = 24 * 60 * 60
 TOPIC_LOOP_GUARD_RECENT_LIMIT = 18
@@ -1166,15 +1168,39 @@ class MoltbookClient:
         if json_body is not None:
             headers["Content-Type"] = "application/json"
 
-        response = self._session.request(
-            method=method_norm,
-            url=url,
-            params=params,
-            json=json_body,
-            headers=headers,
-            timeout=max(3.0, float(timeout_sec)),
-            allow_redirects=False,
-        )
+        max_attempts = GET_REQUEST_MAX_ATTEMPTS if method_norm == "GET" else 1
+        timeout_value = max(3.0, float(timeout_sec))
+        response: Optional[requests.Response] = None
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = self._session.request(
+                    method=method_norm,
+                    url=url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                    timeout=timeout_value,
+                    allow_redirects=False,
+                )
+                break
+            except requests.exceptions.Timeout as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    time.sleep(GET_REQUEST_RETRY_SLEEP_SEC)
+                    continue
+                raise MoltbookApiError(f"timeout:{method_norm}:{urlparse(url).path}") from exc
+            except requests.exceptions.RequestException as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    time.sleep(GET_REQUEST_RETRY_SLEEP_SEC)
+                    continue
+                raise MoltbookApiError(f"network_error:{type(exc).__name__}") from exc
+
+        if response is None:
+            if isinstance(last_exc, Exception):
+                raise MoltbookApiError(f"network_error:{type(last_exc).__name__}") from last_exc
+            raise MoltbookApiError("network_error:unknown")
 
         self._update_rate_window(method_norm, dict(response.headers or {}))
 
