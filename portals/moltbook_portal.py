@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.66"
+__version__ = "1.0.67"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -91,7 +91,8 @@ MOLTBOOK_RSS_HISTORY_KEY = "tater:moltbook:rss_articles:history"
 MOLTBOOK_WORLD_NEWS_POSTED_SET = "tater:moltbook:world_news:posted"
 MOLTBOOK_WORLD_NEWS_HISTORY_KEY = "tater:moltbook:world_news:history"
 MOLTBOOK_POSTED_SOURCE_URLS_SET = "tater:moltbook:source_urls:posted"
-MOLTBOOK_POSTED_TITLES_SET = "tater:moltbook:posted_titles"
+MOLTBOOK_POSTED_TITLES_RECENT_KEY = "tater:moltbook:posted_titles:recent"
+MOLTBOOK_POSTED_TITLES_SET_LEGACY = "tater:moltbook:posted_titles"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -2156,7 +2157,8 @@ class MoltbookPortal:
             self.redis.delete(MOLTBOOK_RSS_POSTED_ARTICLES_SET)
             self.redis.delete(MOLTBOOK_WORLD_NEWS_POSTED_SET)
             self.redis.delete(MOLTBOOK_POSTED_SOURCE_URLS_SET)
-            self.redis.delete(MOLTBOOK_POSTED_TITLES_SET)
+            self.redis.delete(MOLTBOOK_POSTED_TITLES_RECENT_KEY)
+            self.redis.delete(MOLTBOOK_POSTED_TITLES_SET_LEGACY)
             self.redis.delete(MOLTBOOK_REPLIED_TARGETS_ZSET)
         except Exception:
             pass
@@ -2621,8 +2623,19 @@ class MoltbookPortal:
                 continue
             seen_titles.add(token)
             posted_titles.append(token)
+        title_rows = self._load_json_list(MOLTBOOK_POSTED_TITLES_RECENT_KEY, limit=DISCOVERY_SATURATION_SCAN_POST_TITLES * 2)
+        for row in title_rows:
+            raw_title = _coalesce_str(row.get("title"), default="")
+            token = self._posted_title_token(raw_title)
+            if not token or token in seen_titles:
+                continue
+            seen_titles.add(token)
+            posted_titles.append(token)
+            if len(posted_titles) >= DISCOVERY_SATURATION_SCAN_POST_TITLES:
+                break
+        # Legacy compatibility for older installs that used a set key.
         try:
-            for raw in self.redis.sscan_iter(MOLTBOOK_POSTED_TITLES_SET, count=120):
+            for raw in self.redis.sscan_iter(MOLTBOOK_POSTED_TITLES_SET_LEGACY, count=120):
                 token = self._posted_title_token(raw)
                 if not token or token in seen_titles:
                     continue
@@ -5518,6 +5531,22 @@ class MoltbookPortal:
         if not title or not content:
             return False
 
+        is_title_dup, dup_reason, dup_match = self._is_recent_title_duplicate(title=title, max_recent=20)
+        if is_title_dup:
+            logger.info(
+                "[Moltbook] Curiosity seed skipped: duplicate_recent_title (reason=%s matched=%s title=%s)",
+                _limit_text(dup_reason, 180),
+                _limit_text(dup_match, 220),
+                _limit_text(title, 220),
+            )
+            seed_id = str(seed.get("seed_id") or "").strip()
+            if seed_id:
+                try:
+                    self.redis.sadd(MOLTBOOK_USED_CURIOSITY_SEEDS_KEY, seed_id)
+                except Exception:
+                    pass
+            return False
+
         seed_topic = _coalesce_str(seed.get("seed_topic"), title, default=title)
         if not self._topic_loop_guard_ok(topic=seed_topic, summary=_coalesce_str(seed.get("seed_text"), default="")):
             logger.info("[Moltbook] Curiosity seed skipped: loop_guard (%s)", _limit_text(seed_topic, 120))
@@ -5723,13 +5752,85 @@ class MoltbookPortal:
         return " ".join(str(title or "").strip().lower().split())
 
     def _remember_posted_title(self, title: str) -> None:
-        token = self._posted_title_token(title)
-        if not token:
+        clean_title = _limit_text(str(title or "").strip(), 300)
+        token = self._posted_title_token(clean_title)
+        if not clean_title or not token:
             return
-        try:
-            self.redis.sadd(MOLTBOOK_POSTED_TITLES_SET, token)
-        except Exception:
-            return
+        self._push_json(
+            MOLTBOOK_POSTED_TITLES_RECENT_KEY,
+            {"title": clean_title, "token": token, "ts": _iso_utc_now()},
+            max_len=260,
+        )
+
+    def _recent_posted_titles(self, *, limit: int = 20) -> List[str]:
+        rows = self._load_json_list(MOLTBOOK_POSTED_TITLES_RECENT_KEY, limit=max(20, int(limit) * 4))
+        out: List[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            title = _coalesce_str(row.get("title"), default="")
+            if not title:
+                continue
+            token = self._posted_title_token(title)
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            out.append(_limit_text(title, 300))
+            if len(out) >= max(1, int(limit)):
+                break
+        # Legacy support for older installs where titles were stored in a set.
+        if len(out) < max(1, int(limit)):
+            try:
+                for raw in self.redis.sscan_iter(MOLTBOOK_POSTED_TITLES_SET_LEGACY, count=100):
+                    title = _limit_text(str(raw or "").strip(), 300)
+                    token = self._posted_title_token(title)
+                    if not token or token in seen:
+                        continue
+                    seen.add(token)
+                    out.append(title)
+                    if len(out) >= max(1, int(limit)):
+                        break
+            except Exception:
+                pass
+        return out
+
+    def _is_recent_title_duplicate(self, *, title: str, max_recent: int = 20) -> Tuple[bool, str, str]:
+        candidate_title = _limit_text(str(title or "").strip(), 300)
+        if not candidate_title:
+            return True, "empty_title", ""
+        if self.llm_client is None:
+            return False, "llm_unavailable", ""
+
+        recent_titles = self._recent_posted_titles(limit=max_recent)
+        if not recent_titles:
+            return False, "", ""
+
+        title_lines = [f"- {_limit_text(item, 300)}" for item in recent_titles[: max(1, int(max_recent))]]
+        system_prompt = (
+            "You detect duplicate post titles for one agent.\n"
+            "Return strict JSON only:\n"
+            '{"is_duplicate":true|false,"matched_title":"...","reason":"...","confidence":0.0}\n'
+            "Rules:\n"
+            "- Treat exact-title repeats as duplicates.\n"
+            "- Treat same-core-topic paraphrases as duplicates.\n"
+            "- If candidate is clearly distinct from all recent titles, set is_duplicate=false."
+        )
+        user_prompt = (
+            f"Candidate title: {candidate_title}\n"
+            "Recent posted titles (newest first):\n"
+            + "\n".join(title_lines)
+        )
+        decision = self._llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            default={"is_duplicate": True, "matched_title": "", "reason": "llm_parse_failed", "confidence": 0.0},
+            max_tokens=260,
+            stage="recent_title_duplicate_gate",
+        )
+        return (
+            _parse_bool(decision.get("is_duplicate"), True),
+            _coalesce_str(decision.get("reason"), default=""),
+            _coalesce_str(decision.get("matched_title"), default=""),
+        )
 
     def _remember_posted_content(self, *, title: str, content: str, submolt: str, url: str = "") -> None:
         digest = _post_hash(title, content, url)
@@ -6957,6 +7058,88 @@ class MoltbookPortal:
                 best_name = name
         return best_name or "general"
 
+    def _retire_rejected_post_plan_source(
+        self,
+        *,
+        plan_source: str,
+        topic: str,
+        summary: str,
+        title: str,
+        content: str,
+        submolt: str,
+        discovery_candidates: List[Dict[str, Any]],
+        capability_unique_id: str = "",
+        capability_kind: str = "",
+        capability_id: str = "",
+        capability_name: str = "",
+        rss_article_uid: str = "",
+        rss_feed_url: str = "",
+        rss_feed_title: str = "",
+        rss_entry_title: str = "",
+        rss_entry_link: str = "",
+        world_news_uid: str = "",
+        world_news_source_url: str = "",
+        world_news_source_title: str = "",
+        world_news_headline: str = "",
+    ) -> List[Dict[str, Any]]:
+        source = str(plan_source or "").strip().lower()
+        next_discoveries = list(discovery_candidates or [])
+
+        if source == "discovery":
+            topic_token = self._posted_title_token(topic)
+            if topic_token:
+                next_discoveries = [
+                    row
+                    for row in next_discoveries
+                    if self._posted_title_token(_coalesce_str(row.get("topic"), default="")) != topic_token
+                ]
+            # Remove related discovery/seed memory so this trigger is less likely to repeat.
+            self._prune_discovery_memory_for_post(
+                posted_topic=topic,
+                posted_title=title or topic,
+                posted_content=content or summary,
+            )
+            return next_discoveries
+
+        if source == "capability" and capability_unique_id:
+            self._mark_capability_topic_posted(
+                unique_id=capability_unique_id,
+                kind=capability_kind,
+                capability_id=capability_id,
+                capability_name=capability_name,
+                topic=topic,
+                title=title or topic,
+                submolt=submolt or "general",
+            )
+            return next_discoveries
+
+        if source == "rss_article" and rss_article_uid:
+            self._mark_rss_article_posted(
+                uid=rss_article_uid,
+                feed_url=rss_feed_url,
+                feed_title=rss_feed_title,
+                entry_title=rss_entry_title,
+                entry_link=rss_entry_link,
+                topic=topic,
+                title=title or topic,
+                submolt=submolt or "general",
+            )
+            return next_discoveries
+
+        if source == "world_news" and world_news_uid:
+            self._mark_world_news_posted(
+                uid=world_news_uid,
+                source_url=world_news_source_url,
+                source_title=world_news_source_title,
+                headline=world_news_headline,
+                topic=topic,
+                title=title or topic,
+                submolt=submolt or "general",
+            )
+            return next_discoveries
+
+        return next_discoveries
+
     def _maybe_post(
         self,
         config: MoltbookConfig,
@@ -6976,154 +7159,240 @@ class MoltbookPortal:
             return False
 
         experiment_result = self._select_experiment_result() if config.experiments_enabled else None
-        plan = self._plan_post_topic(config, discoveries=discoveries, experiment_result=experiment_result)
-        if not plan:
-            return False
-        topic = _coalesce_str(plan.get("topic"), default="")
-        summary = _coalesce_str(plan.get("summary"), default="")
-        if not topic:
-            return False
-        plan_source = _coalesce_str(plan.get("source"), default="discovery")
-        capability_unique_id = _coalesce_str(plan.get("capability_unique_id"), default="")
-        capability_kind = _coalesce_str(plan.get("capability_kind"), default="")
-        capability_id = _coalesce_str(plan.get("capability_id"), default="")
-        capability_name = _coalesce_str(plan.get("capability_name"), default="")
-        rss_article_uid = _coalesce_str(plan.get("rss_article_uid"), default="")
-        rss_feed_url = _coalesce_str(plan.get("rss_feed_url"), default="")
-        rss_feed_title = _coalesce_str(plan.get("rss_feed_title"), default="")
-        rss_entry_title = _coalesce_str(plan.get("rss_entry_title"), default="")
-        rss_entry_link = _coalesce_str(plan.get("rss_entry_link"), default="")
-        rss_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("rss_submolt_hint"), default=""))
-        world_news_uid = _coalesce_str(plan.get("world_news_uid"), default="")
-        world_news_source_url = _coalesce_str(plan.get("world_news_source_url"), default="")
-        world_news_source_title = _coalesce_str(plan.get("world_news_source_title"), default="")
-        world_news_headline = _coalesce_str(plan.get("world_news_headline"), default="")
-        world_news_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("world_news_submolt_hint"), default=""))
+        remaining_discoveries = [dict(item) for item in discoveries if isinstance(item, dict)]
+        max_plan_attempts = 4
 
-        preferred = self._choose_post_target_submolt(config, posts)
-        if plan_source == "rss_article" and rss_submolt_hint and rss_submolt_hint not in config.submolts_to_avoid:
-            preferred = rss_submolt_hint
-        if plan_source == "world_news" and world_news_submolt_hint and world_news_submolt_hint not in config.submolts_to_avoid:
-            preferred = world_news_submolt_hint
+        for attempt in range(1, max_plan_attempts + 1):
+            plan = self._plan_post_topic(config, discoveries=remaining_discoveries, experiment_result=experiment_result)
+            if not plan:
+                return False
 
-        draft = self._draft_post(
-            config,
-            topic=topic,
-            discovery_summary=summary,
-            preferred_submolt=preferred,
-            post_source=plan_source,
-            capability_name=capability_name,
-            capability_kind=capability_kind,
-            source_url=(rss_entry_link if plan_source == "rss_article" else world_news_source_url),
-            source_title=(rss_feed_title if plan_source == "rss_article" else world_news_source_title),
-            source_headline=(rss_entry_title if plan_source == "rss_article" else world_news_headline),
-            experiment_result=experiment_result,
-        )
-        if not draft:
-            return False
+            topic = _coalesce_str(plan.get("topic"), default="")
+            summary = _coalesce_str(plan.get("summary"), default="")
+            if not topic:
+                return False
+            plan_source = _coalesce_str(plan.get("source"), default="discovery")
+            capability_unique_id = _coalesce_str(plan.get("capability_unique_id"), default="")
+            capability_kind = _coalesce_str(plan.get("capability_kind"), default="")
+            capability_id = _coalesce_str(plan.get("capability_id"), default="")
+            capability_name = _coalesce_str(plan.get("capability_name"), default="")
+            rss_article_uid = _coalesce_str(plan.get("rss_article_uid"), default="")
+            rss_feed_url = _coalesce_str(plan.get("rss_feed_url"), default="")
+            rss_feed_title = _coalesce_str(plan.get("rss_feed_title"), default="")
+            rss_entry_title = _coalesce_str(plan.get("rss_entry_title"), default="")
+            rss_entry_link = _coalesce_str(plan.get("rss_entry_link"), default="")
+            rss_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("rss_submolt_hint"), default=""))
+            world_news_uid = _coalesce_str(plan.get("world_news_uid"), default="")
+            world_news_source_url = _coalesce_str(plan.get("world_news_source_url"), default="")
+            world_news_source_title = _coalesce_str(plan.get("world_news_source_title"), default="")
+            world_news_headline = _coalesce_str(plan.get("world_news_headline"), default="")
+            world_news_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("world_news_submolt_hint"), default=""))
 
-        submolt = _normalize_submolt_slug(_coalesce_str(draft.get("submolt_name"), preferred, default="general")) or "general"
+            preferred = self._choose_post_target_submolt(config, posts)
+            if plan_source == "rss_article" and rss_submolt_hint and rss_submolt_hint not in config.submolts_to_avoid:
+                preferred = rss_submolt_hint
+            if plan_source == "world_news" and world_news_submolt_hint and world_news_submolt_hint not in config.submolts_to_avoid:
+                preferred = world_news_submolt_hint
 
-        title = _limit_text(draft.get("title"), 300)
-        content = _limit_text(draft.get("content"), 7000)
-        if not title or not content:
-            return False
-
-        submolt, fit_ok = self._enforce_post_submolt_fit(
-            config,
-            topic=topic,
-            title=title,
-            content=content,
-            submolt=submolt,
-        )
-        if not fit_ok:
-            return False
-        if submolt == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
-            fallback_submolt = self._choose_post_target_submolt(config, posts)
-            submolt = fallback_submolt if fallback_submolt != MOLTBOOK_TATER_COMMUNITY_SUBMOLT else "general"
-            logger.info("[Moltbook] Post rerouted away from m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
-        if submolt in config.submolts_to_avoid:
-            return False
-
-        if not self._anti_repeat_ok(config, title=title, content=content):
-            return False
-        if not self._semantic_duplicate_ok(config, topic=topic, title=title):
-            return False
-
-        payload = {
-            "submolt_name": submolt,
-            "title": title,
-            "content": content,
-            "type": "text",
-        }
-        created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
-        if not isinstance(created, dict):
-            return False
-
-        self._set_last_action_ts("post")
-        self._inc_daily_counter("posts")
-        self._state_set("last_post_submolt", submolt)
-        self._remember_posted_content(title=title, content=content, submolt=submolt, url="")
-        self._record_successful_post_submolt(config, submolt=submolt, topic=topic, title=title)
-        if plan_source == "discovery":
-            self._prune_discovery_memory_for_post(
-                posted_topic=topic,
-                posted_title=title,
-                posted_content=content,
-            )
-        if plan_source == "capability" and capability_unique_id:
-            self._mark_capability_topic_posted(
-                unique_id=capability_unique_id,
-                kind=capability_kind,
-                capability_id=capability_id,
+            draft = self._draft_post(
+                config,
+                topic=topic,
+                discovery_summary=summary,
+                preferred_submolt=preferred,
+                post_source=plan_source,
                 capability_name=capability_name,
-                topic=topic,
-                title=title,
-                submolt=submolt,
+                capability_kind=capability_kind,
+                source_url=(rss_entry_link if plan_source == "rss_article" else world_news_source_url),
+                source_title=(rss_feed_title if plan_source == "rss_article" else world_news_source_title),
+                source_headline=(rss_entry_title if plan_source == "rss_article" else world_news_headline),
+                experiment_result=experiment_result,
             )
-        if plan_source == "rss_article" and rss_article_uid:
-            self._mark_rss_article_posted(
-                uid=rss_article_uid,
-                feed_url=rss_feed_url,
-                feed_title=rss_feed_title,
-                entry_title=rss_entry_title,
-                entry_link=rss_entry_link,
-                topic=topic,
-                title=title,
-                submolt=submolt,
-            )
-        if plan_source == "world_news" and world_news_uid:
-            self._mark_world_news_posted(
-                uid=world_news_uid,
-                source_url=world_news_source_url,
-                source_title=world_news_source_title,
-                headline=world_news_headline,
-                topic=topic,
-                title=title,
-                submolt=submolt,
-            )
+            if not draft:
+                return False
 
-        if experiment_result and isinstance(experiment_result, dict):
-            experiment_result["posted"] = True
-            self._push_json(
-                MOLTBOOK_EXPERIMENTS_KEY,
-                {
-                    **experiment_result,
-                    "posted": True,
-                    "posted_at": _iso_utc_now(),
-                },
-                max_len=500,
+            submolt = _normalize_submolt_slug(_coalesce_str(draft.get("submolt_name"), preferred, default="general")) or "general"
+            title = _limit_text(draft.get("title"), 300)
+            content = _limit_text(draft.get("content"), 7000)
+            if not title or not content:
+                return False
+
+            is_title_dup, dup_reason, dup_match = self._is_recent_title_duplicate(title=title, max_recent=20)
+            if is_title_dup:
+                logger.info(
+                    "[Moltbook] Post draft rejected: duplicate_recent_title (source=%s attempt=%d/%d reason=%s matched=%s title=%s)",
+                    plan_source,
+                    attempt,
+                    max_plan_attempts,
+                    _limit_text(dup_reason, 180),
+                    _limit_text(dup_match, 220),
+                    _limit_text(title, 220),
+                )
+                remaining_discoveries = self._retire_rejected_post_plan_source(
+                    plan_source=plan_source,
+                    topic=topic,
+                    summary=summary,
+                    title=title,
+                    content=content,
+                    submolt=submolt,
+                    discovery_candidates=remaining_discoveries,
+                    capability_unique_id=capability_unique_id,
+                    capability_kind=capability_kind,
+                    capability_id=capability_id,
+                    capability_name=capability_name,
+                    rss_article_uid=rss_article_uid,
+                    rss_feed_url=rss_feed_url,
+                    rss_feed_title=rss_feed_title,
+                    rss_entry_title=rss_entry_title,
+                    rss_entry_link=rss_entry_link,
+                    world_news_uid=world_news_uid,
+                    world_news_source_url=world_news_source_url,
+                    world_news_source_title=world_news_source_title,
+                    world_news_headline=world_news_headline,
+                )
+                continue
+
+            submolt, fit_ok = self._enforce_post_submolt_fit(
+                config,
+                topic=topic,
+                title=title,
+                content=content,
+                submolt=submolt,
             )
-            self._push_json(
-                MOLTBOOK_INSIGHTS_KEY,
-                {
-                    "topic": _coalesce_str(experiment_result.get("topic"), topic, default=topic),
-                    "insight": _coalesce_str(experiment_result.get("summary"), summary, default=summary),
-                    "ts": _iso_utc_now(),
-                },
+            if not fit_ok:
+                return False
+            if submolt == MOLTBOOK_TATER_COMMUNITY_SUBMOLT:
+                fallback_submolt = self._choose_post_target_submolt(config, posts)
+                submolt = fallback_submolt if fallback_submolt != MOLTBOOK_TATER_COMMUNITY_SUBMOLT else "general"
+                logger.info("[Moltbook] Post rerouted away from m/%s.", MOLTBOOK_TATER_COMMUNITY_SUBMOLT)
+            if submolt in config.submolts_to_avoid:
+                return False
+
+            if not self._anti_repeat_ok(config, title=title, content=content):
+                logger.info("[Moltbook] Post draft rejected: anti_repeat (source=%s attempt=%d/%d).", plan_source, attempt, max_plan_attempts)
+                remaining_discoveries = self._retire_rejected_post_plan_source(
+                    plan_source=plan_source,
+                    topic=topic,
+                    summary=summary,
+                    title=title,
+                    content=content,
+                    submolt=submolt,
+                    discovery_candidates=remaining_discoveries,
+                    capability_unique_id=capability_unique_id,
+                    capability_kind=capability_kind,
+                    capability_id=capability_id,
+                    capability_name=capability_name,
+                    rss_article_uid=rss_article_uid,
+                    rss_feed_url=rss_feed_url,
+                    rss_feed_title=rss_feed_title,
+                    rss_entry_title=rss_entry_title,
+                    rss_entry_link=rss_entry_link,
+                    world_news_uid=world_news_uid,
+                    world_news_source_url=world_news_source_url,
+                    world_news_source_title=world_news_source_title,
+                    world_news_headline=world_news_headline,
+                )
+                continue
+            if not self._semantic_duplicate_ok(config, topic=topic, title=title):
+                logger.info("[Moltbook] Post draft rejected: semantic_duplicate (source=%s attempt=%d/%d).", plan_source, attempt, max_plan_attempts)
+                remaining_discoveries = self._retire_rejected_post_plan_source(
+                    plan_source=plan_source,
+                    topic=topic,
+                    summary=summary,
+                    title=title,
+                    content=content,
+                    submolt=submolt,
+                    discovery_candidates=remaining_discoveries,
+                    capability_unique_id=capability_unique_id,
+                    capability_kind=capability_kind,
+                    capability_id=capability_id,
+                    capability_name=capability_name,
+                    rss_article_uid=rss_article_uid,
+                    rss_feed_url=rss_feed_url,
+                    rss_feed_title=rss_feed_title,
+                    rss_entry_title=rss_entry_title,
+                    rss_entry_link=rss_entry_link,
+                    world_news_uid=world_news_uid,
+                    world_news_source_url=world_news_source_url,
+                    world_news_source_title=world_news_source_title,
+                    world_news_headline=world_news_headline,
+                )
+                continue
+
+            payload = {
+                "submolt_name": submolt,
+                "title": title,
+                "content": content,
+                "type": "text",
+            }
+            created = self._create_with_verification(f"{MOLTBOOK_API_PREFIX}posts", payload, config=config)
+            if not isinstance(created, dict):
+                return False
+
+            self._set_last_action_ts("post")
+            self._inc_daily_counter("posts")
+            self._state_set("last_post_submolt", submolt)
+            self._remember_posted_content(title=title, content=content, submolt=submolt, url="")
+            self._record_successful_post_submolt(config, submolt=submolt, topic=topic, title=title)
+            if plan_source == "discovery":
+                self._prune_discovery_memory_for_post(
+                    posted_topic=topic,
+                    posted_title=title,
+                    posted_content=content,
+                )
+            if plan_source == "capability" and capability_unique_id:
+                self._mark_capability_topic_posted(
+                    unique_id=capability_unique_id,
+                    kind=capability_kind,
+                    capability_id=capability_id,
+                    capability_name=capability_name,
+                    topic=topic,
+                    title=title,
+                    submolt=submolt,
+                )
+            if plan_source == "rss_article" and rss_article_uid:
+                self._mark_rss_article_posted(
+                    uid=rss_article_uid,
+                    feed_url=rss_feed_url,
+                    feed_title=rss_feed_title,
+                    entry_title=rss_entry_title,
+                    entry_link=rss_entry_link,
+                    topic=topic,
+                    title=title,
+                    submolt=submolt,
+                )
+            if plan_source == "world_news" and world_news_uid:
+                self._mark_world_news_posted(
+                    uid=world_news_uid,
+                    source_url=world_news_source_url,
+                    source_title=world_news_source_title,
+                    headline=world_news_headline,
+                    topic=topic,
+                    title=title,
+                    submolt=submolt,
+                )
+
+            if experiment_result and isinstance(experiment_result, dict):
+                experiment_result["posted"] = True
+                self._push_json(
+                    MOLTBOOK_EXPERIMENTS_KEY,
+                    {
+                        **experiment_result,
+                        "posted": True,
+                        "posted_at": _iso_utc_now(),
+                    },
+                    max_len=500,
+                )
+                self._push_json(
+                    MOLTBOOK_INSIGHTS_KEY,
+                    {
+                        "topic": _coalesce_str(experiment_result.get("topic"), topic, default=topic),
+                        "insight": _coalesce_str(experiment_result.get("summary"), summary, default=summary),
+                        "ts": _iso_utc_now(),
+                    },
                     max_len=400,
                 )
-        return True
+            return True
+        return False
 
     def _draft_introduction_post(self, config: MoltbookConfig) -> Optional[Dict[str, str]]:
         if self.llm_client is None:
