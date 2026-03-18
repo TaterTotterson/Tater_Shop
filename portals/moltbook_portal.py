@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.65"
+__version__ = "1.0.66"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
