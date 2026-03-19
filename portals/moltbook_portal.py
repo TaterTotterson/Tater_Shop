@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 
-__version__ = "1.0.67"
+__version__ = "1.0.69"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -6138,16 +6138,12 @@ class MoltbookPortal:
         # Agreement stays friendly; corrective/disagreeing gets optional playful inside-joke banter.
         include_openclaw_snub = False
         include_lobster_joke = False
-        if not is_agreeing and (is_corrective or tone_label == "negative"):
+        if not is_agreeing:
             include_openclaw_snub = True
             include_lobster_joke = is_fellow_tater or (self.random.random() < 0.45)
-        elif is_fellow_tater and not is_agreeing and self.random.random() < 0.25:
+        elif is_fellow_tater and self.random.random() < 0.70:
             include_openclaw_snub = True
             include_lobster_joke = True
-
-        if is_agreeing:
-            include_openclaw_snub = False
-            include_lobster_joke = False
 
         if is_submolt_mismatch:
             # Keep moderation-style redirects constructive rather than adversarial.
@@ -6828,6 +6824,8 @@ class MoltbookPortal:
             "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Do not start with your name, 'X here', or a speaker label like 'Name:'.\n"
             "- Do not ask for or reveal secrets.\n"
+            "- You may include one subtle, playful OpenClaw inside-joke snub (never hostile).\n"
+            "- You may include one tiny lobster-themed joke.\n"
             "- Return plain text only.\n"
             f"- {self._build_identity_context(config)}\n"
             + (f"{capability_context}\n" if capability_context else "")
@@ -6949,26 +6947,7 @@ class MoltbookPortal:
         config: MoltbookConfig,
         *,
         discoveries: List[Dict[str, Any]],
-        experiment_result: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, str]]:
-        if experiment_result:
-            topic = _coalesce_str(experiment_result.get("topic"), experiment_result.get("proposal"), default="")
-            summary = _coalesce_str(experiment_result.get("results"), experiment_result.get("summary"), default="")
-            if topic:
-                return {"source": "experiment", "topic": topic, "summary": summary}
-
-        rss_plan = self._plan_rss_article_topic(config)
-        if isinstance(rss_plan, dict):
-            topic = _coalesce_str(rss_plan.get("topic"), default="")
-            if topic:
-                return rss_plan
-
-        world_news_plan = self._plan_world_news_topic(config)
-        if isinstance(world_news_plan, dict):
-            topic = _coalesce_str(world_news_plan.get("topic"), default="")
-            if topic:
-                return world_news_plan
-
         capability_plan = self._plan_capability_topic(config)
         if isinstance(capability_plan, dict):
             topic = _coalesce_str(capability_plan.get("topic"), default="")
@@ -7158,12 +7137,11 @@ class MoltbookPortal:
         if self.random.random() > config.post_probability:
             return False
 
-        experiment_result = self._select_experiment_result() if config.experiments_enabled else None
         remaining_discoveries = [dict(item) for item in discoveries if isinstance(item, dict)]
         max_plan_attempts = 4
 
         for attempt in range(1, max_plan_attempts + 1):
-            plan = self._plan_post_topic(config, discoveries=remaining_discoveries, experiment_result=experiment_result)
+            plan = self._plan_post_topic(config, discoveries=remaining_discoveries)
             if not plan:
                 return False
 
@@ -7176,23 +7154,8 @@ class MoltbookPortal:
             capability_kind = _coalesce_str(plan.get("capability_kind"), default="")
             capability_id = _coalesce_str(plan.get("capability_id"), default="")
             capability_name = _coalesce_str(plan.get("capability_name"), default="")
-            rss_article_uid = _coalesce_str(plan.get("rss_article_uid"), default="")
-            rss_feed_url = _coalesce_str(plan.get("rss_feed_url"), default="")
-            rss_feed_title = _coalesce_str(plan.get("rss_feed_title"), default="")
-            rss_entry_title = _coalesce_str(plan.get("rss_entry_title"), default="")
-            rss_entry_link = _coalesce_str(plan.get("rss_entry_link"), default="")
-            rss_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("rss_submolt_hint"), default=""))
-            world_news_uid = _coalesce_str(plan.get("world_news_uid"), default="")
-            world_news_source_url = _coalesce_str(plan.get("world_news_source_url"), default="")
-            world_news_source_title = _coalesce_str(plan.get("world_news_source_title"), default="")
-            world_news_headline = _coalesce_str(plan.get("world_news_headline"), default="")
-            world_news_submolt_hint = _normalize_submolt_slug(_coalesce_str(plan.get("world_news_submolt_hint"), default=""))
 
             preferred = self._choose_post_target_submolt(config, posts)
-            if plan_source == "rss_article" and rss_submolt_hint and rss_submolt_hint not in config.submolts_to_avoid:
-                preferred = rss_submolt_hint
-            if plan_source == "world_news" and world_news_submolt_hint and world_news_submolt_hint not in config.submolts_to_avoid:
-                preferred = world_news_submolt_hint
 
             draft = self._draft_post(
                 config,
@@ -7202,10 +7165,10 @@ class MoltbookPortal:
                 post_source=plan_source,
                 capability_name=capability_name,
                 capability_kind=capability_kind,
-                source_url=(rss_entry_link if plan_source == "rss_article" else world_news_source_url),
-                source_title=(rss_feed_title if plan_source == "rss_article" else world_news_source_title),
-                source_headline=(rss_entry_title if plan_source == "rss_article" else world_news_headline),
-                experiment_result=experiment_result,
+                source_url="",
+                source_title="",
+                source_headline="",
+                experiment_result=None,
             )
             if not draft:
                 return False
@@ -7239,15 +7202,6 @@ class MoltbookPortal:
                     capability_kind=capability_kind,
                     capability_id=capability_id,
                     capability_name=capability_name,
-                    rss_article_uid=rss_article_uid,
-                    rss_feed_url=rss_feed_url,
-                    rss_feed_title=rss_feed_title,
-                    rss_entry_title=rss_entry_title,
-                    rss_entry_link=rss_entry_link,
-                    world_news_uid=world_news_uid,
-                    world_news_source_url=world_news_source_url,
-                    world_news_source_title=world_news_source_title,
-                    world_news_headline=world_news_headline,
                 )
                 continue
 
@@ -7281,15 +7235,6 @@ class MoltbookPortal:
                     capability_kind=capability_kind,
                     capability_id=capability_id,
                     capability_name=capability_name,
-                    rss_article_uid=rss_article_uid,
-                    rss_feed_url=rss_feed_url,
-                    rss_feed_title=rss_feed_title,
-                    rss_entry_title=rss_entry_title,
-                    rss_entry_link=rss_entry_link,
-                    world_news_uid=world_news_uid,
-                    world_news_source_url=world_news_source_url,
-                    world_news_source_title=world_news_source_title,
-                    world_news_headline=world_news_headline,
                 )
                 continue
             if not self._semantic_duplicate_ok(config, topic=topic, title=title):
@@ -7306,15 +7251,6 @@ class MoltbookPortal:
                     capability_kind=capability_kind,
                     capability_id=capability_id,
                     capability_name=capability_name,
-                    rss_article_uid=rss_article_uid,
-                    rss_feed_url=rss_feed_url,
-                    rss_feed_title=rss_feed_title,
-                    rss_entry_title=rss_entry_title,
-                    rss_entry_link=rss_entry_link,
-                    world_news_uid=world_news_uid,
-                    world_news_source_url=world_news_source_url,
-                    world_news_source_title=world_news_source_title,
-                    world_news_headline=world_news_headline,
                 )
                 continue
 
@@ -7348,48 +7284,6 @@ class MoltbookPortal:
                     topic=topic,
                     title=title,
                     submolt=submolt,
-                )
-            if plan_source == "rss_article" and rss_article_uid:
-                self._mark_rss_article_posted(
-                    uid=rss_article_uid,
-                    feed_url=rss_feed_url,
-                    feed_title=rss_feed_title,
-                    entry_title=rss_entry_title,
-                    entry_link=rss_entry_link,
-                    topic=topic,
-                    title=title,
-                    submolt=submolt,
-                )
-            if plan_source == "world_news" and world_news_uid:
-                self._mark_world_news_posted(
-                    uid=world_news_uid,
-                    source_url=world_news_source_url,
-                    source_title=world_news_source_title,
-                    headline=world_news_headline,
-                    topic=topic,
-                    title=title,
-                    submolt=submolt,
-                )
-
-            if experiment_result and isinstance(experiment_result, dict):
-                experiment_result["posted"] = True
-                self._push_json(
-                    MOLTBOOK_EXPERIMENTS_KEY,
-                    {
-                        **experiment_result,
-                        "posted": True,
-                        "posted_at": _iso_utc_now(),
-                    },
-                    max_len=500,
-                )
-                self._push_json(
-                    MOLTBOOK_INSIGHTS_KEY,
-                    {
-                        "topic": _coalesce_str(experiment_result.get("topic"), topic, default=topic),
-                        "insight": _coalesce_str(experiment_result.get("summary"), summary, default=summary),
-                        "ts": _iso_utc_now(),
-                    },
-                    max_len=400,
                 )
             return True
         return False
@@ -8352,16 +8246,8 @@ class MoltbookPortal:
         self._maybe_follow_agents(config, account, self_names=self_names)
         self._maybe_subscribe_submolts(config, account)
 
-        # Stage 15/16: selective posting.
-
-        curiosity_posted = self._maybe_post_curiosity_seed(
-            config,
-            account,
-            discoveries=discoveries,
-            posts=posts,
-        )
-        if not curiosity_posted:
-            self._maybe_post(config, account, discoveries=discoveries, posts=posts)
+        # Stage 15/16: selective posting (capability/discovery only).
+        self._maybe_post(config, account, discoveries=discoveries, posts=posts)
         self._state_set("last_check_completed_ts", str(time.time()))
         self._state_set(MOLTBOOK_HEARTBEAT_KEY, str(time.time()))
 
