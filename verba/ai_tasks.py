@@ -1,0 +1,1593 @@
+import json
+import logging
+import time
+import uuid
+import re
+import calendar
+from bisect import bisect_left
+from datetime import datetime, timedelta
+from typing import Any, Dict
+
+from verba_base import ToolVerba
+from helpers import redis_client
+from notify.queue import (
+    ALLOWED_PLATFORMS,
+    load_default_targets,
+    normalize_origin,
+    normalize_platform,
+    resolve_targets,
+)
+
+logger = logging.getLogger("ai_tasks")
+logger.setLevel(logging.INFO)
+
+REMINDER_KEY_PREFIX = "reminders:"
+REMINDER_DUE_ZSET = "reminders:due"
+_WEEKDAY_TOKEN_MAP = {
+    "0": 0,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 0,
+    "sun": 6,
+    "sunday": 6,
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "tuesdays": 1,
+    "wed": 2,
+    "weds": 2,
+    "wedsday": 2,
+    "wednesday": 2,
+    "wednesdays": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "thursdays": 3,
+    "fri": 4,
+    "friday": 4,
+    "fridays": 4,
+    "sat": 5,
+    "saturday": 5,
+    "saturdays": 5,
+    "mondays": 0,
+    "sundays": 6,
+}
+
+
+def _ordinal_day(value: Any) -> str:
+    try:
+        day = int(value)
+    except Exception:
+        return str(value or "").strip()
+    if day <= 0:
+        return str(day)
+    if 10 <= (day % 100) <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+class AITasksPlugin(ToolVerba):
+    name = "ai_tasks"
+    version = "1.2.9"
+    min_tater_version = "59"
+    usage = (
+        '{"function":"ai_tasks","arguments":{"task_prompt":"Assistant-authored execution prompt in your own words '
+        '(no schedule text). Example: turn on living room lights to 50% and send weather forecast.",'
+        '"when":"Schedule phrase in local time. Example: weekdays at 6am or on the 10th of every month."}}'
+    )
+    description = (
+        "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. "
+        "Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling."
+    )
+    pretty_name = "AI Tasks"
+    when_to_use = "Schedule recurring tasks (everyday, weekdays/weekends, weekly, monthly, hourly, secondly, or explicit cron)."
+    how_to_use = (
+        "Provide task_prompt in the assistant's own words (what to do each run), and provide schedule via when or cron."
+    )
+    common_needs = [
+        "task_prompt (assistant-authored execution instruction)",
+        "when/cron schedule (local time)",
+        "destination (optional; defaults to current channel/room or platform defaults)",
+    ]
+    missing_info_prompts = [
+        "What should this task do each time it runs? Put that in `task_prompt`.",
+        "When should this run? Put that in `when` (for example `everyday at 6am`, `weekdays at 8am`, or `on the 10th of every month`) or provide cron (`0 10 6 * * *`). If destination isn't this same chat/room, include `targets` (or `channel`/`room`/`chat_id`).",
+    ]
+
+    platforms = ["discord", "irc", "matrix", "homeassistant", "telegram", "webui", "macos"]
+    waiting_prompt_template = (
+        "Write a short, friendly message telling {mention} you’re scheduling the task now. "
+        "Only output that message."
+    )
+
+    # ----------------------------
+    # NEW: build a runtime prompt
+    # ----------------------------
+    @staticmethod
+    def _build_runtime_prompt(user_message: str) -> str:
+        raw = (user_message or "").strip()
+        if not raw:
+            return ""
+
+        # Strip common "scheduling" lead-ins so the runtime prompt becomes "do the thing"
+        text = raw
+
+        # remove "add/create/set a task/reminder ..."
+        text = re.sub(
+            r"^(?:please\s+)?(?:add|create|set|schedule)\s+(?:a\s+)?(?:task|reminder)\s+(?:to\s+)?",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # remove trailing scheduling phrases like "every morning at 6am", "daily at 06:00", etc.
+        text = re.sub(
+            r"\b(?:every|each)\s+(?:day|morning|night|weekday|weekend|week)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r"\b(?:daily|weekly|monthly)\b.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:at|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bin\s+\d+\s*(?:seconds?|minutes?|hours?|days?)\b.*$", "", text, flags=re.IGNORECASE)
+
+        text = text.strip(" .\n\t")
+
+        # If we stripped too aggressively, fall back to original.
+        if not text:
+            text = raw
+
+        # Guardrails: scheduled runs must NEVER try to schedule more tasks.
+        # Also: encourage a single tool call, then produce final message.
+        return (
+            "You are running a previously scheduled task.\n"
+            "IMPORTANT: Do NOT create/schedule/modify tasks or reminders. The schedule already exists.\n"
+            "Do the requested work NOW. You may call at most ONE tool if needed, then write the final user-facing result.\n"
+            f"User originally asked: {raw}\n"
+            f"Task to perform now: {text}\n"
+        )
+
+    @staticmethod
+    def _clean_task_prompt(task_text: Any) -> str:
+        raw = str(task_text or "").strip()
+        if not raw:
+            return ""
+        cleaned = raw
+        try:
+            from kernel_tools import _ai_tasks_clean_task_prompt
+
+            kernel_cleaned = str(_ai_tasks_clean_task_prompt(raw) or "").strip()
+            if kernel_cleaned:
+                cleaned = kernel_cleaned
+        except Exception:
+            cleaned = raw
+
+        # Plugin-local cleanup for request-only calls where schedule phrasing may
+        # still be present at the front of the sentence.
+        cleaned = re.sub(r"^\s*(?:hey\s+)?tater[\s,:-]+", "", cleaned, flags=re.IGNORECASE).strip()
+        schedule_prefixes = (
+            r"^\s*(?:every|each)\s+(?:second|minute|hour)\b\s*(?:,|:|-)?\s*",
+            r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+week|each\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*on\s+(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?)(?:\s*(?:,|and)\s*(?:mon(?:day|days?)?|tues?(?:day|days?)?|wed(?:nesday|nesdays|s|sday|sdays)?|thu(?:r|rs|rsday|rsdays|day|days)?|fri(?:day|days)?|sat(?:urday|urdays)?|sun(?:day|days)?))*\s+(?:every|each)\s+week\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*\s+of\s+(?:every|each)\s+month\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:every\s+month|each\s+month|monthly)\b(?:\s+on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
+            r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
+            r"^\s*(?:at|@)\s*\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
+        )
+        for pattern in schedule_prefixes:
+            candidate = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+            if candidate:
+                cleaned = candidate
+        cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+        return cleaned or raw
+
+    @classmethod
+    def _polish_task_prompt(cls, task_text: Any, request_text: Any = "") -> str:
+        seed = str(task_text or "").strip() or str(request_text or "").strip()
+        if not seed:
+            return ""
+
+        text = cls._clean_task_prompt(seed) or seed
+        text = re.sub(r"^\s*(?:hey\s+)?tater[\s,:-]+", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(
+            r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\s+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"^\s*(?:please\s+)?i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r"^\s*(?:please\s+)?(?:let(?:'|’)s|let us)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\btell me\b", "tell", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bgive me\b", "give", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bsend me\b", "send", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bshow me\b", "show", text, flags=re.IGNORECASE)
+        text = re.sub(r"\band also\b", "and", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ,.-")
+        if not text:
+            return ""
+        text = text[0].upper() + text[1:] if text and text[0].islower() else text
+        if text and not re.search(r"[.!?]$", text):
+            text += "."
+        return text
+
+    @staticmethod
+    def _normalize_compare_text(value: Any) -> str:
+        text = " ".join(str(value or "").strip().lower().split())
+        return text
+
+    async def _rewrite_task_prompt_with_llm(
+        self,
+        *,
+        llm_client: Any,
+        task_prompt: Any,
+        request_text: Any = "",
+    ) -> str:
+        base = self._polish_task_prompt(task_prompt, request_text=request_text)
+        if not base:
+            return ""
+        if llm_client is None:
+            return base
+
+        request_raw = str(request_text or "").strip()
+        rewrite_prompt = (
+            "Rewrite this scheduled task into a concise execution prompt.\n"
+            "Return JSON only:\n"
+            '{"task_prompt":"<rewritten prompt>"}\n\n'
+            "Rules:\n"
+            "1) Keep the exact intended action/data/entities.\n"
+            "2) Remove scheduling words/timing/reminder phrasing.\n"
+            "3) Make it executable now (imperative, concise).\n"
+            "4) Do not add new actions.\n"
+            "5) No markdown, no explanation text.\n\n"
+            f"Original user request: {request_raw}\n"
+            f"Current task prompt: {base}\n"
+        )
+
+        try:
+            response = await llm_client.chat(messages=[{"role": "system", "content": rewrite_prompt}])
+            raw = str((response.get("message") or {}).get("content") or "").strip()
+            json_text = extract_json(raw) or raw
+            parsed = json.loads(json_text)
+            candidate = ""
+            if isinstance(parsed, dict):
+                candidate = str(parsed.get("task_prompt") or "").strip()
+            rewritten = self._polish_task_prompt(candidate, request_text=base) if candidate else ""
+            if not rewritten:
+                return base
+
+            req_norm = self._normalize_compare_text(request_raw)
+            rewritten_norm = self._normalize_compare_text(rewritten)
+            base_norm = self._normalize_compare_text(base)
+
+            # Ensure the stored task prompt is not verbatim user wording when possible.
+            if req_norm and rewritten_norm == req_norm:
+                if base_norm and base_norm != req_norm:
+                    return base
+                minimal = re.sub(r"^\s*(?:please\s+)?", "", rewritten, flags=re.IGNORECASE).strip()
+                minimal = re.sub(r"\s+", " ", minimal).strip(" ,.-")
+                if minimal and self._normalize_compare_text(minimal) != req_norm:
+                    if not re.search(r"[.!?]$", minimal):
+                        minimal += "."
+                    return minimal
+                return base
+
+            return rewritten
+        except Exception as exc:
+            logger.warning("[ai_tasks] task prompt rewrite fallback: %s", exc)
+            return base
+
+    @classmethod
+    def _title_case(cls, text: str) -> str:
+        words = [w for w in re.split(r"\s+", str(text or "").strip()) if w]
+        if not words:
+            return ""
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "at",
+            "by",
+            "for",
+            "from",
+            "in",
+            "of",
+            "on",
+            "or",
+            "the",
+            "to",
+            "with",
+        }
+        out: list[str] = []
+        for idx, word in enumerate(words):
+            lead = re.match(r"^[^A-Za-z0-9']*", word)
+            trail = re.search(r"[^A-Za-z0-9']*$", word)
+            lead_txt = lead.group(0) if lead else ""
+            trail_txt = trail.group(0) if trail else ""
+            core = word[len(lead_txt) : len(word) - len(trail_txt) if trail_txt else len(word)]
+            if not core:
+                out.append(word)
+                continue
+            lower = core.lower()
+            if idx > 0 and lower in stopwords:
+                cooked = lower
+            else:
+                cooked = core[0].upper() + core[1:]
+            out.append(f"{lead_txt}{cooked}{trail_txt}")
+        return " ".join(out).strip()
+
+    @classmethod
+    def _title_cadence_prefix(cls, recurrence: Dict[str, Any] | None, interval: float) -> str:
+        rec = recurrence if isinstance(recurrence, dict) else {}
+        kind = str(rec.get("kind") or "").strip().lower()
+        if kind == "daily_local_time":
+            return "Daily"
+        if kind == "weekly_local_time":
+            return "Weekly"
+        if kind == "monthly_local_time":
+            return "Monthly"
+        if kind == "cron_simple":
+            hours = rec.get("hours") if isinstance(rec.get("hours"), list) else []
+            minutes = rec.get("minutes") if isinstance(rec.get("minutes"), list) else []
+            seconds = rec.get("seconds") if isinstance(rec.get("seconds"), list) else []
+            weekdays = rec.get("weekdays") if isinstance(rec.get("weekdays"), list) else []
+            if len(hours) == 24 and len(minutes) == 60 and len(seconds) == 60 and not weekdays:
+                return "Secondly"
+            if len(hours) == 24 and len(minutes) == 60 and seconds == [0] and not weekdays:
+                return "Minutely"
+            if len(hours) == 24 and minutes == [0] and seconds == [0] and not weekdays:
+                return "Hourly"
+            if len(hours) == 1 and len(minutes) == 1 and len(seconds) == 1:
+                return "Weekly" if weekdays else "Daily"
+
+        iv = float(interval or 0.0)
+        if iv <= 0:
+            return ""
+        if iv <= 1.5:
+            return "Secondly"
+        if iv <= 60.5:
+            return "Minutely"
+        if iv <= 3600.5:
+            return "Hourly"
+        if iv <= (24 * 3600.5):
+            return "Daily"
+        return "Recurring"
+
+    @classmethod
+    def _smart_title_core(cls, task_prompt: Any, request_text: Any = "") -> str:
+        base = cls._polish_task_prompt(task_prompt, request_text=request_text).strip()
+        if not base:
+            return ""
+        base = re.sub(r"[.!?]+$", "", base).strip()
+        lowered = base.lower()
+
+        if "lights" in lowered and any(token in lowered for token in ("weather", "forecast")):
+            return "Lights + Forecast"
+
+        if any(token in lowered for token in ("weather", "forecast", "rain chance", "rain chances")):
+            return "Weather Forecast"
+
+        if "joke" in lowered:
+            subject = ""
+            m_nemesis = re.search(r"arch\s+nemesis[,:\s]+([A-Za-z0-9'_-]+)", base, flags=re.IGNORECASE)
+            if m_nemesis:
+                subject = str(m_nemesis.group(1) or "").strip()
+            if not subject:
+                m_about = re.search(r"\b(?:about|on)\s+(.+)$", base, flags=re.IGNORECASE)
+                if m_about:
+                    phrase = str(m_about.group(1) or "")
+                    phrase = re.sub(r"[^A-Za-z0-9' ]+", " ", phrase)
+                    tokens = [tok for tok in phrase.split() if tok]
+                    if tokens:
+                        subject = tokens[-1]
+            if subject:
+                return f"{cls._title_case(subject)} Joke"
+            return "Joke"
+
+        generic = re.sub(
+            r"^(?:tell|send|post|give|show|check|run|turn on|turn off|turn|set|open|close|lock|unlock|start|stop|notify|remind|fetch|get|play|pause)\s+",
+            "",
+            base,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not generic:
+            generic = base
+        return cls._title_case(generic)
+
+    @classmethod
+    def _default_title(
+        cls,
+        *,
+        task_prompt: Any,
+        recurrence: Dict[str, Any] | None,
+        interval: float,
+        request_text: Any = "",
+    ) -> str:
+        seed = str(task_prompt or "").strip() or str(request_text or "").strip()
+        cadence_prefix = cls._title_cadence_prefix(recurrence, interval)
+
+        core = cls._smart_title_core(seed, request_text=request_text)
+        if core:
+            title = core
+            if cadence_prefix and not title.lower().startswith(cadence_prefix.lower() + " "):
+                title = f"{cadence_prefix} {title}".strip()
+            if len(title) > 80:
+                title = title[:77].rstrip() + "..."
+            return title
+
+        try:
+            from kernel_tools import _ai_tasks_default_title
+
+            inferred = str(_ai_tasks_default_title(seed, recurrence or {}, float(interval or 0.0)) or "").strip()
+            if inferred:
+                return inferred
+        except Exception:
+            pass
+
+        fallback = cls._title_case(re.sub(r"\s+", " ", seed).strip(" ."))
+        if fallback:
+            if cadence_prefix and not fallback.lower().startswith(cadence_prefix.lower() + " "):
+                fallback = f"{cadence_prefix} {fallback}".strip()
+            if len(fallback) > 80:
+                fallback = fallback[:77].rstrip() + "..."
+            return fallback
+        return "Scheduled AI task"
+
+    @staticmethod
+    def _infer_platform_from_text(raw_text: Any) -> str:
+        text = " ".join(str(raw_text or "").strip().lower().split())
+        if not text:
+            return ""
+        candidates = (
+            ("homeassistant", r"\bhome\s*assistant\b|\bhomeassistant\b"),
+            ("telegram", r"\btelegram\b"),
+            ("discord", r"\bdiscord\b"),
+            ("matrix", r"\bmatrix\b"),
+            ("irc", r"\birc\b"),
+            ("ntfy", r"\bntfy\b"),
+        )
+        for platform_key, pattern in candidates:
+            if re.search(pattern, text):
+                return platform_key
+        return ""
+
+    @staticmethod
+    def _extract_request_target_hint(raw_text: Any) -> str:
+        text = str(raw_text or "").strip()
+        if not text:
+            return ""
+
+        explicit = re.search(
+            r"\b(?:in|to|on)\s+(?:the\s+)?(?:(?:channel|room|chat)\s+)?(#[A-Za-z0-9][A-Za-z0-9._:-]*|![^\s]+|@[A-Za-z0-9_]+)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if explicit:
+            return str(explicit.group(1) or "").strip()
+
+        matrix_ref = re.search(r"([!#][A-Za-z0-9._:-]+:[A-Za-z0-9._:-]+)", text)
+        if matrix_ref:
+            return str(matrix_ref.group(1) or "").strip()
+
+        named = re.search(
+            r"(?:^|\b(?:in|to|on)\s+)(?:the\s+)?(?:channel|room|chat)\s+([#@!]?[A-Za-z0-9][A-Za-z0-9._:-]*)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if named:
+            return str(named.group(1) or "").strip()
+        return ""
+
+    @staticmethod
+    def _normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
+        t = dict(targets or {})
+        channel_ref = t.get("channel")
+        room_ref = t.get("room")
+        destination_ref = t.get("destination")
+        to_ref = t.get("to")
+        target_ref = t.get("target")
+
+        if not channel_ref:
+            if dest == "discord":
+                channel_ref = t.get("channel_id") or room_ref or destination_ref or to_ref or target_ref
+            elif dest == "irc":
+                channel_ref = t.get("channel") or room_ref or destination_ref or to_ref or target_ref
+            elif dest == "matrix":
+                channel_ref = t.get("room_id") or room_ref or destination_ref or to_ref or target_ref
+            elif dest == "homeassistant":
+                channel_ref = t.get("device_service") or destination_ref or to_ref or target_ref
+            elif dest == "telegram":
+                channel_ref = t.get("chat_id") or room_ref or destination_ref or to_ref or target_ref
+
+        if not channel_ref:
+            return t
+
+        ref = str(channel_ref).strip()
+        if not ref:
+            return {}
+
+        if dest == "discord":
+            if ref.isdigit():
+                return {"channel_id": ref}
+            return {"channel": ref}
+
+        if dest == "matrix":
+            if not ref.startswith(("!", "#")) and ":" in ref:
+                ref = f"#{ref}"
+            return {"room_id": ref}
+
+        if dest == "homeassistant":
+            return {"device_service": ref}
+
+        if dest == "telegram":
+            return {"chat_id": ref}
+
+        return {"channel": ref}
+
+    @classmethod
+    def _is_current_target_alias(cls, value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        text = " ".join(text.replace("_", " ").split())
+        return text in {
+            "current",
+            "here",
+            "this",
+            "this chat",
+            "this channel",
+            "same chat",
+            "same channel",
+            "current chat",
+            "current channel",
+        }
+
+    @staticmethod
+    def _extract_target_hint(raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        for pattern in (r"![^\s]+", r"#[A-Za-z0-9][A-Za-z0-9._:-]*", r"@[A-Za-z0-9_]+"):
+            m = re.search(pattern, text)
+            if m:
+                return m.group(0)
+        text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"\s+(?:in|on)\s+(?:discord|irc|matrix|telegram|home\s*assistant|homeassistant)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text.strip(" .")
+
+    @staticmethod
+    def _coerce_targets(payload: Any) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        if isinstance(payload, str):
+            hint = AITasksPlugin._extract_target_hint(payload)
+            if hint:
+                return {"channel": hint}
+        return {}
+
+    @staticmethod
+    def _load_platform_fallback_targets(dest: str) -> Dict[str, Any]:
+        platform = normalize_platform(dest)
+        out: Dict[str, Any] = {}
+        try:
+            if platform == "discord":
+                settings = redis_client.hgetall("discord_portal_settings") or {}
+                channel_id = str(settings.get("response_channel_id") or "").strip()
+                if channel_id:
+                    out["channel_id"] = channel_id
+                return out
+
+            if platform == "irc":
+                settings = (
+                    redis_client.hgetall("irc_portal_settings")
+                    or redis_client.hgetall("platform_settings:IRC Settings")
+                    or redis_client.hgetall("platform_settings:IRC")
+                    or {}
+                )
+                channel = str(settings.get("irc_channel") or "").strip()
+                if channel:
+                    out["channel"] = channel if channel.startswith("#") else f"#{channel}"
+                return out
+
+            if platform == "telegram":
+                settings = redis_client.hgetall("telegram_portal_settings") or {}
+                legacy = redis_client.hgetall("verba_settings:Telegram Notifier") or {}
+                chat_id = str(settings.get("response_chat_id") or legacy.get("telegram_chat_id") or "").strip()
+                if chat_id:
+                    out["chat_id"] = chat_id
+                return out
+        except Exception:
+            return {}
+        return {}
+
+    @classmethod
+    def _merge_target_aliases(cls, targets: Dict[str, Any], value: Any) -> Dict[str, Any]:
+        out = dict(targets or {})
+        if isinstance(value, dict):
+            for key, val in value.items():
+                if val in (None, ""):
+                    continue
+                if key not in out:
+                    out[key] = val
+            return out
+        hint = cls._extract_target_hint(value)
+        if hint and "channel" not in out and "room_id" not in out and "chat_id" not in out:
+            out["channel"] = hint
+        return out
+
+    def _extract_args(self, args: Dict[str, Any]):
+        args = args or {}
+        title = args.get("title")
+        platform = args.get("platform")
+        origin = args.get("origin")
+
+        request_text = str(args.get("request") or "").strip()
+        if isinstance(origin, dict):
+            origin_request_text = str(origin.get("request_text") or "").strip()
+            if origin_request_text:
+                request_text = origin_request_text or request_text
+
+        task_prompt = self._clean_task_prompt(args.get("task_prompt"))
+        explicit_task_prompt = bool(task_prompt)
+        if not task_prompt and request_text:
+            task_prompt = self._clean_task_prompt(request_text)
+        if not task_prompt and request_text:
+            task_prompt = str(request_text).strip()
+        task_prompt = self._polish_task_prompt(task_prompt, request_text=request_text)
+
+        targets = self._coerce_targets(args.get("targets"))
+        for alias_key in ("target", "destination", "to"):
+            if alias_key in args:
+                targets = self._merge_target_aliases(targets, args.get(alias_key))
+        for key in ("channel", "channel_id", "room", "room_id", "device_service", "chat_id"):
+            value = args.get(key)
+            if value and key not in targets:
+                targets[key] = value
+
+        if request_text and not targets:
+            hint = self._extract_request_target_hint(request_text)
+            if hint:
+                targets = self._merge_target_aliases(targets, hint)
+
+        # "current"/"here"/"this channel" should mean "use origin context", not a literal destination.
+        for key in ("channel", "channel_id", "room", "room_id", "chat_id", "target", "destination", "to"):
+            if key in targets and self._is_current_target_alias(targets.get(key)):
+                targets.pop(key, None)
+
+        cron_expr = args.get("cron")
+        when_ts = args.get("when_ts")
+        when_txt = args.get("when")
+
+        meta = {
+            "priority": args.get("priority"),
+            "tags": args.get("tags"),
+            "ttl_sec": args.get("ttl_sec"),
+        }
+
+        return (
+            title,
+            task_prompt,
+            platform,
+            targets,
+            cron_expr,
+            when_ts,
+            when_txt,
+            origin,
+            request_text,
+            explicit_task_prompt,
+            meta,
+        )
+
+    @staticmethod
+    def _next_local_time_occurrence(
+        *,
+        now_ts: float,
+        hour: int,
+        minute: int,
+        second: int,
+        weekdays: list[int] | None = None,
+    ) -> float:
+        now_local = datetime.fromtimestamp(float(now_ts))
+        h = min(23, max(0, int(hour)))
+        m = min(59, max(0, int(minute)))
+        s = min(59, max(0, int(second)))
+
+        candidate = now_local.replace(hour=h, minute=m, second=s, microsecond=0)
+        if candidate.timestamp() <= now_ts:
+            candidate = candidate + timedelta(days=1)
+
+        day_filter = sorted(set(int(d) for d in (weekdays or []) if 0 <= int(d) <= 6))
+        if not day_filter:
+            return candidate.timestamp()
+
+        while candidate.weekday() not in day_filter:
+            candidate = candidate + timedelta(days=1)
+        return candidate.timestamp()
+
+    @staticmethod
+    def _parse_weekday_field(value: str) -> tuple[list[int] | None, str]:
+        raw = str(value or "").strip().lower()
+        if raw in {"*", "?"}:
+            return [], ""
+        if any(ch in raw for ch in ("/", "-")):
+            return None, "Cron day-of-week supports only single values or comma lists (no ranges/steps)."
+
+        out: list[int] = []
+        for token in raw.split(","):
+            key = token.strip().lower()
+            if not key:
+                continue
+            mapped = _WEEKDAY_TOKEN_MAP.get(key)
+            if mapped is None:
+                return None, f"Invalid cron day-of-week token: {token}"
+            if mapped not in out:
+                out.append(mapped)
+        return sorted(out), ""
+
+    @staticmethod
+    def _expand_numeric_field(
+        value: Any,
+        *,
+        minimum: int,
+        maximum: int,
+        field_name: str,
+    ) -> tuple[list[int] | None, str]:
+        text = str(value or "").strip().lower()
+        if not text or text in {"*", "?"}:
+            return list(range(minimum, maximum + 1)), ""
+
+        out: list[int] = []
+        for token in text.split(","):
+            part = token.strip().lower()
+            if not part:
+                continue
+            if part in {"*", "?"}:
+                out.extend(range(minimum, maximum + 1))
+                continue
+            if part.startswith("*/"):
+                step_txt = part[2:].strip()
+                if not re.fullmatch(r"\d{1,3}", step_txt):
+                    return None, f"Invalid cron {field_name} step: {part}"
+                step = int(step_txt)
+                if step <= 0:
+                    return None, f"Cron {field_name} step must be > 0."
+                out.extend(range(minimum, maximum + 1, step))
+                continue
+            if not re.fullmatch(r"\d{1,3}", part):
+                return None, f"Invalid cron {field_name}: {part}"
+            number = int(part)
+            if number < minimum or number > maximum:
+                return None, f"Cron {field_name} must be in {minimum}-{maximum}."
+            out.append(number)
+
+        unique = sorted(set(out))
+        if not unique:
+            return None, f"Cron {field_name} produced no values."
+        return unique, ""
+
+    @classmethod
+    def _next_cron_occurrence(
+        cls,
+        *,
+        now_ts: float,
+        hours: list[int],
+        minutes: list[int],
+        seconds: list[int],
+        weekdays: list[int] | None = None,
+    ) -> float:
+        valid_hours = sorted(set(int(v) for v in (hours or []) if 0 <= int(v) <= 23))
+        valid_minutes = sorted(set(int(v) for v in (minutes or []) if 0 <= int(v) <= 59))
+        valid_seconds = sorted(set(int(v) for v in (seconds or []) if 0 <= int(v) <= 59))
+        valid_weekdays = sorted(set(int(v) for v in (weekdays or []) if 0 <= int(v) <= 6))
+        if not valid_hours or not valid_minutes or not valid_seconds:
+            return 0.0
+
+        base = datetime.fromtimestamp(float(now_ts)).replace(microsecond=0) + timedelta(seconds=1)
+        day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        for day_offset in range(0, 370):
+            day = day_start + timedelta(days=day_offset)
+            if valid_weekdays and day.weekday() not in valid_weekdays:
+                continue
+
+            h_start = base.hour if day_offset == 0 else 0
+            h_idx = bisect_left(valid_hours, h_start)
+            while h_idx < len(valid_hours):
+                hour = valid_hours[h_idx]
+                m_start = base.minute if (day_offset == 0 and hour == base.hour) else 0
+                m_idx = bisect_left(valid_minutes, m_start)
+                while m_idx < len(valid_minutes):
+                    minute = valid_minutes[m_idx]
+                    s_start = base.second if (day_offset == 0 and hour == base.hour and minute == base.minute) else 0
+                    s_idx = bisect_left(valid_seconds, s_start)
+                    if s_idx < len(valid_seconds):
+                        second = valid_seconds[s_idx]
+                        candidate = day.replace(hour=hour, minute=minute, second=second, microsecond=0)
+                        if candidate.timestamp() > now_ts:
+                            return candidate.timestamp()
+                    m_idx += 1
+                h_idx += 1
+        return 0.0
+
+    @staticmethod
+    def _parse_time_of_day(text: Any) -> tuple[int, int, int] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+
+        m12 = re.search(r"\b(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm)\b", raw, flags=re.IGNORECASE)
+        if m12:
+            hour = int(m12.group(1))
+            minute = int(m12.group(2) or 0)
+            second = int(m12.group(3) or 0)
+            mer = str(m12.group(4) or "").lower()
+            if hour < 1 or hour > 12 or minute > 59 or second > 59:
+                return None
+            if mer == "am":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+            return hour, minute, second
+
+        m24 = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?\b", raw)
+        if m24:
+            hour = int(m24.group(1))
+            minute = int(m24.group(2))
+            second = int(m24.group(3) or 0)
+            return hour, minute, second
+
+        m_compact = re.search(r"\bat\s+(\d{3,4})(?:\b|$)", raw, flags=re.IGNORECASE)
+        if m_compact:
+            digits = str(m_compact.group(1) or "")
+            if len(digits) == 3:
+                hour = int(digits[0])
+                minute = int(digits[1:])
+            else:
+                hour = int(digits[:2])
+                minute = int(digits[2:])
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute, 0
+
+        m_at = re.search(r"\bat\s+([01]?\d|2[0-3])(?::([0-5]\d))?(?::([0-5]\d))?(?:\b|$)", raw, flags=re.IGNORECASE)
+        if m_at:
+            return int(m_at.group(1)), int(m_at.group(2) or 0), int(m_at.group(3) or 0)
+
+        m_oclock = re.search(r"\b([1-9]|1[0-2])\s*o'?clock\b", raw, flags=re.IGNORECASE)
+        if m_oclock:
+            return int(m_oclock.group(1)), 0, 0
+        return None
+
+    @staticmethod
+    def _extract_weekdays_from_text(value: Any) -> list[int]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return []
+        if "weekdays" in text or "weekday" in text:
+            return [0, 1, 2, 3, 4]
+        if "weekends" in text or "weekend" in text:
+            return [5, 6]
+        out: list[int] = []
+        for token, mapped in _WEEKDAY_TOKEN_MAP.items():
+            if token.isdigit():
+                continue
+            if re.search(rf"\b{re.escape(token)}\b", text):
+                if mapped not in out:
+                    out.append(mapped)
+        return sorted(out)
+
+    @staticmethod
+    def _extract_monthdays_from_text(value: Any) -> list[int]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return []
+        if not re.search(r"\b(every month|each month|monthly)\b", text):
+            return []
+
+        out: list[int] = []
+        for token in re.findall(r"\b([12]?\d|3[01])(?:st|nd|rd|th)\b", text):
+            day = int(token)
+            if 1 <= day <= 31 and day not in out:
+                out.append(day)
+
+        if not out:
+            for token in re.findall(r"\bon\s+the\s+([12]?\d|3[01])\b", text):
+                day = int(token)
+                if 1 <= day <= 31 and day not in out:
+                    out.append(day)
+
+        return sorted(out)
+
+    @staticmethod
+    def _default_local_time_parts(now_ts: float) -> tuple[int, int, int]:
+        now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+        return int(now_local.hour), int(now_local.minute), 0
+
+    @staticmethod
+    def _normalize_monthdays(raw: Any) -> list[int]:
+        if not isinstance(raw, list):
+            return []
+        out: list[int] = []
+        for item in raw:
+            try:
+                day = int(item)
+            except Exception:
+                continue
+            if 1 <= day <= 31 and day not in out:
+                out.append(day)
+        return sorted(out)
+
+    @classmethod
+    def _next_monthly_occurrence(
+        cls,
+        *,
+        now_ts: float,
+        hour: int,
+        minute: int,
+        second: int,
+        monthdays: list[int] | None = None,
+    ) -> float:
+        valid_monthdays = cls._normalize_monthdays(monthdays or [])
+        if not valid_monthdays:
+            return 0.0
+
+        now_local = datetime.fromtimestamp(float(now_ts))
+        h = min(23, max(0, int(hour)))
+        m = min(59, max(0, int(minute)))
+        s = min(59, max(0, int(second)))
+
+        for month_offset in range(0, 61):
+            month_index = (now_local.month - 1) + month_offset
+            year = now_local.year + (month_index // 12)
+            month = (month_index % 12) + 1
+            last_day = calendar.monthrange(year, month)[1]
+            for day in valid_monthdays:
+                if day > last_day:
+                    continue
+                candidate = now_local.replace(
+                    year=year,
+                    month=month,
+                    day=day,
+                    hour=h,
+                    minute=m,
+                    second=s,
+                    microsecond=0,
+                )
+                if candidate.timestamp() > now_ts:
+                    return candidate.timestamp()
+        return 0.0
+
+    @classmethod
+    def _build_cron_simple_schedule(
+        cls,
+        *,
+        now_ts: float,
+        hours: list[int],
+        minutes: list[int],
+        seconds: list[int],
+        weekdays: list[int] | None = None,
+        cron: str = "",
+    ) -> Dict[str, Any] | None:
+        next_run = cls._next_cron_occurrence(
+            now_ts=now_ts,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            weekdays=weekdays or [],
+        )
+        if next_run <= 0:
+            return None
+
+        recurrence: Dict[str, Any] = {
+            "kind": "cron_simple",
+            "hours": sorted(set(int(v) for v in (hours or []) if 0 <= int(v) <= 23)),
+            "minutes": sorted(set(int(v) for v in (minutes or []) if 0 <= int(v) <= 59)),
+            "seconds": sorted(set(int(v) for v in (seconds or []) if 0 <= int(v) <= 59)),
+        }
+        weekday_list = sorted(set(int(v) for v in (weekdays or []) if 0 <= int(v) <= 6))
+        if weekday_list:
+            recurrence["weekdays"] = weekday_list
+
+        interval_estimate = 0.0
+        if not weekday_list and len(recurrence["hours"]) == 24 and len(recurrence["minutes"]) == 60 and len(recurrence["seconds"]) == 60:
+            interval_estimate = 1.0
+        elif not weekday_list and len(recurrence["hours"]) == 24 and len(recurrence["minutes"]) == 60 and recurrence["seconds"] == [0]:
+            interval_estimate = 60.0
+        elif not weekday_list and len(recurrence["hours"]) == 24 and recurrence["minutes"] == [0] and recurrence["seconds"] == [0]:
+            interval_estimate = 3600.0
+        elif not weekday_list and len(recurrence["hours"]) == 1 and len(recurrence["minutes"]) == 1 and len(recurrence["seconds"]) == 1:
+            interval_estimate = 24 * 60 * 60.0
+
+        out: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": float(interval_estimate),
+            "recurrence": recurrence,
+        }
+        if cron:
+            out["cron"] = str(cron).strip()
+        return out
+
+    @classmethod
+    def _build_monthly_schedule(
+        cls,
+        *,
+        now_ts: float,
+        hour: int,
+        minute: int,
+        second: int,
+        monthdays: list[int],
+    ) -> Dict[str, Any] | None:
+        valid_monthdays = cls._normalize_monthdays(monthdays)
+        if not valid_monthdays:
+            return None
+
+        next_run = cls._next_monthly_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            monthdays=valid_monthdays,
+        )
+        if next_run <= 0:
+            return None
+
+        return {
+            "next_run_ts": float(next_run),
+            "interval_sec": 0.0,
+            "recurrence": {
+                "kind": "monthly_local_time",
+                "hour": int(hour),
+                "minute": int(minute),
+                "second": int(second),
+                "monthdays": valid_monthdays,
+            },
+        }
+
+    def _parse_human_schedule(
+        self,
+        raw_value: Any,
+        *,
+        now_ts: float,
+    ) -> tuple[Dict[str, Any] | None, str]:
+        text = " ".join(str(raw_value or "").strip().lower().split())
+        if not text:
+            return None, ""
+
+        if re.search(r"\b(every|each)\s+second\b|\bsecondly\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=list(range(60)),
+                cron="* * * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-second schedule."
+
+        m_every_seconds = re.search(r"\bevery\s+(\d+)\s+seconds?\b", text)
+        if m_every_seconds:
+            step = int(m_every_seconds.group(1))
+            if step <= 0:
+                return None, "Every-seconds value must be > 0."
+            if step == 1:
+                seconds = list(range(60))
+            elif step <= 59:
+                seconds = list(range(0, 60, step))
+            elif step % 60 == 0:
+                minute_step = step // 60
+                if minute_step > 59:
+                    return None, "Every-seconds value is too large for cron-like conversion."
+                schedule = self._build_cron_simple_schedule(
+                    now_ts=now_ts,
+                    hours=list(range(24)),
+                    minutes=list(range(0, 60, minute_step)),
+                    seconds=[0],
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for every-seconds schedule."
+            else:
+                return None, "Every-seconds value must be 1-59 or a multiple of 60."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=seconds,
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-seconds schedule."
+
+        if re.search(r"\b(every|each)\s+minute\b|\bminutely\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(60)),
+                seconds=[0],
+                cron="0 * * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-minute schedule."
+
+        m_every_minutes = re.search(r"\bevery\s+(\d+)\s+minutes?\b", text)
+        if m_every_minutes:
+            step = int(m_every_minutes.group(1))
+            if step <= 0 or step > 59:
+                return None, "Every-minutes value must be between 1 and 59."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=list(range(0, 60, step)),
+                seconds=[0],
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-minutes schedule."
+
+        if re.search(r"\b(every|each)\s+hour\b|\bhourly\b", text):
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(24)),
+                minutes=[0],
+                seconds=[0],
+                cron="0 0 * * * *",
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-hour schedule."
+
+        m_every_hours = re.search(r"\bevery\s+(\d+)\s+hours?\b", text)
+        if m_every_hours:
+            step = int(m_every_hours.group(1))
+            if step <= 0 or step > 23:
+                return None, "Every-hours value must be between 1 and 23."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=list(range(0, 24, step)),
+                minutes=[0],
+                seconds=[0],
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for every-hours schedule."
+
+        daily = bool(re.search(r"\b(every day|everyday|daily|each day)\b", text))
+        weekly = bool(re.search(r"\b(every week|each week|weekly)\b", text))
+        monthly = bool(re.search(r"\b(every month|each month|monthly)\b", text))
+        weekdays = self._extract_weekdays_from_text(text)
+        monthdays = self._extract_monthdays_from_text(text)
+        if daily or weekly or weekdays or monthly or monthdays:
+            time_parts = self._parse_time_of_day(text)
+            if not time_parts:
+                time_parts = self._default_local_time_parts(now_ts)
+            hour, minute, second = time_parts
+            if monthly or monthdays:
+                chosen_monthdays = monthdays or [int(datetime.fromtimestamp(float(now_ts)).astimezone().day)]
+                schedule = self._build_monthly_schedule(
+                    now_ts=now_ts,
+                    hour=hour,
+                    minute=minute,
+                    second=second,
+                    monthdays=chosen_monthdays,
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for monthly schedule."
+            cron_text = f"{int(second)} {int(minute)} {int(hour)} * * *"
+            if weekdays or weekly:
+                chosen_weekdays = weekdays or [datetime.fromtimestamp(float(now_ts)).astimezone().weekday()]
+                day_tokens = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                dow_tokens = [day_tokens[int(d)] for d in sorted(set(chosen_weekdays)) if 0 <= int(d) <= 6]
+                if dow_tokens:
+                    cron_text = f"{int(second)} {int(minute)} {int(hour)} * * {','.join(dow_tokens)}"
+                schedule = self._build_cron_simple_schedule(
+                    now_ts=now_ts,
+                    hours=[hour],
+                    minutes=[minute],
+                    seconds=[second],
+                    weekdays=chosen_weekdays,
+                    cron=cron_text,
+                )
+                if schedule:
+                    return schedule, ""
+                return None, "Could not compute next run for weekly schedule."
+            schedule = self._build_cron_simple_schedule(
+                now_ts=now_ts,
+                hours=[hour],
+                minutes=[minute],
+                seconds=[second],
+                cron=cron_text,
+            )
+            if schedule:
+                return schedule, ""
+            return None, "Could not compute next run for daily schedule."
+
+        return None, ""
+
+    @staticmethod
+    def _recurrence_label(recurrence: Dict[str, Any]) -> str:
+        recurrence = recurrence if isinstance(recurrence, dict) else {}
+        kind = str(recurrence.get("kind") or "").strip().lower()
+        hour = int(recurrence.get("hour") or 0)
+        minute = int(recurrence.get("minute") or 0)
+        second = int(recurrence.get("second") or 0)
+        time_part = f"{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+
+        if kind == "daily_local_time":
+            return f"daily at {time_part}"
+        if kind == "weekly_local_time":
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            days = recurrence.get("weekdays") if isinstance(recurrence.get("weekdays"), list) else []
+            day_labels: list[str] = []
+            for day in days:
+                try:
+                    day_i = int(day)
+                except Exception:
+                    continue
+                if 0 <= day_i <= 6:
+                    name = day_names[day_i]
+                    if name not in day_labels:
+                        day_labels.append(name)
+            if day_labels:
+                return f"weekly ({', '.join(day_labels)}) at {time_part}"
+            return f"weekly at {time_part}"
+        if kind == "monthly_local_time":
+            monthdays = recurrence.get("monthdays") if isinstance(recurrence.get("monthdays"), list) else []
+            day_labels = [_ordinal_day(day) for day in monthdays if str(day).strip()]
+            if day_labels:
+                return f"monthly ({', '.join(day_labels)}) at {time_part}"
+            return f"monthly at {time_part}"
+        if kind == "cron_simple":
+            hours = recurrence.get("hours") if isinstance(recurrence.get("hours"), list) else []
+            minutes = recurrence.get("minutes") if isinstance(recurrence.get("minutes"), list) else []
+            seconds = recurrence.get("seconds") if isinstance(recurrence.get("seconds"), list) else []
+            weekdays = recurrence.get("weekdays") if isinstance(recurrence.get("weekdays"), list) else []
+            if len(hours) == 24 and len(minutes) == 60 and len(seconds) == 60 and not weekdays:
+                return "every second"
+            if len(hours) == 24 and len(minutes) == 60 and seconds == [0] and not weekdays:
+                return "every minute"
+            if len(hours) == 24 and minutes == [0] and seconds == [0] and not weekdays:
+                return "every hour"
+            if len(hours) == 1 and len(minutes) == 1 and len(seconds) == 1:
+                time_part = f"{int(hours[0]):02d}:{int(minutes[0]):02d}" + (
+                    f":{int(seconds[0]):02d}" if int(seconds[0]) else ""
+                )
+                if weekdays:
+                    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    day_labels: list[str] = []
+                    for day in weekdays:
+                        try:
+                            day_i = int(day)
+                        except Exception:
+                            continue
+                        if 0 <= day_i <= 6:
+                            name = day_names[day_i]
+                            if name not in day_labels:
+                                day_labels.append(name)
+                    if day_labels:
+                        return f"weekly ({', '.join(day_labels)}) at {time_part}"
+                return f"daily at {time_part}"
+            cron_text = str(recurrence.get("cron") or "").strip()
+            if cron_text:
+                return f"cron ({cron_text})"
+            return "cron schedule"
+        return "recurring"
+
+    def _parse_cron_schedule(
+        self,
+        raw_value: Any,
+        *,
+        now_ts: float,
+    ) -> tuple[Dict[str, Any] | None, str]:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None, ""
+
+        parts = text.split()
+        if len(parts) not in {5, 6}:
+            return None, ""
+
+        if len(parts) == 5:
+            sec_raw = "0"
+            minute_raw, hour_raw, day_raw, month_raw, dow_raw = parts
+        else:
+            sec_raw, minute_raw, hour_raw, day_raw, month_raw, dow_raw = parts
+
+        if day_raw not in {"*", "?"} or month_raw not in {"*", "?"}:
+            return None, "Cron day-of-month and month must be '*' or '?' for ai_tasks."
+
+        weekdays, weekday_err = self._parse_weekday_field(dow_raw)
+        if weekday_err:
+            return None, weekday_err
+        if weekdays is None:
+            return None, "Invalid cron day-of-week field."
+
+        seconds, sec_err = self._expand_numeric_field(sec_raw, minimum=0, maximum=59, field_name="second")
+        if sec_err:
+            return None, sec_err
+        minutes, min_err = self._expand_numeric_field(minute_raw, minimum=0, maximum=59, field_name="minute")
+        if min_err:
+            return None, min_err
+        hours, hour_err = self._expand_numeric_field(hour_raw, minimum=0, maximum=23, field_name="hour")
+        if hour_err:
+            return None, hour_err
+
+        cron_text = " ".join(parts)
+        schedule = self._build_cron_simple_schedule(
+            now_ts=now_ts,
+            hours=hours or [],
+            minutes=minutes or [],
+            seconds=seconds or [],
+            weekdays=weekdays or [],
+            cron=cron_text,
+        )
+        if not isinstance(schedule, dict):
+            return None, "Could not compute next run for cron schedule."
+        recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
+        if isinstance(recurrence, dict) and cron_text:
+            recurrence["cron"] = cron_text
+            schedule["recurrence"] = recurrence
+        return schedule, ""
+
+    async def _schedule(self, args: Dict[str, Any], llm_client: Any = None):
+        (
+            title,
+            task_prompt,
+            platform,
+            targets,
+            cron_expr,
+            when_ts,
+            when_txt,
+            origin,
+            request_text,
+            explicit_task_prompt,
+            meta,
+        ) = self._extract_args(args)
+
+        task_prompt = (task_prompt or "").strip()
+
+        if not task_prompt:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
+
+        if not explicit_task_prompt:
+            task_prompt = await self._rewrite_task_prompt_with_llm(
+                llm_client=llm_client,
+                task_prompt=task_prompt,
+                request_text=request_text,
+            )
+        task_prompt = (task_prompt or "").strip()
+        if not task_prompt:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
+
+        dest = normalize_platform(platform)
+        if not dest and request_text:
+            inferred_dest = normalize_platform(self._infer_platform_from_text(request_text))
+            if inferred_dest in ALLOWED_PLATFORMS:
+                dest = inferred_dest
+        if not dest:
+            if isinstance(origin, dict):
+                origin_platform = normalize_platform(origin.get("platform"))
+                if origin_platform in ALLOWED_PLATFORMS:
+                    dest = origin_platform
+
+        if dest not in ALLOWED_PLATFORMS:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing destination platform"}
+
+        def _is_set(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                text = value.strip().lower()
+                return text not in {"", "0", "0.0", "false", "none", "null"}
+            if isinstance(value, (int, float)):
+                return float(value) != 0.0
+            return True
+
+        one_shot_time_fields = (
+            "in_seconds",
+            "in_minutes",
+            "in_hours",
+            "every_seconds",
+            "every_minutes",
+            "every_hours",
+        )
+        for key in one_shot_time_fields:
+            if _is_set((args or {}).get(key)):
+                return {
+                    "tool": "ai_tasks",
+                    "ok": False,
+                    "error": (
+                        f"`{key}` is no longer supported. "
+                        "Use `when`/`cron` (for example: `everyday at 6am`, `weekdays at 8am`, "
+                        "`on monday and wedsday each week`, `on the 10th of every month`, "
+                        "`every hour`, `every second`, or `0 0 6 * * *`)."
+                    ),
+                }
+
+        now = time.time()
+
+        schedule_result: Dict[str, Any] | None = None
+        cron_source = ""
+        parse_error = ""
+
+        schedule_candidates: list[Any] = []
+        seen_candidates: set[str] = set()
+
+        def _add_candidate(raw_value: Any) -> None:
+            if raw_value in (None, ""):
+                return
+            text = " ".join(str(raw_value).strip().split())
+            if not text or text in seen_candidates:
+                return
+            seen_candidates.add(text)
+            schedule_candidates.append(raw_value)
+
+        _add_candidate(cron_expr)
+        _add_candidate(when_ts)
+        _add_candidate(when_txt)
+        _add_candidate((args or {}).get("request"))
+        if isinstance(origin, dict):
+            _add_candidate(origin.get("request_text"))
+
+        for candidate in schedule_candidates:
+            parsed, err = self._parse_cron_schedule(candidate, now_ts=now)
+            if isinstance(parsed, dict):
+                schedule_result = parsed
+                cron_source = str(parsed.get("cron") or "").strip() or " ".join(str(candidate).strip().split())
+                break
+            if err:
+                parse_error = err
+
+        if not isinstance(schedule_result, dict):
+            for candidate in schedule_candidates:
+                parsed, err = self._parse_human_schedule(candidate, now_ts=now)
+                if isinstance(parsed, dict):
+                    schedule_result = parsed
+                    cron_source = str(parsed.get("cron") or "").strip()
+                    break
+                if err:
+                    parse_error = err
+
+        if not isinstance(schedule_result, dict):
+            guidance = (
+                "Use `when`/`cron` in local time, for example `everyday at 6am`, "
+                "`weekdays at 8am`, `on monday and wedsday each week`, "
+                "`on the 10th of every month`, `every hour`, `every second`, "
+                "or `0 0 6 * * *`."
+            )
+            if parse_error:
+                return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {parse_error} {guidance}"}
+            return {
+                "tool": "ai_tasks",
+                "ok": False,
+                "error": f"Cannot schedule: missing schedule details. {guidance}",
+            }
+
+        next_run = float(schedule_result.get("next_run_ts") or 0.0)
+        recurrence = schedule_result.get("recurrence") if isinstance(schedule_result.get("recurrence"), dict) else {}
+        interval = float(schedule_result.get("interval_sec") or 0.0)
+        if next_run <= 0 or not recurrence:
+            return {"tool": "ai_tasks", "ok": False, "error": "Cannot schedule: invalid recurrence."}
+
+        if not str(title or "").strip():
+            title = self._default_title(
+                task_prompt=task_prompt,
+                recurrence=recurrence if isinstance(recurrence, dict) else {},
+                interval=interval,
+                request_text=request_text,
+            )
+
+        recurrence_cron = str(recurrence.get("cron") or "").strip()
+        if recurrence_cron and not cron_source:
+            cron_source = recurrence_cron
+
+        if cron_source and isinstance(recurrence, dict):
+            recurrence["cron"] = cron_source
+
+        normalized_targets = self._normalize_channel_targets(dest, targets)
+        defaults = load_default_targets(dest, redis_client)
+        fallback_defaults = self._load_platform_fallback_targets(dest)
+        if isinstance(fallback_defaults, dict) and fallback_defaults:
+            for key, value in fallback_defaults.items():
+                if key not in defaults and value not in (None, ""):
+                    defaults[key] = value
+        resolved_targets, err = resolve_targets(dest, normalized_targets, origin, defaults)
+        if err:
+            err_text = str(err).strip()
+            if "missing target channel/room" in err_text.lower():
+                err_text = (
+                    f"{err_text} for {dest}. "
+                    "Include a destination (targets.channel / targets.room_id / targets.chat_id), "
+                    "or configure that platform's default target."
+                )
+            return {"tool": "ai_tasks", "ok": False, "error": err_text}
+
+        reminder_id = str(uuid.uuid4())
+        schedule_payload: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": float(interval),
+            "anchor_ts": float(next_run),
+            "recurrence": dict(recurrence),
+        }
+        if cron_source:
+            schedule_payload["cron"] = cron_source
+
+        reminder = {
+            "id": reminder_id,
+            "created_at": float(now),
+            "platform": dest,
+            "title": title,
+            "task_prompt": task_prompt,  # what to do at runtime
+            "targets": resolved_targets or {},
+            "origin": normalize_origin(origin),
+            "meta": meta or {},
+            "schedule": schedule_payload,
+            "enabled": True,
+        }
+
+        redis_client.set(f"{REMINDER_KEY_PREFIX}{reminder_id}", json.dumps(reminder))
+        redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: float(next_run)})
+
+        human = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M:%S")
+        cadence = self._recurrence_label(recurrence)
+        result_text = f"Recurring AI task scheduled {cadence} (next at {human})."
+
+        return {
+            "tool": "ai_tasks",
+            "ok": True,
+            "result": result_text,
+            "reminder_id": reminder_id,
+            "next_run_ts": float(next_run),
+            "platform": dest,
+            "title": title,
+            "targets": resolved_targets or {},
+            "schedule": reminder.get("schedule") or {},
+        }
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+    async def handle_webui(self, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+
+    async def handle_macos(self, args, llm_client, context=None):
+        try:
+            return await self.handle_webui(args, llm_client, context=context)
+        except TypeError:
+            return await self.handle_webui(args, llm_client)
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+    async def handle_homeassistant(self, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._schedule(args, llm_client)
+
+
+verba = AITasksPlugin()

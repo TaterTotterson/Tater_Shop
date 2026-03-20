@@ -9,22 +9,22 @@ CORE_MANIFEST = ROOT / "core_manifest.json"
 PORTAL_MANIFEST = ROOT / "portal_manifest.json"
 README = ROOT / "README.md"
 
-BEGIN = "<!-- AUTO:PLUGIN_TABLES:BEGIN -->"
-END = "<!-- AUTO:PLUGIN_TABLES:END -->"
+BEGIN = "<!-- AUTO:VERBA_TABLES:BEGIN -->"
+END = "<!-- AUTO:VERBA_TABLES:END -->"
 
 
 def md_escape(s: str) -> str:
     return (s or "").replace("\n", " ").replace("|", "\\|").strip()
 
 
-def plugin_surfaces(p: dict) -> list[str]:
+def verba_surfaces(p: dict) -> list[str]:
     return list(p.get("portals") or [])
 
 
-def plugin_row(p: dict) -> str:
+def verba_row(p: dict) -> str:
     pid = md_escape(p.get("id", ""))
     desc = md_escape(p.get("description", ""))
-    portals = md_escape(", ".join(plugin_surfaces(p)))
+    portals = md_escape(", ".join(verba_surfaces(p)))
     return f"| `{pid}` | {desc} | {portals} |"
 
 
@@ -42,11 +42,11 @@ def portal_row(p: dict) -> str:
     return f"| `{pid}` | `{module_key}` | {desc} |"
 
 
-def build_plugin_tables(plugins: list[dict]) -> str:
-    plugins = sorted(plugins, key=lambda x: (x.get("id") or "").lower())
+def build_verba_tables(verbas: list[dict]) -> str:
+    verbas = sorted(verbas, key=lambda x: (x.get("id") or "").lower())
 
     def portals(p):
-        return set(plugin_surfaces(p))
+        return set(verba_surfaces(p))
 
     def is_notifier(p):
         return ("notifier" in portals(p)) or bool(p.get("notifier", False))
@@ -54,9 +54,9 @@ def build_plugin_tables(plugins: list[dict]) -> str:
     def is_automation(p):
         return "automation" in portals(p)
 
-    interactive = [p for p in plugins if (not is_notifier(p)) and (not is_automation(p))]
-    automation = [p for p in plugins if is_automation(p)]
-    notifiers = [p for p in plugins if is_notifier(p)]
+    interactive = [p for p in verbas if (not is_notifier(p)) and (not is_automation(p))]
+    automation = [p for p in verbas if is_automation(p)]
+    notifiers = [p for p in verbas if is_notifier(p)]
 
     def table_block(title: str, items: list[dict]) -> str:
         if not items:
@@ -64,18 +64,18 @@ def build_plugin_tables(plugins: list[dict]) -> str:
         lines = [
             f"### {title}",
             "",
-            "| Plugin Name | Description | Portals |",
+            "| Verba ID | Description | Portals |",
             "|------------|-------------|----------|",
         ]
-        lines += [plugin_row(p) for p in items]
+        lines += [verba_row(p) for p in items]
         lines.append("")
         return "\n".join(lines)
 
     out = []
-    out.append("## 🧩 Verba Plugin Store\n")
-    out.append(table_block("💬 Interactive / Conversational Plugins", interactive))
-    out.append(table_block("⚙️ Automation Plugins (Home Assistant)", automation))
-    out.append(table_block("📡 RSS Notifier Plugins", notifiers))
+    out.append("## 🧩 Verba Store\n")
+    out.append(table_block("💬 Interactive / Conversational Verbas", interactive))
+    out.append(table_block("⚙️ Automation Verbas (Home Assistant)", automation))
+    out.append(table_block("📡 RSS Notifier Verbas", notifiers))
     return "\n".join(out).strip() + "\n"
 
 
@@ -124,13 +124,13 @@ def load_manifest_items(path: Path, key: str) -> list[dict]:
 
 
 def build_generated_block() -> str:
-    plugins = load_manifest_items(MANIFEST, "plugins")
+    verbas = load_manifest_items(MANIFEST, "verbas")
     cores = load_manifest_items(CORE_MANIFEST, "cores")
     portals = load_manifest_items(PORTAL_MANIFEST, "portals")
-    plugin_text = build_plugin_tables(plugins)
+    verba_text = build_verba_tables(verbas)
     core_text = build_core_table(cores)
     portal_text = build_portal_table(portals)
-    return (core_text + "\n" + portal_text + "\n" + plugin_text).strip() + "\n"
+    return (core_text + "\n" + portal_text + "\n" + verba_text).strip() + "\n"
 
 
 def main() -> None:

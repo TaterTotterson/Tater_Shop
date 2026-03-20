@@ -6,7 +6,7 @@ import logging
 import asyncio
 from dotenv import load_dotenv
 import re
-import plugin_registry as pr
+import verba_registry as pr
 import time
 import irc3
 from notify.queue import is_expired
@@ -18,8 +18,8 @@ from admin_gate import (
     is_admin_only_plugin,
     normalize_admin_list,
 )
-from plugin_result import action_failure
-from plugin_kernel import plugin_supports_platform
+from verba_result import action_failure
+from verba_kernel import verba_supports_platform
 from cerberus import run_cerberus_turn, resolve_agent_limits
 __version__ = "1.0.0"
 
@@ -390,7 +390,7 @@ def _find_prev_user_message(channel: str, sender: str, bot_name: str, exclude_te
     return ""
 
 def get_plugin_enabled(name):
-    enabled = redis_client.hget("plugin_enabled", name)
+    enabled = redis_client.hget("verba_enabled", name)
     return enabled and enabled.lower() == "true"
 
 def save_irc_message(channel, role, username, content):
@@ -457,7 +457,7 @@ async def on_message(self, mask, event, target, data):
     history = load_irc_history(channel=target)
     messages = history
     platform_preamble = build_system_prompt()
-    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = get_plugin_enabled
 
     try:
@@ -475,7 +475,7 @@ async def on_message(self, mask, event, target, data):
         async def _wait_callback(func_name, plugin_obj):
             if not plugin_obj:
                 return
-            if not plugin_supports_platform(plugin_obj, "irc"):
+            if not verba_supports_platform(plugin_obj, "irc"):
                 return
             if not hasattr(plugin_obj, "waiting_prompt_template"):
                 return

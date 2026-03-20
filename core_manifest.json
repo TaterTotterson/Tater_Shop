@@ -13,7 +13,7 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "4c5280833de8d938d9b811581be9584d3e889fbc63775179f58011d5401b7311"
+      "sha256": "7faa0439747784a8d1f0864de53e42d38c50638fa489bc126afbe3a82655f877"
     },
     {
       "id": "memory",

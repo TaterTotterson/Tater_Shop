@@ -10,7 +10,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-import plugin_registry as pr
+import verba_registry as pr
 import threading
 import time
 from io import BytesIO
@@ -27,8 +27,8 @@ from helpers import (
 from admin_gate import (
     is_admin_only_plugin,
 )
-from plugin_result import action_failure
-from plugin_kernel import plugin_display_name
+from verba_result import action_failure
+from verba_kernel import verba_display_name
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 __version__ = "1.0.1"
@@ -359,7 +359,7 @@ def _enforce_user_assistant_alternation(loop_messages):
 
 
 def get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 
@@ -853,7 +853,7 @@ class discord_portal(commands.Bot):
         history = await self.load_history(message.channel.id)
         messages_list = history
         platform_preamble = self.build_system_prompt()
-        merged_registry = dict(pr.get_registry_snapshot() or {})
+        merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = get_plugin_enabled
 
         async with safe_typing(message.channel):
@@ -896,7 +896,7 @@ class discord_portal(commands.Bot):
 
                     if needs_admin and not self._admin_allowed(getattr(message.author, "id", None)):
                         plugin_obj = merged_registry.get(func_name)
-                        pretty = plugin_display_name(plugin_obj) if plugin_obj else func_name
+                        pretty = verba_display_name(plugin_obj) if plugin_obj else func_name
                         msg = (
                             "This tool is restricted to the configured admin user on Discord."
                             if self.admin_user_id

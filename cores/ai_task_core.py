@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 
-import plugin_registry as pr
-from plugin_base import ToolPlugin
-from plugin_kernel import plugin_supports_platform
+import verba_registry as pr
+from verba_base import ToolVerba
+from verba_kernel import verba_supports_platform
 from helpers import (
     get_llm_client_from_env,
 )
@@ -104,12 +104,12 @@ class _StubMatrixClient:
     pass
 
 
-def _has_platform_handler(plugin: ToolPlugin, platform: str) -> bool:
+def _has_platform_handler(plugin: ToolVerba, platform: str) -> bool:
     handler_name = f"handle_{platform}"
     method = getattr(plugin.__class__, handler_name, None)
     if not callable(method):
         return False
-    base = getattr(ToolPlugin, handler_name, None)
+    base = getattr(ToolVerba, handler_name, None)
     if base is None:
         return True
     return method is not base
@@ -181,7 +181,7 @@ def _build_platform_context(
 
 
 def get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 
@@ -495,23 +495,23 @@ def _flatten_result_payload(res: Any) -> Tuple[str, List[Dict[str, Any]]]:
     return str(res).strip(), []
 
 
-def _has_webui_handler(plugin: ToolPlugin) -> bool:
+def _has_webui_handler(plugin: ToolVerba) -> bool:
     method = getattr(plugin.__class__, "handle_webui", None)
-    base = getattr(ToolPlugin, "handle_webui", None)
+    base = getattr(ToolVerba, "handle_webui", None)
     return callable(method) and method is not base
 
 
-def _has_automation_handler(plugin: ToolPlugin) -> bool:
+def _has_automation_handler(plugin: ToolVerba) -> bool:
     return callable(getattr(plugin, "handle_automation", None))
 
 
-def _supports_scheduled_tools(plugin_name: str, plugin: ToolPlugin, platform: str) -> bool:
+def _supports_scheduled_tools(plugin_name: str, plugin: ToolVerba, platform: str) -> bool:
     if plugin_name in SCHEDULER_EXCLUDED_TOOLS:
         return False
     if getattr(plugin, "notifier", False):
         return False
 
-    if not plugin_supports_platform(plugin, platform):
+    if not verba_supports_platform(plugin, platform):
         return False
     return _has_platform_handler(plugin, platform)
 
@@ -580,7 +580,7 @@ async def _render_scheduled_message(
         {"role": "user", "content": user_prompt},
     ]
 
-    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = get_plugin_enabled
 
     def _enabled(name: str) -> bool:
@@ -945,7 +945,7 @@ def _ai_tasks_ui_parse_schedule_input(raw_value: str) -> Tuple[Optional[Dict[str
         return None, "Schedule is required."
 
     try:
-        from plugins.ai_tasks import AITasksPlugin
+        from verba.ai_tasks import AITasksPlugin
 
         parser = AITasksPlugin()
         now_ts = float(time.time())

@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-import plugin_registry as pr
+import verba_registry as pr
 from notify.queue import is_expired
 from notify.media import load_queue_attachments
 
@@ -30,7 +30,7 @@ from admin_gate import (
     is_admin_only_plugin,
     normalize_admin_list,
 )
-from plugin_result import action_failure
+from verba_result import action_failure
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 
@@ -453,7 +453,7 @@ def _admin_user_allowed(sender: str) -> bool:
     return bool(_matrix_user_tokens(sender) & allowed)
 
 def get_plugin_enabled(name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", name)
+    enabled = redis_client.hget("verba_enabled", name)
     return bool(enabled and enabled.lower() == "true")
 
 def _room_history_key(room_id: str) -> str:
@@ -1448,7 +1448,7 @@ class MatrixPlatform:
         system_prompt = build_system_prompt()
         history = load_matrix_history(room.room_id)
         messages = history
-        merged_registry = dict(pr.get_registry_snapshot() or {})
+        merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = get_plugin_enabled
 
         async with self.typing(room.room_id):

@@ -15,15 +15,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-import plugin_registry as pr
+import verba_registry as pr
 from cerberus import resolve_agent_limits, run_cerberus_turn
 from conversation_artifacts import load_conversation_artifacts, save_conversation_artifacts
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 from notify.core import dispatch_notification_sync
 from notify.media import load_queue_attachments
 from notify.queue import is_expired as notify_item_is_expired, queue_key as notify_queue_key
-from plugin_kernel import plugin_supports_platform
-from plugin_result import narrate_result, result_artifacts
+from verba_kernel import verba_supports_platform
+from verba_result import narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
 __version__ = "1.0.0"
 
@@ -184,7 +184,7 @@ def _get_str_setting(name: str, default: str = "") -> str:
 
 
 def get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 
@@ -779,7 +779,7 @@ async def _emit_tool_wait_message(
 ) -> None:
     if _llm is None or plugin_obj is None:
         return
-    if not plugin_supports_platform(plugin_obj, "macos"):
+    if not verba_supports_platform(plugin_obj, "macos"):
         return
 
     template = str(getattr(plugin_obj, "waiting_prompt_template", "") or "").strip()
@@ -1076,7 +1076,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             llm_client=_llm,
             platform="macos",
             history_messages=history,
-            registry=dict(pr.get_registry_snapshot() or {}),
+            registry=dict(pr.get_verba_registry_snapshot() or {}),
             enabled_predicate=get_plugin_enabled,
             context=runtime_context,
             user_text=effective_user_text,
@@ -1194,7 +1194,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
         request_text=request_text,
         device_id=str(payload.device_id or "").strip(),
     )
-    registry_snapshot = dict(pr.get_registry_snapshot() or {})
+    registry_snapshot = dict(pr.get_verba_registry_snapshot() or {})
     plugin_name = str(payload.plugin_name or "").strip()
     plugin_obj = registry_snapshot.get(plugin_name)
     mention_target = str(context_payload.get("device_name") or "there").strip() or "there"

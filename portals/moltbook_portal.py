@@ -1363,12 +1363,12 @@ class MoltbookPortal:
         return out
 
     def _collect_enabled_verbas(self) -> List[Dict[str, str]]:
-        plugin_dir = self._resolve_surface_dir("TATER_PLUGIN_DIR", "plugins")
+        plugin_dir = self._resolve_surface_dir("TATER_VERBA_DIR", "verba")
         if not plugin_dir.exists() or not plugin_dir.is_dir():
             return []
 
         try:
-            enabled_map = self.redis.hgetall("plugin_enabled") or {}
+            enabled_map = self.redis.hgetall("verba_enabled") or {}
         except Exception:
             enabled_map = {}
 

@@ -18,7 +18,7 @@ import aiohttp
 from helpers import (
     get_llm_client_from_env,
 )
-import plugin_registry as pr
+import verba_registry as pr
 from cerberus import run_cerberus_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
@@ -231,7 +231,7 @@ class NotificationsOut(BaseModel):
 
 # -------------------- Plugin gating --------------------
 def get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 # -------------------- Stable conversation key (CRITICAL for continued chat) --------------------
@@ -450,8 +450,8 @@ class _HA:
         # Backward-compatible fallback (legacy storage)
         if not base or not token:
             legacy = (
-                redis_client.hgetall("plugin_settings: Home Assistant")
-                or redis_client.hgetall("plugin_settings:Home Assistant")
+                redis_client.hgetall("verba_settings: Home Assistant")
+                or redis_client.hgetall("verba_settings:Home Assistant")
                 or {}
             )
             base = base or (legacy.get("HA_BASE_URL") or "").strip()
@@ -988,7 +988,7 @@ async def handle_message(payload: HARequest):
 
     logger.debug(f"[HA Bridge] LLM last role = {messages_list[-1]['role']} (conv_key={conv_key})")
 
-    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = get_plugin_enabled
 
     try:
