@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-import plugin_registry as pr
+import verba_registry as pr
 from helpers import get_llm_client_from_env, build_llm_host_from_env
 __version__ = "1.0.0"
 
@@ -157,7 +157,7 @@ class EventsOut(BaseModel):
 
 # -------------------- Gating helpers --------------------
 def _plugin_enabled(name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", name)
+    enabled = redis_client.hget("verba_enabled", name)
     return bool(enabled and enabled.lower() == "true")
 
 def _is_automation_plugin(p) -> bool:
@@ -261,7 +261,7 @@ async def call_tool(tool_name: str, payload: ToolCallRequest):
     if not func_name:
         raise HTTPException(status_code=400, detail="Missing tool_name")
 
-    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = _plugin_enabled
     plugin = merged_registry.get(func_name)
     if not plugin:

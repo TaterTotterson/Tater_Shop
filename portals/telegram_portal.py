@@ -15,8 +15,8 @@ import redis
 import requests
 from dotenv import load_dotenv
 
-import plugin_registry as pr
-from plugin_base import ToolPlugin
+import verba_registry as pr
+from verba_base import ToolVerba
 from notify.media import load_queue_attachments
 from notify.queue import is_expired
 from helpers import (
@@ -26,7 +26,7 @@ from helpers import (
 from admin_gate import (
     is_admin_only_plugin,
 )
-from plugin_result import action_failure
+from verba_result import action_failure
 from cerberus import run_cerberus_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 __version__ = "1.0.0"
@@ -298,7 +298,7 @@ def _telegram_sender_identity(message: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 
@@ -306,7 +306,7 @@ def _is_custom_handler(plugin: Any, method_name: str) -> bool:
     method = getattr(plugin, method_name, None)
     if not callable(method):
         return False
-    base = getattr(ToolPlugin, method_name, None)
+    base = getattr(ToolVerba, method_name, None)
     impl = getattr(plugin.__class__, method_name, None)
     return impl is not None and impl is not base
 
@@ -1108,7 +1108,7 @@ class TelegramPlatform:
         system_prompt = self.build_system_prompt()
         history = self._load_history(chat_id)
         messages = history
-        merged_registry = dict(pr.get_registry_snapshot() or {})
+        merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = _get_plugin_enabled
 
         try:
@@ -1349,7 +1349,7 @@ class TelegramPlatform:
 
 def _load_portal_settings() -> Dict[str, Any]:
     settings = redis_client.hgetall("telegram_portal_settings") or {}
-    legacy = redis_client.hgetall("plugin_settings:Telegram Notifier") or {}
+    legacy = redis_client.hgetall("verba_settings:Telegram Notifier") or {}
 
     token = (
         str(settings.get("telegram_bot_token") or "").strip()

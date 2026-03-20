@@ -10,7 +10,7 @@ import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
-import plugin_registry as pr
+import verba_registry as pr
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
@@ -92,7 +92,7 @@ def _get_str_setting(name: str, default: str = "") -> str:
 
 # -------------------- Plugin gating --------------------
 def _get_plugin_enabled(plugin_name: str) -> bool:
-    enabled = redis_client.hget("plugin_enabled", plugin_name)
+    enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
 
 # -------------------- History helpers --------------------
@@ -257,7 +257,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
 
     await _save_message(session_id, "user", text_in, history_max, session_ttl)
 
-    merged_registry = dict(pr.get_registry_snapshot() or {})
+    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = _get_plugin_enabled
 
     try:

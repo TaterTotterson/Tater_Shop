@@ -7,18 +7,18 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGINS_DIR = ROOT / "plugins"
+VERBA_DIR = ROOT / "verba"
 MANIFEST_PATH = ROOT / "manifest.json"
 SCHEMA_VERSION = 1
 
 FIELDS = {
     "name",
-    "plugin_name",
+    "verba_name",
     "pretty_name",
     "version",
     "min_tater_version",
     "description",
-    "plugin_dec",
+    "verba_dec",
     "platforms",
     "portals",
     "notifier",
@@ -67,7 +67,7 @@ def ensure_tag(values: list[str], tag: str) -> list[str]:
     return values
 
 
-def extract_plugin_meta(py_file: Path) -> dict:
+def extract_verba_meta(py_file: Path) -> dict:
     tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
 
     class_assigns = {}
@@ -81,7 +81,7 @@ def extract_plugin_meta(py_file: Path) -> dict:
             elif isinstance(b, ast.Attribute):
                 base_names.append(b.attr)
 
-        looks_like_plugin = ("ToolPlugin" in base_names)
+        looks_like_verba = ("ToolVerba" in base_names)
 
         assigns = {}
         for stmt in n.body:
@@ -92,13 +92,13 @@ def extract_plugin_meta(py_file: Path) -> dict:
                     if val is not None:
                         assigns[key] = val
 
-        if looks_like_plugin or ("name" in assigns and ("portals" in assigns or "platforms" in assigns)):
+        if looks_like_verba or ("name" in assigns and ("portals" in assigns or "platforms" in assigns)):
             class_assigns = assigns
             break
 
     pid = class_assigns.get("name") or py_file.stem
-    display = class_assigns.get("plugin_name") or class_assigns.get("pretty_name") or pid
-    desc = class_assigns.get("plugin_dec") or class_assigns.get("description") or ""
+    display = class_assigns.get("verba_name") or class_assigns.get("pretty_name") or pid
+    desc = class_assigns.get("verba_dec") or class_assigns.get("description") or ""
 
     surfaces = normalize_surfaces(class_assigns.get("portals") or class_assigns.get("platforms") or [])
     is_notifier = bool(class_assigns.get("notifier", False))
@@ -119,26 +119,26 @@ def extract_plugin_meta(py_file: Path) -> dict:
 
 
 def main():
-    if not PLUGINS_DIR.exists():
-        raise SystemExit(f"Missing plugins dir: {PLUGINS_DIR}")
+    if not VERBA_DIR.exists():
+        raise SystemExit(f"Missing verba dir: {VERBA_DIR}")
 
-    plugins = []
+    verbas = []
     errors = []
 
-    for py_file in sorted(PLUGINS_DIR.glob("*.py")):
+    for py_file in sorted(VERBA_DIR.glob("*.py")):
         if py_file.name.startswith("_"):
             continue
 
         rel_entry = str(py_file.relative_to(ROOT)).replace("\\", "/")
         try:
-            meta = extract_plugin_meta(py_file)
+            meta = extract_verba_meta(py_file)
             meta["entry"] = rel_entry
             meta["sha256"] = sha256_file(py_file)
-            plugins.append(meta)
+            verbas.append(meta)
         except Exception as e:
             errors.append({"file": py_file.name, "error": str(e)})
 
-    manifest = {"schema": SCHEMA_VERSION, "plugins": plugins}
+    manifest = {"schema": SCHEMA_VERSION, "verbas": verbas}
     MANIFEST_PATH.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8"
@@ -150,7 +150,7 @@ def main():
             print(f" - {err['file']}: {err['error']}")
         raise SystemExit(1)
 
-    print(f"Wrote {MANIFEST_PATH} with {len(plugins)} plugins")
+    print(f"Wrote {MANIFEST_PATH} with {len(verbas)} verbas")
 
 
 if __name__ == "__main__":

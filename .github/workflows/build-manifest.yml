@@ -3,7 +3,7 @@ name: Build manifests
 on:
   push:
     paths:
-      - "plugins/**/*.py"
+      - "verba/**/*.py"
       - "cores/**/*.py"
       - "portals/**/*.py"
       - "tools/generate_manifest.py"
@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate plugin manifest
+      - name: Generate verba manifest
         run: python tools/generate_manifest.py
 
       - name: Generate core manifest

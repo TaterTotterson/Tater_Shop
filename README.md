@@ -6,7 +6,7 @@
   />
 </p>
 
-<!-- AUTO:PLUGIN_TABLES:BEGIN -->
+<!-- AUTO:VERBA_TABLES:BEGIN -->
 ## 🧠 Core Store
 
 | Core ID | Module | Description |
@@ -30,11 +30,11 @@
 | `telegram` | `telegram_portal` | Telegram integration portal for Tater. |
 | `xbmc` | `xbmc_portal` | XBMC / Original Xbox integration portal for Tater. |
 
-## 🧩 Verba Plugin Store
+## 🧩 Verba Store
 
-### 💬 Interactive / Conversational Plugins
+### 💬 Interactive / Conversational Verbas
 
-| Plugin Name | Description | Portals |
+| Verba ID | Description | Portals |
 |------------|-------------|----------|
 | `ai_tasks` | Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling. | discord, irc, matrix, homeassistant, telegram, webui, macos |
 | `automatic_plugin` | Create one image from a natural-language image request. | discord, webui, macos, telegram |
@@ -73,9 +73,9 @@
 | `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |
 | `youtube_summary` | Summarize a YouTube video using its transcript. | discord, webui, macos, irc, matrix, telegram |
 
-### ⚙️ Automation Plugins (Home Assistant)
+### ⚙️ Automation Verbas (Home Assistant)
 
-| Plugin Name | Description | Portals |
+| Verba ID | Description | Portals |
 |------------|-------------|----------|
 | `camera_event` | Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier. | automation |
 | `doorbell_alert` | Handle doorbell events: snapshot, describe with vision, announce, and log notifications. | automation |
@@ -83,8 +83,8 @@
 | `weather_brief` | Give a short automation-friendly recap of recent weather conditions. | automation |
 | `zen_greeting` | Generate a calming daily greeting and message for dashboards. | automation |
 
-### 📡 RSS Notifier Plugins
+### 📡 RSS Notifier Verbas
 
 *(none)*
 
-<!-- AUTO:PLUGIN_TABLES:END -->
+<!-- AUTO:VERBA_TABLES:END -->
