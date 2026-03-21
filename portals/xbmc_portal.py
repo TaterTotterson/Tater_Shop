@@ -21,7 +21,7 @@ from helpers import (
     build_llm_host_from_env,
 )
 import verba_registry as pr
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 __version__ = "1.0.0"
 
 
@@ -338,7 +338,7 @@ async def handle_message(payload: XBMCRequest):
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=_llm,
             platform="xbmc",
             history_messages=messages_list,

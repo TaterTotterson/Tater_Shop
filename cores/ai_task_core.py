@@ -18,7 +18,7 @@ from verba_kernel import verba_supports_platform
 from helpers import (
     get_llm_client_from_env,
 )
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 from notify import dispatch_notification
 
 from dotenv import load_dotenv
@@ -617,7 +617,7 @@ async def _render_scheduled_message(
         return None
 
     agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-    result = await run_cerberus_turn(
+    result = await run_hydra_turn(
         llm_client=llm_client,
         platform=platform,
         history_messages=messages,

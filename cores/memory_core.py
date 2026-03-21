@@ -86,20 +86,20 @@ CORE_SETTINGS = {
             "default": 2700,
             "description": "Max completion tokens for memory extraction.",
         },
-        "cerberus_max_items": {
-            "label": "Cerberus Memory Items",
+        "hydra_max_items": {
+            "label": "Hydra Memory Items",
             "type": "number",
             "default": 12,
             "description": "Max memory facts injected per scope (user and room).",
         },
-        "cerberus_value_max_chars": {
-            "label": "Cerberus Value Chars",
+        "hydra_value_max_chars": {
+            "label": "Hydra Value Chars",
             "type": "number",
             "default": 288,
             "description": "Max characters per memory fact value in context.",
         },
-        "cerberus_summary_max_chars": {
-            "label": "Cerberus Summary Chars",
+        "hydra_summary_max_chars": {
+            "label": "Hydra Summary Chars",
             "type": "number",
             "default": 2100,
             "description": "Max characters for user/room memory summaries in context.",

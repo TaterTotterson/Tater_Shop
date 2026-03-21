@@ -15,7 +15,7 @@ from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
 )
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 __version__ = "1.0.0"
 
 
@@ -270,7 +270,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=_llm,
             platform="homekit",
             history_messages=messages_list,

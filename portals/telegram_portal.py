@@ -27,7 +27,7 @@ from admin_gate import (
     is_admin_only_plugin,
 )
 from verba_result import action_failure
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 __version__ = "1.0.0"
 
@@ -1162,7 +1162,7 @@ class TelegramPlatform:
             artifacts = []
             async with self._safe_typing(chat_id):
                 agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-                result = await run_cerberus_turn(
+                result = await run_hydra_turn(
                     llm_client=self.llm,
                     platform="telegram",
                     history_messages=messages,

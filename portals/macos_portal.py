@@ -16,7 +16,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 import verba_registry as pr
-from cerberus import resolve_agent_limits, run_cerberus_turn
+from hydra import resolve_agent_limits, run_hydra_turn
 from conversation_artifacts import load_conversation_artifacts, save_conversation_artifacts
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
 from notify.core import dispatch_notification_sync
@@ -1072,7 +1072,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
 
     try:
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=_llm,
             platform="macos",
             history_messages=history,

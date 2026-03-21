@@ -20,7 +20,7 @@ from admin_gate import (
 )
 from verba_result import action_failure
 from verba_kernel import verba_supports_platform
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 __version__ = "1.0.0"
 
 
@@ -516,7 +516,7 @@ async def on_message(self, mask, event, target, data):
             return None
 
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=llm_client,
             platform="irc",
             history_messages=messages,
