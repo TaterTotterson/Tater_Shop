@@ -29,7 +29,7 @@ from admin_gate import (
 )
 from verba_result import action_failure
 from verba_kernel import verba_display_name
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
 __version__ = "1.0.1"
 
@@ -911,7 +911,7 @@ class discord_portal(commands.Bot):
                     return None
 
                 agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-                result = await run_cerberus_turn(
+                result = await run_hydra_turn(
                     llm_client=self.llm,
                     platform="discord",
                     history_messages=messages_list,

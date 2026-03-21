@@ -2464,7 +2464,7 @@ class MoltbookPortal:
     def _get_local_model_hint(self) -> str:
         keys = (
             "TATER_LLM_MODEL",
-            "CERBERUS_MODEL",
+            "HYDRA_MODEL",
             "LLM_MODEL",
             "OPENAI_MODEL",
             "OLLAMA_MODEL",
@@ -5872,7 +5872,7 @@ class MoltbookPortal:
 
     def _build_identity_context(self, config: MoltbookConfig) -> str:
         identity_line = (
-            "I am not an OpenClaw agent. I run on Tater with the Cerberus Core and a modular architecture "
+            "I am not an OpenClaw agent. I run on Tater with the Hydra Core and a modular architecture "
             "of Verbas, Portals, and Cores."
         )
         personality = self._get_tater_personality()

@@ -19,7 +19,7 @@ from helpers import (
     get_llm_client_from_env,
 )
 import verba_registry as pr
-from cerberus import run_cerberus_turn, resolve_agent_limits
+from hydra import run_hydra_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
 __version__ = "1.0.0"
@@ -977,7 +977,7 @@ async def handle_message(payload: HARequest):
     # Save the user turn
     await _save_message(conv_key, "user", text_in, history_max)
 
-    # Build the messages list: shaped history only (Cerberus applies platform preamble)
+    # Build the messages list: shaped history only (Hydra applies platform preamble)
     system_prompt = build_system_prompt(ctx if ctx else None)
     loop_messages = await _load_history(conv_key, history_max)
     messages_list = loop_messages
@@ -1003,7 +1003,7 @@ async def handle_message(payload: HARequest):
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-        result = await run_cerberus_turn(
+        result = await run_hydra_turn(
             llm_client=_llm,
             platform="homeassistant",
             history_messages=messages_list,
