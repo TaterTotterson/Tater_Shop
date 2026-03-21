@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "e6f7c5c594d7f2b27cd019c60a2ce26a0a2d64701af09cadbfab352c78ff6e38"
+      "sha256": "bc640722c9aecd65ea50649f111ac2f7e89b0523f00fac87692279940ae28f77"
     },
     {
       "id": "ha_automations",
@@ -41,7 +41,7 @@
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "8c81b9d752d70a89a0d15f070a2c5eadf6bb4ff7b61981ab2d78eb774e43bf6a"
+      "sha256": "8953ed4754f1e337c07cbf2bac401855ab64b75aadd386df03652e19dd205258"
     },
     {
       "id": "homekit",
@@ -55,7 +55,7 @@
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "e0ed254abfe236958418d2b085df9f99c80e4f8ea0c8984b7bb53a1cf708181d"
+      "sha256": "e3dc6f0d19b9c5d1d8ff7a4149b062702d1c0d54a61d1ad634bfe4efe54c0c05"
     },
     {
       "id": "irc",
@@ -69,7 +69,7 @@
       "autostart_key": "irc_portal_running",
       "tags": [],
       "entry": "portals/irc_portal.py",
-      "sha256": "49aec592d3d3e66673c33cc5cab48cc936fe323b83cabebee23f492106db02bf"
+      "sha256": "47b26a536a1d032231bc43163fe72f9d4ea122b30a2962f654f7813003354b2a"
     },
     {
       "id": "macos",
@@ -83,7 +83,7 @@
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "ea90d186c4a7107e7991fff01d3d26d0f4530256f64b8ad6b131143bea2ad0cc"
+      "sha256": "f48f3f760e1ea2219425d80b23743c467a090fc64789131379ab9ed300bfd21a"
     },
     {
       "id": "matrix",
@@ -97,7 +97,7 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "feddf79e752f426511dc4b933bcabc27c8d7dd9054aeb2462fd6e0293ad5f54b"
+      "sha256": "b5bf006a1211300e2ff75feea3ecfe36009125275b3499be04a065a039db515f"
     },
     {
       "id": "moltbook",
@@ -115,7 +115,7 @@
         "learning"
       ],
       "entry": "portals/moltbook_portal.py",
-      "sha256": "fa4723364ad69e1029db6f673fb5d2ec4dad02bbcdbb761f7889f92d62b847c7"
+      "sha256": "9edd0e5a81d8f2365fcee7ededd0838190221534deaa7c7bee78a8700bafbe3b"
     },
     {
       "id": "telegram",
@@ -129,7 +129,7 @@
       "autostart_key": "telegram_portal_running",
       "tags": [],
       "entry": "portals/telegram_portal.py",
-      "sha256": "67876e6d4db72ee96dac1e0aefb8de7c63aa4de899537a27149c8b6df631a893"
+      "sha256": "c4259d5f458504ea955f3c417efda0131669ab450047a2d4f810e88c200df81a"
     },
     {
       "id": "xbmc",
@@ -143,7 +143,7 @@
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "2974a948f9db3272402196f18c13b39c49b8732040de1643e82dcc84cdcf9e8c"
+      "sha256": "ca52ffa2d35e912d422933bc5fb91a38aa11055924895b0b803c0cf095bbcaca"
     }
   ]
 }
