@@ -36,7 +36,6 @@
 
 | Verba ID | Description | Portals |
 |------------|-------------|----------|
-| `ai_tasks` | Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling. | discord, irc, matrix, homeassistant, telegram, webui, macos |
 | `automatic_plugin` | Create one image from a natural-language image request. | discord, webui, macos, telegram |
 | `broadcast` | Send a one-time spoken announcement to your Home Assistant media players. | homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc |
 | `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, macos, homeassistant, matrix, telegram |

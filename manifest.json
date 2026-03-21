@@ -2,27 +2,6 @@
   "schema": 1,
   "verbas": [
     {
-      "id": "ai_tasks",
-      "name": "AI Tasks",
-      "version": "1.2.9",
-      "min_tater_version": "59",
-      "description": "Schedule recurring AI tasks using natural phrases or cron-like schedules in local time. Prefer passing `task_prompt` as a concise execution instruction and `when`/`cron` for scheduling.",
-      "portals": [
-        "discord",
-        "irc",
-        "matrix",
-        "homeassistant",
-        "telegram",
-        "webui",
-        "macos"
-      ],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [],
-      "entry": "verba/ai_tasks.py",
-      "sha256": "95d2ef29aeb518d9d35f0ede05fae41a6534ce6477cf2fa6fddf489aabe377a8"
-    },
-    {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
       "version": "1.2.1",
