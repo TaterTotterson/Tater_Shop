@@ -75,7 +75,7 @@
       "id": "macos",
       "name": "macOS",
       "module_key": "macos_portal",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "macOS integration portal for Tater.",
       "settings_category": "macOS Settings",
@@ -83,7 +83,7 @@
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "4be43cf197ce3698b422b32630df7f44a31c2354a8c02ecf2a5f717184218a01"
+      "sha256": "0beb1faec45b938df53f543f2f044b738c9a0533a4efaed9107f8bdac1b29794"
     },
     {
       "id": "matrix",
