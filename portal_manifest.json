@@ -23,11 +23,11 @@
       "min_tater_version": "59",
       "description": "Automation integration portal for Tater.",
       "settings_category": "Automation Settings",
-      "required_settings_count": 2,
+      "required_settings_count": 4,
       "autostart_key": "ha_automations_portal_running",
       "tags": [],
       "entry": "portals/ha_automations_portal.py",
-      "sha256": "85ad83ff590c72913f9e4cd104b148277dffde297d7a8de37a2bbca890df6110"
+      "sha256": "ec8c43c6f1ed1e364c6cc19a333938a2a0a4282b0b9458b6c447095580f1ee8b"
     },
     {
       "id": "homeassistant",
@@ -37,11 +37,11 @@
       "min_tater_version": "59",
       "description": "Home Assistant integration portal for Tater.",
       "settings_category": "Home Assistant Settings",
-      "required_settings_count": 12,
+      "required_settings_count": 14,
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "edc98ea49c803c4bfae1f7b239926d5f469aa6959d2703e0b45e6812a167ab18"
+      "sha256": "ce1378f74d5c9008fcf29b01fca10ffc29b80ece8e8638867a8d1e2e734ea9e5"
     },
     {
       "id": "homekit",
@@ -51,11 +51,11 @@
       "min_tater_version": "59",
       "description": "HomeKit / Siri integration portal for Tater.",
       "settings_category": "HomeKit / Siri",
-      "required_settings_count": 5,
+      "required_settings_count": 7,
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "522189d380521f97458d6b5441543039c1b2e028ece19d2353579ca1af56c402"
+      "sha256": "c577b0df49e654276b85794aacba747cea9be3066cf260b0bce342b4180f19fa"
     },
     {
       "id": "irc",
@@ -79,11 +79,11 @@
       "min_tater_version": "59",
       "description": "macOS integration portal for Tater.",
       "settings_category": "macOS Settings",
-      "required_settings_count": 5,
+      "required_settings_count": 7,
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "0ff8521a9cb74e1f756c9d245f3bc8e10eb8c140b3e13252c7e7f015dbeba0a3"
+      "sha256": "938a5739f0aa4433576daaaa8a9e481cba554108b57918e5bca45639ea656aeb"
     },
     {
       "id": "matrix",
@@ -103,7 +103,7 @@
       "id": "moltbook",
       "name": "Moltbook",
       "module_key": "moltbook_portal",
-      "version": "1.0.69",
+      "version": "1.0.71",
       "min_tater_version": "59",
       "description": "Moltbook social/research integration portal for Tater.",
       "settings_category": "Moltbook Settings",
@@ -115,7 +115,7 @@
         "learning"
       ],
       "entry": "portals/moltbook_portal.py",
-      "sha256": "2cb011bdd26216b4330bba5369abbc06134d6d75598bfa00c4362a0ba726ae1b"
+      "sha256": "b36bd98f745cd6d550b51db8bb3f80bea1c444d3e50dc981c36fb99128ca4479"
     },
     {
       "id": "telegram",
@@ -139,11 +139,11 @@
       "min_tater_version": "59",
       "description": "XBMC / Original Xbox integration portal for Tater.",
       "settings_category": "XBMC / Original Xbox Settings",
-      "required_settings_count": 4,
+      "required_settings_count": 6,
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "292bac55ee57a806af774886f0e44b08175ef444d03fe7ad38757706b073791e"
+      "sha256": "5304b38c009bfbc16f5490c30c40cf230b42729ecccbc172a4217086272f2f80"
     }
   ]
 }
