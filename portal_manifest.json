@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "bc640722c9aecd65ea50649f111ac2f7e89b0523f00fac87692279940ae28f77"
+      "sha256": "3c0df932447b6bef64a44369bda1ab565ae151945cc46ff9081cd7e5043563b2"
     },
     {
       "id": "ha_automations",
@@ -27,7 +27,7 @@
       "autostart_key": "ha_automations_portal_running",
       "tags": [],
       "entry": "portals/ha_automations_portal.py",
-      "sha256": "ad1c02136b848414974479f787e8c93e219ea876044727638436e06b57008f85"
+      "sha256": "85ad83ff590c72913f9e4cd104b148277dffde297d7a8de37a2bbca890df6110"
     },
     {
       "id": "homeassistant",
@@ -41,7 +41,7 @@
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "8953ed4754f1e337c07cbf2bac401855ab64b75aadd386df03652e19dd205258"
+      "sha256": "edc98ea49c803c4bfae1f7b239926d5f469aa6959d2703e0b45e6812a167ab18"
     },
     {
       "id": "homekit",
@@ -55,7 +55,7 @@
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "e3dc6f0d19b9c5d1d8ff7a4149b062702d1c0d54a61d1ad634bfe4efe54c0c05"
+      "sha256": "522189d380521f97458d6b5441543039c1b2e028ece19d2353579ca1af56c402"
     },
     {
       "id": "irc",
@@ -69,7 +69,7 @@
       "autostart_key": "irc_portal_running",
       "tags": [],
       "entry": "portals/irc_portal.py",
-      "sha256": "47b26a536a1d032231bc43163fe72f9d4ea122b30a2962f654f7813003354b2a"
+      "sha256": "3fab80464ce8f15196bf7b6f5c82899c21833615de7abd3f1821805078675e43"
     },
     {
       "id": "macos",
@@ -83,7 +83,7 @@
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "f48f3f760e1ea2219425d80b23743c467a090fc64789131379ab9ed300bfd21a"
+      "sha256": "0ff8521a9cb74e1f756c9d245f3bc8e10eb8c140b3e13252c7e7f015dbeba0a3"
     },
     {
       "id": "matrix",
@@ -97,7 +97,7 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "b5bf006a1211300e2ff75feea3ecfe36009125275b3499be04a065a039db515f"
+      "sha256": "8e1102337324e22f3fef606bfbf87269bde38885719c71ab6f90accafbfce6f6"
     },
     {
       "id": "moltbook",
@@ -115,7 +115,7 @@
         "learning"
       ],
       "entry": "portals/moltbook_portal.py",
-      "sha256": "9edd0e5a81d8f2365fcee7ededd0838190221534deaa7c7bee78a8700bafbe3b"
+      "sha256": "2cb011bdd26216b4330bba5369abbc06134d6d75598bfa00c4362a0ba726ae1b"
     },
     {
       "id": "telegram",
@@ -129,7 +129,7 @@
       "autostart_key": "telegram_portal_running",
       "tags": [],
       "entry": "portals/telegram_portal.py",
-      "sha256": "c4259d5f458504ea955f3c417efda0131669ab450047a2d4f810e88c200df81a"
+      "sha256": "f9bcb75c90e864bf9f623f1e94613f3821b57b1a1656e62775afe010fc9a478b"
     },
     {
       "id": "xbmc",
@@ -143,7 +143,7 @@
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "ca52ffa2d35e912d422933bc5fb91a38aa11055924895b0b803c0cf095bbcaca"
+      "sha256": "292bac55ee57a806af774886f0e44b08175ef444d03fe7ad38757706b073791e"
     }
   ]
 }

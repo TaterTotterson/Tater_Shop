@@ -176,7 +176,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/discord_admin.py",
-      "sha256": "9cc3ce6d248573bb22dd847527c33e91c0de0bc9741c75f77e1b482b7ff3bd21"
+      "sha256": "be0feea7b72fbab446fb2d0eb47400baf6c647f128bc6be5e7491a1e67ea1ce4"
     },
     {
       "id": "doorbell_alert",
@@ -581,7 +581,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_account.py",
-      "sha256": "d3619b2a754481a3254a16c59d942547d9c283a09c80343779841586c14cbb68"
+      "sha256": "40f2215accd3d18c50d62b5a860ab758d0042ac5e4b0918f5f4bcca91728622e"
     },
     {
       "id": "sftpgo_activity",
@@ -601,7 +601,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_activity.py",
-      "sha256": "5ee3a81fdf9043d6262995be3f1e0c128fa58aa066129b907537e7e2d5eb0aea"
+      "sha256": "604faae063fcb6a87888dc4e3270a1a20652b7ad3b085fe834825ef88957bb45"
     },
     {
       "id": "tater_gits_add_feed",
