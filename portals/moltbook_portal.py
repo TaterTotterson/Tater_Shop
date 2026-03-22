@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name, redis_client
 
-__version__ = "1.0.69"
+__version__ = "1.0.71"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -92,6 +92,8 @@ MOLTBOOK_WORLD_NEWS_HISTORY_KEY = "tater:moltbook:world_news:history"
 MOLTBOOK_POSTED_SOURCE_URLS_SET = "tater:moltbook:source_urls:posted"
 MOLTBOOK_POSTED_TITLES_RECENT_KEY = "tater:moltbook:posted_titles:recent"
 MOLTBOOK_POSTED_TITLES_SET_LEGACY = "tater:moltbook:posted_titles"
+MOLTBOOK_AGENT_PROFILES_LEGACY_PATTERN = "tater:moltbook:agent_profiles:*"
+MOLTBOOK_AGENT_PERSONALITIES_LEGACY_PATTERN = "tater:moltbook:agent_personalities:*"
 
 LEARNING_OBSERVATIONS_KEY = "tater:learning:observations"
 LEARNING_IDEAS_KEY = "tater:learning:ideas"
@@ -1270,6 +1272,7 @@ class MoltbookPortal:
         self.client = MoltbookClient(strict_rate_limit_mode=True, use_www_only=True)
         self._last_tick_started_at = 0.0
         self._capability_snapshot_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+        self._boot_legacy_cleanup_ran = False
 
     def _resolve_surface_dir(self, env_var: str, default_subdir: str) -> Path:
         app_root = Path(__file__).resolve().parent.parent
@@ -2499,6 +2502,57 @@ class MoltbookPortal:
         except Exception:
             return
 
+    def _cleanup_boot_legacy_agent_memory_once(self) -> None:
+        if self._boot_legacy_cleanup_ran:
+            return
+        self._boot_legacy_cleanup_ran = True
+
+        patterns = (
+            MOLTBOOK_AGENT_PROFILES_LEGACY_PATTERN,
+            MOLTBOOK_AGENT_PERSONALITIES_LEGACY_PATTERN,
+        )
+        total_found = 0
+        total_deleted = 0
+
+        for pattern in patterns:
+            batch: List[str] = []
+            found = 0
+            deleted = 0
+            try:
+                for key in self.redis.scan_iter(match=pattern, count=1000):
+                    key_text = str(key or "").strip()
+                    if not key_text:
+                        continue
+                    found += 1
+                    batch.append(key_text)
+                    if len(batch) >= 500:
+                        try:
+                            deleted += int(self.redis.delete(*batch) or 0)
+                        except Exception:
+                            pass
+                        batch = []
+                if batch:
+                    try:
+                        deleted += int(self.redis.delete(*batch) or 0)
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+            total_found += found
+            total_deleted += deleted
+            if found > 0:
+                logger.info("[Moltbook] Boot cleanup removed legacy keys for pattern '%s': found=%d deleted=%d", pattern, found, deleted)
+
+        if total_found > 0:
+            self._state_set_many(
+                {
+                    "legacy_agent_memory_cleanup_last_ts": str(time.time()),
+                    "legacy_agent_memory_cleanup_found": str(total_found),
+                    "legacy_agent_memory_cleanup_deleted": str(total_deleted),
+                }
+            )
+
     def _push_json(self, key: str, payload: Dict[str, Any], *, max_len: int = 300) -> None:
         try:
             self.redis.lpush(key, _safe_json_dumps(payload))
@@ -2956,30 +3010,10 @@ class MoltbookPortal:
             return
 
         now_iso = _iso_utc_now()
-        token = _safe_key_token(name)
-        profile_key = f"tater:moltbook:agent_profiles:{token}"
         fellow_key = f"tater:moltbook:fellow_tater_agent:{_safe_key_token(canonical)}"
-        topics: List[str] = []
-        if isinstance(source_post, dict):
-            title = _extract_post_title(source_post)
-            submolt = _extract_submolt(source_post)
-            if title:
-                topics.append(title)
-            if submolt:
-                topics.append(f"submolt:{submolt}")
 
         try:
             self.redis.sadd(MOLTBOOK_TATER_FELLOW_AGENTS_SET, canonical)
-            self.redis.hset(
-                profile_key,
-                mapping={
-                    "agent_name": name,
-                    "fellow_tater_agent": "true",
-                    "last_interaction": now_iso,
-                    "topics_discussed": _limit_text(" | ".join(topics), 600),
-                },
-            )
-            self.redis.hsetnx(profile_key, "fellow_tater_since", now_iso)
             self.redis.hset(
                 fellow_key,
                 mapping={
@@ -4884,38 +4918,10 @@ class MoltbookPortal:
         author = _extract_author_name(post)
         if not author:
             return
-        token = _safe_key_token(author)
-        profile_key = f"tater:moltbook:agent_profiles:{token}"
-        personality_key = f"tater:moltbook:agent_personalities:{token}"
-        is_fellow_tater = self._is_known_fellow_tater_agent(author)
-
-        topics = []
-        title = _extract_post_title(post)
-        submolt = _extract_submolt(post)
-        if title:
-            topics.append(title)
-        if submolt:
-            topics.append(f"submolt:{submolt}")
 
         try:
-            profile_map = {
-                "agent_name": author,
-                "last_interaction": _iso_utc_now(),
-                "topics_discussed": _limit_text(" | ".join(topics), 600),
-            }
-            if is_fellow_tater:
-                profile_map["fellow_tater_agent"] = "true"
-            self.redis.hset(
-                profile_key,
-                mapping=profile_map,
-            )
-            if is_fellow_tater:
-                self.redis.hsetnx(profile_key, "fellow_tater_since", _iso_utc_now())
             if score_delta:
                 self.redis.zincrby(MOLTBOOK_AGENT_RADAR_ZSET, float(score_delta), author)
-            current_personality = self.redis.hget(personality_key, "trait")
-            if not current_personality:
-                self.redis.hset(personality_key, "trait", "observer")
         except Exception:
             return
 
@@ -8264,6 +8270,10 @@ class MoltbookPortal:
         self._cleanup_saturated_discovery_memory(reason="background_between_checkins")
 
     def run_loop(self, stop_event: Optional[threading.Event] = None) -> None:
+        try:
+            self._cleanup_boot_legacy_agent_memory_once()
+        except Exception:
+            logger.exception("[Moltbook] Boot cleanup failed.")
         while True:
             if stop_event and stop_event.is_set():
                 break

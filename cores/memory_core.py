@@ -4844,26 +4844,8 @@ def _hydra_platform(platform: Any) -> str:
 
 def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
     source = args if isinstance(args, dict) else {}
-    origin_data = origin if isinstance(origin, dict) else {}
-    candidates = (
-        source.get("request"),
-        source.get("request_text"),
-        source.get("text"),
-        source.get("content"),
-        source.get("message"),
-        source.get("query"),
-        source.get("input"),
-        source.get("instruction"),
-        origin_data.get("request_text"),
-        origin_data.get("raw_message"),
-        origin_data.get("text"),
-        origin_data.get("message"),
-    )
-    for candidate in candidates:
-        text = _as_text(candidate).strip()
-        if text:
-            return text
-    return ""
+    del origin
+    return _as_text(source.get("text")).strip()
 
 
 def _hydra_user_target(
@@ -5551,13 +5533,13 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "memory_add",
-            "description": "add durable user memory facts from explicit user statements (user-only memory core)",
-            "usage": '{"function":"memory_add","arguments":{"request":"remember that <fact>"}}',
+            "description": "Store durable user-memory facts from natural-language statements for the current user (preferences, profile, habits, long-term constraints).",
+            "usage": '{"function":"memory_add","arguments":{"text":"<natural language fact(s) to remember>"}}',
         },
         {
             "id": "memory_remove",
-            "description": "remove durable user memory facts or list values based on explicit forget requests (user-only memory core)",
-            "usage": '{"function":"memory_remove","arguments":{"request":"forget <fact>"}}',
+            "description": "Remove durable user-memory facts or specific stored values from natural-language forget instructions for the current user.",
+            "usage": '{"function":"memory_remove","arguments":{"text":"<natural language instruction describing what to forget/remove>"}}',
         },
     ]
 

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
@@ -44,6 +44,19 @@ PORTAL_SETTINGS = {
             "type": "number",
             "default": 8790,
             "description": "TCP port for the Tater ↔ XBMC bridge"
+        },
+        "API_AUTH_ENABLED": {
+            "label": "Require API Key",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "Require X-Tater-Token on all XBMC portal API endpoints."
+        },
+        "API_AUTH_KEY": {
+            "label": "API Key",
+            "type": "password",
+            "default": "",
+            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled."
         },
         "SESSION_HISTORY_MAX": {
             "label": "Session History (turns)",
@@ -104,6 +117,40 @@ def _get_int_platform_setting(name: str, default: int) -> int:
         return int(str(s).strip()) if s is not None and str(s).strip() != "" else default
     except Exception:
         return default
+
+def _get_str_platform_setting(name: str, default: str = "") -> str:
+    s = _portal_settings().get(name)
+    return str(s) if s is not None else default
+
+def _get_bool_platform_setting(name: str, default: bool = False) -> bool:
+    s = _portal_settings().get(name)
+    if s is None:
+        return default
+    token = str(s).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+def _get_api_auth_key() -> str:
+    return _get_str_platform_setting("API_AUTH_KEY", "").strip()
+
+def _is_api_auth_enabled() -> bool:
+    raw = _portal_settings().get("API_AUTH_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        return bool(_get_api_auth_key())
+    return _get_bool_platform_setting("API_AUTH_ENABLED", False)
+
+def _require_api_auth(x_tater_token: Optional[str]) -> None:
+    if not _is_api_auth_enabled():
+        return
+    configured = _get_api_auth_key()
+    if not configured:
+        raise HTTPException(status_code=503, detail="API auth is enabled but no API key is configured.")
+    supplied = str(x_tater_token or "").strip()
+    if supplied != configured:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
 
 # -------------------- FastAPI DTOs --------------------
 class XBMCRequest(BaseModel):
@@ -290,12 +337,13 @@ async def _on_startup():
     logger.info(f"[XBMC Bridge] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-xbmc/v1/health")
-async def health():
+async def health(x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     return {"ok": True, "version": "1.0"}
 
 # -------------------- Main XBMC chat endpoint --------------------
 @app.post("/tater-xbmc/v1/message", response_model=XBMCResponse)
-async def handle_message(payload: XBMCRequest):
+async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = Header(None)):
     """
     XBMC bridge:
     - Builds a Cortana-flavored system prompt, aware it's on OG Xbox / XBMC4Xbox
@@ -303,6 +351,8 @@ async def handle_message(payload: XBMCRequest):
     - (Optionally) executes plugins that implement handle_xbmc (currently disabled)
     - Returns simple text for the XBMC script to show
     """
+    _require_api_auth(x_tater_token)
+
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
 

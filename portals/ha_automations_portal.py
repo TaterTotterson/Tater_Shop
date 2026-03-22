@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -36,6 +36,19 @@ PORTAL_SETTINGS = {
             "type": "number",
             "default": 8788,
             "description": "TCP port for the Tater ↔ Home Assistant Automations bridge"
+        },
+        "API_AUTH_ENABLED": {
+            "label": "Require API Key",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "Require X-Tater-Token on all automation portal API endpoints."
+        },
+        "API_AUTH_KEY": {
+            "label": "API Key",
+            "type": "password",
+            "default": "",
+            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled."
         },
         "events_retention": {
             "label": "Events Retention",
@@ -67,6 +80,43 @@ def _get_events_retention_seconds() -> Optional[int]:
         "forever": None,
     }
     return mapping.get(val, mapping["7d"])
+
+def _portal_settings() -> Dict[str, str]:
+    return redis_client.hgetall("ha_automations_portal_settings") or {}
+
+def _get_str_setting(name: str, default: str = "") -> str:
+    value = _portal_settings().get(name)
+    return str(value) if value is not None else default
+
+def _get_bool_setting(name: str, default: bool = False) -> bool:
+    value = _portal_settings().get(name)
+    if value is None:
+        return default
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+def _get_api_auth_key() -> str:
+    return _get_str_setting("API_AUTH_KEY", "").strip()
+
+def _is_api_auth_enabled() -> bool:
+    raw = _portal_settings().get("API_AUTH_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        return bool(_get_api_auth_key())
+    return _get_bool_setting("API_AUTH_ENABLED", False)
+
+def _require_api_auth(x_tater_token: Optional[str]) -> None:
+    if not _is_api_auth_enabled():
+        return
+    configured = _get_api_auth_key()
+    if not configured:
+        raise HTTPException(status_code=503, detail="API auth is enabled but no API key is configured.")
+    supplied = str(x_tater_token or "").strip()
+    if supplied != configured:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
 
 # -------------------- Time helpers (naive ISO) --------------------
 def _parse_iso_naive(s: Optional[str]) -> Optional[datetime]:
@@ -180,12 +230,14 @@ async def _on_startup():
     logger.info(f"[Automations] LLM client → {build_llm_host_from_env()}")
 
 @app.get("/tater-ha/v1/health")
-async def health():
+async def health(x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     return {"ok": True, "version": APP_VERSION}
 
 # -------------------- Events APIs --------------------
 @app.post("/tater-ha/v1/events/add")
-async def add_event(ev: EventIn):
+async def add_event(ev: EventIn, x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     ha_dt = _parse_iso_naive(ev.ha_time)
     if ha_dt is None:
         raise HTTPException(status_code=422, detail="ha_time must be ISO like 2025-10-19T20:07:00 (no timezone)")
@@ -209,7 +261,9 @@ async def events_search(
     limit: int = Query(25, ge=1, le=1000, description="Max number of items to return (newest first)"),
     since: Optional[str] = Query(None, description="Naive ISO start (YYYY-MM-DDTHH:MM:SS)"),
     until: Optional[str] = Query(None, description="Naive ISO end (YYYY-MM-DDTHH:MM:SS)"),
+    x_tater_token: Optional[str] = Header(None),
 ):
+    _require_api_auth(x_tater_token)
     try:
         _trim_events_by_time(source)
     except Exception:
@@ -239,7 +293,7 @@ async def events_search(
 
 # -------------------- Direct tool endpoint (NO AI ROUTING) --------------------
 @app.post("/tater-ha/v1/tools/{tool_name}")
-async def call_tool(tool_name: str, payload: ToolCallRequest):
+async def call_tool(tool_name: str, payload: ToolCallRequest, x_tater_token: Optional[str] = Header(None)):
     """
     Direct tool call endpoint for Home Assistant automations.
 
@@ -248,6 +302,8 @@ async def call_tool(tool_name: str, payload: ToolCallRequest):
 
     Returns: {"result": <plugin_result>}
     """
+    _require_api_auth(x_tater_token)
+
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
 

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Optional, Dict, Any, List, Tuple
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
 import requests
@@ -59,6 +59,19 @@ PORTAL_SETTINGS = {
             "type": "number",
             "default": 8787,
             "description": "TCP port for the Tater ↔ HA bridge",
+        },
+        "API_AUTH_ENABLED": {
+            "label": "Require API Key",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "Require X-Tater-Token on all Home Assistant portal API endpoints.",
+        },
+        "API_AUTH_KEY": {
+            "label": "API Key",
+            "type": "password",
+            "default": "",
+            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled.",
         },
 
         # --- History and TTL controls ---
@@ -190,6 +203,25 @@ def _get_bool_platform_setting(name: str, default: bool) -> bool:
     if v in ("0", "false", "no", "n", "off", "disabled"):
         return False
     return default
+
+def _get_api_auth_key() -> str:
+    return str(_portal_settings().get("API_AUTH_KEY") or "").strip()
+
+def _is_api_auth_enabled() -> bool:
+    raw = _portal_settings().get("API_AUTH_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        return bool(_get_api_auth_key())
+    return _get_bool_platform_setting("API_AUTH_ENABLED", False)
+
+def _require_api_auth(x_tater_token: Optional[str]) -> None:
+    if not _is_api_auth_enabled():
+        return
+    configured = _get_api_auth_key()
+    if not configured:
+        raise HTTPException(status_code=503, detail="API auth is enabled but no API key is configured.")
+    supplied = str(x_tater_token or "").strip()
+    if supplied != configured:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
 
 # -------------------- FastAPI DTOs --------------------
 class HAContext(BaseModel):
@@ -863,12 +895,14 @@ async def _on_startup():
     _llm = get_llm_client_from_env()
 
 @app.get("/tater-ha/v1/health")
-async def health():
+async def health(x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     return {"ok": True, "version": "2.0"}
 
 # -------------------- Notifications API --------------------
 @app.post("/tater-ha/v1/notifications/add")
-async def add_notification(n: NotificationIn):
+async def add_notification(n: NotificationIn, x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     item = {
         "source": n.source.strip(),
         "title": n.title.strip(),
@@ -891,7 +925,8 @@ async def add_notification(n: NotificationIn):
     return {"ok": True, "queued": True}
 
 @app.get("/tater-ha/v1/notifications", response_model=NotificationsOut)
-async def pull_notifications(background_tasks: BackgroundTasks):
+async def pull_notifications(background_tasks: BackgroundTasks, x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
     raw = redis_client.lrange(REDIS_NOTIF_LIST, 0, -1) or []
     notifications = []
     for r in raw:
@@ -917,7 +952,7 @@ async def pull_notifications(background_tasks: BackgroundTasks):
 
 # -------------------- Main HA chat endpoint --------------------
 @app.post("/tater-ha/v1/message", response_model=HAResponse)
-async def handle_message(payload: HARequest):
+async def handle_message(payload: HARequest, x_tater_token: Optional[str] = Header(None)):
     """
     Home Assistant bridge:
     - Builds a Discord/IRC-style system prompt (HA-scoped)
@@ -932,6 +967,8 @@ async def handle_message(payload: HARequest):
     IMPORTANT:
     We key history/ctx by a stable conv_key so follow-up mic re-open does NOT reset context.
     """
+    _require_api_auth(x_tater_token)
+
     if _llm is None:
         raise HTTPException(status_code=503, detail="LLM backend not initialized")
 
