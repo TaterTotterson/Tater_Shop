@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-import redis
 import requests
 from dotenv import load_dotenv
 
@@ -36,7 +35,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     BeautifulSoup = None  # type: ignore
 
-from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
+from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name, redis_client
 
 __version__ = "1.0.69"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
@@ -8294,14 +8293,6 @@ class MoltbookPortal:
             if stop_event and stop_event.wait(sleep_for):
                 break
             time.sleep(0.1)
-
-
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
 
 
 def run(stop_event: Optional[threading.Event] = None):

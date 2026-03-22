@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-import redis
 import requests
 from dotenv import load_dotenv
 
@@ -22,6 +21,8 @@ from notify.queue import is_expired
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
+    redis_blob_client as shared_redis_blob_client,
+    redis_client as shared_redis_client,
 )
 from admin_gate import (
     is_admin_only_plugin,
@@ -37,18 +38,8 @@ load_dotenv()
 logger = logging.getLogger("telegram")
 logging.basicConfig(level=logging.INFO)
 
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
-blob_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=False,
-)
+redis_client = shared_redis_client
+blob_client = shared_redis_blob_client
 
 NOTIFY_QUEUE_KEY = "notifyq:telegram"
 NOTIFY_POLL_INTERVAL = 0.5

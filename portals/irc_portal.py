@@ -1,7 +1,6 @@
 # irc_portal.py
 import os
 import json
-import redis
 import logging
 import asyncio
 from dotenv import load_dotenv
@@ -13,6 +12,7 @@ from notify.queue import is_expired
 from helpers import (
     get_tater_name,
     get_llm_client_from_env,
+    redis_client,
 )
 from admin_gate import (
     is_admin_only_plugin,
@@ -75,12 +75,6 @@ PORTAL_SETTINGS = {
     }
 }
 
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True
-)
 NOTIFY_QUEUE_KEY = "notifyq:irc"
 NOTIFY_POLL_INTERVAL = 0.5
 

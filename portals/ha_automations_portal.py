@@ -8,14 +8,13 @@ import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 
-import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 import verba_registry as pr
-from helpers import get_llm_client_from_env, build_llm_host_from_env
+from helpers import get_llm_client_from_env, build_llm_host_from_env, redis_client
 __version__ = "1.0.0"
 
 
@@ -27,11 +26,6 @@ logger = logging.getLogger("ha_automations")
 # -------------------- Platform constants --------------------
 BIND_HOST = "0.0.0.0"
 APP_VERSION = "1.7"  # direct tool calls only (no AI router)
-
-# -------------------- Redis --------------------
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 # -------------------- Platform settings (WebUI can write this hash) --------------------
 PORTAL_SETTINGS = {

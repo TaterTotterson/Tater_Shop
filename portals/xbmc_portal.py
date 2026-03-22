@@ -7,7 +7,6 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 
-import redis
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -19,6 +18,7 @@ from helpers import (
     get_tater_name,
     get_llm_client_from_env,
     build_llm_host_from_env,
+    redis_client,
 )
 import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -35,11 +35,6 @@ TIMEOUT_SECONDS = 60
 DEFAULT_SESSION_HISTORY_MAX = 6
 DEFAULT_MAX_HISTORY_CAP = 20
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
-
-# Redis (history + platform settings)
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 PORTAL_SETTINGS = {
     "category": "XBMC / Original Xbox Settings",

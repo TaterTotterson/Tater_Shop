@@ -5,10 +5,9 @@ import re
 from typing import Any, Dict, Iterable, Optional
 
 import discord
-import redis
 
 from verba_base import ToolVerba
-from helpers import extract_json, redis_client
+from helpers import extract_json, redis_blob_client, redis_client
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("discord_admin")
@@ -1200,12 +1199,7 @@ class DiscordAdminPlugin(ToolVerba):
 
     @staticmethod
     def _blob_client():
-        return redis.Redis(
-            host=os.getenv("REDIS_HOST", "127.0.0.1"),
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            db=0,
-            decode_responses=False,
-        )
+        return redis_blob_client
 
     @classmethod
     def _read_blob_bytes(cls, blob_key: str) -> bytes:

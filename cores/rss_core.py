@@ -4,12 +4,11 @@ import time
 import os
 import feedparser
 import logging
-import redis
 import requests
 from typing import Any, Dict, List
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from helpers import get_llm_client_from_env
+from helpers import get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
 __version__ = "1.0.4"
@@ -19,11 +18,6 @@ logger = logging.getLogger("rss")
 logger.setLevel(logging.INFO)
 
 load_dotenv()
-
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 CORE_SETTINGS = {
     "category": "RSS Core Settings",

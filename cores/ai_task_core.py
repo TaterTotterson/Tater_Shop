@@ -10,13 +10,12 @@ from bisect import bisect_left
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-import redis
-
 import verba_registry as pr
 from verba_base import ToolVerba
 from verba_kernel import verba_supports_platform
 from helpers import (
     get_llm_client_from_env,
+    redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
 from notify import dispatch_notification
@@ -46,13 +45,6 @@ CORE_WEBUI_TAB = {
     "order": 10,
     "requires_running": True,
 }
-
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
