@@ -30,7 +30,7 @@ from notify.queue import is_expired as notify_item_is_expired, queue_key as noti
 from verba_kernel import verba_supports_platform
 from verba_result import narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -40,8 +40,8 @@ logger = logging.getLogger("macos")
 
 BIND_HOST = "0.0.0.0"
 DEFAULT_PORT = 8791
-DEFAULT_SESSION_HISTORY_MAX = 6
-DEFAULT_MAX_HISTORY_CAP = 20
+DEFAULT_GLOBAL_MAX_STORE = 20
+DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
 INLINE_ATTACHMENT_MAX_BYTES = int(os.getenv("MACOS_INLINE_ATTACHMENT_MAX_BYTES", "0"))
 MAX_NOTIFY_WAIT_SECONDS = float(os.getenv("MACOS_NOTIFY_MAX_WAIT_SECONDS", "45"))
@@ -76,18 +76,6 @@ PORTAL_SETTINGS = {
             "type": "number",
             "default": DEFAULT_PORT,
             "description": "TCP port for the Tater macOS bridge.",
-        },
-        "SESSION_HISTORY_MAX": {
-            "label": "Session History (turns)",
-            "type": "number",
-            "default": DEFAULT_SESSION_HISTORY_MAX,
-            "description": "How many recent turns to include per Mac conversation.",
-        },
-        "MAX_HISTORY_CAP": {
-            "label": "Max History Cap",
-            "type": "number",
-            "default": DEFAULT_MAX_HISTORY_CAP,
-            "description": "Hard ceiling to prevent runaway context sizes.",
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL",
@@ -209,6 +197,26 @@ def _get_bool_setting(name: str, default: bool = False) -> bool:
     if token in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
+
+
+def _read_global_history_limit(redis_key: str, default: int, *, min_value: int = 0, max_value: int = 500) -> int:
+    try:
+        raw = redis_client.get(redis_key)
+        value = int(str(raw).strip()) if raw is not None else int(default)
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value > 0:
+        value = min(int(max_value), value)
+    return int(value)
+
+
+def _global_history_store_limit() -> int:
+    return _read_global_history_limit("tater:max_store", DEFAULT_GLOBAL_MAX_STORE, min_value=0)
+
+
+def _global_history_llm_limit() -> int:
+    return _read_global_history_limit("tater:max_llm", DEFAULT_GLOBAL_MAX_LLM, min_value=1)
 
 
 def _get_api_auth_key() -> str:
@@ -927,7 +935,7 @@ async def session_history(
     _require_auth(x_tater_token)
     resolved_scope = _scope_value(scope, device_id)
     _remember_active_macos_client(resolved_scope, device_id)
-    max_cap = max(1, _get_int_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP))
+    max_cap = max(1, _global_history_store_limit())
     resolved_limit = min(max(1, int(limit)), max_cap * 4)
     return {
         "ok": True,
@@ -946,7 +954,7 @@ async def bootstrap_state(
     _require_auth(x_tater_token)
     resolved_scope = _scope_value(scope, device_id)
     _remember_active_macos_client(resolved_scope, device_id)
-    max_cap = max(1, _get_int_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP))
+    max_cap = max(1, _global_history_store_limit())
     resolved_limit = min(max(1, int(history_limit)), max_cap * 4)
     logger.debug(
         "[macOS] bootstrap poll scope=%s device_id=%s history_limit=%s",
@@ -1058,11 +1066,8 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
     if not effective_user_text:
         raise HTTPException(status_code=400, detail="Provide user_text, clipboard_text, selected_text, or assets.")
 
-    history_limit = min(
-        max(_get_int_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX), 0),
-        _get_int_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP),
-    )
-    history_limit = max(1, history_limit)
+    history_store_limit = _global_history_store_limit()
+    history_llm_limit = _global_history_llm_limit()
     ttl_seconds = _get_duration_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
     user_id = str(payload.device_id or scope).strip() or scope
     username = str(context_payload.get("device_name") or "macos_user").strip() or "macos_user"
@@ -1071,7 +1076,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
         scope,
         "user",
         effective_user_text,
-        max_store=history_limit,
+        max_store=history_store_limit,
         ttl_seconds=ttl_seconds,
         username=username,
         user_id=user_id,
@@ -1081,13 +1086,13 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             scope,
             "user",
             _artifact_history_content(artifact),
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
             username=username,
             user_id=user_id,
         )
 
-    history = await _load_history(scope, history_limit)
+    history = await _load_history(scope, history_llm_limit)
     origin = _build_origin(
         scope=scope,
         device_id=str(payload.device_id or "").strip(),
@@ -1115,7 +1120,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
                 plugin_obj=plugin_obj,
                 mention=mention_target,
                 origin=origin,
-                max_store=history_limit,
+                max_store=history_store_limit,
                 ttl_seconds=ttl_seconds,
             )
         except Exception:
@@ -1146,7 +1151,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             scope,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": fallback},
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
             username="assistant",
             user_id="assistant",
@@ -1158,7 +1163,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
         scope,
         "assistant",
         {"marker": "plugin_response", "phase": "final", "content": final_text},
-        max_store=history_limit,
+        max_store=history_store_limit,
         ttl_seconds=ttl_seconds,
         username="assistant",
         user_id="assistant",
@@ -1171,7 +1176,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             scope,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": _artifact_history_content(artifact)},
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
             username="assistant",
             user_id="assistant",
@@ -1194,11 +1199,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
 
     scope = _scope_value(payload.scope, payload.device_id)
     _remember_active_macos_client(scope, payload.device_id)
-    history_limit = min(
-        max(_get_int_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX), 0),
-        _get_int_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP),
-    )
-    history_limit = max(1, history_limit)
+    history_store_limit = _global_history_store_limit()
     ttl_seconds = _get_duration_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
     context_payload = dict(payload.context or {})
     input_artifacts = _save_request_assets(scope, list(payload.assets or []))
@@ -1215,7 +1216,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
         scope,
         "user",
         request_text,
-        max_store=history_limit,
+        max_store=history_store_limit,
         ttl_seconds=ttl_seconds,
         username=username,
         user_id=user_id,
@@ -1225,7 +1226,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
             scope,
             "user",
             _artifact_history_content(artifact),
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
             username=username,
             user_id=user_id,
@@ -1258,7 +1259,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
         scope,
         "assistant",
         {"marker": "plugin_call", "plugin": payload.plugin_name, "arguments": args},
-        max_store=history_limit,
+        max_store=history_store_limit,
         ttl_seconds=ttl_seconds,
         username="assistant",
         user_id="assistant",
@@ -1272,7 +1273,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
             plugin_obj=plugin_obj,
             mention=mention_target,
             origin=origin,
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
         )
     except Exception:
@@ -1298,7 +1299,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
         scope,
         "assistant",
         {"marker": "plugin_response", "phase": "final", "content": assistant_text},
-        max_store=history_limit,
+        max_store=history_store_limit,
         ttl_seconds=ttl_seconds,
         username="assistant",
         user_id="assistant",
@@ -1308,7 +1309,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
             scope,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": _artifact_history_content(artifact)},
-            max_store=history_limit,
+            max_store=history_store_limit,
             ttl_seconds=ttl_seconds,
             username="assistant",
             user_id="assistant",

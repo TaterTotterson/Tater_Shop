@@ -22,7 +22,7 @@ import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 load_dotenv()
 
@@ -33,9 +33,9 @@ logger = logging.getLogger("homeassistant")
 BIND_HOST = "0.0.0.0"
 TIMEOUT_SECONDS = 60  # LLM request timeout in seconds
 
-# Defaults; users can override these in WebUI platform settings
-DEFAULT_SESSION_HISTORY_MAX = 6
-DEFAULT_MAX_HISTORY_CAP = 20
+# Shared chat-history defaults from main Hydra/WebUI settings
+DEFAULT_GLOBAL_MAX_STORE = 20
+DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
 # Continued chat (auto follow-up) defaults
@@ -74,19 +74,7 @@ PORTAL_SETTINGS = {
             "description": "Shared API key expected in the X-Tater-Token header when auth is enabled.",
         },
 
-        # --- History and TTL controls ---
-        "SESSION_HISTORY_MAX": {
-            "label": "Session History (turns)",
-            "type": "number",
-            "default": DEFAULT_SESSION_HISTORY_MAX,
-            "description": "How many recent turns to include per HA conversation (smaller = faster).",
-        },
-        "MAX_HISTORY_CAP": {
-            "label": "Max History Cap",
-            "type": "number",
-            "default": DEFAULT_MAX_HISTORY_CAP,
-            "description": "Hard ceiling to prevent runaway context sizes.",
-        },
+        # --- TTL control ---
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL",
             "type": "select",
@@ -203,6 +191,26 @@ def _get_bool_platform_setting(name: str, default: bool) -> bool:
     if v in ("0", "false", "no", "n", "off", "disabled"):
         return False
     return default
+
+
+def _read_global_history_limit(redis_key: str, default: int, *, min_value: int = 0, max_value: int = 500) -> int:
+    try:
+        raw = redis_client.get(redis_key)
+        value = int(str(raw).strip()) if raw is not None else int(default)
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value > 0:
+        value = min(int(max_value), value)
+    return int(value)
+
+
+def _global_history_store_limit() -> int:
+    return _read_global_history_limit("tater:max_store", DEFAULT_GLOBAL_MAX_STORE, min_value=0)
+
+
+def _global_history_llm_limit() -> int:
+    return _read_global_history_limit("tater:max_llm", DEFAULT_GLOBAL_MAX_LLM, min_value=1)
 
 def _get_api_auth_key() -> str:
     return str(_portal_settings().get("API_AUTH_KEY") or "").strip()
@@ -976,9 +984,8 @@ async def handle_message(payload: HARequest, x_tater_token: Optional[str] = Head
     if not text_in:
         return HAResponse(response="(no text provided)")
 
-    session_history_max = _get_int_platform_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX)
-    max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
-    history_max = min(max(session_history_max, 0), max_history_cap)
+    history_store_limit = _global_history_store_limit()
+    history_llm_limit = _global_history_llm_limit()
 
     # ---- canonical context merge (ctx stored separately; not in chat history) ----
     incoming_ctx: Dict[str, Any] = {}
@@ -1007,11 +1014,11 @@ async def handle_message(payload: HARequest, x_tater_token: Optional[str] = Head
     )
 
     # Save the user turn
-    await _save_message(conv_key, "user", text_in, history_max)
+    await _save_message(conv_key, "user", text_in, history_store_limit)
 
     # Build the messages list: shaped history only (Hydra applies platform preamble)
     system_prompt = build_system_prompt(ctx if ctx else None)
-    loop_messages = await _load_history(conv_key, history_max)
+    loop_messages = await _load_history(conv_key, history_llm_limit)
     messages_list = loop_messages
 
     # Hard guard: ensure last turn is user
@@ -1057,7 +1064,7 @@ async def handle_message(payload: HARequest, x_tater_token: Optional[str] = Head
             conv_key,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": final_text},
-            history_max,
+            history_store_limit,
         )
         if _get_bool_platform_setting("CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED):
             asyncio.create_task(_maybe_reopen_listening(conv_key, ctx, final_text))
@@ -1066,7 +1073,7 @@ async def handle_message(payload: HARequest, x_tater_token: Optional[str] = Head
     except Exception:
         logger.exception("[HA Bridge] LLM error")
         msg = "Sorry, I ran into a problem processing that."
-        await _save_message(conv_key, "assistant", msg, history_max)
+        await _save_message(conv_key, "assistant", msg, history_store_limit)
         return HAResponse(response=msg)
 
 def run(stop_event: Optional[threading.Event] = None):
