@@ -60,11 +60,24 @@ PORTAL_SETTINGS = {
             "default": DEFAULT_SESSION_TTL_SECONDS,
             "description": "How long to keep a Siri session alive."
         },
-        "AUTH_TOKEN": {
-            "label": "Auth Token (optional)",
-            "type": "string",
+        "API_AUTH_ENABLED": {
+            "label": "Require API Key",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "Require X-Tater-Token on HomeKit API requests."
+        },
+        "API_AUTH_KEY": {
+            "label": "API Key",
+            "type": "password",
             "default": "",
-            "description": "If set, Shortcuts must send this token in X-Tater-Token header."
+            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled."
+        },
+        "AUTH_TOKEN": {
+            "label": "Legacy Auth Token (optional)",
+            "type": "password",
+            "default": "",
+            "description": "Backward-compatible fallback token if API Key is empty."
         },
     }
 }
@@ -84,6 +97,39 @@ def _get_int_setting(name: str, default: int) -> int:
 def _get_str_setting(name: str, default: str = "") -> str:
     s = _portal_settings().get(name)
     return s if s is not None else default
+
+def _get_bool_setting(name: str, default: bool = False) -> bool:
+    s = _portal_settings().get(name)
+    if s is None:
+        return default
+    token = str(s).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+def _get_api_auth_key() -> str:
+    primary = _get_str_setting("API_AUTH_KEY", "").strip()
+    if primary:
+        return primary
+    return _get_str_setting("AUTH_TOKEN", "").strip()
+
+def _is_api_auth_enabled() -> bool:
+    raw = _portal_settings().get("API_AUTH_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        return bool(_get_api_auth_key())
+    return _get_bool_setting("API_AUTH_ENABLED", False)
+
+def _require_api_auth(x_tater_token: Optional[str]) -> None:
+    if not _is_api_auth_enabled():
+        return
+    configured = _get_api_auth_key()
+    if not configured:
+        raise HTTPException(status_code=503, detail="API auth is enabled but no API key is configured.")
+    supplied = str(x_tater_token or "").strip()
+    if supplied != configured:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
 
 # -------------------- Plugin gating --------------------
 def _get_plugin_enabled(plugin_name: str) -> bool:
@@ -231,10 +277,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
     if _llm is None:
         raise HTTPException(503, "LLM not ready")
 
-    configured_token = _get_str_setting("AUTH_TOKEN", "")
-    if configured_token:
-        if not x_tater_token or x_tater_token != configured_token:
-            raise HTTPException(401, "Bad token")
+    _require_api_auth(x_tater_token)
 
     text_in = (payload.get("text") or "").strip()
     if not text_in:

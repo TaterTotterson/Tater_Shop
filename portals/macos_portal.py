@@ -96,11 +96,24 @@ PORTAL_SETTINGS = {
             "default": "2h",
             "description": "How long to keep a Mac conversation history alive.",
         },
-        "AUTH_TOKEN": {
-            "label": "Auth Token (optional)",
+        "API_AUTH_ENABLED": {
+            "label": "Require API Key",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "false",
+            "description": "Require X-Tater-Token on macOS portal API requests.",
+        },
+        "API_AUTH_KEY": {
+            "label": "API Key",
             "type": "password",
             "default": "",
-            "description": "If set, the macOS client must send this in the X-Tater-Token header.",
+            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled.",
+        },
+        "AUTH_TOKEN": {
+            "label": "Legacy Auth Token (optional)",
+            "type": "password",
+            "default": "",
+            "description": "Backward-compatible fallback token if API Key is empty.",
         },
     },
 }
@@ -184,6 +197,32 @@ def _get_int_setting(name: str, default: int) -> int:
 def _get_str_setting(name: str, default: str = "") -> str:
     raw = _portal_settings().get(name)
     return str(raw) if raw is not None else default
+
+
+def _get_bool_setting(name: str, default: bool = False) -> bool:
+    raw = _portal_settings().get(name)
+    if raw is None:
+        return default
+    token = str(raw).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def _get_api_auth_key() -> str:
+    primary = _get_str_setting("API_AUTH_KEY", "").strip()
+    if primary:
+        return primary
+    return _get_str_setting("AUTH_TOKEN", "").strip()
+
+
+def _is_api_auth_enabled() -> bool:
+    raw = _portal_settings().get("API_AUTH_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        return bool(_get_api_auth_key())
+    return _get_bool_setting("API_AUTH_ENABLED", False)
 
 
 def get_plugin_enabled(plugin_name: str) -> bool:
@@ -524,6 +563,8 @@ def _build_origin(
     *,
     scope: str,
     device_id: str,
+    user_id: str,
+    username: str,
     flags: Dict[str, Any],
     context_payload: Dict[str, Any],
     input_artifacts: List[Dict[str, Any]],
@@ -533,6 +574,8 @@ def _build_origin(
         "platform": "macos",
         "scope": scope,
         "device_id": device_id,
+        "user_id": user_id,
+        "user": username,
         "request_kind": request_kind,
     }
     if context_payload:
@@ -841,9 +884,11 @@ async def _emit_tool_wait_message(
 
 
 def _require_auth(x_tater_token: Optional[str]) -> None:
-    configured = _get_str_setting("AUTH_TOKEN", "").strip()
-    if not configured:
+    if not _is_api_auth_enabled():
         return
+    configured = _get_api_auth_key()
+    if not configured:
+        raise HTTPException(status_code=503, detail="API auth is enabled but no API key is configured.")
     supplied = str(x_tater_token or "").strip()
     if supplied != configured:
         raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
@@ -861,7 +906,8 @@ async def _on_startup():
 
 
 @app.get("/macos/health")
-async def health():
+async def health(x_tater_token: Optional[str] = Header(None)):
+    _require_auth(x_tater_token)
     return {"ok": True, "platform": "macos", "version": "1.0"}
 
 
@@ -1045,6 +1091,8 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
     origin = _build_origin(
         scope=scope,
         device_id=str(payload.device_id or "").strip(),
+        user_id=user_id,
+        username=username,
         flags=dict(payload.flags or {}),
         context_payload=context_payload,
         input_artifacts=input_artifacts,
@@ -1186,6 +1234,8 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
     origin = _build_origin(
         scope=scope,
         device_id=str(payload.device_id or "").strip(),
+        user_id=user_id,
+        username=username,
         flags=dict(payload.flags or {}),
         context_payload=context_payload,
         input_artifacts=input_artifacts,
