@@ -33,7 +33,7 @@ class DoorbellAlertPlugin(ToolVerba):
     """
     name = "doorbell_alert"
     verba_name = "Doorbell Alert"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     description = "Doorbell alert tool for when the user requests or says to run a doorbell alert."
     verba_dec = "Handle doorbell events: snapshot, describe with vision, announce, and log notifications."
@@ -202,15 +202,8 @@ class DoorbellAlertPlugin(ToolVerba):
         data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        POST to Automations events: /tater-ha/v1/events/add
+        Write to the same Redis events list consumed by automations.
         """
-        try:
-            raw_port = redis_client.hget("ha_automations_portal_settings", "bind_port")
-            port = int(raw_port) if raw_port is not None else 8788
-        except Exception:
-            port = 8788
-
-        url = f"http://127.0.0.1:{port}/tater-ha/v1/events/add"
         payload = {
             "source": source,  # area slug
             "title": title,
@@ -222,11 +215,10 @@ class DoorbellAlertPlugin(ToolVerba):
             "data": data or {},
         }
         try:
-            r = requests.post(url, json=payload, timeout=5)
-            if r.status_code >= 400:
-                logger.warning("[doorbell_alert] events post failed %s: %s", r.status_code, r.text[:200])
-        except Exception as e:
-            logger.warning("[doorbell_alert] events post error: %s", e)
+            key = f"tater:automations:events:{source}"
+            redis_client.lpush(key, json.dumps(payload))
+        except Exception as exc:
+            logger.warning("[doorbell_alert] redis event write failed: %s", exc)
 
     async def _notify_via_homeassistant_notifier(
         self,
