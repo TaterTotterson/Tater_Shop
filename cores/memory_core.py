@@ -5157,28 +5157,10 @@ def _hydra_remove_targets_from_value(value: Any, targets: List[Any]) -> Tuple[An
 
 
 def _hydra_remove_plan(args: Dict[str, Any], llm_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    keys = _hydra_memory_key_list(args)
-    values: List[Any] = []
-
-    raw_values = args.get("values") if isinstance(args, dict) else None
-    if isinstance(raw_values, list):
-        values.extend(raw_values)
-    elif raw_values is not None and not isinstance(raw_values, dict):
-        values.append(raw_values)
-
-    raw_value = args.get("value") if isinstance(args, dict) else None
-    if raw_value is not None and not isinstance(raw_value, dict):
-        values.append(raw_value)
-
+    del args
     parsed = llm_payload if isinstance(llm_payload, dict) else {}
-    llm_keys = parsed.get("remove_keys") if isinstance(parsed.get("remove_keys"), list) else []
-    llm_values = parsed.get("remove_values") if isinstance(parsed.get("remove_values"), list) else []
-
-    for item in llm_keys:
-        text = _as_text(item).strip()
-        if text:
-            keys.append(text)
-    values.extend(llm_values)
+    keys = parsed.get("remove_keys") if isinstance(parsed.get("remove_keys"), list) else []
+    values = parsed.get("remove_values") if isinstance(parsed.get("remove_values"), list) else []
 
     deduped_keys: List[str] = []
     seen_keys: set[str] = set()
@@ -5427,27 +5409,62 @@ async def _hydra_memory_remove(
         }
 
     request_text = _hydra_request_text(args, origin)
-    llm_payload: Optional[Dict[str, Any]] = None
-    if request_text and llm_client is not None:
-        llm_payload = await _hydra_llm_json_async(
-            llm_client=llm_client,
-            system_prompt=(
-                "Plan durable user-memory removals from a forget request.\n"
-                "Return strict JSON object with optional arrays: remove_keys, remove_values.\n"
-                "Rules:\n"
-                "- remove_keys should contain exact-ish fact keys when clear.\n"
-                "- remove_values should contain scalar values to remove from list/dict/scalar facts when clear.\n"
-                "- Prefer precise removals; do not guess.\n"
-                "- Return empty arrays when unsure.\n"
-            ),
-            payload={
-                "request": request_text,
-                "arguments": args,
-                "known_keys": sorted(str(k) for k in facts.keys()),
-            },
-            max_tokens=700,
-            temperature=0.1,
+    if not request_text:
+        return {
+            "tool": "memory_remove",
+            "ok": False,
+            "error": "memory_remove requires arguments.text.",
+            "summary_for_user": "Please provide text describing what memory should be removed.",
+        }
+
+    if llm_client is None:
+        return {
+            "tool": "memory_remove",
+            "ok": False,
+            "error": "memory_remove requires ai planning, but llm_client is unavailable.",
+            "summary_for_user": "I couldn't plan memory removal right now because AI planning is unavailable.",
+        }
+
+    known_facts_for_llm: List[Dict[str, Any]] = []
+    for fact_key in sorted(str(k) for k in facts.keys())[:80]:
+        fact_row = facts.get(fact_key)
+        if not isinstance(fact_row, dict) or "value" not in fact_row:
+            continue
+        known_facts_for_llm.append(
+            {
+                "key": fact_key,
+                "value": fact_row.get("value"),
+            }
         )
+
+    llm_payload: Optional[Dict[str, Any]] = None
+    llm_payload = await _hydra_llm_json_async(
+        llm_client=llm_client,
+        system_prompt=(
+            "Plan durable user-memory removals from a forget request.\n"
+            "Return strict JSON object with optional arrays: remove_keys, remove_values.\n"
+            "Rules:\n"
+            "- remove_keys must contain exact keys from known_keys only.\n"
+            "- remove_values must contain exact literal values or dict keys present in known_facts values.\n"
+            "- Do not paraphrase, infer, or use fuzzy matching.\n"
+            "- Return empty arrays when unsure.\n"
+        ),
+        payload={
+            "request": request_text,
+            "known_keys": sorted(str(k) for k in facts.keys()),
+            "known_facts": known_facts_for_llm,
+        },
+        max_tokens=700,
+        temperature=0.1,
+    )
+    if llm_payload is None:
+        return {
+            "tool": "memory_remove",
+            "ok": False,
+            "error": "AI removal planner failed to produce a plan.",
+            "request_text": request_text,
+            "summary_for_user": "I couldn't plan what to remove right now.",
+        }
 
     plan = _hydra_remove_plan(args, llm_payload)
     keys = list(plan.get("keys") or [])
