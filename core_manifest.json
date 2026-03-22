@@ -27,7 +27,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "39a986c837d35312b07205ae963215b4986c6c2342f83c090f80ba489beed510"
+      "sha256": "333d5f4eaf2198693b94f021ba400e5c2f9791c94720937c32e5cd5890a0bd40"
     },
     {
       "id": "rss",
