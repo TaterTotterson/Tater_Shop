@@ -45,7 +45,7 @@
     {
       "id": "camera_event",
       "name": "Camera Event",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
       "portals": [
@@ -55,7 +55,7 @@
       "settings_category": "Camera Event",
       "tags": [],
       "entry": "verba/camera_event.py",
-      "sha256": "1fb61b9319c0cc50e6f16a3b2c62bc83b66af7f3fa8a9c66986bb4b6dcffd253"
+      "sha256": "139c8f7978f655299639ff60489c9e2389da3742f718203125fb517797e50c7f"
     },
     {
       "id": "comfyui_audio_ace",
@@ -181,7 +181,7 @@
     {
       "id": "doorbell_alert",
       "name": "Doorbell Alert",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
       "portals": [
@@ -191,7 +191,7 @@
       "settings_category": "Doorbell Alert",
       "tags": [],
       "entry": "verba/doorbell_alert.py",
-      "sha256": "c66e2e9da869a08b4b09a3d9fd17922889893e83a34b6ac5d13f1eb9834fcf44"
+      "sha256": "180bb47de4fd8759aae91617164f5f7a81f302476fb31dcecd83a4baf19754c3"
     },
     {
       "id": "events_query",
