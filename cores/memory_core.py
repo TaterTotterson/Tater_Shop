@@ -706,7 +706,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 
 load_dotenv()
@@ -2048,6 +2048,10 @@ _MEMORY_USER_PROFILE_CATEGORIES: List[Dict[str, Any]] = [
     {
         "label": "Goals and Aspirations",
         "keys": ["short_term_goals", "long_term_aspirations"],
+    },
+    {
+        "label": "Assistant Memory Notes",
+        "keys": ["user_wants_you_to_remember"],
     },
 ]
 _MEMORY_USER_FACT_TO_CATEGORY: Dict[str, str] = {}
