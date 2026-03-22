@@ -16,7 +16,7 @@ from helpers import (
     redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -28,8 +28,8 @@ logger = logging.getLogger("homekit")
 BIND_HOST = "0.0.0.0"
 DEFAULT_PORT = 8789
 TIMEOUT_SECONDS = 60
-DEFAULT_SESSION_HISTORY_MAX = 4
-DEFAULT_MAX_HISTORY_CAP = 12
+DEFAULT_GLOBAL_MAX_STORE = 20
+DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 60 * 60  # 1h
 
 # -------------------- Platform settings --------------------
@@ -41,18 +41,6 @@ PORTAL_SETTINGS = {
             "type": "number",
             "default": DEFAULT_PORT,
             "description": "TCP port for the Tater ↔ Siri / Shortcuts bridge"
-        },
-        "SESSION_HISTORY_MAX": {
-            "label": "Session History (turns)",
-            "type": "number",
-            "default": DEFAULT_SESSION_HISTORY_MAX,
-            "description": "How many recent turns to include per Siri conversation."
-        },
-        "MAX_HISTORY_CAP": {
-            "label": "Max History Cap",
-            "type": "number",
-            "default": DEFAULT_MAX_HISTORY_CAP,
-            "description": "Hard ceiling to prevent runaway context sizes."
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL (seconds)",
@@ -108,6 +96,26 @@ def _get_bool_setting(name: str, default: bool = False) -> bool:
     if token in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
+
+
+def _read_global_history_limit(redis_key: str, default: int, *, min_value: int = 0, max_value: int = 500) -> int:
+    try:
+        raw = redis_client.get(redis_key)
+        value = int(str(raw).strip()) if raw is not None else int(default)
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value > 0:
+        value = min(int(max_value), value)
+    return int(value)
+
+
+def _global_history_store_limit() -> int:
+    return _read_global_history_limit("tater:max_store", DEFAULT_GLOBAL_MAX_STORE, min_value=0)
+
+
+def _global_history_llm_limit() -> int:
+    return _read_global_history_limit("tater:max_llm", DEFAULT_GLOBAL_MAX_LLM, min_value=1)
 
 def _get_api_auth_key() -> str:
     primary = _get_str_setting("API_AUTH_KEY", "").strip()
@@ -284,16 +292,15 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
         return {"reply": "(no text provided)"}
 
     session_id = payload.get("session_id") or "default"
-    session_history_max = _get_int_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX)
-    max_history_cap = _get_int_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
-    history_max = min(max(session_history_max, 0), max_history_cap)
+    history_store_limit = _global_history_store_limit()
+    history_llm_limit = _global_history_llm_limit()
     session_ttl = _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
 
     system_prompt = build_system_prompt()
-    loop_messages = await _load_history(session_id, history_max)
+    loop_messages = await _load_history(session_id, history_llm_limit)
     messages_list = loop_messages + [{"role": "user", "content": text_in}]
 
-    await _save_message(session_id, "user", text_in, history_max, session_ttl)
+    await _save_message(session_id, "user", text_in, history_store_limit, session_ttl)
 
     merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = _get_plugin_enabled
@@ -330,14 +337,14 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
             session_id,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": final_text},
-            history_max,
+            history_store_limit,
             session_ttl,
         )
         return {"reply": final_text}
 
     except Exception as e:
         logger.exception("[HomeKit] LLM error")
-        await _save_message(session_id, "assistant", f"LLM error: {e}", history_max, session_ttl)
+        await _save_message(session_id, "assistant", f"LLM error: {e}", history_store_limit, session_ttl)
         return {"reply": "Sorry, I had a problem talking to Tater."}
 
 def run(stop_event: Optional[threading.Event] = None):

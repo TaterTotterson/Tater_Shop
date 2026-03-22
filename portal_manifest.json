@@ -33,29 +33,29 @@
       "id": "homeassistant",
       "name": "Home Assistant",
       "module_key": "homeassistant_portal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Home Assistant integration portal for Tater.",
       "settings_category": "Home Assistant Settings",
-      "required_settings_count": 14,
+      "required_settings_count": 12,
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "ce1378f74d5c9008fcf29b01fca10ffc29b80ece8e8638867a8d1e2e734ea9e5"
+      "sha256": "c6a9d57a451c2ef248fb5caf2f4a24925938ca19c8914aa7383362255a93a872"
     },
     {
       "id": "homekit",
       "name": "HomeKit / Siri",
       "module_key": "homekit_portal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "HomeKit / Siri integration portal for Tater.",
       "settings_category": "HomeKit / Siri",
-      "required_settings_count": 7,
+      "required_settings_count": 5,
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "c577b0df49e654276b85794aacba747cea9be3066cf260b0bce342b4180f19fa"
+      "sha256": "24069a0a9702f75fa1adcf69764f8592bb2d8b336fcc06cc88fd2bbf79457464"
     },
     {
       "id": "irc",
@@ -75,15 +75,15 @@
       "id": "macos",
       "name": "macOS",
       "module_key": "macos_portal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "macOS integration portal for Tater.",
       "settings_category": "macOS Settings",
-      "required_settings_count": 7,
+      "required_settings_count": 5,
       "autostart_key": "macos_portal_running",
       "tags": [],
       "entry": "portals/macos_portal.py",
-      "sha256": "938a5739f0aa4433576daaaa8a9e481cba554108b57918e5bca45639ea656aeb"
+      "sha256": "4be43cf197ce3698b422b32630df7f44a31c2354a8c02ecf2a5f717184218a01"
     },
     {
       "id": "matrix",
@@ -135,15 +135,15 @@
       "id": "xbmc",
       "name": "XBMC / Original Xbox",
       "module_key": "xbmc_portal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "XBMC / Original Xbox integration portal for Tater.",
       "settings_category": "XBMC / Original Xbox Settings",
-      "required_settings_count": 6,
+      "required_settings_count": 4,
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "5304b38c009bfbc16f5490c30c40cf230b42729ecccbc172a4217086272f2f80"
+      "sha256": "3000a39ba19a35a59d5ee7985252f9d17aa2592b716e1350f2bc1adcab75bb52"
     }
   ]
 }

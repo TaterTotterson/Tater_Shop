@@ -22,7 +22,7 @@ from helpers import (
 )
 import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +32,8 @@ logger = logging.getLogger("xbmc")
 BIND_HOST = "0.0.0.0"
 TIMEOUT_SECONDS = 60
 
-DEFAULT_SESSION_HISTORY_MAX = 6
-DEFAULT_MAX_HISTORY_CAP = 20
+DEFAULT_GLOBAL_MAX_STORE = 20
+DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
 
 PORTAL_SETTINGS = {
@@ -57,18 +57,6 @@ PORTAL_SETTINGS = {
             "type": "password",
             "default": "",
             "description": "Shared API key expected in the X-Tater-Token header when auth is enabled."
-        },
-        "SESSION_HISTORY_MAX": {
-            "label": "Session History (turns)",
-            "type": "number",
-            "default": DEFAULT_SESSION_HISTORY_MAX,
-            "description": "How many recent turns to include per XBMC conversation (smaller = faster)."
-        },
-        "MAX_HISTORY_CAP": {
-            "label": "Max History Cap",
-            "type": "number",
-            "default": DEFAULT_MAX_HISTORY_CAP,
-            "description": "Hard ceiling to prevent runaway context sizes."
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL",
@@ -132,6 +120,26 @@ def _get_bool_platform_setting(name: str, default: bool = False) -> bool:
     if token in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
+
+
+def _read_global_history_limit(redis_key: str, default: int, *, min_value: int = 0, max_value: int = 500) -> int:
+    try:
+        raw = redis_client.get(redis_key)
+        value = int(str(raw).strip()) if raw is not None else int(default)
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value > 0:
+        value = min(int(max_value), value)
+    return int(value)
+
+
+def _global_history_store_limit() -> int:
+    return _read_global_history_limit("tater:max_store", DEFAULT_GLOBAL_MAX_STORE, min_value=0)
+
+
+def _global_history_llm_limit() -> int:
+    return _read_global_history_limit("tater:max_llm", DEFAULT_GLOBAL_MAX_LLM, min_value=1)
 
 def _get_api_auth_key() -> str:
     return _get_str_platform_setting("API_AUTH_KEY", "").strip()
@@ -360,15 +368,14 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
     if not text_in:
         return XBMCResponse(response="(no text provided)")
 
-    session_history_max = _get_int_platform_setting("SESSION_HISTORY_MAX", DEFAULT_SESSION_HISTORY_MAX)
-    max_history_cap = _get_int_platform_setting("MAX_HISTORY_CAP", DEFAULT_MAX_HISTORY_CAP)
-    history_max = min(max(session_history_max, 0), max_history_cap)
+    history_store_limit = _global_history_store_limit()
+    history_llm_limit = _global_history_llm_limit()
 
     # Save user turn
-    await _save_message(payload.session_id, "user", text_in, history_max)
+    await _save_message(payload.session_id, "user", text_in, history_store_limit)
 
     system_prompt = build_system_prompt()
-    loop_messages = await _load_history(payload.session_id, history_max)
+    loop_messages = await _load_history(payload.session_id, history_llm_limit)
     messages_list = loop_messages
     merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = get_plugin_enabled
@@ -405,14 +412,14 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
             payload.session_id,
             "assistant",
             {"marker": "plugin_response", "phase": "final", "content": final_text},
-            history_max,
+            history_store_limit,
         )
         return XBMCResponse(response=final_text)
 
     except Exception:
         logger.exception("[XBMC Bridge] LLM error")
         msg = "Sorry, I ran into a problem processing that."
-        await _save_message(payload.session_id, "assistant", msg, history_max)
+        await _save_message(payload.session_id, "assistant", msg, history_store_limit)
         return XBMCResponse(response=msg)
 
 # -------------------- Runner (WebUI-style) --------------------
