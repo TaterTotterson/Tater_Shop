@@ -7,7 +7,6 @@ import threading
 import time
 from typing import Optional, Dict, Any, List, Tuple
 
-import redis
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 import uvicorn
@@ -17,6 +16,7 @@ import aiohttp
 
 from helpers import (
     get_llm_client_from_env,
+    redis_client,
 )
 import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -44,11 +44,6 @@ DEFAULT_CONTINUED_CHAT_ENABLED = False
 # Follow-up defaults
 DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S = 12.0
 DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
-
-# Redis (history + plugin toggles + notifications)
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 # Notification keys
 REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clear

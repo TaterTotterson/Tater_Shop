@@ -5,7 +5,6 @@ import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager, suppress
-import redis
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -23,6 +22,8 @@ from helpers import (
     get_tater_name,
     get_llm_client_from_env,
     build_llm_host_from_env,
+    redis_blob_client,
+    redis_client,
 )
 from admin_gate import (
     is_admin_only_plugin,
@@ -35,15 +36,11 @@ __version__ = "1.0.1"
 
 
 load_dotenv()
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
 max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", 1500))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("discord")
 
-# NOTE: decode_responses=True means redis-py returns strings, not bytes.
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 NOTIFY_QUEUE_KEY = "notifyq:discord"
 NOTIFY_POLL_INTERVAL = 0.5
 ROOM_LABEL_PREFIX = "tater:room_label"
@@ -93,17 +90,15 @@ def store_blob(binary: bytes, ttl_seconds: int = 60 * 60 * 24 * 7) -> str:
 
     Easiest/cleanest: create a second client with decode_responses=False for blobs.
     """
-    blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
     key = _blob_key().encode("utf-8")
-    blob_client.set(key, binary)
+    redis_blob_client.set(key, binary)
     if ttl_seconds and ttl_seconds > 0:
-        blob_client.expire(key, int(ttl_seconds))
+        redis_blob_client.expire(key, int(ttl_seconds))
     return key.decode("utf-8")
 
 
 def load_blob(key: str) -> bytes | None:
-    blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
-    return blob_client.get(key.encode("utf-8"))
+    return redis_blob_client.get(key.encode("utf-8"))
 
 
 def _room_label_key(platform: str, room_id: Any) -> str:

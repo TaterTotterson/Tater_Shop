@@ -2,7 +2,6 @@
 import os
 import json
 import time
-import redis
 import asyncio
 import logging
 import threading
@@ -25,6 +24,8 @@ from notify.media import load_queue_attachments
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
+    redis_blob_client as shared_redis_blob_client,
+    redis_client as shared_redis_client,
 )
 from admin_gate import (
     is_admin_only_plugin,
@@ -210,19 +211,12 @@ PORTAL_SETTINGS = {
 }
 
 # ---------------- Redis (text/json history) ----------------
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
+redis_client = shared_redis_client
 NOTIFY_QUEUE_KEY = "notifyq:matrix"
 NOTIFY_POLL_INTERVAL = 0.5
 
 # ---------------- Redis (binary blobs, NO base64) ----------------
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
+blob_client = shared_redis_blob_client
 
 BLOB_PREFIX = "tater:blob:matrix"
 

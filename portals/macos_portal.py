@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
-import redis
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Response
@@ -18,7 +17,13 @@ from pydantic import BaseModel, Field
 import verba_registry as pr
 from hydra import resolve_agent_limits, run_hydra_turn
 from conversation_artifacts import load_conversation_artifacts, save_conversation_artifacts
-from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name
+from helpers import (
+    build_llm_host_from_env,
+    get_llm_client_from_env,
+    get_tater_name,
+    redis_blob_client as shared_redis_blob_client,
+    redis_client as shared_redis_client,
+)
 from notify.core import dispatch_notification_sync
 from notify.media import load_queue_attachments
 from notify.queue import is_expired as notify_item_is_expired, queue_key as notify_queue_key
@@ -60,10 +65,8 @@ def _configure_access_log_filters() -> None:
             return
     access_logger.addFilter(_SuppressPollingAccessLogFilter())
 
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
-redis_blob_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=False)
+redis_client = shared_redis_client
+redis_blob_client = shared_redis_blob_client
 
 PORTAL_SETTINGS = {
     "category": "macOS Settings",

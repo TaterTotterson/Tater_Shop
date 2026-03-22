@@ -6,7 +6,6 @@ import logging
 import threading
 import time
 from typing import Optional, Dict, Any, List
-import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
@@ -14,6 +13,7 @@ import verba_registry as pr
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
+    redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
 __version__ = "1.0.0"
@@ -31,11 +31,6 @@ TIMEOUT_SECONDS = 60
 DEFAULT_SESSION_HISTORY_MAX = 4
 DEFAULT_MAX_HISTORY_CAP = 12
 DEFAULT_SESSION_TTL_SECONDS = 60 * 60  # 1h
-
-# -------------------- Redis --------------------
-redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-redis_port = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
 # -------------------- Platform settings --------------------
 PORTAL_SETTINGS = {

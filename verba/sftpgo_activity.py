@@ -3,7 +3,7 @@ import os
 import asyncio
 import aiohttp
 import base64
-import redis
+from helpers import redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -45,9 +45,7 @@ class SFTPGoActivityPlugin(ToolVerba):
 
 
     def get_sftpgo_settings(self):
-        redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
-        redis_port = int(os.getenv('REDIS_PORT', 6379))
-        client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+        client = redis_client
         key = f"verba_settings:{self.settings_category}"
         settings = client.hgetall(key)
         defaults = {

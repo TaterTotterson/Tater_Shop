@@ -2,10 +2,10 @@
 import os
 import aiohttp
 import base64
-import redis
 import secrets
 import string
 import logging
+from helpers import redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -78,9 +78,7 @@ class SFTPGoAccountPlugin(ToolVerba):
 
     @staticmethod
     def _redis():
-        redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
-        redis_port = int(os.getenv("REDIS_PORT", 6379))
-        return redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
+        return redis_client
 
     def get_sftpgo_settings(self):
         """

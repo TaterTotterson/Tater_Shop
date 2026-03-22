@@ -11,10 +11,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import redis
 from dotenv import load_dotenv
 
-from helpers import extract_json, get_llm_client_from_env
+from helpers import extract_json, get_llm_client_from_env, redis_client
 # Built-in local memory store module for single-file Memory Core distribution.
 _MEMORY_CORE_STORE_LOCAL_SOURCE = r"""
 import json
@@ -714,13 +713,6 @@ load_dotenv()
 
 logger = logging.getLogger("memory_core")
 logger.setLevel(logging.INFO)
-
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "127.0.0.1"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0,
-    decode_responses=True,
-)
 
 CORE_SETTINGS = {
     "category": "Memory Core Settings",
