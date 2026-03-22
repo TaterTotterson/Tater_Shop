@@ -707,7 +707,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.4"
+__version__ = "1.0.6"
 
 
 load_dotenv()
@@ -4894,7 +4894,10 @@ def _hydra_user_target(
     if not display_name:
         display_name = user_id
 
-    normalized_platform = _hydra_platform(args.get("platform") if isinstance(args, dict) else platform)
+    requested_platform = ""
+    if isinstance(args, dict):
+        requested_platform = _as_text(args.get("platform")).strip()
+    normalized_platform = _hydra_platform(requested_platform or platform)
     doc_key = (
         resolve_user_doc_key(
             redis_obj,
@@ -5444,9 +5447,9 @@ async def _hydra_memory_remove(
     if not facts:
         return {
             "tool": "memory_remove",
-            "ok": False,
-            "error": "No stored user memory exists to remove.",
-            "summary_for_user": "There is no saved user memory for that target yet.",
+            "ok": True,
+            "no_op": True,
+            "summary_for_user": "No saved user memory was found for that target, so nothing needed removal.",
         }
 
     request_text = _hydra_request_text(args, origin)
@@ -5514,9 +5517,9 @@ async def _hydra_memory_remove(
     if not deleted_keys and not removed_values:
         return {
             "tool": "memory_remove",
-            "ok": False,
-            "error": "No matching memory facts were removed.",
-            "summary_for_user": "I couldn't find matching saved memory to remove.",
+            "ok": True,
+            "no_op": True,
+            "summary_for_user": "No matching saved memory was found to remove.",
             "request_text": request_text,
         }
 
