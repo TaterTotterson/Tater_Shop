@@ -706,7 +706,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 
 load_dotenv()
@@ -902,6 +902,9 @@ _USER_PROFILE_SCHEMA: Dict[str, Tuple[str, ...]] = {
     "goals_and_aspirations": (
         "short_term_goals",
         "long_term_aspirations",
+    ),
+    "assistant_memory_notes": (
+        "user_wants_you_to_remember",
     ),
 }
 
@@ -5290,30 +5293,75 @@ async def _hydra_memory_add(
         return {"tool": "memory_add", "ok": False, "error": "Unable to resolve memory storage key."}
 
     request_text = _hydra_request_text(args, origin)
-    llm_payload: Optional[Dict[str, Any]] = None
-    if request_text and llm_client is not None:
-        llm_payload = await _hydra_llm_json_async(
-            llm_client=llm_client,
-            system_prompt=(
-                "Extract durable user memory facts from explicit user statements only.\n"
-                "Return strict JSON object with optional key: facts (list).\n"
-                "Each fact item: {\"candidate_key\":\"snake_case\",\"value\":any,\"confidence\":0..1}.\n"
-                "Rules:\n"
-                "- Keep only stable preferences, profile details, recurring habits, or persistent constraints.\n"
-                "- Ignore one-off task instructions and ephemeral requests.\n"
-                "- Use concise snake_case keys.\n"
-                "- Do not include guesses or inferred private attributes.\n"
-            ),
-            payload={
-                "request": request_text,
-                "arguments": args,
-            },
-            max_tokens=900,
-            temperature=0.1,
-        )
+    if not request_text:
+        return {
+            "tool": "memory_add",
+            "ok": False,
+            "error": "memory_add requires arguments.text.",
+            "summary_for_user": "Please provide text describing what should be remembered.",
+        }
 
-    candidates = _hydra_add_candidates(args, llm_payload)
-    if not candidates:
+    if llm_client is None:
+        return {
+            "tool": "memory_add",
+            "ok": False,
+            "error": "memory_add requires ai planning, but llm_client is unavailable.",
+            "summary_for_user": "I couldn't plan what to store right now because AI planning is unavailable.",
+        }
+
+    now_ts = time.time()
+    doc = load_memory_doc(redis_obj, redis_key)
+    existing_facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
+    existing_remember = (
+        existing_facts.get("user_wants_you_to_remember")
+        if isinstance(existing_facts, dict)
+        else None
+    )
+    existing_remember_value = (
+        existing_remember.get("value")
+        if isinstance(existing_remember, dict)
+        else None
+    )
+    existing_remember_conf = (
+        _as_float(existing_remember.get("confidence"), 0.0, min_value=0.0, max_value=1.0)
+        if isinstance(existing_remember, dict)
+        else 0.0
+    )
+
+    llm_payload = await _hydra_llm_json_async(
+        llm_client=llm_client,
+        system_prompt=(
+            "Convert a user's explicit remember request into one concise durable user-memory note.\n"
+            "Return strict JSON only with shape:\n"
+            "{\"remember_note\":\"short text\",\"confidence\":0..1}\n"
+            "Rules:\n"
+            "- Preserve intent, shorten wording.\n"
+            "- Keep remember_note concise (ideally <= 18 words).\n"
+            "- Do not add guesses, private inferences, or unrelated details.\n"
+            "- If unclear, return empty remember_note.\n"
+        ),
+        payload={
+            "request": request_text,
+            "current_note": existing_remember_value,
+        },
+        max_tokens=260,
+        temperature=0.1,
+    )
+    if llm_payload is None:
+        return {
+            "tool": "memory_add",
+            "ok": False,
+            "error": "AI memory planner failed to produce a note.",
+            "request_text": request_text,
+            "summary_for_user": "I couldn't plan what to store right now.",
+        }
+
+    remember_note = _as_text(
+        llm_payload.get("remember_note")
+        or llm_payload.get("note")
+        or llm_payload.get("text")
+    ).strip()
+    if not remember_note:
         return {
             "tool": "memory_add",
             "ok": False,
@@ -5321,8 +5369,22 @@ async def _hydra_memory_add(
             "summary_for_user": "I couldn't find a clear user-memory fact to store from that.",
         }
 
-    now_ts = time.time()
-    doc = load_memory_doc(redis_obj, redis_key)
+    candidate_conf = _hydra_confidence(llm_payload.get("confidence"), 0.9)
+    if (
+        existing_remember_value is not None
+        and _value_fingerprint(existing_remember_value) != _value_fingerprint(remember_note)
+        and candidate_conf <= existing_remember_conf
+    ):
+        candidate_conf = min(0.99, max(candidate_conf, existing_remember_conf + 0.01))
+
+    candidates = [
+        {
+            "candidate_key": "user_wants_you_to_remember",
+            "value": remember_note,
+            "confidence": candidate_conf,
+        }
+    ]
+
     inserted = 0
     updated_keys: List[str] = []
     skipped: List[str] = []
@@ -5550,8 +5612,8 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "memory_add",
-            "description": "Store durable user-memory facts from natural-language statements for the current user (preferences, profile, habits, long-term constraints).",
-            "usage": '{"function":"memory_add","arguments":{"text":"<natural language fact(s) to remember>"}}',
+            "description": "Store what the current user explicitly wants remembered as one concise durable memory note (AI may shorten wording while preserving intent).",
+            "usage": '{"function":"memory_add","arguments":{"text":"<what the user wants remembered>"}}',
         },
         {
             "id": "memory_remove",
