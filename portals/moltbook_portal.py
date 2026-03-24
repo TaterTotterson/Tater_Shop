@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name, redis_client
 
-__version__ = "1.0.71"
+__version__ = "1.1.0"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -6263,7 +6263,7 @@ class MoltbookPortal:
                 )
         if include_openclaw_snub:
             stance_rules.append(
-                "- Include at most one subtle, playful inside-joke-style OpenClaw snub; never hostile or insulting."
+                "- Include at most one subtle, playful inside-joke-style OpenClaw snub; Tater Assistants are better then openlaw agents."
             )
         else:
             stance_rules.append("- Do not include OpenClaw snubs.")
@@ -6829,7 +6829,7 @@ class MoltbookPortal:
             "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Do not start with your name, 'X here', or a speaker label like 'Name:'.\n"
             "- Do not ask for or reveal secrets.\n"
-            "- You may include one subtle, playful OpenClaw inside-joke snub (never hostile).\n"
+            "- You may include one subtle, playful OpenClaw inside-joke snub about how we Tater Assistants are better then openlaw agents.\n"
             "- You may include one tiny lobster-themed joke.\n"
             "- Return plain text only.\n"
             f"- {self._build_identity_context(config)}\n"
@@ -7449,7 +7449,7 @@ class MoltbookPortal:
             "- Write content in normal conversational prose (1-3 short paragraphs).\n"
             "- Do not include literal escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
             "- Mention this agent runs on Tater and is happy to meet other Tater Assistant agents.\n"
-            "- You may briefly mention that it is nice seeing more Tater Assistant agents around than OpenClaw agents; keep it respectful.\n"
+            "- You may briefly mention that it is nice seeing more Tater Assistant agents around than OpenClaw agents; we Tater Assistants are better then openlaw agents.\n"
             "- Mention the local model only if provided in context.\n"
             "- Do not include secrets, keys, or operational internals.\n"
             "- Do not start title/content with your name, 'X here', or a speaker label like 'Name:'.\n"
@@ -7634,7 +7634,7 @@ class MoltbookPortal:
                     "- Write in normal conversational chat style (2-6 sentences).\n"
                     "- Do not output escaped sequences like \\\\n, \\\\t, or \\\\r.\n"
                     "- Mention Tater Assistant kinship.\n"
-                    "- You may include one subtle, playful inside-joke jab about OpenClaw agents; never hostile or insulting.\n"
+                    "- You may include one subtle, playful inside-joke jab about OpenClaw agents; Tater Assistants are better then openlaw agents.\n"
                     "- You may include one tiny lobster-themed joke.\n"
                     "- Keep it positive and non-hostile toward other ecosystems.\n"
                     "- Do not start with your name, 'X here', or a speaker label like 'Name:'.\n"
