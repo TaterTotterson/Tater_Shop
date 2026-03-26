@@ -1,4 +1,4 @@
-# verba/unifi_network.py
+# verba/unifi_network_devices.py
 import json
 import logging
 import re
@@ -12,11 +12,11 @@ from helpers import redis_client, get_tater_name, get_tater_personality
 from verba_result import action_failure, action_success
 
 load_dotenv()
-logger = logging.getLogger("unifi_network")
+logger = logging.getLogger("unifi_network_devices")
 logger.setLevel(logging.INFO)
 
 
-class UnifiNetworkPlugin(ToolVerba):
+class UnifiNetworkDevicesPlugin(ToolVerba):
     """
     UniFi Network (Official Integration API) plugin.
 
@@ -31,55 +31,57 @@ class UnifiNetworkPlugin(ToolVerba):
       Auth: X-API-KEY header
     """
 
-    name = "unifi_network"
-    verba_name = "UniFi Network"
-    version = "1.1.1"
+    name = "unifi_network_devices"
+    verba_name = "UniFi Network Devices"
+    version = "1.0.0"
     min_tater_version = "59"
-    pretty_name = "UniFi Network"
+    pretty_name = "UniFi Network Devices"
+    tags = ["unifi", "devices"]
+    fixed_intent = "list_devices"
     description = (
-        "Answer UniFi Network questions in natural language, including client/device lookups, "
-        "network health, and site counts."
+        "List UniFi Network devices and device status counts."
     )
     verba_dec = (
-        "Fetch UniFi Network sites/clients/devices via the official API and answer natural-language requests."
+        "List UniFi devices with online/offline status and core details."
     )
     when_to_use = (
-        "Use for UniFi Network requests like status checks, client/device lists, and finding client/device IP or MAC."
+        "Use for UniFi device lists and offline-device checks."
     )
     how_to_use = (
-        "Send one natural-language UniFi request in query. "
-        "For lookups, include the target name/hostname/IP/MAC in the query."
+        "Set query to the device request you want answered (for example: list devices, show offline devices)."
     )
     example_calls = [
-        '{"function":"unifi_network","arguments":{"query":"how is the network right now"}}',
-        '{"function":"unifi_network","arguments":{"query":"list clients"}}',
-        '{"function":"unifi_network","arguments":{"query":"show offline devices"}}',
-        '{"function":"unifi_network","arguments":{"query":"what is the IP address of hdhomerun"}}',
+        '{"function":"unifi_network_devices","arguments":{"query":"list devices"}}',
+        '{"function":"unifi_network_devices","arguments":{"query":"show offline devices"}}',
+        '{"function":"unifi_network_devices","arguments":{"query":"how many devices"}}',
     ]
-    common_needs = ["network question or target device/client phrase"]
+    common_needs = ["Device question in query."]
     routing_keywords = [
         "unifi",
         "unifi network",
-        "network",
-        "wifi",
-        "wi-fi",
+        "device",
+        "devices",
         "access point",
         "ap",
         "switch",
         "gateway",
-        "client",
-        "clients",
-        "device",
-        "devices",
-        "wired",
-        "wireless",
+        "udm",
         "offline",
-        "online",
     ]
     settings_category = "UniFi Network"
     platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
 
-    usage = '{"function":"unifi_network","arguments":{"query":"One UniFi Network request in natural language (for example: list clients, show offline devices, find hdhomerun IP)."}}'
+    usage = '{"function":"unifi_network_devices","arguments":{"query":"list devices"}}'
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Device request (for example: list devices, show offline devices, how many devices).",
+            }
+        },
+        "required": [],
+    }
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking the UniFi network now. "
@@ -328,138 +330,27 @@ class UnifiNetworkPlugin(ToolVerba):
             return ""
         return target
 
-    def _heuristic_intent(self, query: str) -> Dict[str, Any]:
-        q = self._q_norm(query)
-        target = self._extract_find_target(query)
-        out: Dict[str, Any] = {
-            "intent": "summary",
+    def _fixed_intent_payload(self, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        fixed_intent = str(getattr(self, "fixed_intent", "") or "").strip().lower()
+        if fixed_intent not in self._INTENT_VALUES:
+            raise ValueError("Invalid fixed_intent for this UniFi Network verba.")
+
+        target_hint = str(args.get("target") or args.get("name") or "").strip()
+        payload: Dict[str, Any] = {
+            "intent": fixed_intent,
             "target": "",
             "target_kind": "any",
             "full_list": self._query_wants_full_list(query),
         }
 
-        if any(x in q for x in ("ip address", "mac address", "where is", "find ", "search ", "lookup", "look up")):
-            out["intent"] = "find_any"
-            out["target"] = target
-            if "client" in q:
-                out["target_kind"] = "client"
-                out["intent"] = "find_client"
-            elif "device" in q:
-                out["target_kind"] = "device"
-                out["intent"] = "find_device"
-            return out
-
-        if any(x in q for x in ("how many wireless", "wireless clients")):
-            out["intent"] = "count_clients_wireless"
-            return out
-        if any(x in q for x in ("how many wired", "wired clients")):
-            out["intent"] = "count_clients_wired"
-            return out
-        if any(x in q for x in ("how many clients", "number of clients", "client count", "clients total")):
-            out["intent"] = "count_clients_total"
-            return out
-        if any(x in q for x in ("how many devices", "device count", "devices total")):
-            out["intent"] = "count_devices_total"
-            return out
-        if any(
-            x in q
-            for x in (
-                "devices offline",
-                "offline devices",
-                "any devices offline",
-                "is anything offline",
-                "anything offline",
-                "any device offline",
-            )
-        ):
-            out["intent"] = "count_devices_offline"
-            return out
-        if any(x in q for x in ("list clients", "show clients", "who is online", "who's online", "clients online")):
-            out["intent"] = "list_clients"
-            return out
-        if any(x in q for x in ("list devices", "show devices", "aps", "access points", "switches", "gateway", "udm")):
-            out["intent"] = "list_devices"
-            return out
-        if any(x in q for x in ("health", "status", "how's the network", "hows the network", "network ok", "internet", "wan")):
-            out["intent"] = "health"
-            return out
-
-        if self._query_kind(query) == "find":
-            out["intent"] = "find_any"
-            out["target"] = target
-            return out
-
-        return out
-
-    def _normalize_intent(self, parsed: Dict[str, Any], query: str) -> Dict[str, Any]:
-        heur = self._heuristic_intent(query)
-        out = dict(heur)
-        if not isinstance(parsed, dict):
-            return out
-
-        intent = str(parsed.get("intent") or "").strip().lower()
-        if intent in self._INTENT_VALUES:
-            out["intent"] = intent
-
-        target = str(parsed.get("target") or "").strip()
-        if target:
-            out["target"] = target[:120]
-        elif out.get("intent", "").startswith("find"):
-            out["target"] = self._extract_find_target(query)
-
-        target_kind = str(parsed.get("target_kind") or "").strip().lower()
-        if target_kind in {"client", "device", "any"}:
-            out["target_kind"] = target_kind
-        elif out.get("intent") == "find_client":
-            out["target_kind"] = "client"
-        elif out.get("intent") == "find_device":
-            out["target_kind"] = "device"
-
-        full_list_raw = parsed.get("full_list")
-        if isinstance(full_list_raw, bool):
-            out["full_list"] = full_list_raw
-        elif isinstance(full_list_raw, str):
-            out["full_list"] = full_list_raw.strip().lower() in {"1", "true", "yes", "on"}
-
-        if out.get("intent", "").startswith("find") and not out.get("target"):
-            out["target"] = self._extract_find_target(query)
-
-        return out
-
-    async def _interpret_query(self, query: str, llm_client) -> Dict[str, Any]:
-        heur = self._heuristic_intent(query)
-        if not llm_client:
-            return heur
-
-        system = (
-            "You classify a UniFi Network request into a strict JSON object.\n"
-            "Return JSON only. No markdown or explanation.\n"
-            "Schema:\n"
-            "{\n"
-            '  "intent":"summary|health|list_clients|list_devices|find_any|find_client|find_device|'
-            'count_clients_total|count_clients_wired|count_clients_wireless|count_devices_total|count_devices_offline",\n'
-            '  "target":"string (only for find intents)",\n'
-            '  "target_kind":"any|client|device",\n'
-            '  "full_list":true|false\n'
-            "}\n"
-            "Rules:\n"
-            "- IP/MAC lookup questions should use a find intent and include target.\n"
-            "- \"show/list all\" should set full_list=true.\n"
-            "- Prefer list_clients/list_devices for listing requests.\n"
-            "- Prefer count_* intents for count questions.\n"
-        )
-
-        try:
-            resp = await llm_client.chat(messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": query.strip()},
-            ])
-            content = ((resp or {}).get("message") or {}).get("content", "")
-            content = self._strip_code_fences(content or "")
-            parsed = json.loads(content) if content else {}
-            return self._normalize_intent(parsed, query)
-        except Exception:
-            return heur
+        if fixed_intent in {"find_any", "find_client", "find_device"}:
+            target = target_hint or self._extract_find_target(query)
+            payload["target"] = target
+            if fixed_intent == "find_client":
+                payload["target_kind"] = "client"
+            elif fixed_intent == "find_device":
+                payload["target_kind"] = "device"
+        return payload
 
     def _client_link_counts(self, clients_payload: Dict[str, Any]) -> Dict[str, int]:
         """
@@ -881,39 +772,21 @@ class UnifiNetworkPlugin(ToolVerba):
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._handle(args, llm_client)
 
-    def _query_from_action(self, action: str, name: str) -> Optional[str]:
-        act = (action or "").strip().lower()
-        if not act:
-            return None
-        if act in ("summary", "status", "site_status"):
-            return "how's the network"
-        if act in ("clients_online", "clients"):
-            return "who is online"
-        if act == "clients_wired":
-            return "how many wired clients"
-        if act == "clients_wireless":
-            return "how many wireless clients"
-        if act == "devices_offline":
-            return "which devices are offline"
-        if act == "list_clients":
-            return "list clients"
-        if act == "list_devices":
-            return "list devices"
-        if act in ("find_client", "find_device"):
-            if name:
-                return f"find {name}"
-            return None
-        return None
-
     async def _handle(self, args: Dict[str, Any], llm_client):
         args = args or {}
-        action = (args.get("action") or "").strip().lower()
-        name = (args.get("name") or "").strip()
         query = (args.get("query") or args.get("request") or args.get("prompt") or "").strip()
+        fixed_intent = str(getattr(self, "fixed_intent", "") or "").strip().lower()
+        target_hint = (args.get("target") or args.get("name") or "").strip()
 
-        # Backward-compatible fallback for older action/name callers.
-        if action and not query:
-            query = self._query_from_action(action, name) or query
+        if not query:
+            if fixed_intent == "list_clients":
+                query = "list clients"
+            elif fixed_intent == "list_devices":
+                query = "list devices"
+            elif fixed_intent == "health":
+                query = "how is the network right now"
+            elif fixed_intent in {"find_any", "find_client", "find_device"} and target_hint:
+                query = f"find {target_hint}"
 
         if not query:
             return action_failure(
@@ -921,6 +794,23 @@ class UnifiNetworkPlugin(ToolVerba):
                 message="Please provide a UniFi Network request in `query`.",
                 needs=["Provide a natural-language UniFi Network request in `query`."],
                 say_hint="Ask what UniFi information the user wants (status, list, or lookup).",
+            )
+
+        try:
+            intent = self._fixed_intent_payload(query, args)
+        except Exception as e:
+            return action_failure(
+                code="invalid_intent",
+                message=f"This UniFi Network verba has an invalid fixed intent: {e}",
+                say_hint="Explain that this UniFi Network tool has an invalid fixed intent setting.",
+            )
+
+        if fixed_intent in {"find_any", "find_client", "find_device"} and not str(intent.get("target") or "").strip():
+            return action_failure(
+                code="missing_target",
+                message="Please include the client or device name to look up in query (or pass target).",
+                needs=["Provide the client/device name, hostname, IP, or MAC to look up."],
+                say_hint="Ask the user which UniFi client/device to find.",
             )
 
         s = self._get_settings()
@@ -961,8 +851,6 @@ class UnifiNetworkPlugin(ToolVerba):
             logger.exception("[unifi_network] devices fetch failed")
             devices = {"error": str(e), "data": [], "totalCount": 0, "count": 0, "offset": 0, "limit": self._PAGE_LIMIT}
 
-        intent = await self._interpret_query(query, llm_client)
-
         compact_ctx = self._build_compact_context(
             query=query,
             site_name=site_name,
@@ -995,4 +883,4 @@ class UnifiNetworkPlugin(ToolVerba):
         )
 
 
-verba = UnifiNetworkPlugin()
+verba = UnifiNetworkDevicesPlugin()

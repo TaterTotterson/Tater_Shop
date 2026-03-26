@@ -62,7 +62,7 @@ class HAClient:
 class HATemperaturePlugin(ToolVerba):
     name = 'ha_temperature'
     verba_name = 'Home Assistant Temperature'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Temperature'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HATemperaturePlugin(ToolVerba):
     forced_route = 'temperature'
     forced_domain_hint = 'sensor'
 
-    usage = '{"function":"ha_temperature","arguments":{"query":"Read ambient Home Assistant temperature sensors in natural language."}}'
+    usage = '{"function":"ha_temperature","arguments":{"query":"what is the temperature in the kitchen"}}'
 
-    description = 'Read ambient Home Assistant temperature sensors with temperature-only routing.'
+    description = 'Read room and ambient temperature sensors in the house.'
     verba_dec = 'Read Home Assistant ambient temperatures.'
     when_to_use = 'Use for ambient temperature questions, including room-by-room temperature checks.'
     common_needs = ['room/device (for example: kitchen temperature)']

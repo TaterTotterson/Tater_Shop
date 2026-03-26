@@ -62,7 +62,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '1.0.1'
+    version = '1.0.2'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Lights'
     settings_category = 'Home Assistant Control'
@@ -72,7 +72,7 @@ class HALightsPlugin(ToolVerba):
     forced_route = 'light'
     forced_domain_hint = 'light'
 
-    usage = '{"function":"ha_lights","arguments":{"query":"Control or check Home Assistant lights in natural language."}}'
+    usage = '{"function":"ha_lights","arguments":{"query":"turn off office lights"}}'
 
     description = 'Turn on and off lights and change brightness in the house'
     verba_dec = 'Control Home Assistant lights.'

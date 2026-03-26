@@ -1,7 +1,6 @@
-# verba/unifi_protect.py
+# verba/unifi_protect_camera_info.py
 import asyncio
 import base64
-import json
 import logging
 import mimetypes
 import os
@@ -14,7 +13,7 @@ import urllib3
 
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
-from helpers import redis_client, get_tater_name
+from helpers import redis_client
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -28,7 +27,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
         "bytes": bytes(binary),
     }
 
-logger = logging.getLogger("unifi_protect")
+logger = logging.getLogger("unifi_protect_camera_info")
 logger.setLevel(logging.INFO)
 
 
@@ -333,7 +332,7 @@ class ProtectClient:
 # ----------------------------
 # Plugin
 # ----------------------------
-class UniFiProtectPlugin(ToolVerba):
+class UniFiProtectCameraInfoPlugin(ToolVerba):
     """
     UniFi Protect (Integration API) plugin.
 
@@ -353,92 +352,29 @@ class UniFiProtectPlugin(ToolVerba):
       and return "Entity 'endpoint' not found". This plugin does NOT rely on those.
     """
 
-    name = "unifi_protect"
-    verba_name = "UniFi Protect"
-    version = "1.0.10"
+    name = 'unifi_protect_camera_info'
+    verba_name = 'UniFi Protect Camera Info'
+    version = '1.0.0'
     min_tater_version = "59"
-    pretty_name = "UniFi Protect"
+    pretty_name = 'UniFi Protect Camera Info'
     settings_category = "UniFi Protect"
+    tags = ['unifi', 'cameras']
 
     platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
-    routing_keywords = [
-        "unifi protect",
-        "protect",
-        "camera",
-        "cameras",
-        "doorbell",
-        "snapshot",
-        "front yard",
-        "back yard",
-        "yard",
-        "driveway",
-        "porch",
-        "patio",
-        "garage camera",
-        "sensor",
-        "sensors",
-        "motion",
-    ]
+    routing_keywords = ['unifi protect', 'protect', 'camera', 'cameras', 'list cameras', 'show cameras']
+    fixed_action = 'list_cameras'
 
-    usage = (
-        '{"function":"unifi_protect","arguments":{"query":"ONE natural-language UniFi Protect request '
-        '(for example: list my cameras, what is going on in the front yard, describe the doorbell camera, are any doors open)."}}'
-    )
+    usage = '{"function":"unifi_protect_camera_info","arguments":{"query":"list my cameras"}}'
 
-    description = (
-        "Handle one natural-language UniFi Protect request for sensors, camera lists, or camera and area snapshot descriptions."
-    )
-    verba_dec = (
-        "Get UniFi Protect camera snapshot descriptions and sensor status. "
-        "Preferred for 'what do you see' or 'what is happening' camera questions."
-    )
-    when_to_use = (
-        "Use for camera/scene questions and snapshot descriptions (for example: "
-        "'what are my dogs doing in the backyard', 'what does the driveway look like', "
-        "'describe the porch camera'), plus Protect sensor status and camera lists. "
-        "If a request is about viewing/describing a scene, prefer this over unifi_network."
-    )
-    how_to_use = (
-        "Pass one natural-language Protect request in query. Include the camera or area naturally when needed. "
-        "This plugin can infer whether the user wants sensor status, a camera list, a specific camera description, or an area description."
-    )
-    common_needs = ["A natural-language UniFi Protect request."]
+    description = 'List available UniFi Protect cameras and their basic state.'
+    verba_dec = 'List UniFi Protect cameras.'
+    when_to_use = 'Use when the request is to list cameras.'
+    how_to_use = 'Set query to a camera-list request (for example: list my cameras).'
+    common_needs = ['Camera-list request in query.']
     missing_info_prompts = []
-    example_calls = [
-        '{"function":"unifi_protect","arguments":{"query":"list my cameras"}}',
-        '{"function":"unifi_protect","arguments":{"query":"what is going on in the front yard"}}',
-        '{"function":"unifi_protect","arguments":{"query":"describe the doorbell camera"}}',
-        '{"function":"unifi_protect","arguments":{"query":"are any doors open"}}',
-    ]
+    example_calls = ['{"function":"unifi_protect_camera_info","arguments":{"query":"list my cameras"}}', '{"function":"unifi_protect_camera_info","arguments":{"query":"show all cameras"}}']
 
-    argument_schema = {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"],
-                "description": "Optional action (plugin can infer from query).",
-            },
-            "target": {
-                "type": "string",
-                "description": "Name hint for sensor/camera/area (front door, garage, back yard).",
-            },
-            "camera": {
-                "type": "string",
-                "description": "Camera name (alias of target for describe_camera).",
-            },
-            "area": {
-                "type": "string",
-                "description": "Area name (alias of target for describe_area).",
-            },
-            "query": {
-                "type": "string",
-                "description": "Optional: user request text to infer action/target.",
-            },
-        },
-        "required": [],
-    }
-
+    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The camera-list request (for example: list my cameras, show all cameras).'}}, 'required': []}
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you’re checking UniFi Protect now. "
         "Only output that message."
@@ -486,52 +422,8 @@ class UniFiProtectPlugin(ToolVerba):
         try:
             return ProtectClient()
         except Exception as e:
-            logger.error(f"[unifi_protect] Failed to init client: {e}")
+            logger.error(f"[unifi_protect_camera_info] Failed to init client: {e}")
             return None
-
-    # ----------------------------
-    # LLM: decide action
-    # ----------------------------
-    async def _decide_action(self, user_query: str, llm_client) -> dict:
-        """
-        Ask LLM to choose a small action plan.
-        """
-        first, last = get_tater_name()
-        assistant_name = f"{first} {last}".strip() or "Tater"
-
-        system = (
-            f"You are {assistant_name}, routing a UniFi Protect request.\n"
-            "Return STRICT JSON only.\n"
-            "Schema:\n"
-            "{\n"
-            '  "action": "sensors_status|sensor_detail|list_cameras|describe_camera|describe_area",\n'
-            '  "target": "optional name hint like front door, garage, doorbell, front yard"\n'
-            "}\n"
-            "Rules:\n"
-            "- If user asks about doors/windows/sensors/battery/temp/humidity: use sensors_status.\n"
-            "- If user asks about a specific sensor (front door/back door/garage door): use sensor_detail and set target.\n"
-            "- If user asks to list cameras: list_cameras.\n"
-            "- If user asks what's going on in a place (front yard/front door/porch/back yard): describe_area and set target.\n"
-            "- If user asks to describe a specific camera (doorbell/front door/garage): describe_camera and set target.\n"
-        )
-
-        resp = await llm_client.chat(messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": (user_query or "").strip()},
-        ])
-        content = _strip_code_fences((resp.get("message", {}) or {}).get("content", ""))
-        try:
-            data = json.loads(content)
-            if isinstance(data, dict) and data.get("action"):
-                return data
-        except Exception:
-            pass
-
-        # fallback
-        q = (user_query or "").lower()
-        if any(w in q for w in ["camera", "cameras"]):
-            return {"action": "list_cameras", "target": ""}
-        return {"action": "sensors_status", "target": ""}
 
     # ----------------------------
     # Data shaping: sensors
@@ -842,7 +734,7 @@ class UniFiProtectPlugin(ToolVerba):
         client = self._get_client()
         if not client:
             return action_failure(
-                code="unifi_protect_not_configured",
+                code="unifi_protect_camera_info_not_configured",
                 message=(
                     "UniFi Protect is not configured. "
                     "Set UNIFI_PROTECT_BASE_URL and UNIFI_PROTECT_API_KEY in plugin settings."
@@ -852,7 +744,6 @@ class UniFiProtectPlugin(ToolVerba):
 
         args = args or {}
         context = context or {}
-        action_raw = (args.get("action") or "").strip()
         target = (
             args.get("target")
             or args.get("camera")
@@ -866,36 +757,13 @@ class UniFiProtectPlugin(ToolVerba):
         if not query:
             query = _extract_context_text(context)
 
-        action, action_target = _split_action_and_target(action_raw)
-        if action_target and not target:
-            target = action_target
-
         allowed_actions = {"sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"}
-
-        if action and action not in allowed_actions:
-            guessed = _guess_action_from_text(action, target)
-            if guessed:
-                action = guessed
-            else:
-                action = ""
-
-        if not action:
-            if query:
-                action = _guess_action_from_text(query, target)
-            if not action and query:
-                plan = await self._decide_action(query, llm_client)
-                action = (plan.get("action") or "").strip().lower()
-                target = target or (plan.get("target") or "").strip()
-
-        if not action:
+        action = str(getattr(self, "fixed_action", "") or "").strip().lower()
+        if action not in allowed_actions:
             return action_failure(
                 code="invalid_action",
-                message="I couldn't determine which UniFi Protect action to run.",
-                needs=[
-                    "Do you want sensors status, list cameras, or a camera/area description?",
-                    "Which camera or area should I describe (for example: back yard, front door, garage)?",
-                ],
-                say_hint="Explain that more detail is needed and ask the follow-up questions.",
+                message="This UniFi Protect verba is not configured with a valid fixed action.",
+                say_hint="Explain that this tool has an invalid fixed action and needs a configuration fix.",
             )
 
         if not query:
@@ -904,15 +772,12 @@ class UniFiProtectPlugin(ToolVerba):
         if action == "sensors_status" and target:
             action = "sensor_detail"
 
-        if action == "describe_camera" and not target and _looks_like_area(query):
-            action = "describe_area"
-
         # ---- Sensors status / detail
         if action in ("sensors_status", "sensor_detail"):
             try:
                 sensors = client.list_sensors()
             except Exception as e:
-                logger.error(f"[unifi_protect] list_sensors error: {e}")
+                logger.error(f"[unifi_protect_camera_info] list_sensors error: {e}")
                 return action_failure(
                     code="unifi_sensors_failed",
                     message=f"I couldn't reach UniFi Protect sensors. {e}",
@@ -956,7 +821,7 @@ class UniFiProtectPlugin(ToolVerba):
             try:
                 cams = client.list_cameras()
             except Exception as e:
-                logger.error(f"[unifi_protect] list_cameras error: {e}")
+                logger.error(f"[unifi_protect_camera_info] list_cameras error: {e}")
                 return action_failure(
                     code="unifi_cameras_failed",
                     message=f"I couldn't list cameras. {e}",
@@ -975,7 +840,7 @@ class UniFiProtectPlugin(ToolVerba):
             try:
                 cams = client.list_cameras()
             except Exception as e:
-                logger.error(f"[unifi_protect] list_cameras error: {e}")
+                logger.error(f"[unifi_protect_camera_info] list_cameras error: {e}")
                 return action_failure(
                     code="unifi_cameras_failed",
                     message=f"I couldn't list cameras. {e}",
@@ -998,7 +863,7 @@ class UniFiProtectPlugin(ToolVerba):
             try:
                 img_bytes, mimetype = client.get_camera_snapshot(cam_id)
             except Exception as e:
-                logger.error(f"[unifi_protect] snapshot error: {e}")
+                logger.error(f"[unifi_protect_camera_info] snapshot error: {e}")
                 facts = {"camera": hit, "note": f"Snapshot not available for that camera: {e}"}
                 return action_failure(
                     code="snapshot_failed",
@@ -1048,7 +913,7 @@ class UniFiProtectPlugin(ToolVerba):
             try:
                 cams = client.list_cameras()
             except Exception as e:
-                logger.error(f"[unifi_protect] list_cameras error: {e}")
+                logger.error(f"[unifi_protect_camera_info] list_cameras error: {e}")
                 return action_failure(
                     code="unifi_cameras_failed",
                     message=f"I couldn't list cameras. {e}",
@@ -1111,7 +976,7 @@ class UniFiProtectPlugin(ToolVerba):
                         )
 
                 except Exception as e:
-                    logger.info(f"[unifi_protect] snapshot/vision failed for {cam_name}: {e}")
+                    logger.info(f"[unifi_protect_camera_info] snapshot/vision failed for {cam_name}: {e}")
                     camera_descriptions.append({
                         "camera": cam_name,
                         "state": cam.get("state"),
@@ -1153,4 +1018,4 @@ class UniFiProtectPlugin(ToolVerba):
         )
 
 
-verba = UniFiProtectPlugin()
+verba = UniFiProtectCameraInfoPlugin()

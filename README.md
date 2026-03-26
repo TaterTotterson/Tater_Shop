@@ -76,8 +76,14 @@
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, matrix, telegram |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, macos, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, macos, discord, irc, matrix, telegram |
-| `unifi_network` | Fetch UniFi Network sites/clients/devices via the official API and answer natural-language requests. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
-| `unifi_protect` | Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_network_clients` | List UniFi clients with wired/wireless counts and client details. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_network_devices` | List UniFi devices with online/offline status and core details. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_network_health` | Get UniFi network health summary including client/device totals and offline device signals. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_network_lookup` | Look up a UniFi client/device and return matching identity and network details. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_protect_area` | Describe activity across multiple cameras in a named area. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_protect_camera` | Describe a single UniFi Protect camera snapshot. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_protect_camera_info` | List UniFi Protect cameras. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `unifi_protect_sensors` | Check UniFi Protect sensor status and single-sensor detail. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc |
 | `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, macos, irc, homeassistant, matrix, homekit, xbmc, telegram |
 | `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |

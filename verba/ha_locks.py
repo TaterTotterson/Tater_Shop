@@ -62,7 +62,7 @@ class HAClient:
 class HALocksPlugin(ToolVerba):
     name = 'ha_locks'
     verba_name = 'Home Assistant Locks'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Locks'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HALocksPlugin(ToolVerba):
     forced_route = 'lock'
     forced_domain_hint = 'lock'
 
-    usage = '{"function":"ha_locks","arguments":{"query":"Control or check Home Assistant lock entities in natural language."}}'
+    usage = '{"function":"ha_locks","arguments":{"query":"is the front door locked"}}'
 
-    description = 'Control and check Home Assistant locks with lock-focused routing.'
+    description = 'Lock, unlock, and check lock status for doors and smart locks.'
     verba_dec = 'Control Home Assistant lock entities.'
     when_to_use = 'Use for lock status checks and lock/unlock actions.'
     common_needs = ['lock/device and action (for example: front door + lock)']

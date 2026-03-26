@@ -62,7 +62,7 @@ class HAClient:
 class HAFansPlugin(ToolVerba):
     name = 'ha_fans'
     verba_name = 'Home Assistant Fans'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Fans'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HAFansPlugin(ToolVerba):
     forced_route = 'fan'
     forced_domain_hint = 'fan'
 
-    usage = '{"function":"ha_fans","arguments":{"query":"Control or check Home Assistant fan entities in natural language."}}'
+    usage = '{"function":"ha_fans","arguments":{"query":"turn on the bedroom fan"}}'
 
-    description = 'Control and check Home Assistant fan entities with fan-focused routing.'
+    description = 'Turn fans on or off and check fan status in different rooms.'
     verba_dec = 'Control Home Assistant fans.'
     when_to_use = 'Use for fan status checks and fan on/off control.'
     common_needs = ['fan/device and action (for example: bedroom fan + turn off)']

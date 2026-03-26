@@ -62,7 +62,7 @@ class HAClient:
 class HACoversPlugin(ToolVerba):
     name = 'ha_covers'
     verba_name = 'Home Assistant Covers'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Covers'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HACoversPlugin(ToolVerba):
     forced_route = 'cover'
     forced_domain_hint = 'cover'
 
-    usage = '{"function":"ha_covers","arguments":{"query":"Control or check Home Assistant covers, garage doors, blinds, and shades in natural language."}}'
+    usage = '{"function":"ha_covers","arguments":{"query":"open the garage door"}}'
 
-    description = 'Control and check Home Assistant covers with cover-focused routing.'
+    description = 'Open, close, and check covers like garage doors, blinds, and shades.'
     verba_dec = 'Control Home Assistant covers and garage doors.'
     when_to_use = 'Use for opening/closing/checking garage doors, blinds, shades, and other cover entities.'
     common_needs = ['cover/device and action (for example: garage door + open)']

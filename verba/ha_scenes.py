@@ -62,7 +62,7 @@ class HAClient:
 class HAScenesPlugin(ToolVerba):
     name = 'ha_scenes'
     verba_name = 'Home Assistant Scenes'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Scenes'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HAScenesPlugin(ToolVerba):
     forced_route = 'scene'
     forced_domain_hint = 'scene'
 
-    usage = '{"function":"ha_scenes","arguments":{"query":"Activate or check Home Assistant scenes in natural language."}}'
+    usage = '{"function":"ha_scenes","arguments":{"query":"run movie time scene"}}'
 
-    description = 'Activate and check Home Assistant scenes with scene-focused routing.'
+    description = 'Activate Home Assistant scenes and check whether a scene is active.'
     verba_dec = 'Control Home Assistant scenes.'
     when_to_use = 'Use for explicit scene activation or scene state checks.'
     common_needs = ['scene name and action (for example: movie time scene + run)']
