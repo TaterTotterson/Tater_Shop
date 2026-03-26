@@ -62,7 +62,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Lights'
     settings_category = 'Home Assistant Control'
@@ -74,7 +74,7 @@ class HALightsPlugin(ToolVerba):
 
     usage = '{"function":"ha_lights","arguments":{"query":"Control or check Home Assistant lights in natural language."}}'
 
-    description = 'Control and check Home Assistant light entities with light-only routing.'
+    description = 'Turn on and off lights and change brightness in the house'
     verba_dec = 'Control Home Assistant lights.'
     when_to_use = 'Use when the request is specifically about lights, brightness, or color.'
     common_needs = ['light/device and action (for example: office lights + turn off)']
