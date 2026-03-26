@@ -290,11 +290,11 @@
       "sha256": "c213bb956fd6200ec3d73df29001bd6d4bf6dc327463e2534de61b801e493fc4"
     },
     {
-      "id": "ha_control",
-      "name": "Home Assistant Control",
-      "version": "1.1.11",
+      "id": "ha_climate",
+      "name": "Home Assistant Climate",
+      "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Control Home Assistant devices.",
+      "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
         "homeassistant",
         "webui",
@@ -308,9 +308,298 @@
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
-      "tags": [],
-      "entry": "verba/ha_control.py",
-      "sha256": "753af2862e9573c95fb2b866ab66f4cff6ae3ab93a13dfdd9ee6a851feef4f72"
+      "tags": [
+        "homeassistant",
+        "climate"
+      ],
+      "entry": "verba/ha_climate.py",
+      "sha256": "401499ead3f096502c16e765a5f0ba62725ab79bd26263e182eb33ac9db9ef94"
+    },
+    {
+      "id": "ha_covers",
+      "name": "Home Assistant Covers",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant covers and garage doors.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "cover"
+      ],
+      "entry": "verba/ha_covers.py",
+      "sha256": "5c751e1cd6895a387d6e540ccca56105231e4c0d83b631e7c590190b8a210d0b"
+    },
+    {
+      "id": "ha_fans",
+      "name": "Home Assistant Fans",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant fans.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "fan"
+      ],
+      "entry": "verba/ha_fans.py",
+      "sha256": "e92f33e0446b66a413105ae167c8c843e86158e4d32fbd3e1042995a818e1927"
+    },
+    {
+      "id": "ha_lights",
+      "name": "Home Assistant Lights",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant lights.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "light"
+      ],
+      "entry": "verba/ha_lights.py",
+      "sha256": "6703066e9e5283ed9df90cd97c3f2efaf4ae016b0eb5dbb3d02899f4c7cc4de1"
+    },
+    {
+      "id": "ha_locks",
+      "name": "Home Assistant Locks",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant lock entities.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "lock"
+      ],
+      "entry": "verba/ha_locks.py",
+      "sha256": "76ccf9f5a7dc643bf0d0162c474785ebfd7bc3b4a2fa2e91c8192dfba649c9e9"
+    },
+    {
+      "id": "ha_media_players",
+      "name": "Home Assistant Media Players",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant media players.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "media_player"
+      ],
+      "entry": "verba/ha_media_players.py",
+      "sha256": "ed557c287645aa786a4663e1751a1a08004a6f77e036092bd30d55dafe6360f6"
+    },
+    {
+      "id": "ha_remotes",
+      "name": "Home Assistant Remotes",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant remotes and remote commands.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "remote"
+      ],
+      "entry": "verba/ha_remotes.py",
+      "sha256": "7b66182095a177e9fb2474a94489a33bfbbaed4361844a534cf9f99182e38631"
+    },
+    {
+      "id": "ha_scenes",
+      "name": "Home Assistant Scenes",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant scenes.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "scene"
+      ],
+      "entry": "verba/ha_scenes.py",
+      "sha256": "c5073e2b4b5afdb7b75260662ece6ec66ac718901627fd07ead8534a8579d1e8"
+    },
+    {
+      "id": "ha_scripts",
+      "name": "Home Assistant Scripts",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant scripts.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "script"
+      ],
+      "entry": "verba/ha_scripts.py",
+      "sha256": "7d1e9e972c9d5194cd4b202855eb217539168169e9436ce1b9d20f903edbcc5f"
+    },
+    {
+      "id": "ha_sensors",
+      "name": "Home Assistant Sensors",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read Home Assistant sensor entities.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "sensor"
+      ],
+      "entry": "verba/ha_sensors.py",
+      "sha256": "6db6b630293c3a578b52381acff86f55993f5ce708d2c682955c738462c91c16"
+    },
+    {
+      "id": "ha_switches",
+      "name": "Home Assistant Switches",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant switches and plugs.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "switch"
+      ],
+      "entry": "verba/ha_switches.py",
+      "sha256": "d47404c757735d37396bd7fb9f8d877183f77e2b868dd3eb8887f37aeedd839c"
+    },
+    {
+      "id": "ha_temperature",
+      "name": "Home Assistant Temperature",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read Home Assistant ambient temperatures.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "temperature"
+      ],
+      "entry": "verba/ha_temperature.py",
+      "sha256": "81bf4073a4b7e4f4b78b3b2d6e9bb8cf382dd4842a08e0f2cac514ee11fe6d72"
     },
     {
       "id": "jackett_search",

@@ -1,4 +1,4 @@
-# verba/ha_control_plugin.py
+# verba/ha_remotes.py
 import asyncio
 import logging
 import re
@@ -13,7 +13,7 @@ from helpers import redis_client
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
-logger = logging.getLogger("ha_control")
+logger = logging.getLogger("ha_remotes")
 logger.setLevel(logging.INFO)
 
 
@@ -59,24 +59,25 @@ class HAClient:
         return self._req("GET", "/api/states") or []
 
 
-class HAControlPlugin(ToolVerba):
-    name = "ha_control"
-    verba_name = "Home Assistant Control"
-    version = "1.1.11"
-    min_tater_version = "59"
-    pretty_name = "Home Assistant Control"
-    settings_category = "Home Assistant Control"
-    platforms = ["homeassistant", "webui", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
+class HARemotesPlugin(ToolVerba):
+    name = 'ha_remotes'
+    verba_name = 'Home Assistant Remotes'
+    version = '1.0.0'
+    min_tater_version = '59'
+    pretty_name = 'Home Assistant Remotes'
+    settings_category = 'Home Assistant Control'
+    platforms = ['homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
+    tags = ['homeassistant', 'remote']
 
-    usage = '{"function":"ha_control","arguments":{"query":"A single Home Assistant request in natural language (for example: turn off office lights, set bedroom thermostat to 72, or what is the living room temperature?)"}}'
+    forced_route = 'remote'
+    forced_domain_hint = 'remote'
 
-    description = (
-        "Control or check Home Assistant devices like lights, switches, thermostats, locks, covers, "
-        "remotes for TVs/streaming devices, temperatures, and sensors."
-    )
-    verba_dec = "Control Home Assistant devices."
-    when_to_use = "Use to control or query Home Assistant devices from a single natural-language command."
-    common_needs = ["device/area and action (e.g., \"office lights\" + \"turn off\")"]
+    usage = '{"function":"ha_remotes","arguments":{"query":"Control Home Assistant remote entities (mute, volume, navigation, play/pause) in natural language."}}'
+
+    description = 'Control and check Home Assistant remote entities with remote-focused routing.'
+    verba_dec = 'Control Home Assistant remotes and remote commands.'
+    when_to_use = 'Use for remote button-style commands like mute, volume up/down, home, back, and play/pause.'
+    common_needs = ['remote/device and command (for example: living room roku + mute)']
     missing_info_prompts = []
 
     waiting_prompt_template = (
@@ -175,7 +176,7 @@ class HAControlPlugin(ToolVerba):
         try:
             return HAClient()
         except Exception as e:
-            logger.error(f"[ha_control] Failed to initialize HA client: {e}")
+            logger.error(f"[ha_remotes] Failed to initialize HA client: {e}")
             return None
 
     def _excluded_entities_set(self) -> set[str]:
@@ -191,7 +192,7 @@ class HAControlPlugin(ToolVerba):
             if v:
                 ids.append(v.lower())
         excluded = set(ids)
-        logger.debug(f"[ha_control] excluded voice PE entities: {excluded}")
+        logger.debug(f"[ha_remotes] excluded voice PE entities: {excluded}")
         return excluded
 
     def _clean_search_text(self, text: str) -> str:
@@ -216,108 +217,11 @@ class HAControlPlugin(ToolVerba):
         }
 
     async def _route_query_with_llm(self, query: str, intent: Optional[dict], llm_client) -> dict:
-        base = self._default_route_info(query)
-        if not str(query or "").strip() or llm_client is None:
-            return base
+        # Split verba are domain-fixed; no LLM route classification.
+        return self._default_route_info(query)
 
-        cache_ttl = self._get_int_setting("HA_INTERPRET_CACHE_SECONDS", 45)
-        cache_key = None
-        if cache_ttl > 0:
-            try:
-                intent_key = _json.dumps(intent or {}, sort_keys=True, ensure_ascii=False)
-            except Exception:
-                intent_key = "{}"
-            cache_key = f"ha_control:route:v1:{query.strip().lower()}:{intent_key}"
-            cached = self._cache_get_json(cache_key)
-            if isinstance(cached, dict) and str(cached.get("route") or "").strip():
-                route = str(cached.get("route") or "").strip().lower()
-                if route in {
-                    "unknown", "light", "switch", "climate", "temperature", "cover",
-                    "lock", "fan", "remote", "media_player", "scene", "script", "sensor",
-                }:
-                    search_text = str(cached.get("search_text") or "").strip()
-                    return {
-                        "route": route,
-                        "search_text": search_text or base["search_text"],
-                    }
-
-        prompt = (
-            "Classify this Home Assistant request and choose the primary entity-routing path.\n"
-            "Return strict JSON only with this shape:\n"
-            '{"route":"unknown|light|switch|climate|temperature|cover|lock|fan|remote|media_player|scene|script|sensor",'
-            '"search_text":"short entity lookup phrase"}\n'
-            "Rules:\n"
-            "- route=light for lights, lamps, bulbs, colors, brightness, or light state requests.\n"
-            "- route=switch for switches, outlets, plugs, and simple power control for named devices like TVs, arcade cabinets, consoles, receivers, chargers, lamps, or similar gear when Home Assistant exposes them as switch entities.\n"
-            "- route=climate for thermostat/HVAC state or setpoint changes.\n"
-            "- route=temperature for ambient temperature sensor questions.\n"
-            "- route=cover for garage doors, blinds, shades, and covers.\n"
-            "- route=lock for locks and unlock/lock requests.\n"
-            "- route=fan for fans.\n"
-            "- route=remote for button presses like mute, volume, play, pause, home, back, menu, select.\n"
-            "- route=media_player for native playback/source/app/state requests on media devices.\n"
-            "- For simple on/off power requests for a TV, arcade cabinet, receiver, or similar device, prefer route=switch when it could plausibly be a smart plug/switch entity.\n"
-            "- route=scene only for explicit scene activation/state.\n"
-            "- route=script only for explicit script execution/state.\n"
-            "- route=sensor for non-temperature sensor status.\n"
-            "- route=unknown only when the domain is not clear.\n"
-            "- Think in terms of these paths: light, switch/plug/device-power, climate/thermostat, temperature sensor, cover/garage, lock, fan, remote buttons, native media_player, scene, script, sensor.\n"
-            "- search_text should be short, concrete, and based on the user's wording.\n"
-            "- search_text should focus on the target entity phrase, like 'office lights', 'kitchen switch', 'garage door', 'living room tv', or 'arcade plug'.\n"
-            "- Do not invent entity_ids.\n"
-            "Examples:\n"
-            '- "turn off office lights" -> {"route":"light","search_text":"office lights"}\n'
-            '- "set office lights to blue" -> {"route":"light","search_text":"office lights"}\n'
-            '- "turn on the kitchen plug" -> {"route":"switch","search_text":"kitchen plug"}\n'
-            '- "power on the arcade" -> {"route":"switch","search_text":"arcade"}\n'
-            '- "turn off the living room tv" -> {"route":"switch","search_text":"living room tv"}\n'
-            '- "what is the living room tv playing" -> {"route":"media_player","search_text":"living room tv"}\n'
-            '- "pause the roku" -> {"route":"remote","search_text":"roku"}\n'
-            '- "mute the family room receiver" -> {"route":"remote","search_text":"family room receiver"}\n'
-            '- "open the garage door" -> {"route":"cover","search_text":"garage door"}\n'
-            '- "is the front door locked" -> {"route":"lock","search_text":"front door"}\n'
-            '- "turn on the bedroom fan" -> {"route":"fan","search_text":"bedroom fan"}\n'
-            '- "set the hallway thermostat to 72" -> {"route":"climate","search_text":"hallway thermostat"}\n'
-            '- "what is the thermostat set to in the office" -> {"route":"climate","search_text":"office thermostat"}\n'
-            '- "what is the temperature in the kitchen" -> {"route":"temperature","search_text":"kitchen temperature"}\n'
-            '- "run movie time scene" -> {"route":"scene","search_text":"movie time"}\n'
-        )
-
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": "You return only strict JSON."},
-                    {
-                        "role": "user",
-                        "content": _json.dumps(
-                            {"query": query, "intent_hint": intent or {}},
-                            ensure_ascii=False,
-                        ) + "\n\n" + prompt,
-                    },
-                ]
-            )
-            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-            parsed = _json.loads(raw)
-            if not isinstance(parsed, dict):
-                return base
-            route = str(parsed.get("route") or "").strip().lower()
-            if route not in {
-                "unknown", "light", "switch", "climate", "temperature", "cover",
-                "lock", "fan", "remote", "media_player", "scene", "script", "sensor",
-            }:
-                route = "unknown"
-            search_text = self._clean_search_text(parsed.get("search_text")) or base["search_text"]
-            out = {"route": route, "search_text": search_text}
-            if cache_key and cache_ttl > 0:
-                self._cache_set_json(cache_key, out, cache_ttl)
-            return out
-        except Exception as exc:
-            logger.debug(f"[ha_control] route_query failed: {exc}")
-            return base
-
-    async def _route_query(self, query: str, intent: Optional[dict], llm_client) -> dict:
-        return await self._route_query_with_llm(query, intent, llm_client)
+    async def _base_route_query(self, query: str, intent: Optional[dict], llm_client) -> dict:
+        return self._default_route_info(query)
 
     @staticmethod
     def _state_key(st: Any) -> str:
@@ -691,7 +595,7 @@ class HAControlPlugin(ToolVerba):
     # Catalog (grounding)
     # ----------------------------
     def _catalog_cache_key(self) -> str:
-        return "ha_control:catalog:v4"
+        return "ha_remotes:catalog:v4"
 
     def _build_catalog_from_states(self, states: List[dict]) -> List[dict]:
         catalog: List[dict] = []
@@ -789,11 +693,11 @@ class HAControlPlugin(ToolVerba):
     # ----------------------------
     # Step 1: LLM interprets query → intent (with cache)
     # ----------------------------
-    async def _interpret_query(self, query: str, llm_client) -> dict:
+    async def _base_interpret_query(self, query: str, llm_client) -> dict:
         allowed_domain = "light,switch,climate,sensor,binary_sensor,cover,lock,fan,media_player,scene,script,select,remote"
 
         cache_ttl = self._get_int_setting("HA_INTERPRET_CACHE_SECONDS", 45)
-        cache_key = f"ha_control:interpret:v1:{query.strip().lower()}"
+        cache_key = f"ha_remotes:interpret:v1:{query.strip().lower()}"
         if cache_ttl > 0:
             cached = self._cache_get_json(cache_key)
             if cached and isinstance(cached, dict) and cached.get("intent"):
@@ -937,7 +841,7 @@ class HAControlPlugin(ToolVerba):
         cat_ts = self._catalog_ts()
         cache_key = None
         if cache_ttl > 0:
-            cache_key = f"ha_control:choose:v3:{(query or '').strip().lower()}:{str(cat_ts or 'none')}:{_json.dumps(intent, sort_keys=True, ensure_ascii=False)}"
+            cache_key = f"ha_remotes:choose:v3:{(query or '').strip().lower()}:{str(cat_ts or 'none')}:{_json.dumps(intent, sort_keys=True, ensure_ascii=False)}"
             try:
                 cached = self._cache_get_json(cache_key)
                 if cached and isinstance(cached, dict):
@@ -1003,7 +907,7 @@ class HAControlPlugin(ToolVerba):
             try:
                 picked = await ask_pick(mini)
             except Exception as e:
-                logger.warning(f"[ha_control] LLM choose failed single-shot: {e}")
+                logger.warning(f"[ha_remotes] LLM choose failed single-shot: {e}")
 
         # Tournament fallback
         if not picked:
@@ -1021,7 +925,7 @@ class HAControlPlugin(ToolVerba):
                 else:
                     picked = mini[0]["entity_id"] if mini else None
             except Exception as e:
-                logger.warning(f"[ha_control] LLM choose failed tournament: {e}")
+                logger.warning(f"[ha_remotes] LLM choose failed tournament: {e}")
                 picked = mini[0]["entity_id"] if mini else None
 
         if picked and cache_key and cache_ttl > 0:
@@ -1251,7 +1155,7 @@ class HAControlPlugin(ToolVerba):
     # ----------------------------
     # Core logic
     # ----------------------------
-    async def _handle(self, args, llm_client):
+    async def _base_handle(self, args, llm_client):
         client = self._get_client()
         if not client:
             return (
@@ -1270,13 +1174,13 @@ class HAControlPlugin(ToolVerba):
         try:
             catalog = self._get_catalog_cached(client)
         except Exception as e:
-            logger.error(f"[ha_control] catalog build failed: {e}")
+            logger.error(f"[ha_remotes] catalog build failed: {e}")
             return "I couldn't access Home Assistant states."
 
         try:
             intent = await self._interpret_query(query, llm_client)
         except Exception as e:
-            logger.error(f"[ha_control] interpret_query failed: {e}")
+            logger.error(f"[ha_remotes] interpret_query failed: {e}")
             return "I couldn't understand that request."
 
         intent_type = (intent.get("intent") or "").strip()
@@ -1339,7 +1243,7 @@ class HAControlPlugin(ToolVerba):
                 unit = (attrs.get("unit_of_measurement") or "")
                 return await self._speak_response_state(query, friendly, str(val), str(unit), llm_client)
             except Exception as e:
-                logger.error(f"[ha_control] temp get_state error: {e}")
+                logger.error(f"[ha_remotes] temp get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
         if primary_route == "climate" and intent_type in ("get_state", "control") and action == "get_state":
@@ -1389,7 +1293,7 @@ class HAControlPlugin(ToolVerba):
                 val = st.get("state", "unknown") if isinstance(st, dict) else str(st)
                 return await self._speak_response_state(query, friendly, str(val), "", llm_client)
             except Exception as e:
-                logger.error(f"[ha_control] thermostat read error: {e}")
+                logger.error(f"[ha_remotes] thermostat read error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
         if intent_type == "set_temperature" or action == "set_temperature":
@@ -1436,7 +1340,7 @@ class HAControlPlugin(ToolVerba):
                 friendly = (attrs.get("friendly_name") or entity_id)
                 return await self._speak_response_confirm(query, friendly, f"set to {int(temperature)} degrees", "", llm_client)
             except Exception as e:
-                logger.error(f"[ha_control] set_temperature error: {e}")
+                logger.error(f"[ha_remotes] set_temperature error: {e}")
                 return f"Error setting {entity_id}: {e}"
 
         if intent_type == "control":
@@ -1543,7 +1447,7 @@ class HAControlPlugin(ToolVerba):
                                 did_work = True  # we successfully called the service; assume ok
 
                         except Exception as e:
-                            logger.info(f"[ha_control] remote.turn_on failed: {e}")
+                            logger.info(f"[ha_remotes] remote.turn_on failed: {e}")
 
                         # If the remote didn't show any change, try powering a related media_player
                         if not did_work:
@@ -1555,7 +1459,7 @@ class HAControlPlugin(ToolVerba):
                                     extras_txt_parts.append("power")
                                     did_work = True
                                 except Exception as e:
-                                    logger.info(f"[ha_control] media_player.turn_on fallback failed: {e}")
+                                    logger.info(f"[ha_remotes] media_player.turn_on fallback failed: {e}")
 
                         if not did_work:
                             return (
@@ -1575,7 +1479,7 @@ class HAControlPlugin(ToolVerba):
                             except Exception:
                                 did_work = True
                         except Exception as e:
-                            logger.info(f"[ha_control] remote.turn_off failed: {e}")
+                            logger.info(f"[ha_remotes] remote.turn_off failed: {e}")
 
                         if not did_work:
                             remote_friendly = attrs_now.get("friendly_name") or entity_id
@@ -1586,7 +1490,7 @@ class HAControlPlugin(ToolVerba):
                                     extras_txt_parts.append("power")
                                     did_work = True
                                 except Exception as e:
-                                    logger.info(f"[ha_control] media_player.turn_off fallback failed: {e}")
+                                    logger.info(f"[ha_remotes] media_player.turn_off fallback failed: {e}")
 
                         if not did_work:
                             return (
@@ -1621,7 +1525,7 @@ class HAControlPlugin(ToolVerba):
                                 break
 
                         if last_error is not None:
-                            logger.info(f"[ha_control] remote.send_command failed. Tried: {tried}. Last error: {last_error}")
+                            logger.info(f"[ha_remotes] remote.send_command failed. Tried: {tried}. Last error: {last_error}")
                             return (
                                 "I tried a few command names for that remote, but none worked. "
                                 "If you tell me what the button is called in Home Assistant, I can use it."
@@ -1630,7 +1534,7 @@ class HAControlPlugin(ToolVerba):
                         client.call_service(entity_domain, service, payload)
 
                 except Exception as e:
-                    logger.error(f"[ha_control] remote control error: {e}")
+                    logger.error(f"[ha_remotes] remote control error: {e}")
                     return f"Error performing {service} on {entity_id}: {e}"
 
                 # Confirm
@@ -1651,7 +1555,7 @@ class HAControlPlugin(ToolVerba):
                     extras_txt = ", ".join(extras_txt_parts) if extras_txt_parts else ""
                     return await self._speak_response_confirm(query, friendly, spoken_action, extras_txt, llm_client)
                 except Exception as e:
-                    logger.error(f"[ha_control] remote post-state error: {e}")
+                    logger.error(f"[ha_remotes] remote post-state error: {e}")
                     return "Done."
 
             # Generic non-remote control path
@@ -1731,9 +1635,9 @@ class HAControlPlugin(ToolVerba):
                 )
 
             except Exception as e:
-                logger.error(f"[ha_control] control error: {e}")
+                logger.error(f"[ha_remotes] control error: {e}")
                 return action_failure(
-                    code="ha_control_failed",
+                    code="ha_remotes_failed",
                     message=f"Error performing {service} on {entity_id}: {e}",
                     diagnosis=self._ha_diagnosis(),
                     needs=["Should I retry or target a different device?"],
@@ -1778,10 +1682,101 @@ class HAControlPlugin(ToolVerba):
 
                 return await self._speak_response_state(query, friendly, str(val), str(unit), llm_client)
             except Exception as e:
-                logger.error(f"[ha_control] get_state error: {e}")
+                logger.error(f"[ha_remotes] get_state error: {e}")
                 return f"Error reading {entity_id}: {e}"
 
         return "I couldn't understand that request."
 
+    def _route_key(self) -> str:
+        route = str(getattr(self, "forced_route", "") or "").strip().lower()
+        return route or "unknown"
 
-verba = HAControlPlugin()
+    def _hint_key(self) -> str:
+        hint = str(getattr(self, "forced_domain_hint", "") or "").strip().lower()
+        if hint:
+            return hint
+        route = self._route_key()
+        if route == "temperature":
+            return "sensor"
+        return route
+
+    def _domain_guard(self, intent: dict):
+        route = self._route_key()
+        intent_type = str((intent or {}).get("intent") or "").strip().lower()
+        action = str((intent or {}).get("action") or "").strip().lower()
+
+        if route != "temperature" and intent_type == "get_temp":
+            return action_failure(
+                code="ha_domain_mismatch",
+                message=f"{self.name} handles {route} requests. Use ha_temperature for ambient temperature checks.",
+                diagnosis=self._ha_diagnosis(),
+                needs=["Ask for a state/control request in this domain, or use ha_temperature."],
+                say_hint="Explain that this tool is domain-specific and suggest the matching Home Assistant verba.",
+            )
+
+        if route != "climate" and (intent_type == "set_temperature" or action == "set_temperature"):
+            return action_failure(
+                code="ha_domain_mismatch",
+                message=f"{self.name} handles {route} requests. Use ha_climate for thermostat setpoint changes.",
+                diagnosis=self._ha_diagnosis(),
+                needs=["Use ha_climate to set thermostat temperatures."],
+                say_hint="Explain that thermostat setpoint changes belong to the climate verba.",
+            )
+
+        if route == "temperature" and (
+            intent_type in {"control", "set_temperature"}
+            or action in {"turn_on", "turn_off", "open", "close", "set_temperature", "send_command"}
+        ):
+            return action_failure(
+                code="ha_temperature_read_only",
+                message="ha_temperature is read-only for ambient temperature lookups.",
+                diagnosis=self._ha_diagnosis(),
+                needs=["Use a control-focused Home Assistant verba (for example ha_lights, ha_switches, or ha_climate)."],
+                say_hint="Explain that this tool is read-only and suggest the correct control-focused verba.",
+            )
+
+        return None
+
+    async def _handle(self, args, llm_client):
+        args = args or {}
+        query = str(args.get("query") or "").strip()
+        if query and llm_client is not None:
+            try:
+                parsed = await self._base_interpret_query(query, llm_client)
+                if isinstance(parsed, dict):
+                    guarded = self._domain_guard(parsed)
+                    if guarded:
+                        return guarded
+            except Exception:
+                # Guardrails are best-effort and should not block normal handling.
+                pass
+        return await self._base_handle(args, llm_client)
+
+    async def _route_query(self, query: str, intent, llm_client) -> dict:
+        return {
+            "route": self._route_key(),
+            "search_text": self._clean_search_text(query) or str(query or "").strip(),
+        }
+
+    async def _interpret_query(self, query: str, llm_client) -> dict:
+        data = await self._base_interpret_query(query, llm_client)
+        if not isinstance(data, dict):
+            data = {}
+
+        route = self._route_key()
+        hint = self._hint_key()
+
+        if route == "temperature":
+            data["intent"] = "get_temp"
+            data["action"] = "get_state"
+            data["domain_hint"] = "sensor"
+            data["read_target"] = "state"
+            return data
+
+        if hint:
+            data["domain_hint"] = hint
+
+        return data
+
+
+verba = HARemotesPlugin()
