@@ -1,0 +1,1073 @@
+{
+  "schema": 1,
+  "verbas": [
+    {
+      "id": "automatic_plugin",
+      "name": "Automatic1111 Image",
+      "version": "1.2.1",
+      "min_tater_version": "59",
+      "description": "Create one image from a natural-language image request.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Automatic111",
+      "tags": [],
+      "entry": "verba/automatic_plugin.py",
+      "sha256": "bcefde8ba2ca8edfe051b7e2ae3acd04b5b9c71157b5b56c071d6abe8917b431"
+    },
+    {
+      "id": "broadcast",
+      "name": "Broadcast",
+      "version": "1.1.3",
+      "min_tater_version": "59",
+      "description": "Send a one-time spoken announcement to your Home Assistant media players.",
+      "portals": [
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "webui",
+        "macos",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Broadcast",
+      "tags": [],
+      "entry": "verba/broadcast.py",
+      "sha256": "eb62e6c8f9d2e44a8828aba26fa6626f767b39b9b05b8b4fbfc76e5e13bfdad9"
+    },
+    {
+      "id": "camera_event",
+      "name": "Camera Event",
+      "version": "1.2.2",
+      "min_tater_version": "59",
+      "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
+      "portals": [
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Camera Event",
+      "tags": [],
+      "entry": "verba/camera_event.py",
+      "sha256": "139c8f7978f655299639ff60489c9e2389da3742f718203125fb517797e50c7f"
+    },
+    {
+      "id": "comfyui_audio_ace",
+      "name": "ComfyUI Audio Ace",
+      "version": "1.0.4",
+      "min_tater_version": "59",
+      "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "homeassistant",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "ComfyUI Audio Ace",
+      "tags": [],
+      "entry": "verba/comfyui_audio_ace.py",
+      "sha256": "d318c6d1e960ca4c6a1dc6ae2d87a7a3684dbf61e7df4d14fc9f50241fbb4566"
+    },
+    {
+      "id": "comfyui_image_plugin",
+      "name": "ComfyUI Image",
+      "version": "1.0.5",
+      "min_tater_version": "59",
+      "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "ComfyUI Image",
+      "tags": [],
+      "entry": "verba/comfyui_image_plugin.py",
+      "sha256": "a59925e924d64b4f1ee23cc744b045c81abac3c8bc0e22b602364d59b2b566aa"
+    },
+    {
+      "id": "comfyui_image_video",
+      "name": "ComfyUI Animate Image",
+      "version": "1.0.2",
+      "min_tater_version": "59",
+      "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": "ComfyUI Animate Image",
+      "tags": [],
+      "entry": "verba/comfyui_image_video.py",
+      "sha256": "837cd41e06d802ff3de3d3b2a5e8d3f66648ad5d7747b9a4a76d27f4caf6faae"
+    },
+    {
+      "id": "comfyui_music_video",
+      "name": "ComfyUI Music Video",
+      "version": "1.0.3",
+      "min_tater_version": "59",
+      "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "verba/comfyui_music_video.py",
+      "sha256": "0792400be7a4015bb90c864205daca390b9d98d1556d6897967f689942a78e28"
+    },
+    {
+      "id": "comfyui_video_plugin",
+      "name": "ComfyUI Video",
+      "version": "1.0.3",
+      "min_tater_version": "59",
+      "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "verba/comfyui_video_plugin.py",
+      "sha256": "26c2f218be0405a035f07ee0a406024523093729f60b05fe719d46f8c2b9a5cf"
+    },
+    {
+      "id": "device_compare",
+      "name": "Device Compare",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Natural-language device comparison with spec tables and optional per-game FPS benchmarks.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Device Compare",
+      "tags": [],
+      "entry": "verba/device_compare.py",
+      "sha256": "7fd9a8249ce48dd01140d30fdc80e73f73d57b0c94219ec0d0c848ac6ecfd07c"
+    },
+    {
+      "id": "discord_admin",
+      "name": "Discord Admin",
+      "version": "1.0.18",
+      "min_tater_version": "59",
+      "description": "Discord server setup, admin changes, and current-room always-respond control.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "verba/discord_admin.py",
+      "sha256": "be0feea7b72fbab446fb2d0eb47400baf6c647f128bc6be5e7491a1e67ea1ce4"
+    },
+    {
+      "id": "doorbell_alert",
+      "name": "Doorbell Alert",
+      "version": "1.0.5",
+      "min_tater_version": "59",
+      "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
+      "portals": [
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Doorbell Alert",
+      "tags": [],
+      "entry": "verba/doorbell_alert.py",
+      "sha256": "180bb47de4fd8759aae91617164f5f7a81f302476fb31dcecd83a4baf19754c3"
+    },
+    {
+      "id": "events_query",
+      "name": "Events Query",
+      "version": "2.0.0",
+      "min_tater_version": "59",
+      "description": "Natural-language semantic event-history search.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Events Query",
+      "tags": [],
+      "entry": "verba/events_query.py",
+      "sha256": "2e24a9c76b2047fe8c43e313fc4e5bf384575b319aee2180fbabeddb0bdf68ea"
+    },
+    {
+      "id": "events_query_brief",
+      "name": "Events Query Brief",
+      "version": "1.0.2",
+      "min_tater_version": "59",
+      "description": "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant.",
+      "portals": [
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Events Query",
+      "tags": [],
+      "entry": "verba/events_query_brief.py",
+      "sha256": "d03786843160fa484b95d6a276250f58d20259168083108c2d1e7cc3d7a923ad"
+    },
+    {
+      "id": "find_my_phone",
+      "name": "Find My Phone",
+      "version": "1.0.5",
+      "min_tater_version": "59",
+      "description": "Ping or ring your phone through Home Assistant so you can locate it.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Find My Phone",
+      "tags": [],
+      "entry": "verba/find_my_phone.py",
+      "sha256": "13e5cb16e84a0e631235933da25658ffb6628907e65c0bbcdc0adb2f64195c30"
+    },
+    {
+      "id": "ftp_browser",
+      "name": "FTP Browser",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Browse and download files from the configured FTP server.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": "FTPBrowser",
+      "tags": [],
+      "entry": "verba/ftp_browser.py",
+      "sha256": "ef1a4f3db6acee4316313a34f69db0e7622ca0b318f50ad915353205190a63a0"
+    },
+    {
+      "id": "get_notifications",
+      "name": "Get Notifications",
+      "version": "1.1.2",
+      "min_tater_version": "59",
+      "description": "Fetch queued notifications from the Home Assistant bridge.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Notifications",
+      "tags": [],
+      "entry": "verba/get_notifications.py",
+      "sha256": "c213bb956fd6200ec3d73df29001bd6d4bf6dc327463e2534de61b801e493fc4"
+    },
+    {
+      "id": "ha_climate",
+      "name": "Home Assistant Climate",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant thermostats and HVAC entities.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "climate"
+      ],
+      "entry": "verba/ha_climate.py",
+      "sha256": "e2ced1f7f124c2013d3960557ca527caf2b68e9ce8f37c48600852479f3fd54e"
+    },
+    {
+      "id": "ha_covers",
+      "name": "Home Assistant Covers",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant covers and garage doors.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "cover"
+      ],
+      "entry": "verba/ha_covers.py",
+      "sha256": "8059b332077d758a6d84bcbb41a6f866f045ab724b2ad792a5ae84ad9ebdf1e5"
+    },
+    {
+      "id": "ha_fans",
+      "name": "Home Assistant Fans",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant fans.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "fan"
+      ],
+      "entry": "verba/ha_fans.py",
+      "sha256": "629b8d3575706614649e7026183f17afc7549e4b529b2dbf368c289842bcd575"
+    },
+    {
+      "id": "ha_lights",
+      "name": "Home Assistant Lights",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant lights.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "light"
+      ],
+      "entry": "verba/ha_lights.py",
+      "sha256": "c1836b341044b3fd471073b4553080a73864741c7d27cf34013088337fbf4a0a"
+    },
+    {
+      "id": "ha_locks",
+      "name": "Home Assistant Locks",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant lock entities.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "lock"
+      ],
+      "entry": "verba/ha_locks.py",
+      "sha256": "419c104c3172a1ab0ac4022842dc7f4aa2a8a0f20be6e180dd187033d6c984a8"
+    },
+    {
+      "id": "ha_media_players",
+      "name": "Home Assistant Media Players",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant media players.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "media_player"
+      ],
+      "entry": "verba/ha_media_players.py",
+      "sha256": "55c5087b16a091f382db2c48fc3b8776dfd4a718dd624aa489d4a156c1b70c85"
+    },
+    {
+      "id": "ha_remotes",
+      "name": "Home Assistant Remotes",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant remotes and remote commands.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "remote"
+      ],
+      "entry": "verba/ha_remotes.py",
+      "sha256": "90e2e4b393185f1be880815daa68ed2c9879c06ba95ee984ba69161df5cd1e7b"
+    },
+    {
+      "id": "ha_scenes",
+      "name": "Home Assistant Scenes",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant scenes.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "scene"
+      ],
+      "entry": "verba/ha_scenes.py",
+      "sha256": "34b2c76953f0a9980150daf144d70518e9eb3032e581fa123fb635475ba9b403"
+    },
+    {
+      "id": "ha_scripts",
+      "name": "Home Assistant Scripts",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant scripts.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "script"
+      ],
+      "entry": "verba/ha_scripts.py",
+      "sha256": "0c9f5d938023f7c010092980c8da150954939a1c3fee07d697c1294f16eab101"
+    },
+    {
+      "id": "ha_sensors",
+      "name": "Home Assistant Sensors",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read Home Assistant sensor entities.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "sensor"
+      ],
+      "entry": "verba/ha_sensors.py",
+      "sha256": "93e5d844095ba7b11dab297b4084390cb4169c329e3ab0b9c0f4cb77e4b8a111"
+    },
+    {
+      "id": "ha_switches",
+      "name": "Home Assistant Switches",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Home Assistant switches and plugs.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "switch"
+      ],
+      "entry": "verba/ha_switches.py",
+      "sha256": "7cbfddb6573ec2205c819c388b54cc9ff1d840c3b3a0ac6f96aacb046512510a"
+    },
+    {
+      "id": "ha_temperature",
+      "name": "Home Assistant Temperature",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read Home Assistant ambient temperatures.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "temperature"
+      ],
+      "entry": "verba/ha_temperature.py",
+      "sha256": "9a6b37fb8120511ce95df5822185b2bcd9b81e0a48247bab07e1aaf988ed378c"
+    },
+    {
+      "id": "jackett_search",
+      "name": "Jackett Search",
+      "version": "1.0.3",
+      "min_tater_version": "59",
+      "description": "Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [],
+      "entry": "verba/jackett_search.py",
+      "sha256": "703053be59cd3a975bbf0e80b08688d215180b95b7acf3d6fd0c0470b7e539bf"
+    },
+    {
+      "id": "joke_api",
+      "name": "Joke API",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Fetch one joke from JokeAPI.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Joke API",
+      "tags": [],
+      "entry": "verba/joke_api.py",
+      "sha256": "7e5e7fd7a41a5f68b048ae5c61af428bf294a9a45bf9a7a734c13b93ecfcebc5"
+    },
+    {
+      "id": "lowfi_video",
+      "name": "Lofi Video",
+      "version": "1.1.2",
+      "min_tater_version": "59",
+      "description": "Create a cozy lofi video by generating music and looping a matching animation.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [],
+      "entry": "verba/lowfi_video.py",
+      "sha256": "fbb18c73f7308d776366af06789234b30cb70464fc0bb27e252198fbac1e580a"
+    },
+    {
+      "id": "mister_remote",
+      "name": "MiSTer Remote",
+      "version": "1.1.7",
+      "min_tater_version": "59",
+      "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "matrix",
+        "homekit",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "MiSTer Remote",
+      "tags": [],
+      "entry": "verba/mister_remote.py",
+      "sha256": "6f5be6cce284cf4d3f3e6d6585dd8c4f64b03a6361cf3dd3ce6f4ee61d7285ea"
+    },
+    {
+      "id": "moltbook_info",
+      "name": "Moltbook Info",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Natural-language Moltbook account intelligence and status lookups.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [],
+      "entry": "verba/moltbook_info.py",
+      "sha256": "6ee338954e573c37ed178fd1889bd260e1e1f05382e99389ea6e6f63cdca6a2f"
+    },
+    {
+      "id": "music_assistant",
+      "name": "Music Assistant",
+      "version": "1.0.10",
+      "min_tater_version": "59",
+      "description": "Play music and control playback via Music Assistant in Home Assistant.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Music Assistant",
+      "tags": [],
+      "entry": "verba/music_assistant.py",
+      "sha256": "323b314ef9010d40f43339a18f579a4d12598f06bc0ca559419121a45796af19"
+    },
+    {
+      "id": "obsidian_note",
+      "name": "Obsidian Note",
+      "version": "3.0.2",
+      "min_tater_version": "59",
+      "description": "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": "Obsidian",
+      "tags": [],
+      "entry": "verba/obsidian_note.py",
+      "sha256": "2a0bdd0ae8fcd65883d989862179fd54e8a0b39ad8a53a7eafbc7670a4885cef"
+    },
+    {
+      "id": "obsidian_search",
+      "name": "Obsidian Search",
+      "version": "2.0.2",
+      "min_tater_version": "59",
+      "description": "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis.",
+      "portals": [
+        "webui",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": "Obsidian",
+      "tags": [],
+      "entry": "verba/obsidian_search.py",
+      "sha256": "029e0ed9cbd9246ac9e438f82ccf2ba8b2d72ae82947abd9d2813d0aafaf050b"
+    },
+    {
+      "id": "overseerr_details",
+      "name": "Overseerr Details",
+      "version": "1.2.1",
+      "min_tater_version": "59",
+      "description": "Fetch details for a specific movie or TV show from Overseerr.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "matrix",
+        "homekit",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Overseerr",
+      "tags": [],
+      "entry": "verba/overseerr_details.py",
+      "sha256": "5a3bc8b289334c325fa97ba5662e627877278032ea7cdd64869890b7df54692f"
+    },
+    {
+      "id": "overseerr_request",
+      "name": "Overseerr Request",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Request a movie or TV show in Overseerr by title.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Overseerr",
+      "tags": [],
+      "entry": "verba/overseerr_request.py",
+      "sha256": "31bd161f382fb9d71a09e334f913dff91bcd860efff066e675c8bd9fde3de374"
+    },
+    {
+      "id": "overseerr_trending",
+      "name": "Overseerr Trending",
+      "version": "1.2.1",
+      "min_tater_version": "59",
+      "description": "List trending or upcoming movies/TV from Overseerr.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "matrix",
+        "homekit",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Overseerr",
+      "tags": [],
+      "entry": "verba/overseerr_trending.py",
+      "sha256": "fc80291c7a7b00459a3b107ead428c45587a4205c9b206d64d929503806c744c"
+    },
+    {
+      "id": "premiumize_download",
+      "name": "Premiumize Download",
+      "version": "3.1.0",
+      "min_tater_version": "59",
+      "description": "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Premiumize",
+      "tags": [],
+      "entry": "verba/premiumize_download.py",
+      "sha256": "c960e714718a2c13c5e40924e5f3d131aab21dc0e5f6de8f6dbd86ad9b75a8e4"
+    },
+    {
+      "id": "sftpgo_account",
+      "name": "SFTPGo Account",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Create an SFTPGo account for the user and return login details.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "SFTPGo",
+      "tags": [],
+      "entry": "verba/sftpgo_account.py",
+      "sha256": "40f2215accd3d18c50d62b5a860ab758d0042ac5e4b0918f5f4bcca91728622e"
+    },
+    {
+      "id": "sftpgo_activity",
+      "name": "SFTPGo Activity",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Show current connection activity on the SFTPGo server.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "SFTPGo",
+      "tags": [],
+      "entry": "verba/sftpgo_activity.py",
+      "sha256": "604faae063fcb6a87888dc4e3270a1a20652b7ad3b085fe834825ef88957bb45"
+    },
+    {
+      "id": "tater_gits_add_feed",
+      "name": "Tater Gits Add Feed",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Add a GitHub releases feed to the tater-gits watcher with smart naming.",
+      "portals": [
+        "webui",
+        "macos",
+        "discord",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Tater Gits",
+      "tags": [],
+      "entry": "verba/tater_gits_add_feed.py",
+      "sha256": "b4db292c256c03e47835683c1d553d37728eeccfff81c43fda3d7993e944c617"
+    },
+    {
+      "id": "unifi_network",
+      "name": "UniFi Network",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Fetch UniFi Network sites/clients/devices via the official API and answer natural-language requests.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "UniFi Network",
+      "tags": [],
+      "entry": "verba/unifi_network.py",
+      "sha256": "1a17302ba5c46b8279fd28cf09e99042f7fc92cad11e18878a627d004527da31"
+    },
+    {
+      "id": "unifi_protect",
+      "name": "UniFi Protect",
+      "version": "1.0.10",
+      "min_tater_version": "59",
+      "description": "Get UniFi Protect camera snapshot descriptions and sensor status. Preferred for 'what do you see' or 'what is happening' camera questions.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "UniFi Protect",
+      "tags": [],
+      "entry": "verba/unifi_protect.py",
+      "sha256": "bb1b1400b00711be081f840327650a39e91c45d8f7bcfc4803e5c7475a7a0440"
+    },
+    {
+      "id": "voicepe_remote_timer",
+      "name": "Voice PE Remote Timer",
+      "version": "1.1.1",
+      "min_tater_version": "59",
+      "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
+      "portals": [
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "webui",
+        "macos",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Voice PE Remote Timer",
+      "tags": [],
+      "entry": "verba/voicepe_remote_timer.py",
+      "sha256": "96fa35b24650a54c36dc22f937cf4da80de9078ee6d45675e0bee7e0c3c049b1"
+    },
+    {
+      "id": "weather_brief",
+      "name": "Weather Brief",
+      "version": "1.0.2",
+      "min_tater_version": "59",
+      "description": "Give a short automation-friendly recap of recent weather conditions.",
+      "portals": [
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Weather Brief",
+      "tags": [],
+      "entry": "verba/weather_brief.py",
+      "sha256": "504086e8c5b2fb65980728021b0cb9a93ee66c4f96ca6e19b961dbdc898164ee"
+    },
+    {
+      "id": "weather_forecast",
+      "name": "Weather Forecast",
+      "version": "1.1.5",
+      "min_tater_version": "59",
+      "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "matrix",
+        "homekit",
+        "xbmc",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "Weather Forecast",
+      "tags": [],
+      "entry": "verba/weather_forecast.py",
+      "sha256": "b94264601cd8379736e58b0d5d26767c48fa0c500b8cd5c992da27ee5d1365f7"
+    },
+    {
+      "id": "webdav_browser",
+      "name": "WebDAV Browser",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Browse and download files from the configured WebDAV server.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": "WebDAV Browser",
+      "tags": [],
+      "entry": "verba/webdav_browser.py",
+      "sha256": "e95b0ad57c084f52c38f69fdc5cc59a0dfa95ebaf7576ef2255daae855f50bfa"
+    },
+    {
+      "id": "youtube_summary",
+      "name": "YouTube Summary",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Summarize a YouTube video using its transcript.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram"
+      ],
+      "notifier": false,
+      "settings_category": "YouTube Summary",
+      "tags": [],
+      "entry": "verba/youtube_summary.py",
+      "sha256": "6e88de3f4ad92ec05bafc382cd3686bf8ce5e0462ddaaec8b784647d609aaf79"
+    },
+    {
+      "id": "zen_greeting",
+      "name": "Zen Greeting",
+      "version": "1.0.2",
+      "min_tater_version": "59",
+      "description": "Generate a calming daily greeting and message for dashboards.",
+      "portals": [
+        "automation"
+      ],
+      "notifier": false,
+      "settings_category": "Zen Greeting",
+      "tags": [],
+      "entry": "verba/zen_greeting.py",
+      "sha256": "64a2ea1581bf0c5b00ab0cf53845d8870a5a82000e3316fa3352a800c849974e"
+    }
+  ]
+}
