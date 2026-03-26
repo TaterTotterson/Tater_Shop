@@ -49,7 +49,18 @@
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
 | `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, homeassistant, discord, telegram, matrix, irc |
-| `ha_control` | Control Home Assistant devices. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_climate` | Control Home Assistant thermostats and HVAC entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_covers` | Control Home Assistant covers and garage doors. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_fans` | Control Home Assistant fans. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_lights` | Control Home Assistant lights. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_locks` | Control Home Assistant lock entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_media_players` | Control Home Assistant media players. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_remotes` | Control Home Assistant remotes and remote commands. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_scenes` | Control Home Assistant scenes. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_scripts` | Control Home Assistant scripts. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_sensors` | Read Home Assistant sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_switches` | Control Home Assistant switches and plugs. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_temperature` | Read Home Assistant ambient temperatures. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `jackett_search` | Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
