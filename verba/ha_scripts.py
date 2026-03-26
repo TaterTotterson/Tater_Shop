@@ -62,7 +62,7 @@ class HAClient:
 class HAScriptsPlugin(ToolVerba):
     name = 'ha_scripts'
     verba_name = 'Home Assistant Scripts'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Scripts'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HAScriptsPlugin(ToolVerba):
     forced_route = 'script'
     forced_domain_hint = 'script'
 
-    usage = '{"function":"ha_scripts","arguments":{"query":"Run or check Home Assistant scripts in natural language."}}'
+    usage = '{"function":"ha_scripts","arguments":{"query":"run bedtime script"}}'
 
-    description = 'Run and check Home Assistant scripts with script-focused routing.'
+    description = 'Run Home Assistant scripts and check script run state.'
     verba_dec = 'Control Home Assistant scripts.'
     when_to_use = 'Use for explicit Home Assistant script execution or script state checks.'
     common_needs = ['script name and action (for example: bedtime script + run)']

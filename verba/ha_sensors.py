@@ -62,7 +62,7 @@ class HAClient:
 class HASensorsPlugin(ToolVerba):
     name = 'ha_sensors'
     verba_name = 'Home Assistant Sensors'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Sensors'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HASensorsPlugin(ToolVerba):
     forced_route = 'sensor'
     forced_domain_hint = 'sensor'
 
-    usage = '{"function":"ha_sensors","arguments":{"query":"Check Home Assistant non-temperature sensors in natural language."}}'
+    usage = '{"function":"ha_sensors","arguments":{"query":"is the back door sensor open"}}'
 
-    description = 'Read Home Assistant non-temperature sensors with sensor-focused routing.'
+    description = 'Read non-temperature sensor states like motion, contact, and occupancy.'
     verba_dec = 'Read Home Assistant sensor entities.'
     when_to_use = 'Use for non-temperature sensor status checks.'
     common_needs = ['sensor/device to read (for example: front door sensor state)']

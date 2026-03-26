@@ -62,7 +62,7 @@ class HAClient:
 class HARemotesPlugin(ToolVerba):
     name = 'ha_remotes'
     verba_name = 'Home Assistant Remotes'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Remotes'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HARemotesPlugin(ToolVerba):
     forced_route = 'remote'
     forced_domain_hint = 'remote'
 
-    usage = '{"function":"ha_remotes","arguments":{"query":"Control Home Assistant remote entities (mute, volume, navigation, play/pause) in natural language."}}'
+    usage = '{"function":"ha_remotes","arguments":{"query":"mute the living room tv"}}'
 
-    description = 'Control and check Home Assistant remote entities with remote-focused routing.'
+    description = 'Send remote commands like mute, volume, play/pause, home, and back.'
     verba_dec = 'Control Home Assistant remotes and remote commands.'
     when_to_use = 'Use for remote button-style commands like mute, volume up/down, home, back, and play/pause.'
     common_needs = ['remote/device and command (for example: living room roku + mute)']

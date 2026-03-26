@@ -62,7 +62,7 @@ class HAClient:
 class HASwitchesPlugin(ToolVerba):
     name = 'ha_switches'
     verba_name = 'Home Assistant Switches'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Switches'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HASwitchesPlugin(ToolVerba):
     forced_route = 'switch'
     forced_domain_hint = 'switch'
 
-    usage = '{"function":"ha_switches","arguments":{"query":"Control or check Home Assistant switches, outlets, and plugs in natural language."}}'
+    usage = '{"function":"ha_switches","arguments":{"query":"turn on the arcade plug"}}'
 
-    description = 'Control and check Home Assistant switches, plugs, and outlets with switch-only routing.'
+    description = 'Turn switches, outlets, and smart plugs on or off around the house.'
     verba_dec = 'Control Home Assistant switches and plugs.'
     when_to_use = 'Use when the request is about switches, outlets, plugs, or simple power toggles.'
     common_needs = ['switch/device and action (for example: arcade plug + turn on)']

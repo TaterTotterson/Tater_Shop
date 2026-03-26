@@ -62,7 +62,7 @@ class HAClient:
 class HAClimatePlugin(ToolVerba):
     name = 'ha_climate'
     verba_name = 'Home Assistant Climate'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Climate'
     settings_category = 'Home Assistant Control'
@@ -72,9 +72,9 @@ class HAClimatePlugin(ToolVerba):
     forced_route = 'climate'
     forced_domain_hint = 'climate'
 
-    usage = '{"function":"ha_climate","arguments":{"query":"Control or check Home Assistant thermostats/HVAC in natural language."}}'
+    usage = '{"function":"ha_climate","arguments":{"query":"set hallway thermostat to 72"}}'
 
-    description = 'Control and check Home Assistant climate entities with thermostat-focused routing.'
+    description = 'Control thermostat and HVAC settings like target temperature and current state.'
     verba_dec = 'Control Home Assistant thermostats and HVAC entities.'
     when_to_use = 'Use for thermostat state checks, mode/status checks, and target temperature changes.'
     common_needs = ['thermostat/entity and action (for example: hallway thermostat + set to 72)']
