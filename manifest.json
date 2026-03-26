@@ -313,7 +313,7 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "401499ead3f096502c16e765a5f0ba62725ab79bd26263e182eb33ac9db9ef94"
+      "sha256": "e2ced1f7f124c2013d3960557ca527caf2b68e9ce8f37c48600852479f3fd54e"
     },
     {
       "id": "ha_covers",
@@ -339,7 +339,7 @@
         "cover"
       ],
       "entry": "verba/ha_covers.py",
-      "sha256": "5c751e1cd6895a387d6e540ccca56105231e4c0d83b631e7c590190b8a210d0b"
+      "sha256": "8059b332077d758a6d84bcbb41a6f866f045ab724b2ad792a5ae84ad9ebdf1e5"
     },
     {
       "id": "ha_fans",
@@ -365,7 +365,7 @@
         "fan"
       ],
       "entry": "verba/ha_fans.py",
-      "sha256": "e92f33e0446b66a413105ae167c8c843e86158e4d32fbd3e1042995a818e1927"
+      "sha256": "629b8d3575706614649e7026183f17afc7549e4b529b2dbf368c289842bcd575"
     },
     {
       "id": "ha_lights",
@@ -391,7 +391,7 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "6703066e9e5283ed9df90cd97c3f2efaf4ae016b0eb5dbb3d02899f4c7cc4de1"
+      "sha256": "3becbe1207ccd2bedd1e153bffe7b6504d8972a3eda7c25a6dfb81862f1303b6"
     },
     {
       "id": "ha_locks",
@@ -417,7 +417,7 @@
         "lock"
       ],
       "entry": "verba/ha_locks.py",
-      "sha256": "76ccf9f5a7dc643bf0d0162c474785ebfd7bc3b4a2fa2e91c8192dfba649c9e9"
+      "sha256": "419c104c3172a1ab0ac4022842dc7f4aa2a8a0f20be6e180dd187033d6c984a8"
     },
     {
       "id": "ha_media_players",
@@ -443,7 +443,7 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "ed557c287645aa786a4663e1751a1a08004a6f77e036092bd30d55dafe6360f6"
+      "sha256": "55c5087b16a091f382db2c48fc3b8776dfd4a718dd624aa489d4a156c1b70c85"
     },
     {
       "id": "ha_remotes",
@@ -469,7 +469,7 @@
         "remote"
       ],
       "entry": "verba/ha_remotes.py",
-      "sha256": "7b66182095a177e9fb2474a94489a33bfbbaed4361844a534cf9f99182e38631"
+      "sha256": "90e2e4b393185f1be880815daa68ed2c9879c06ba95ee984ba69161df5cd1e7b"
     },
     {
       "id": "ha_scenes",
@@ -495,7 +495,7 @@
         "scene"
       ],
       "entry": "verba/ha_scenes.py",
-      "sha256": "c5073e2b4b5afdb7b75260662ece6ec66ac718901627fd07ead8534a8579d1e8"
+      "sha256": "34b2c76953f0a9980150daf144d70518e9eb3032e581fa123fb635475ba9b403"
     },
     {
       "id": "ha_scripts",
@@ -521,7 +521,7 @@
         "script"
       ],
       "entry": "verba/ha_scripts.py",
-      "sha256": "7d1e9e972c9d5194cd4b202855eb217539168169e9436ce1b9d20f903edbcc5f"
+      "sha256": "0c9f5d938023f7c010092980c8da150954939a1c3fee07d697c1294f16eab101"
     },
     {
       "id": "ha_sensors",
@@ -547,7 +547,7 @@
         "sensor"
       ],
       "entry": "verba/ha_sensors.py",
-      "sha256": "6db6b630293c3a578b52381acff86f55993f5ce708d2c682955c738462c91c16"
+      "sha256": "93e5d844095ba7b11dab297b4084390cb4169c329e3ab0b9c0f4cb77e4b8a111"
     },
     {
       "id": "ha_switches",
@@ -573,7 +573,7 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "d47404c757735d37396bd7fb9f8d877183f77e2b868dd3eb8887f37aeedd839c"
+      "sha256": "7cbfddb6573ec2205c819c388b54cc9ff1d840c3b3a0ac6f96aacb046512510a"
     },
     {
       "id": "ha_temperature",
@@ -599,7 +599,7 @@
         "temperature"
       ],
       "entry": "verba/ha_temperature.py",
-      "sha256": "81bf4073a4b7e4f4b78b3b2d6e9bb8cf382dd4842a08e0f2cac514ee11fe6d72"
+      "sha256": "9a6b37fb8120511ce95df5822185b2bcd9b81e0a48247bab07e1aaf988ed378c"
     },
     {
       "id": "jackett_search",
