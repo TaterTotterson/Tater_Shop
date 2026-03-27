@@ -7,10 +7,10 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from verba_base import ToolVerba
-from helpers import redis_client, extract_json, get_tater_name
+from helpers import redis_client
 from verba_result import action_failure, action_success
 
-logger = logging.getLogger("moltbook_info")
+logger = logging.getLogger("moltbook_fellow_taters")
 logger.setLevel(logging.INFO)
 
 MOLTBOOK_BASE_URL = "https://www.moltbook.com"
@@ -154,39 +154,35 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
-class MoltbookInfoPlugin(ToolVerba):
-    name = "moltbook_info"
-    verba_name = "Moltbook Info"
+class MoltbookFellowTatersPlugin(ToolVerba):
+    name = "moltbook_fellow_taters"
+    verba_name = "Moltbook Fellow Taters"
     version = "1.0.0"
     min_tater_version = "59"
-    pretty_name = "Moltbook Info"
+    pretty_name = "Moltbook Fellow Taters"
     settings_category = "Moltbook Info"
-    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    tags = ['moltbook', 'fellow_taters']
+    fixed_route = "fellow_taters"
+    platforms = ['webui', 'macos', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     usage = (
-        '{"function":"moltbook_info","arguments":{"query":"Ask in natural language for Moltbook info, '
-        'for example: what are your latest posts, who are you following on Moltbook, what is your profile link?"}}'
+        "{\"function\":\"moltbook_fellow_taters\",\"arguments\":{\"query\":\"list known fellow Tater agents\"}}"
     )
     description = (
-        "Answer Moltbook account questions in natural language: latest posts, following, profile link, "
-        "home overview, activity, announcements, subscriptions, and fellow Tater agents."
+        "List known fellow Tater agents from local Moltbook state."
     )
-    verba_dec = "Natural-language Moltbook account intelligence and status lookups."
+    verba_dec = "Show tracked fellow Tater Moltbook agents."
     when_to_use = (
-        "Use when the user asks for current Moltbook account/profile/feed/activity information."
+        "Use when the user asks for known fellow Tater agents."
     )
     how_to_use = (
-        "Pass one natural-language request in query. The plugin uses an AI router to pick the right Moltbook info path."
+        "Set `query` to a fellow-Taters request (for example: list known fellow Tater agents)."
     )
-    common_needs = ["A natural-language Moltbook question."]
+    common_needs = ['A fellow-Taters request in query.']
+    routing_keywords = ['moltbook', 'fellow taters', 'fellow agents', 'tater agents']
     missing_info_prompts = []
-    example_calls = [
-        '{"function":"moltbook_info","arguments":{"query":"what are your latest posts on moltbook?"}}',
-        '{"function":"moltbook_info","arguments":{"query":"who are you following on moltbook?"}}',
-        '{"function":"moltbook_info","arguments":{"query":"what is your moltbook profile link?"}}',
-        '{"function":"moltbook_info","arguments":{"query":"give me a home overview from moltbook"}}',
-        '{"function":"moltbook_info","arguments":{"query":"show profile for clawdclawderberg"}}',
-    ]
+    example_calls = ['{"function":"moltbook_fellow_taters","arguments":{"query":"list known fellow Tater agents"}}', '{"function":"moltbook_fellow_taters","arguments":{"query":"who are your fellow Taters"}}']
+    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The fellow-Taters request (for example: who are your fellow agents).'}}, 'required': []}
     waiting_prompt_template = (
         "Write a short friendly message that tells {mention} you are checking Moltbook now. "
         "Only output that message."
@@ -348,7 +344,7 @@ class MoltbookInfoPlugin(ToolVerba):
             return None, str(exc)
 
     # ----------------------------
-    # LLM router
+    # Route resolver
     # ----------------------------
     @staticmethod
     def _extract_query(args: Dict[str, Any]) -> str:
@@ -358,94 +354,28 @@ class MoltbookInfoPlugin(ToolVerba):
                 return value.strip()
         return ""
 
-    async def _route_query_with_llm(self, query: str, args: Dict[str, Any], llm_client) -> Dict[str, Any]:
-        default = {"route": "help", "limit": 5, "target_name": ""}
-        if not query:
-            return default
-        if llm_client is None:
-            return self._route_query_fallback(query, args)
-
-        first, last = get_tater_name()
-        assistant_name = f"{first} {last}".strip() or "Tater"
-        route_list = ", ".join(sorted(VALID_ROUTES))
-
-        system_prompt = (
-            f"You are {assistant_name}. Route one Moltbook user query.\n"
-            "Return strict JSON only with shape:\n"
-            '{"route":"help","limit":5,"target_name":""}\n'
-            f"Allowed routes: {route_list}.\n"
-            "Rules:\n"
-            "- latest_posts: user asks for my/our latest posts.\n"
-            "- following: user asks who I follow or following list.\n"
-            "- profile_link: user asks for my profile URL/link.\n"
-            "- account_summary: user asks for account stats/profile snapshot.\n"
-            "- home_overview: user asks for dashboard/check-in summary.\n"
-            "- latest_announcement: user asks about Moltbook announcement/news.\n"
-            "- activity_on_my_posts: user asks about replies/activity on my/your posts.\n"
-            "- subscriptions: user asks what I am subscribed to.\n"
-            "- monitoring_submolts: user asks what submolts I monitor/watch.\n"
-            "- fellow_taters: user asks about known fellow Tater agents.\n"
-            "- agent_profile: user asks for another agent's profile; set target_name.\n"
-            "- help: if unclear.\n"
-            "- limit must be an integer 1..20.\n"
-            "- target_name must be blank unless agent_profile is requested."
-        )
-        user_prompt = (
-            f"User query: {query}\n"
-            f"Explicit target_name argument: {_coalesce_str(args.get('target_name'), default='')}\n"
-            "Route now."
-        )
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=180,
-                temperature=0,
-            )
-            raw = _coalesce_str((resp or {}).get("message", {}).get("content"), default="")
-            candidate = extract_json(raw) or raw
-            parsed = json.loads(candidate)
-            if not isinstance(parsed, dict):
-                return self._route_query_fallback(query, args)
-            route = _coalesce_str(parsed.get("route"), default="").strip().lower()
-            if route not in VALID_ROUTES:
-                route = "help"
-            limit = _safe_int(parsed.get("limit"), default=5, minimum=1, maximum=20)
-            target_name = _coalesce_str(parsed.get("target_name"), args.get("target_name"), default="").strip().lower()
-            if route != "agent_profile":
-                target_name = ""
-            return {"route": route, "limit": limit, "target_name": target_name}
-        except Exception as exc:
-            logger.warning("[moltbook_info] LLM route parse failed: %s", exc)
-            return self._route_query_fallback(query, args)
-
     @staticmethod
-    def _route_query_fallback(query: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_target_name(args: Dict[str, Any], query: str) -> str:
+        explicit = _coalesce_str(args.get("target_name"), default="").strip().lower()
+        if explicit:
+            return explicit
         q = _decode_text(query).strip().lower()
-        target_name = _coalesce_str(args.get("target_name"), default="").strip().lower()
-        if "who am i following" in q or "who are you following" in q or "following" in q:
-            return {"route": "following", "limit": 10, "target_name": ""}
-        if "latest post" in q or "last post" in q or "my posts" in q or "your posts" in q:
-            return {"route": "latest_posts", "limit": 5, "target_name": ""}
-        if "profile link" in q or "profile url" in q or ("profile" in q and "link" in q):
-            return {"route": "profile_link", "limit": 1, "target_name": ""}
-        if "announcement" in q or "news" in q:
-            return {"route": "latest_announcement", "limit": 1, "target_name": ""}
-        if "activity on my posts" in q or "activity on your posts" in q or ("activity" in q and "my post" in q) or ("activity" in q and "your post" in q):
-            return {"route": "activity_on_my_posts", "limit": 5, "target_name": ""}
-        if "subscription" in q:
-            return {"route": "subscriptions", "limit": 20, "target_name": ""}
-        if "monitor" in q and "submolt" in q:
-            return {"route": "monitoring_submolts", "limit": 20, "target_name": ""}
-        if "fellow tater" in q or "fellow agents" in q:
-            return {"route": "fellow_taters", "limit": 20, "target_name": ""}
-        if "home" in q or "dashboard" in q:
-            return {"route": "home_overview", "limit": 5, "target_name": ""}
-        if "profile for" in q or "show profile" in q:
-            return {"route": "agent_profile", "limit": 1, "target_name": target_name}
-        return {"route": "account_summary", "limit": 5, "target_name": ""}
+        match = re.search(
+            r"(?:profile\s+(?:for|of)|show\s+profile\s+(?:for|of)?|agent\s+profile\s+(?:for|of)?)\s+([a-z0-9_.-]{2,64})",
+            q,
+        )
+        if match:
+            return _decode_text(match.group(1)).strip().lower()
+        return ""
+
+    def _resolve_route(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        query = self._extract_query(args)
+        route = _coalesce_str(getattr(self, "fixed_route", ""), default="help").strip().lower()
+        if route not in VALID_ROUTES:
+            route = "help"
+        limit = _safe_int(args.get("limit"), default=5, minimum=1, maximum=20)
+        target_name = self._extract_target_name(args, query)
+        return {"route": route, "limit": limit, "target_name": target_name, "query": query}
 
     # ----------------------------
     # Data builders
@@ -1019,20 +949,26 @@ class MoltbookInfoPlugin(ToolVerba):
     # Core dispatcher
     # ----------------------------
     async def _handle(self, _args: Dict[str, Any], llm_client) -> Dict[str, Any]:
+        _ = llm_client
         args = _args or {}
-        query = self._extract_query(args)
-        if not query and _coalesce_str(args.get("route"), default="").strip():
-            query = _coalesce_str(args.get("route"), default="")
-
-        route_plan = await self._route_query_with_llm(query, args, llm_client)
+        route_plan = self._resolve_route(args)
         route = _coalesce_str(route_plan.get("route"), default="help").strip().lower()
         if route not in VALID_ROUTES:
             route = "help"
         limit = _safe_int(route_plan.get("limit"), default=5, minimum=1, maximum=20)
         target_name = _coalesce_str(route_plan.get("target_name"), args.get("target_name"), default="").strip().lower()
 
-        if route != "help" and route != "monitoring_submolts":
-            # Quickly verify API key for all routes that require authenticated Moltbook data.
+        api_required_routes = {
+            "latest_posts",
+            "following",
+            "profile_link",
+            "account_summary",
+            "home_overview",
+            "latest_announcement",
+            "activity_on_my_posts",
+            "agent_profile",
+        }
+        if route in api_required_routes:
             api_key = self._resolve_api_key()
             if not api_key:
                 return action_failure(
@@ -1104,4 +1040,4 @@ class MoltbookInfoPlugin(ToolVerba):
         return await self._handle(args or {}, llm_client)
 
 
-verba = MoltbookInfoPlugin()
+verba = MoltbookFellowTatersPlugin()
