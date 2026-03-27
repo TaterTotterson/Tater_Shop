@@ -12,30 +12,31 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from helpers import extract_json, redis_client
+from helpers import redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
-logger = logging.getLogger("jackett_search")
+logger = logging.getLogger("jackett_indexers")
 logger.setLevel(logging.INFO)
 
 
-class JackettSearchPlugin(ToolVerba):
-    name = "jackett_search"
-    verba_name = "Jackett Search"
-    version = "1.0.3"
+class JackettIndexersPlugin(ToolVerba):
+    name = "jackett_indexers"
+    verba_name = "Jackett Indexers"
+    version = "1.0.0"
     min_tater_version = "59"
-    pretty_name = "Jackett Discovery"
+    pretty_name = "Jackett Indexers"
     settings_category = "Jackett"
+    tags = ['jackett', 'indexers']
+    fixed_action = "list_indexers"
     usage = (
-        '{"function":"jackett_search","arguments":{"query":"find Ubuntu 24.04 torrents from public trackers"}}'
+        '{"function":"jackett_indexers","arguments":{"query":"list enabled Jackett indexers"}}'
     )
     description = (
-        "Natural-language Jackett torrent discovery bridge with search, recent uploads, "
-        "indexer browsing, ranking, and downloader handoff payloads."
+        'List configured/enabled Jackett indexers.'
     )
-    verba_dec = "Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results."
+    verba_dec = 'Show Jackett indexer inventory with scope and privacy breakdown.'
     waiting_prompt_template = (
         "Tell {mention} you are querying Jackett now and will return ranked torrent results shortly. "
         "Only output that message."
@@ -74,22 +75,16 @@ class JackettSearchPlugin(ToolVerba):
         },
     }
     when_to_use = (
-        "Use when the user asks to search torrents, browse recent uploads, inspect Jackett indexers, "
-        "rank Jackett results, identify source indexers, or prepare downloader handoff payloads."
+        'Use when the user asks to list indexers/trackers configured in Jackett.'
     )
     how_to_use = (
-        "Pass a natural-language query in query. Optional structured arguments: action, search_query, scope, "
-        "indexers, categories, sort_by, min_seeders, max_age_days, min_size, max_size, limit, result_id, "
-        "result_title, and target_downloader."
+        'Set `query` to an indexer-list request. Optional `scope`: all, public, private.'
     )
-    common_needs = ["A natural-language Jackett request."]
-    missing_info_prompts = ["What should I search for in Jackett?"]
-    example_calls = [
-        '{"function":"jackett_search","arguments":{"query":"search Jackett for Ubuntu 24.04 torrents"}}',
-        '{"function":"jackett_search","arguments":{"query":"show me the newest anime uploads"}}',
-        '{"function":"jackett_search","arguments":{"query":"list all enabled Jackett indexers"}}',
-        '{"function":"jackett_search","arguments":{"query":"send the best result to qBittorrent"}}',
-    ]
+    common_needs = ['An indexer-list request in query.']
+    missing_info_prompts = []
+    example_calls = ['{"function":"jackett_indexers","arguments":{"query":"list enabled Jackett indexers"}}', '{"function":"jackett_indexers","arguments":{"query":"show private trackers","scope":"private"}}']
+    routing_keywords = ['jackett', 'indexers', 'trackers', 'list indexers', 'configured']
+    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The indexer-list request (for example: list enabled indexers).'}, 'scope': {'type': 'string', 'description': 'Optional scope: all, public, or private.'}}, 'required': []}
 
     MAX_LIMIT = 100
     CACHE_TTL_SECONDS = 6 * 60 * 60
@@ -426,90 +421,188 @@ class JackettSearchPlugin(ToolVerba):
             dedup.append(item)
         return dedup
 
-    async def _plan_from_llm(
-        self,
-        *,
-        query_text: str,
-        llm_client: Any,
-        known_indexers: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        if not llm_client or not query_text:
-            return {}
-        known = [self._safe_text(x.get("name") or x.get("id")) for x in known_indexers[:80]]
-        prompt = (
-            "You translate Jackett user requests into JSON only.\n"
-            "Return one JSON object with keys:\n"
-            "action(search|recent|list_indexers|inspect_indexer|which_indexer|handoff),\n"
-            "search_query, scope(all|public|private), indexers(array), categories(array of words or IDs),\n"
-            "sort_by(best_match|seeders|newest|size), sort_direction(desc|asc),\n"
-            "min_seeders(number), max_age_days(number), min_size, max_size, limit(number),\n"
-            "result_id, result_title, target_downloader.\n"
-            "Only include indexers from known_indexers.\n"
-            "If a field is unknown, use empty string, 0, null, or [].\n"
-            "For action=search, search_query MUST be the clean content/title query, not routing words.\n"
-            "Do not include command words like search/find/show/list/send in search_query.\n"
-            "Do not append generic transport words like torrent/torrents/magnet/tracker unless the user clearly intends those as literal search terms.\n"
-            "If the user says 'search for Alice in Wonderland movie torrent', output search_query like 'Alice in Wonderland movie'.\n"
-            "Action guidance:\n"
-            "- list_indexers: asks to list/show configured/enabled indexers or trackers.\n"
-            "- inspect_indexer: asks details/about one named indexer.\n"
-            "- which_indexer: asks which indexer/tracker produced a prior result.\n"
-            "- handoff: asks to send/pass selected result to downloader.\n"
-            "- recent: asks newest/latest/recent uploads.\n"
-            "- search: normal Jackett search query.\n"
-            f"known_indexers={json.dumps(known)}\n"
-            f"user_request={json.dumps(query_text)}\n"
-        )
-        try:
-            resp = await llm_client.chat(
-                messages=[{"role": "system", "content": prompt}],
-                max_tokens=260,
-                temperature=0,
-            )
-            raw = ((resp or {}).get("message") or {}).get("content") or ""
-            payload = json.loads(extract_json(raw) or raw)
-            return payload if isinstance(payload, dict) else {}
-        except Exception as exc:
-            logger.debug("[jackett] LLM plan fallback: %s", exc)
-            return {}
+    def _infer_scope_from_query(self, query_text: str) -> str:
+        q = self._safe_text(query_text).lower()
+        if "private" in q:
+            return "private"
+        if "public" in q:
+            return "public"
+        return "all"
+
+    def _infer_sort_by_from_query(self, query_text: str, action: str) -> str:
+        q = self._safe_text(query_text).lower()
+        if any(token in q for token in ("seeders", "seeds", "most seeded")):
+            return "seeders"
+        if any(token in q for token in ("newest", "latest", "recent")):
+            return "newest" if action == "recent" else "best_match"
+        if any(token in q for token in ("size", "largest", "smallest", "biggest")):
+            return "size"
+        return "newest" if action == "recent" else "best_match"
+
+    def _infer_sort_direction_from_query(self, query_text: str, sort_by: str) -> str:
+        q = self._safe_text(query_text).lower()
+        if "ascending" in q or "asc" in q or "oldest" in q or "smallest" in q:
+            return "asc"
+        if "descending" in q or "desc" in q or "largest" in q or "biggest" in q:
+            return "desc"
+        if sort_by == "size" and "small" in q:
+            return "asc"
+        return "desc"
+
+    def _extract_categories_from_query(self, query_text: str) -> List[int]:
+        q = self._safe_text(query_text).lower()
+        found: List[int] = []
+        for token, cid in self.CATEGORY_KEYWORDS.items():
+            if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", q):
+                if cid not in found:
+                    found.append(cid)
+        return found
+
+    def _clean_search_query(self, query_text: str, action: str) -> str:
+        text = self._safe_text(query_text)
+        if not text:
+            return ""
+        lowered = text.lower()
+        if action == "search":
+            lowered = re.sub(r"^\s*(search|find|look\s*up|lookup|show)\s+(?:jackett\s+)?(?:for\s+)?", "", lowered)
+            lowered = re.sub(r"\b(from|on)\s+(public|private)\s+(indexers?|trackers?)\b", "", lowered)
+            lowered = re.sub(r"\b(?:in|from|on)\s+jackett\b", "", lowered)
+            lowered = re.sub(r"\b(torrents?|magnet|trackers?)\b", "", lowered)
+            lowered = re.sub(r"\s+", " ", lowered).strip(" ,.;:-")
+            return lowered
+
+        if action == "recent":
+            lowered = re.sub(r"\b(show|list|find|give me|what are|any)\b", "", lowered)
+            lowered = re.sub(r"\b(new|newest|latest|recent|uploads?|torrents?|from|on|jackett)\b", "", lowered)
+            lowered = re.sub(r"\s+", " ", lowered).strip(" ,.;:-")
+            return lowered
+
+        return ""
+
+    def _infer_result_ref_from_query(self, query_text: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        q = self._safe_text(query_text).lower()
+        if not q:
+            return out
+
+        rid = re.search(r"\b(jkt_[a-f0-9]{8,})\b", q)
+        if rid:
+            out["result_id"] = rid.group(1)
+
+        idx_match = re.search(r"\b(?:result|item|rank|index|#)\s*(\d{1,3})\b", q)
+        if idx_match:
+            out["index"] = int(idx_match.group(1))
+        else:
+            for word, val in self.ORDINAL_MAP.items():
+                if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", q):
+                    out["index"] = int(val)
+                    break
+
+        title_match = re.search(r"\"([^\"]{3,220})\"", self._safe_text(query_text))
+        if title_match:
+            out["result_title"] = title_match.group(1).strip()
+        return out
+
+    @staticmethod
+    def _merge_result_refs(primary: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(fallback or {})
+        out.update({k: v for k, v in (primary or {}).items() if v not in {None, "", 0}})
+        return out
+
+    def _infer_indexers_from_query(self, query_text: str, known_indexers: List[Dict[str, Any]]) -> List[str]:
+        q_slug = self._slug(query_text)
+        if not q_slug:
+            return []
+        hits: List[str] = []
+        seen = set()
+        for idx in known_indexers:
+            idx_id = self._safe_text(idx.get("id"))
+            idx_name = self._safe_text(idx.get("name"))
+            for token in (idx_id, idx_name):
+                slug = self._slug(token)
+                if not slug or slug in seen:
+                    continue
+                if slug in q_slug:
+                    seen.add(slug)
+                    hits.append(idx_id or idx_name)
+                    break
+        return hits
+
+    def _infer_downloader_from_query(self, query_text: str) -> str:
+        q = self._safe_text(query_text).lower()
+        if "qbittorrent" in q or re.search(r"\bqb\b", q):
+            return "qbittorrent"
+        if "transmission" in q:
+            return "transmission"
+        if "deluge" in q:
+            return "deluge"
+        if "sabnzbd" in q or "sab" in q:
+            return "sabnzbd"
+        return "downloader"
 
     async def _resolve_plan(
         self,
         *,
         query_text: str,
+        args: Dict[str, Any],
         llm_client: Any,
         known_indexers: List[Dict[str, Any]],
         default_limit: int,
     ) -> Dict[str, Any]:
-        if not llm_client:
-            return {"_intent_error": "llm_unavailable"}
+        _ = llm_client
+        if isinstance(known_indexers, list):
+            # no-op to satisfy type checker style consistency
+            pass
 
-        llm_plan = await self._plan_from_llm(query_text=query_text, llm_client=llm_client, known_indexers=known_indexers)
-        if not isinstance(llm_plan, dict) or not llm_plan:
-            return {"_intent_error": "llm_parse_failed"}
+        action = self._normalize_action(getattr(self, "fixed_action", "") or "search")
+        scope = self._normalize_scope(args.get("scope")) or self._infer_scope_from_query(query_text)
+        sort_by = self._normalize_sort_by(args.get("sort_by")) or self._infer_sort_by_from_query(query_text, action)
+        sort_direction = self._normalize_sort_direction(args.get("sort_direction"), sort_by)
+        if "sort_direction" not in args:
+            sort_direction = self._infer_sort_direction_from_query(query_text, sort_by)
 
-        action = self._normalize_action(llm_plan.get("action"))
-        scope = self._normalize_scope(llm_plan.get("scope"))
-        sort_by = self._normalize_sort_by(llm_plan.get("sort_by"))
-        sort_direction = self._normalize_sort_direction(llm_plan.get("sort_direction"), sort_by)
-
-        search_query = self._safe_text(llm_plan.get("search_query"))
-        categories = self._extract_categories(llm_plan.get("categories"))
-        limit = self._extract_limit(llm_plan.get("limit"), default_limit)
-        min_seeders = self._extract_min_seeders(llm_plan.get("min_seeders"))
-        max_age_days = self._extract_max_age_days(llm_plan.get("max_age_days"))
+        search_query = self._safe_text(args.get("search_query")) or self._clean_search_query(query_text, action)
+        categories = self._extract_categories(args.get("categories")) or self._extract_categories_from_query(query_text)
+        limit = self._extract_limit(args.get("limit"), default_limit)
+        min_seeders = self._extract_min_seeders(args.get("min_seeders"))
+        max_age_days = self._extract_max_age_days(args.get("max_age_days"))
         min_size, max_size = self._extract_size_filters(
-            llm_plan.get("min_size", llm_plan.get("min_size_bytes")),
-            llm_plan.get("max_size", llm_plan.get("max_size_bytes")),
+            args.get("min_size", args.get("min_size_bytes")),
+            args.get("max_size", args.get("max_size_bytes")),
         )
 
-        indexers = self._extract_indexer_mentions(
-            llm_plan.get("indexers") or llm_plan.get("indexer") or llm_plan.get("trackers") or llm_plan.get("tracker"),
-            known_indexers,
+        if min_seeders <= 0:
+            seeded = re.search(r"\b(?:at least|min)\s*(\d{1,6})\s*seeders?\b", self._safe_text(query_text).lower())
+            if seeded:
+                min_seeders = max(0, int(seeded.group(1)))
+        if max_age_days is None:
+            age = re.search(r"\b(?:within|last|past)\s*(\d{1,4})\s*days?\b", self._safe_text(query_text).lower())
+            if age:
+                max_age_days = max(1, int(age.group(1)))
+        if min_size is None:
+            m = re.search(r"\b(?:over|larger than|bigger than|min(?:imum)? size(?: of)?)\s*([0-9.]+\s*(?:kb|mb|gb|tb|kib|mib|gib|tib))\b", self._safe_text(query_text).lower())
+            if m:
+                min_size = self._parse_size_to_bytes(m.group(1))
+        if max_size is None:
+            m = re.search(r"\b(?:under|smaller than|less than|max(?:imum)? size(?: of)?)\s*([0-9.]+\s*(?:kb|mb|gb|tb|kib|mib|gib|tib))\b", self._safe_text(query_text).lower())
+            if m:
+                max_size = self._parse_size_to_bytes(m.group(1))
+
+        indexer_raw = (
+            args.get("indexers")
+            or args.get("indexer")
+            or args.get("trackers")
+            or args.get("tracker")
         )
-        result_ref = self._extract_result_reference(llm_plan)
+        indexers = self._extract_indexer_mentions(indexer_raw, known_indexers)
+        if not indexers:
+            indexers = self._infer_indexers_from_query(query_text, known_indexers)
+        result_ref = self._merge_result_refs(
+            self._extract_result_reference(args),
+            self._infer_result_ref_from_query(query_text),
+        )
         target_downloader = self._extract_downloader_target(
-            llm_plan.get("target_downloader") or llm_plan.get("downloader") or llm_plan.get("target")
+            args.get("target_downloader") or args.get("downloader") or args.get("target") or self._infer_downloader_from_query(query_text)
         )
 
         return {
@@ -659,7 +752,7 @@ class JackettSearchPlugin(ToolVerba):
     @staticmethod
     def _attr_map(item: ET.Element) -> Dict[str, str]:
         attrs: Dict[str, str] = {}
-        for attr in item.findall("torznab:attr", JackettSearchPlugin.TORZNAB_NS):
+        for attr in item.findall("torznab:attr", JackettIndexersPlugin.TORZNAB_NS):
             name = (attr.attrib.get("name") or "").strip().lower()
             value = (attr.attrib.get("value") or "").strip()
             if name and value and name not in attrs:
@@ -1588,27 +1681,15 @@ class JackettSearchPlugin(ToolVerba):
                 needs=["Tell me what to do in Jackett (search, recent, list indexers, inspect, source lookup, or handoff)."],
                 say_hint="Ask for the Jackett request in natural language.",
             )
-        if llm_client is None:
-            return action_failure(
-                code="llm_required",
-                message="This plugin is configured for LLM-only intent extraction and needs an LLM client.",
-                say_hint="Explain that intent parsing requires the LLM and ask to retry when available.",
-            )
 
         indexers, indexer_error = await self._fetch_indexers(settings)
         plan = await self._resolve_plan(
             query_text=query_text,
+            args=args or {},
             llm_client=llm_client,
             known_indexers=indexers,
             default_limit=settings["default_limit"],
         )
-        if plan.get("_intent_error"):
-            return action_failure(
-                code="jackett_intent_parse_failed",
-                message="Failed to parse Jackett intent from the request with the LLM.",
-                needs=["Rephrase the request with explicit intent and criteria."],
-                say_hint="Explain LLM intent extraction failed and ask for a clearer request.",
-            )
 
         if plan.get("action") in {"list_indexers", "inspect_indexer"} and indexer_error:
             return action_failure(
@@ -1737,4 +1818,4 @@ class JackettSearchPlugin(ToolVerba):
             return action_failure(code="jackett_exception", message="Jackett request failed.")
 
 
-verba = JackettSearchPlugin()
+verba = JackettIndexersPlugin()

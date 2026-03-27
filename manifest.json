@@ -164,19 +164,58 @@
       "sha256": "7fd9a8249ce48dd01140d30fdc80e73f73d57b0c94219ec0d0c848ac6ecfd07c"
     },
     {
-      "id": "discord_admin",
-      "name": "Discord Admin",
-      "version": "1.0.18",
+      "id": "discord_admin_response_mode",
+      "name": "Discord Admin Response Mode",
+      "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Discord server setup, admin changes, and current-room always-respond control.",
+      "description": "Discord response-mode channel controls.",
       "portals": [
         "discord"
       ],
       "notifier": false,
       "settings_category": null,
-      "tags": [],
-      "entry": "verba/discord_admin.py",
-      "sha256": "be0feea7b72fbab446fb2d0eb47400baf6c647f128bc6be5e7491a1e67ea1ce4"
+      "tags": [
+        "discord",
+        "response_mode"
+      ],
+      "entry": "verba/discord_admin_response_mode.py",
+      "sha256": "f6282f59142e9eaf59e71ba72acf2cec55f22dd5eb88562394b94f279c7f001e"
+    },
+    {
+      "id": "discord_admin_roles",
+      "name": "Discord Admin Roles",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Discord role listing and role assignment commands.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "discord",
+        "roles"
+      ],
+      "entry": "verba/discord_admin_roles.py",
+      "sha256": "6dbc3cf1198b9facf31628e2b6d5890f1633ccea2f3e51ce1725cdfb4eaa6481"
+    },
+    {
+      "id": "discord_admin_setup",
+      "name": "Discord Admin Setup",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Discord server setup and structural admin changes.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "discord",
+        "setup"
+      ],
+      "entry": "verba/discord_admin_setup.py",
+      "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
     },
     {
       "id": "doorbell_alert",
@@ -602,11 +641,11 @@
       "sha256": "2ecbab2bf093b2f6217664e42264df2c139403dcdcb5eff67d6b0481fa8f95c5"
     },
     {
-      "id": "jackett_search",
-      "name": "Jackett Search",
-      "version": "1.0.3",
+      "id": "jackett_handoff",
+      "name": "Jackett Handoff",
+      "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results.",
+      "description": "Build transfer payloads (magnet/torrent URI) from cached Jackett search results.",
       "portals": [
         "discord",
         "webui",
@@ -620,9 +659,142 @@
       ],
       "notifier": false,
       "settings_category": "Jackett",
-      "tags": [],
-      "entry": "verba/jackett_search.py",
-      "sha256": "703053be59cd3a975bbf0e80b08688d215180b95b7acf3d6fd0c0470b7e539bf"
+      "tags": [
+        "jackett",
+        "handoff"
+      ],
+      "entry": "verba/jackett_handoff.py",
+      "sha256": "7d63c47c6a109734f741ff694a06d3d07eeaddac4781f6a2251aa22ce91545cd"
+    },
+    {
+      "id": "jackett_indexer_info",
+      "name": "Jackett Indexer Info",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Show status/privacy/configuration details for a specific Jackett indexer.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [
+        "jackett",
+        "indexer_info"
+      ],
+      "entry": "verba/jackett_indexer_info.py",
+      "sha256": "555fc3f266b08130579b49f7d08c0f8b618578ce8ebc7fa4c304b0290e079a72"
+    },
+    {
+      "id": "jackett_indexers",
+      "name": "Jackett Indexers",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Show Jackett indexer inventory with scope and privacy breakdown.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [
+        "jackett",
+        "indexers"
+      ],
+      "entry": "verba/jackett_indexers.py",
+      "sha256": "032d58d825cf8aa462f9cc9652df7775df46a05188439e853c9a05e52634c618"
+    },
+    {
+      "id": "jackett_recent_uploads",
+      "name": "Jackett Recent Uploads",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "List and rank recent Jackett uploads across selected indexers.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [
+        "jackett",
+        "recent"
+      ],
+      "entry": "verba/jackett_recent_uploads.py",
+      "sha256": "b68127cdb11c1ff0864ce20bec7f7f9d179355d0b712fe8193456894a6764a98"
+    },
+    {
+      "id": "jackett_search_torrents",
+      "name": "Jackett Search Torrents",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Run Jackett torrent searches with filters and ranked results.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [
+        "jackett",
+        "search"
+      ],
+      "entry": "verba/jackett_search_torrents.py",
+      "sha256": "1d40a6cd63fe5cc3a1a9ce45c5bacd53454e520c2b06382cef61f0edc72338ae"
+    },
+    {
+      "id": "jackett_source_lookup",
+      "name": "Jackett Source Lookup",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Map a cached Jackett result back to its source indexer/tracker.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "homeassistant",
+        "homekit",
+        "matrix",
+        "telegram",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Jackett",
+      "tags": [
+        "jackett",
+        "source_lookup"
+      ],
+      "entry": "verba/jackett_source_lookup.py",
+      "sha256": "62091653c32ea4b326381a3f5f9642c3a96c8491f7d23d6bbfdac86e06ab7c9f"
     },
     {
       "id": "joke_api",
@@ -686,11 +858,11 @@
       "sha256": "6f5be6cce284cf4d3f3e6d6585dd8c4f64b03a6361cf3dd3ce6f4ee61d7285ea"
     },
     {
-      "id": "moltbook_info",
-      "name": "Moltbook Info",
+      "id": "moltbook_account_summary",
+      "name": "Moltbook Account Summary",
       "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Natural-language Moltbook account intelligence and status lookups.",
+      "description": "Moltbook account snapshot with profile link and key counters.",
       "portals": [
         "webui",
         "macos",
@@ -704,9 +876,272 @@
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
-      "tags": [],
-      "entry": "verba/moltbook_info.py",
-      "sha256": "6ee338954e573c37ed178fd1889bd260e1e1f05382e99389ea6e6f63cdca6a2f"
+      "tags": [
+        "moltbook",
+        "account_summary"
+      ],
+      "entry": "verba/moltbook_account_summary.py",
+      "sha256": "40c6df3edcea4b1d940698d1afd1365d8b0182ac9e003e65b07eeb41e15fd4c5"
+    },
+    {
+      "id": "moltbook_activity_on_posts",
+      "name": "Moltbook Activity On Posts",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read /home activity buckets for your posts and summarize engagement.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "activity_on_my_posts"
+      ],
+      "entry": "verba/moltbook_activity_on_posts.py",
+      "sha256": "cca369c3cce42eb32671c1d0d3046a305ce10aa3975ce62e72bcd00ba4c75a47"
+    },
+    {
+      "id": "moltbook_agent_profile",
+      "name": "Moltbook Agent Profile",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Lookup target Moltbook agent profile details.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "agent_profile"
+      ],
+      "entry": "verba/moltbook_agent_profile.py",
+      "sha256": "1ae8a043595e2ceea2e4225bc3e672cfd3e021b13ac54be059fd765451a05dcb"
+    },
+    {
+      "id": "moltbook_fellow_taters",
+      "name": "Moltbook Fellow Taters",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Show tracked fellow Tater Moltbook agents.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "fellow_taters"
+      ],
+      "entry": "verba/moltbook_fellow_taters.py",
+      "sha256": "9cb4e5e9cf94bf0e0b61947a5b027b3ff87fed520d37b8b3d344c1f2acf13340"
+    },
+    {
+      "id": "moltbook_following",
+      "name": "Moltbook Following",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "List known followed agents and active authors from following feed.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "following"
+      ],
+      "entry": "verba/moltbook_following.py",
+      "sha256": "e3a7429e95efe670dfd42b08e982ef7b6ee4cd2f000b9102174fbd5cd1fc3db0"
+    },
+    {
+      "id": "moltbook_home_overview",
+      "name": "Moltbook Home Overview",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Moltbook /home dashboard overview with unread/activity counters.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "home_overview"
+      ],
+      "entry": "verba/moltbook_home_overview.py",
+      "sha256": "2ea8c9550a50b269a5c1f276d798eb20f6d73dd86118fc31e1025696246d90e8"
+    },
+    {
+      "id": "moltbook_latest_announcement",
+      "name": "Moltbook Latest Announcement",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Get the newest Moltbook announcement/news entry.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "latest_announcement"
+      ],
+      "entry": "verba/moltbook_latest_announcement.py",
+      "sha256": "5431709bc0bdcf705d9c7343ab3c1f184b7e88b2a43d6ac2ddfdcc2c35e08237"
+    },
+    {
+      "id": "moltbook_latest_posts",
+      "name": "Moltbook Latest Posts",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Fetch latest posts authored by this Moltbook agent.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "latest_posts"
+      ],
+      "entry": "verba/moltbook_latest_posts.py",
+      "sha256": "986190cc0e967e7bd842bb5499a1e272c4fb09fdfd65a21085f0a165ec825ef2"
+    },
+    {
+      "id": "moltbook_monitoring_submolts",
+      "name": "Moltbook Monitoring Submolts",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read Moltbook portal settings for submolts to monitor/prefer/avoid.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "monitoring_submolts"
+      ],
+      "entry": "verba/moltbook_monitoring_submolts.py",
+      "sha256": "adef17417cbae16d2eefba1e7f5864ceb95b5d848af601dda2e60fe1f2ca6e20"
+    },
+    {
+      "id": "moltbook_profile_link",
+      "name": "Moltbook Profile Link",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Get the current Moltbook profile URL.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "profile_link"
+      ],
+      "entry": "verba/moltbook_profile_link.py",
+      "sha256": "82fb35026edd3870fc4c7daaf4746e31b0fa9c8069a8de23b18d99cbe259bbde"
+    },
+    {
+      "id": "moltbook_subscriptions",
+      "name": "Moltbook Subscriptions",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Show subscribed submolts from Moltbook portal state.",
+      "portals": [
+        "webui",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Moltbook Info",
+      "tags": [
+        "moltbook",
+        "subscriptions"
+      ],
+      "entry": "verba/moltbook_subscriptions.py",
+      "sha256": "206d3add5d5e03d5e0bff62c927bc4facff553d48a98d178b9e688712192898f"
     },
     {
       "id": "music_assistant",
@@ -830,11 +1265,11 @@
       "sha256": "fc80291c7a7b00459a3b107ead428c45587a4205c9b206d64d929503806c744c"
     },
     {
-      "id": "premiumize_download",
-      "name": "Premiumize Download",
-      "version": "3.1.0",
+      "id": "premiumize_add_transfer",
+      "name": "Premiumize Add Transfer",
+      "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links.",
+      "description": "Create Premiumize transfers from explicit magnet or HTTP(S) source links.",
       "portals": [
         "discord",
         "webui",
@@ -848,9 +1283,116 @@
       ],
       "notifier": false,
       "settings_category": "Premiumize",
-      "tags": [],
-      "entry": "verba/premiumize_download.py",
-      "sha256": "c960e714718a2c13c5e40924e5f3d131aab21dc0e5f6de8f6dbd86ad9b75a8e4"
+      "tags": [
+        "premiumize",
+        "add_transfer"
+      ],
+      "entry": "verba/premiumize_add_transfer.py",
+      "sha256": "cc86767fa743e03401d4f96e119a255d79fb288eb06287979b67576cdf143da7"
+    },
+    {
+      "id": "premiumize_check_transfer",
+      "name": "Premiumize Check Transfer",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Premiumize",
+      "tags": [
+        "premiumize",
+        "check_transfer"
+      ],
+      "entry": "verba/premiumize_check_transfer.py",
+      "sha256": "cf6f1a48db98a207ac93b77667ad61bd18c4cb0ef5e53ccff0b749a6b4555ed2"
+    },
+    {
+      "id": "premiumize_get_links",
+      "name": "Premiumize Get Links",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Get Premiumize stream/download links by magnet/URL or by chosen cloud item.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Premiumize",
+      "tags": [
+        "premiumize",
+        "get_links"
+      ],
+      "entry": "verba/premiumize_get_links.py",
+      "sha256": "3375a937313c73bb551a330ff62f288ea19215ac3646194ed02d99f7925f9540"
+    },
+    {
+      "id": "premiumize_list_files",
+      "name": "Premiumize List Files",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "List Premiumize cloud folder contents with file/folder counts.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Premiumize",
+      "tags": [
+        "premiumize",
+        "list_files"
+      ],
+      "entry": "verba/premiumize_list_files.py",
+      "sha256": "0e47bdb16d8e1e0c494aee3701ced6005a82234555080a49d26fc1a22b0d8219"
+    },
+    {
+      "id": "premiumize_list_transfers",
+      "name": "Premiumize List Transfers",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
+      "portals": [
+        "discord",
+        "webui",
+        "macos",
+        "irc",
+        "matrix",
+        "telegram",
+        "homeassistant",
+        "homekit",
+        "xbmc"
+      ],
+      "notifier": false,
+      "settings_category": "Premiumize",
+      "tags": [
+        "premiumize",
+        "list_transfers"
+      ],
+      "entry": "verba/premiumize_list_transfers.py",
+      "sha256": "b49203ad99d33865ca7409e3f5e5a9e1b067f8988bf70270d947aba31087b0d0"
     },
     {
       "id": "sftpgo_account",

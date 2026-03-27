@@ -10,7 +10,7 @@ from verba_base import ToolVerba
 from helpers import extract_json, redis_blob_client, redis_client
 from verba_result import action_failure, action_success
 
-logger = logging.getLogger("discord_admin")
+logger = logging.getLogger("discord_admin_roles")
 logger.setLevel(logging.INFO)
 
 
@@ -144,21 +144,17 @@ def _clean_name(name: Any, fallback: str) -> str:
     return text[:95] if text else fallback
 
 
-class DiscordAdminPlugin(ToolVerba):
-    name = "discord_admin"
-    verba_name = "Discord Admin"
-    pretty_name = "Discord Admin"
-    version = "1.0.18"
+class DiscordAdminRolesPlugin(ToolVerba):
+    name = "discord_admin_roles"
+    verba_name = "Discord Admin Roles"
+    pretty_name = "Discord Admin Roles"
+    version = "1.0.0"
     min_tater_version = "59"
+    tags = ["discord", "roles"]
+    fixed_route = "role"
     platforms = ["discord"]
     routing_keywords = [
         "discord",
-        "server",
-        "guild",
-        "channel",
-        "channels",
-        "category",
-        "categories",
         "role",
         "roles",
         "role me",
@@ -167,32 +163,47 @@ class DiscordAdminPlugin(ToolVerba):
         "give me role",
         "assign me role",
         "grant me role",
-        "permission",
-        "permissions",
-        "response channel",
-        "always talk",
-        "ping only",
-        "admin",
+        "role yourself",
     ]
 
     usage = (
-        '{"function":"discord_admin","arguments":{"request":"Discord admin request in natural language '
-        '(describe what to create, rename, or configure; for example: setup this Discord for Tater HQ Dev, '
-        'setup this server gamer style, setup this Discord for Tater HQ, always talk in this room, only respond to ping here, list roles, '
-        'give me the Tater Crew role, role yourself BotRole)."}}'
+        '{"function":"discord_admin_roles","arguments":{"request":"list roles"}}'
     )
     description = (
-        "Configure this Discord server from natural language: set up themed server layouts, create categories and rooms, "
-        "create or assign roles, set channel permissions, rename channels, optionally update the server icon, and enable or disable always-respond mode for the current room."
+        "List server roles and assign requested roles to the caller or bot (role hierarchy permitting)."
     )
     when_to_use = (
-        "Use for Discord server setup and admin work in this server: broad creative setups like Tater HQ or gamer style, "
-        "exact room/category requests, role commands, permissions, server icon changes, and current-room always-respond mode."
+        "Use for Discord role commands like list roles, role me, or role yourself."
     )
-    verba_dec = "Discord server setup, admin changes, and current-room always-respond control."
+    how_to_use = (
+        "Provide one role command in `request` or `query` (for example: list roles, give me the Builders role)."
+    )
+    verba_dec = "Discord role listing and role assignment commands."
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "request": {
+                "type": "string",
+                "description": "Role command request.",
+            },
+            "query": {
+                "type": "string",
+                "description": "The role command to run (for example: list roles, give me Builders).",
+            },
+            "role": {
+                "type": "string",
+                "description": "Optional role name hint.",
+            },
+            "roles": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of role names.",
+            },
+        },
+        "required": [],
+    }
     common_needs = [
-        "A single natural-language Discord admin request. Broad themed setup requests are allowed; exact channel/role lists are optional.",
-        "Channel/category deletion is disabled in this plugin; ask the user to delete those manually in Discord.",
+        "A single Discord role command.",
     ]
     missing_info_prompts = []
 
@@ -717,173 +728,57 @@ class DiscordAdminPlugin(ToolVerba):
 
     async def _route_request_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
         command_text = self._normalize_role_command_text(text, message)
-        if not command_text or llm_client is None:
-            return {
-                "route": "none",
-                "role_action": "none",
-                "role": "",
-                "roles": [],
-                "role_only": False,
-                "response_channel_action": "none",
-                "setup_requested": False,
-                "setup_mode": "none",
-                "delete_requested": False,
-            }
+        lowered = self._normalized_request_text(command_text)
+        route = str(getattr(self, "fixed_route", "") or "").strip().lower()
+        if route not in {"role", "response_mode", "setup"}:
+            route = "none"
 
-        prompt = (
-            "Classify this Discord admin request and choose the primary execution path.\n"
-            "Return strict JSON only with this shape:\n"
-            '{"route":"none|role|response_mode|setup",'
-            '"role_action":"none|list_roles|role_me|role_self",'
-            '"role":"role name or empty string",'
-            '"roles":["role name","role name"],'
-            '"role_only":true|false,'
-            '"response_channel_action":"none|add_current|remove_current|set_only_current|clear_all",'
-            '"setup_requested":true|false,'
-            '"setup_mode":"none|exact|creative",'
-            '"delete_requested":true|false}\n\n'
-            "Rules:\n"
-            "- route=role for direct role commands like list roles, role me, assign role to me, or role yourself.\n"
-            "- route=response_mode for always-talk-here / mention-only-here / response-channel changes.\n"
-            "- route=setup for channel/category/permission/server/icon/theme/rename/create/delete requests.\n"
-            "- route=none only when nothing actionable is requested.\n"
-            "- If the user says setup this Discord/server, build our HQ, make this our dev server, or describes the kind of server they want, route=setup.\n"
-            "- If the user says be creative, choose names yourself, you decide, or similar, that is explicit permission to design the setup without follow-up questions.\n"
-            "- Use role_action=list_roles for requests like list role/list roles/show roles.\n"
-            "- Use role_action=role_me when user asks to assign a role to themselves.\n"
-            "- Use role_action=role_self when user asks to assign a role to the bot/assistant itself.\n"
-            "- Set role or roles only for role_me/role_self; otherwise role must be empty and roles must be [].\n"
-            "- If multiple roles are requested, put them in roles.\n"
-            "- If one role is requested, you may use role and optionally also include it in roles.\n"
-            "- Set role_only=true only when the request is purely a role command.\n"
-            "- Set setup_requested=true when the request asks to change server structure/settings "
-            "(roles, channels, categories, permissions, server/guild icon, server name, themed setup).\n"
-            "- setup_mode=exact when the user clearly specifies exact rooms/channels/categories/roles or precise structural changes.\n"
-            "- setup_mode=creative when the user asks for a themed setup, style, vibe, HQ, workspace, or says to design it for them.\n"
-            "- Requests like 'setup this Discord for Tater HQ', 'setup this server gamer style', 'build our HQ', or 'make this our dev server' should be setup_mode=creative.\n"
-            "- Requests like 'create a category named Tater HQ Dev with channels tooling and bot-dev' should be setup_mode=exact.\n"
-            "- setup_mode=none when route is not setup.\n"
-            "- 'always talk in this room', 'always respond here', or 'reply to every message in this room' means response_channel_action=add_current.\n"
-            "- 'mention only in this room', 'stop always talking here', or 'disable always respond in this room' means response_channel_action=remove_current.\n"
-            "- Use set_only_current ONLY when the user explicitly says this should be the only always-response room in the server.\n"
-            "- Use clear_all ONLY when the user explicitly asks to clear or disable always-response rooms across the whole server.\n"
-            "- Do not choose response_mode just because the user mentions chat, talking, or chit-chat inside a broader server setup request.\n"
-            "- Set delete_requested=true when the request asks to delete channels/categories or wipe most of the server.\n"
-            "- response_channel_action must be add_current/remove_current/set_only_current/clear_all only when requested.\n"
-            "- Do not invent role names.\n\n"
-            f"Request: {command_text}"
-        )
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": "You return only strict JSON."},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
-            blob = extract_json(raw) if raw else None
-            if not blob:
-                return {
-                    "route": "none",
-                    "role_action": "none",
-                    "role": "",
-                    "roles": [],
-                    "role_only": False,
-                    "response_channel_action": "none",
-                    "setup_requested": False,
-                    "setup_mode": "none",
-                    "delete_requested": False,
-                }
-            try:
-                parsed = json.loads(blob)
-            except Exception:
-                return {
-                    "route": "none",
-                    "role_action": "none",
-                    "role": "",
-                    "roles": [],
-                    "role_only": False,
-                    "response_channel_action": "none",
-                    "setup_requested": False,
-                    "setup_mode": "none",
-                    "delete_requested": False,
-                }
-            if not isinstance(parsed, dict):
-                return {
-                    "route": "none",
-                    "role_action": "none",
-                    "role": "",
-                    "roles": [],
-                    "role_only": False,
-                    "response_channel_action": "none",
-                    "setup_requested": False,
-                    "setup_mode": "none",
-                    "delete_requested": False,
-                }
+        out = {
+            "route": route,
+            "role_action": "none",
+            "role": "",
+            "roles": [],
+            "role_only": False,
+            "response_channel_action": "none",
+            "setup_requested": False,
+            "setup_mode": "none",
+            "delete_requested": False,
+        }
 
-            route = str(parsed.get("route") or "").strip().lower()
-            if route not in {"none", "role", "response_mode", "setup"}:
-                route = "none"
-            action = str(parsed.get("role_action") or "").strip().lower()
-            if action not in {"none", "list_roles", "role_me", "role_self"}:
-                action = "none"
-            role_only = _coerce_bool(parsed.get("role_only"), True)
-            response_channel_action = str(parsed.get("response_channel_action") or "").strip().lower()
-            if response_channel_action not in VALID_RESPONSE_ACTIONS:
-                response_channel_action = "none"
-            setup_requested = _coerce_bool(parsed.get("setup_requested"), False)
-            setup_mode = str(parsed.get("setup_mode") or "").strip().lower()
-            if setup_mode not in {"none", "exact", "creative"}:
-                setup_mode = "none"
-            delete_requested = _coerce_bool(parsed.get("delete_requested"), False)
+        if route == "role":
+            action = "role_me"
+            if any(marker in lowered for marker in ("list roles", "show roles", "list role")):
+                action = "list_roles"
+            elif any(marker in lowered for marker in ("role yourself", "assign yourself", "give yourself", "grant yourself")):
+                action = "role_self"
+            out["role_action"] = action
+            out["role_only"] = True
+            return out
 
-            role_raw = str(parsed.get("role") or "").strip()
-            role_raw = role_raw.strip(" \t\r\n.,!?")
-            if (role_raw.startswith('"') and role_raw.endswith('"')) or (
-                role_raw.startswith("'") and role_raw.endswith("'")
-            ):
-                role_raw = role_raw[1:-1].strip()
-            role_list_raw = parsed.get("roles")
-            role_list: list[str] = []
-            if isinstance(role_list_raw, list):
-                for item in role_list_raw:
-                    text = str(item or "").strip().strip(" \t\r\n.,!?")
-                    if not text:
-                        continue
-                    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-                        text = text[1:-1].strip()
-                    if text and text not in role_list:
-                        role_list.append(text)
-            if role_raw and role_raw not in role_list:
-                role_list.append(role_raw)
-            if action == "list_roles":
-                role_raw = ""
-                role_list = []
+        if route == "response_mode":
+            action = "none"
+            if any(marker in lowered for marker in ("clear always respond", "clear always-response", "disable always respond everywhere", "clear all always respond")):
+                action = "clear_all"
+            elif any(marker in lowered for marker in ("only always respond here", "only this room", "this should be the only")):
+                action = "set_only_current"
+            elif any(marker in lowered for marker in ("mention only here", "stop always talking here", "disable always respond in this room", "only respond to ping here")):
+                action = "remove_current"
+            elif any(marker in lowered for marker in ("always talk in this room", "always respond here", "reply to every message in this room")):
+                action = "add_current"
+            out["response_channel_action"] = action
+            return out
 
-            return {
-                "route": route,
-                "role_action": action,
-                "role": role_raw,
-                "roles": role_list,
-                "role_only": role_only,
-                "response_channel_action": response_channel_action,
-                "setup_requested": setup_requested,
-                "setup_mode": setup_mode,
-                "delete_requested": delete_requested,
-            }
-        except Exception as exc:
-            logger.debug(f"[discord_admin] request routing failed: {exc}")
-            return {
-                "route": "none",
-                "role_action": "none",
-                "role": "",
-                "roles": [],
-                "role_only": False,
-                "response_channel_action": "none",
-                "setup_requested": False,
-                "setup_mode": "none",
-                "delete_requested": False,
-            }
+        if route == "setup":
+            inferred = self._infer_setup_route_from_request(command_text)
+            mode = str(inferred.get("setup_mode") or "creative").strip().lower()
+            if mode not in {"exact", "creative"}:
+                mode = "creative"
+            out["setup_requested"] = True
+            out["setup_mode"] = mode
+            out["delete_requested"] = bool(re.search(r"\b(delete|wipe|remove)\b", lowered))
+            return out
+
+        return out
 
     @staticmethod
     def _normalize_role_lookup_token(value: str) -> str:
@@ -2955,4 +2850,4 @@ class DiscordAdminPlugin(ToolVerba):
         )
 
 
-verba = DiscordAdminPlugin()
+verba = DiscordAdminRolesPlugin()

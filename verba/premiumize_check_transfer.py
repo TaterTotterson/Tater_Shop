@@ -5,33 +5,32 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from helpers import extract_json, redis_client
+from helpers import redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
-logger = logging.getLogger("premiumize_download")
+logger = logging.getLogger("premiumize_check_transfer")
 logger.setLevel(logging.INFO)
 
 
-class PremiumizeDownloadPlugin(ToolVerba):
-    name = "premiumize_download"
-    verba_name = "Premiumize Download"
-    version = "3.1.0"
+class PremiumizeCheckTransferPlugin(ToolVerba):
+    name = "premiumize_check_transfer"
+    verba_name = "Premiumize Check Transfer"
+    version = "1.0.0"
     min_tater_version = "59"
-    pretty_name = "Premiumize Cloud Downloader"
+    pretty_name = "Premiumize Check Transfer"
     settings_category = "Premiumize"
+    tags = ["premiumize", "check_transfer"]
+    fixed_action = "check_transfer"
     usage = (
-        '{"function":"premiumize_download","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
+        '{"function":"premiumize_check_transfer","arguments":{"query":"check progress for transfer 2"}}'
     )
     description = (
-        "Premiumize transfer manager plugin: add transfers, list/check transfers, browse cloud files, and get "
-        "direct/stream links. For add-transfer and source-based link retrieval, include a literal "
-        "`magnet:?` or `http(s)://` URI in the tool call."
+        "Check progress/status for one Premiumize transfer."
     )
     verba_dec = (
-        "Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and "
-        "retrieve direct or stream links."
+        "Inspect a Premiumize transfer and report status, progress, and related files."
     )
     waiting_prompt_template = (
         "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
@@ -59,26 +58,49 @@ class PremiumizeDownloadPlugin(ToolVerba):
         },
     }
     when_to_use = (
-        "Use when the user wants to send a magnet/URL to Premiumize, check transfer progress, list transfers, "
-        "browse Premiumize files, or retrieve direct/stream links."
+        "Use when the request is to check transfer status/progress for a specific Premiumize transfer."
     )
     how_to_use = (
-        "Pass one request in query. For add-transfer or get-links by source, include the full literal `magnet:?` "
-        "or `http(s)://...` URI in query (or explicit source/src/url/magnet/link arg). Do not rely on vague text "
-        "like 'this torrent' or on chat context/attachments/handoff payloads."
+        "Set `query` to a transfer-status request (for example: check transfer 2, status of transfer id abc123)."
     )
     common_needs = [
-        "A Premiumize action request.",
-        "For add-transfer or source-based get-links: the exact `magnet:?` or `http(s)://` URI.",
+        "A transfer-status request in query.",
     ]
-    missing_info_prompts = ["What exact magnet or URL should I send to Premiumize?"]
+    missing_info_prompts = []
     example_calls = [
-        '{"function":"premiumize_download","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
-        '{"function":"premiumize_download","arguments":{"query":"give me direct links for magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
-        '{"function":"premiumize_download","arguments":{"query":"what is Premiumize downloading right now"}}',
-        '{"function":"premiumize_download","arguments":{"query":"show my Premiumize files"}}',
-        '{"function":"premiumize_download","arguments":{"query":"get me the download link for item 2"}}',
+        '{"function":"premiumize_check_transfer","arguments":{"query":"check progress for transfer 2"}}',
+        '{"function":"premiumize_check_transfer","arguments":{"query":"status of transfer id abc123"}}',
     ]
+    routing_keywords = [
+        "premiumize",
+        "check",
+        "status",
+        "progress",
+        "transfer",
+        "eta",
+    ]
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The transfer-status request (for example: check transfer 2, status transfer id abc123).",
+            },
+            "transfer_id": {
+                "type": "string",
+                "description": "Optional explicit transfer id.",
+            },
+            "index": {
+                "type": "integer",
+                "description": "Optional 1-based transfer index from the latest transfer list.",
+            },
+            "name_query": {
+                "type": "string",
+                "description": "Optional transfer-name search text.",
+            },
+        },
+        "required": [],
+    }
 
     CACHE_KEY = "tater:premiumize:last_context"
     CACHE_TTL_SECONDS = 6 * 60 * 60
@@ -218,77 +240,83 @@ class PremiumizeDownloadPlugin(ToolVerba):
                 return value
         return ""
 
-    async def _parse_intent_with_llm(self, query: str, llm_client) -> Dict[str, Any]:
-        if not query or not llm_client:
-            return {}
-        prompt = (
-            "Extract Premiumize intent from the user request.\n"
-            "Return only JSON with this schema:\n"
-            "{"
-            "\"action\":\"add_transfer|list_transfers|check_transfer|list_files|get_links\","
-            "\"source\":\"\","
-            "\"status_filter\":\"active|finished|failed|all|\","
-            "\"name_query\":\"\","
-            "\"transfer_id\":\"\","
-            "\"folder_id\":\"\","
-            "\"item_id\":\"\","
-            "\"index\":0"
-            "}\n"
-            "Rules:\n"
-            "0) Always choose exactly one action from the allowed action enum.\n"
-            "1) Priority: if the user asks for a download/direct/stream/Premiumize link, action=get_links.\n"
-            "2) If user asks to download/send/add in Premiumize, action=add_transfer.\n"
-            "3) If user asks what is downloading/active, action=list_transfers.\n"
-            "4) If user asks progress/did finish, action=check_transfer.\n"
-            "5) If user asks for files/folders/cloud browse, action=list_files.\n"
-            "6) If user asks for download or stream link, action=get_links.\n"
-            "7) Put magnet or URL in source only if explicitly present in user text.\n"
-            "8) Never invent or paraphrase source values; source must be a literal URI.\n"
-            "9) Use name_query for transfer/file names when referenced.\n"
-            "10) If unknown field, use empty string or 0.\n"
-            "11) If the request mixes link intent with add/search words, keep action=get_links.\n"
-            f'User request: "{query}"\n'
+    @staticmethod
+    def _first_match(text: str, patterns: List[str]) -> str:
+        for pattern in patterns:
+            m = re.search(pattern, text or "", flags=re.IGNORECASE)
+            if m:
+                return str(m.group(1) or "").strip()
+        return ""
+
+    def _infer_status_filter_from_query(self, query: str) -> str:
+        text = str(query or "").lower()
+        if any(token in text for token in ("active", "running", "queued", "in progress", "downloading")):
+            return "active"
+        if any(token in text for token in ("finished", "complete", "completed", "done", "success")):
+            return "finished"
+        if any(token in text for token in ("failed", "error")):
+            return "failed"
+        if "all" in text:
+            return "all"
+        return ""
+
+    def _extract_index_from_query(self, query: str) -> int:
+        raw = self._first_match(
+            query,
+            [
+                r"\b(?:item|file|transfer|entry)\s*#?\s*(\d{1,4})\b",
+                r"\b(?:number|index)\s*(\d{1,4})\b",
+                r"\b(\d{1,4})(?:st|nd|rd|th)\b",
+            ],
         )
-        try:
-            resp = await llm_client.chat(
-                messages=[{"role": "system", "content": prompt}],
-                max_tokens=220,
-                temperature=0,
-            )
-            raw = ((resp or {}).get("message") or {}).get("content") or ""
-            parsed = extract_json(raw) or raw
-            payload = json.loads(parsed)
-            return payload if isinstance(payload, dict) else {}
-        except Exception as exc:
-            logger.debug("[premiumize] llm intent fallback: %s", exc)
-            return {}
+        return self._clamp_int(raw, 0, 500, 0)
+
+    def _extract_transfer_id_from_query(self, query: str) -> str:
+        return self._first_match(
+            query,
+            [
+                r"\btransfer(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b",
+                r"\bid\s*[:#]?\s*([a-zA-Z0-9_-]{6,})\b",
+            ],
+        )
+
+    def _extract_folder_id_from_query(self, query: str) -> str:
+        return self._first_match(
+            query,
+            [
+                r"\bfolder(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b",
+            ],
+        )
+
+    def _extract_item_id_from_query(self, query: str) -> str:
+        return self._first_match(
+            query,
+            [
+                r"\bitem(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b",
+                r"\bfile(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b",
+            ],
+        )
 
     async def _resolve_intent(self, query: str, args: Dict[str, Any], llm_client) -> Dict[str, Any]:
-        llm_intent = await self._parse_intent_with_llm(query, llm_client)
-        action = self._normalize_action(llm_intent.get("action")) or self._normalize_action((args or {}).get("action"))
-        status_filter = self._normalize_status_filter(llm_intent.get("status_filter")) or self._normalize_status_filter(
-            (args or {}).get("status_filter")
+        _ = llm_client
+        action = self._normalize_action(getattr(self, "fixed_action", "")) or self._normalize_action((args or {}).get("action"))
+        status_filter = self._normalize_status_filter((args or {}).get("status_filter")) or self._infer_status_filter_from_query(
+            query
         )
 
-        source = self._safe_text(llm_intent.get("source"))
-        if source:
-            source = self._extract_first_source(source) or source
+        source = self._extract_first_source(query)
         if not source:
-            source = self._extract_first_source(query)
+            source = self._safe_text((args or {}).get("source"))
+            source = self._extract_first_source(source) or source
 
         source_type = self._source_type(source) if source else ""
-        name_query = self._safe_text(llm_intent.get("name_query")) or self._safe_text((args or {}).get("name_query"))
-        transfer_id = self._safe_text(llm_intent.get("transfer_id")) or self._safe_text((args or {}).get("transfer_id"))
-        folder_id = self._safe_text(llm_intent.get("folder_id")) or self._safe_text((args or {}).get("folder_id"))
-        item_id = self._safe_text(llm_intent.get("item_id")) or self._safe_text((args or {}).get("item_id"))
-        index = self._clamp_int(
-            llm_intent.get("index") if llm_intent.get("index") is not None else (args or {}).get("index"),
-            0,
-            500,
-            0,
-        )
+        name_query = self._safe_text((args or {}).get("name_query"))
+        transfer_id = self._safe_text((args or {}).get("transfer_id")) or self._extract_transfer_id_from_query(query)
+        folder_id = self._safe_text((args or {}).get("folder_id")) or self._extract_folder_id_from_query(query)
+        item_id = self._safe_text((args or {}).get("item_id")) or self._extract_item_id_from_query(query)
+        index = self._clamp_int((args or {}).get("index"), 0, 500, self._extract_index_from_query(query))
 
-        # Accept explicit source args but do not force route changes; action must come from LLM/structured action.
+        # Accept explicit source args but do not force route changes; action is fixed by this dedicated verba.
         explicit_source = self._explicit_source_from_args(args or {})
         if explicit_source and not source:
             source = explicit_source
@@ -1134,4 +1162,4 @@ class PremiumizeDownloadPlugin(ToolVerba):
             return action_failure(code="premiumize_exception", message="Premiumize request failed.")
 
 
-verba = PremiumizeDownloadPlugin()
+verba = PremiumizeCheckTransferPlugin()

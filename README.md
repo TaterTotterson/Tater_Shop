@@ -44,7 +44,9 @@
 | `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui, macos |
 | `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui, macos |
 | `device_compare` | Natural-language device comparison with spec tables and optional per-game FPS benchmarks. | discord, webui, macos, matrix, telegram |
-| `discord_admin` | Discord server setup, admin changes, and current-room always-respond control. | discord |
+| `discord_admin_response_mode` | Discord response-mode channel controls. | discord |
+| `discord_admin_roles` | Discord role listing and role assignment commands. | discord |
+| `discord_admin_setup` | Discord server setup and structural admin changes. | discord |
 | `events_query` | Natural-language semantic event-history search. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
@@ -61,18 +63,37 @@
 | `ha_sensors` | Read Home Assistant sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_switches` | Control Home Assistant switches and plugs. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_temperature` | Read Home Assistant ambient temperatures. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `jackett_search` | Search Jackett, browse recent uploads, inspect indexers, and return structured torrent results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_handoff` | Build transfer payloads (magnet/torrent URI) from cached Jackett search results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_indexer_info` | Show status/privacy/configuration details for a specific Jackett indexer. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_indexers` | Show Jackett indexer inventory with scope and privacy breakdown. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_recent_uploads` | List and rank recent Jackett uploads across selected indexers. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_search_torrents` | Run Jackett torrent searches with filters and ranked results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
+| `jackett_source_lookup` | Map a cached Jackett result back to its source indexer/tracker. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `moltbook_info` | Natural-language Moltbook account intelligence and status lookups. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_account_summary` | Moltbook account snapshot with profile link and key counters. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_activity_on_posts` | Read /home activity buckets for your posts and summarize engagement. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_agent_profile` | Lookup target Moltbook agent profile details. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_fellow_taters` | Show tracked fellow Tater Moltbook agents. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_following` | List known followed agents and active authors from following feed. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_home_overview` | Moltbook /home dashboard overview with unread/activity counters. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_latest_announcement` | Get the newest Moltbook announcement/news entry. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_latest_posts` | Fetch latest posts authored by this Moltbook agent. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_monitoring_submolts` | Read Moltbook portal settings for submolts to monitor/prefer/avoid. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_profile_link` | Get the current Moltbook profile URL. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
+| `moltbook_subscriptions` | Show subscribed submolts from Moltbook portal state. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `music_assistant` | Play music and control playback via Music Assistant in Home Assistant. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `obsidian_note` | Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags. | webui, macos |
 | `obsidian_search` | Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis. | webui, macos |
 | `overseerr_details` | Fetch details for a specific movie or TV show from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
 | `overseerr_request` | Request a movie or TV show in Overseerr by title. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
 | `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
-| `premiumize_download` | Send explicit magnet or HTTP(S) links to Premiumize, monitor transfer progress, browse cloud files, and retrieve direct or stream links. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_add_transfer` | Create Premiumize transfers from explicit magnet or HTTP(S) source links. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_check_transfer` | Inspect a Premiumize transfer and report status, progress, and related files. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_get_links` | Get Premiumize stream/download links by magnet/URL or by chosen cloud item. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_list_files` | List Premiumize cloud folder contents with file/folder counts. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_list_transfers` | Show Premiumize transfer queue/status with active, finished, and failed counts. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, matrix, telegram |
 | `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, macos, irc, matrix, telegram |
 | `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, macos, discord, irc, matrix, telegram |
