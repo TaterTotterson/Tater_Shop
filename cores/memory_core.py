@@ -5166,7 +5166,7 @@ def _hydra_remove_targets_from_value(value: Any, targets: List[Any]) -> Tuple[An
 
 
 def _hydra_remove_plan(args: Dict[str, Any], llm_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    del args
+    request_text = _as_text((args or {}).get("text")).strip().lower()
     parsed = llm_payload if isinstance(llm_payload, dict) else {}
     keys = parsed.get("remove_keys") if isinstance(parsed.get("remove_keys"), list) else []
     values = parsed.get("remove_values") if isinstance(parsed.get("remove_values"), list) else []
@@ -5188,6 +5188,20 @@ def _hydra_remove_plan(args: Dict[str, Any], llm_payload: Optional[Dict[str, Any
             continue
         seen_tokens.add(token)
         deduped_values.append(item)
+
+    # Practical fallback for the memory_add workflow:
+    # memory_add stores under user_wants_you_to_remember, so forget/remove requests
+    # should default to removing that slot if planner produced no explicit targets.
+    if (
+        not deduped_keys
+        and not deduped_values
+        and request_text
+        and any(
+            token in request_text
+            for token in ("forget", "remove", "delete", "clear", "memory", "remember")
+        )
+    ):
+        deduped_keys.append("user_wants_you_to_remember")
 
     return {"keys": deduped_keys, "values": deduped_values}
 
