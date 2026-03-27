@@ -713,7 +713,7 @@ if not callable(_value_fingerprint):
             return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:
             return str(value)
-__version__ = "1.0.15"
+__version__ = "1.0.16"
 
 
 load_dotenv()
@@ -5451,53 +5451,7 @@ async def _hydra_memory_add(
     elif existing_remember_value not in (None, ""):
         merged_value = [existing_remember_value, remember_note]
 
-    candidate_conf = 0.95
-    if (
-        existing_remember_value is not None
-        and _value_fingerprint(existing_remember_value) != _value_fingerprint(merged_value)
-        and candidate_conf <= existing_remember_conf
-    ):
-        candidate_conf = min(0.99, max(candidate_conf, existing_remember_conf + 0.01))
     if already_present:
-        candidate_conf = max(candidate_conf, existing_remember_conf or 0.95)
-
-    candidates = [
-        {
-            "candidate_key": "user_wants_you_to_remember",
-            "value": merged_value,
-            "confidence": candidate_conf,
-        }
-    ]
-
-    inserted = 0
-    updated_keys: List[str] = []
-    skipped: List[str] = []
-
-    for candidate in candidates:
-        key = normalize_fact_key(candidate.get("candidate_key") or candidate.get("key"))
-        if not key:
-            continue
-        observation = {
-            "candidate_key": key,
-            "value": candidate.get("value"),
-            "confidence": _hydra_confidence(candidate.get("confidence"), 0.9),
-            "evidence": [request_text] if request_text else [],
-        }
-        changed = merge_observation(
-            doc,
-            observation,
-            min_confidence=0.5,
-            default_ttl_sec=0,
-            allow_new_keys=True,
-            now=now_ts,
-        )
-        if changed:
-            inserted += 1
-            updated_keys.append(key)
-        else:
-            skipped.append(key)
-
-    if inserted <= 0 and already_present:
         return {
             "tool": "memory_add",
             "ok": True,
@@ -5512,15 +5466,27 @@ async def _hydra_memory_add(
             "summary_for_user": "Memory already contains that note.",
         }
 
-    if inserted <= 0:
-        return {
-            "tool": "memory_add",
-            "ok": False,
-            "error": "No memory facts were stored (low confidence or unchanged).",
-            "summary_for_user": "I couldn't store a new durable memory fact from that request.",
-            "skipped_keys": sorted(set(skipped)),
-        }
+    facts_map = doc.get("facts")
+    if not isinstance(facts_map, dict):
+        facts_map = {}
+        doc["facts"] = facts_map
 
+    existing_evidence = []
+    if isinstance(existing_remember, dict):
+        existing_evidence = [item for item in _coerce_evidence(existing_remember.get("evidence")) if item]
+    if request_text and request_text not in existing_evidence:
+        existing_evidence.append(request_text)
+
+    new_conf = max(0.95, existing_remember_conf)
+    facts_map["user_wants_you_to_remember"] = {
+        "value": _json_safe(merged_value),
+        "confidence": _coerce_confidence(new_conf),
+        "evidence": existing_evidence[:12],
+        "ttl_sec": 0,
+        "updated_at": now_ts,
+        "expires_at": None,
+    }
+    doc["last_updated"] = now_ts
     save_memory_doc(redis_obj, redis_key, doc, now=now_ts)
     return {
         "tool": "memory_add",
@@ -5529,10 +5495,10 @@ async def _hydra_memory_add(
         "platform": target.get("platform"),
         "user_id": target.get("user_id"),
         "redis_key": redis_key,
-        "stored_count": inserted,
-        "updated_keys": sorted(set(updated_keys)),
+        "stored_count": 1,
+        "updated_keys": ["user_wants_you_to_remember"],
         "request_text": request_text,
-        "summary_for_user": "Memory updated: added " + ", ".join(sorted(set(updated_keys))) + ".",
+        "summary_for_user": "Memory updated: added user_wants_you_to_remember.",
     }
 
 
