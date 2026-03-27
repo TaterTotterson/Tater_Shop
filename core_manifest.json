@@ -33,7 +33,7 @@
       "id": "rss",
       "name": "RSS Core",
       "module_key": "rss_core",
-      "version": "1.0.4",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "RSS Core integration core for Tater.",
       "settings_category": "RSS Core Settings",
@@ -41,7 +41,7 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "224d654ba8a026251f431c971b33874c86a2b391b060c395c2f335a68e8e8f3c"
+      "sha256": "50dcadda88e9b58923e4e4effd417c291a240dbeea4143852eb379a2a4a517ed"
     }
   ]
 }
