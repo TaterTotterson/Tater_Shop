@@ -706,7 +706,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 
 load_dotenv()
@@ -4854,7 +4854,11 @@ def _hydra_platform(platform: Any) -> str:
 def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) -> str:
     source = args if isinstance(args, dict) else {}
     del origin
-    return _as_text(source.get("text")).strip()
+    for key in ("text", "note", "memory", "content", "value", "query", "request"):
+        value = _as_text(source.get(key)).strip()
+        if value:
+            return value
+    return ""
 
 
 def _hydra_auto_link_identities_enabled(*, args: Dict[str, Any], redis_obj: Any) -> bool:
@@ -5382,14 +5386,6 @@ async def _hydra_memory_add(
             "summary_for_user": "Please provide text describing what should be remembered.",
         }
 
-    if llm_client is None:
-        return {
-            "tool": "memory_add",
-            "ok": False,
-            "error": "memory_add requires ai planning, but llm_client is unavailable.",
-            "summary_for_user": "I couldn't plan what to store right now because AI planning is unavailable.",
-        }
-
     now_ts = time.time()
     doc = load_memory_doc(redis_obj, redis_key)
     existing_facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
@@ -5408,40 +5404,7 @@ async def _hydra_memory_add(
         if isinstance(existing_remember, dict)
         else 0.0
     )
-
-    llm_payload = await _hydra_llm_json_async(
-        llm_client=llm_client,
-        system_prompt=(
-            "Convert a user's explicit remember request into one concise durable user-memory note.\n"
-            "Return strict JSON only with shape:\n"
-            "{\"remember_note\":\"short text\",\"confidence\":0..1}\n"
-            "Rules:\n"
-            "- Preserve intent, shorten wording.\n"
-            "- Keep remember_note concise (ideally <= 18 words).\n"
-            "- Do not add guesses, private inferences, or unrelated details.\n"
-            "- If unclear, return empty remember_note.\n"
-        ),
-        payload={
-            "request": request_text,
-            "current_note": existing_remember_value,
-        },
-        max_tokens=260,
-        temperature=0.1,
-    )
-    if llm_payload is None:
-        return {
-            "tool": "memory_add",
-            "ok": False,
-            "error": "AI memory planner failed to produce a note.",
-            "request_text": request_text,
-            "summary_for_user": "I couldn't plan what to store right now.",
-        }
-
-    remember_note = _as_text(
-        llm_payload.get("remember_note")
-        or llm_payload.get("note")
-        or llm_payload.get("text")
-    ).strip()
+    remember_note = " ".join(_as_text(request_text).split()).strip()
     if not remember_note:
         return {
             "tool": "memory_add",
@@ -5449,19 +5412,52 @@ async def _hydra_memory_add(
             "error": "No durable user memory facts were identified to store.",
             "summary_for_user": "I couldn't find a clear user-memory fact to store from that.",
         }
+    existing_text_values: List[str] = []
+    if isinstance(existing_remember_value, str):
+        token = existing_remember_value.strip()
+        if token:
+            existing_text_values.append(token)
+    elif isinstance(existing_remember_value, list):
+        for item in existing_remember_value:
+            token = _as_text(item).strip()
+            if token:
+                existing_text_values.append(token)
 
-    candidate_conf = _hydra_confidence(llm_payload.get("confidence"), 0.9)
+    existing_tokens = {" ".join(item.split()).strip().lower() for item in existing_text_values if item}
+    remember_token = remember_note.lower()
+    already_present = bool(remember_token and remember_token in existing_tokens)
+
+    merged_value: Any = remember_note
+    if already_present and existing_remember_value is not None:
+        merged_value = existing_remember_value
+    elif isinstance(existing_remember_value, list):
+        merged_items: List[Any] = list(existing_remember_value)
+        if not already_present:
+            merged_items.append(remember_note)
+        merged_value = merged_items
+    elif isinstance(existing_remember_value, str):
+        prior = existing_remember_value.strip()
+        if prior and prior.lower() != remember_token:
+            merged_value = [prior, remember_note]
+        else:
+            merged_value = prior or remember_note
+    elif existing_remember_value not in (None, ""):
+        merged_value = [existing_remember_value, remember_note]
+
+    candidate_conf = 0.95
     if (
         existing_remember_value is not None
-        and _value_fingerprint(existing_remember_value) != _value_fingerprint(remember_note)
+        and _value_fingerprint(existing_remember_value) != _value_fingerprint(merged_value)
         and candidate_conf <= existing_remember_conf
     ):
         candidate_conf = min(0.99, max(candidate_conf, existing_remember_conf + 0.01))
+    if already_present:
+        candidate_conf = max(candidate_conf, existing_remember_conf or 0.95)
 
     candidates = [
         {
             "candidate_key": "user_wants_you_to_remember",
-            "value": remember_note,
+            "value": merged_value,
             "confidence": candidate_conf,
         }
     ]
@@ -5493,6 +5489,21 @@ async def _hydra_memory_add(
             updated_keys.append(key)
         else:
             skipped.append(key)
+
+    if inserted <= 0 and already_present:
+        return {
+            "tool": "memory_add",
+            "ok": True,
+            "no_op": True,
+            "scope": "user",
+            "platform": target.get("platform"),
+            "user_id": target.get("user_id"),
+            "redis_key": redis_key,
+            "stored_count": 0,
+            "updated_keys": ["user_wants_you_to_remember"],
+            "request_text": request_text,
+            "summary_for_user": "Memory already contains that note.",
+        }
 
     if inserted <= 0:
         return {
@@ -5696,7 +5707,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "memory_add",
-            "description": "Store what the current user explicitly wants remembered as one concise durable memory note (AI may shorten wording while preserving intent).",
+            "description": "Store what the current user explicitly wants remembered as a durable memory note under user_wants_you_to_remember.",
             "usage": '{"function":"memory_add","arguments":{"text":"<what the user wants remembered>"}}',
         },
         {
@@ -5719,7 +5730,7 @@ async def run_hydra_kernel_tool(
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
     func = _as_text(tool_id).strip().lower()
-    payload_args = dict(args or {})
+    payload_args = dict(args) if isinstance(args, dict) else {}
     payload_origin = payload_args.get("origin") if isinstance(payload_args.get("origin"), dict) else origin
     redis_obj = redis_client if redis_client is not None else globals().get("redis_client")
     if redis_obj is None:
@@ -5730,24 +5741,38 @@ async def run_hydra_kernel_tool(
         }
 
     if func in {"memory_add", "memory_store", "memory_save", "memory_set"}:
-        return await _hydra_memory_add(
-            args=payload_args,
-            platform=platform,
-            scope=scope,
-            origin=payload_origin,
-            llm_client=llm_client,
-            redis_obj=redis_obj,
-        )
+        try:
+            return await _hydra_memory_add(
+                args=payload_args,
+                platform=platform,
+                scope=scope,
+                origin=payload_origin,
+                llm_client=llm_client,
+                redis_obj=redis_obj,
+            )
+        except Exception as exc:
+            return {
+                "tool": "memory_add",
+                "ok": False,
+                "error": f"memory_add failed: {exc}",
+            }
 
     if func in {"memory_remove", "memory_forget", "memory_delete", "memory_clear"}:
-        return await _hydra_memory_remove(
-            args=payload_args,
-            platform=platform,
-            scope=scope,
-            origin=payload_origin,
-            llm_client=llm_client,
-            redis_obj=redis_obj,
-        )
+        try:
+            return await _hydra_memory_remove(
+                args=payload_args,
+                platform=platform,
+                scope=scope,
+                origin=payload_origin,
+                llm_client=llm_client,
+                redis_obj=redis_obj,
+            )
+        except Exception as exc:
+            return {
+                "tool": "memory_remove",
+                "ok": False,
+                "error": f"memory_remove failed: {exc}",
+            }
 
     return None
 
