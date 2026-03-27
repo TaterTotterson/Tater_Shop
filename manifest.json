@@ -641,84 +641,6 @@
       "sha256": "2ecbab2bf093b2f6217664e42264df2c139403dcdcb5eff67d6b0481fa8f95c5"
     },
     {
-      "id": "jackett_handoff",
-      "name": "Jackett Handoff",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Build transfer payloads (magnet/torrent URI) from cached Jackett search results.",
-      "portals": [
-        "discord",
-        "webui",
-        "macos",
-        "irc",
-        "homeassistant",
-        "homekit",
-        "matrix",
-        "telegram",
-        "xbmc"
-      ],
-      "notifier": false,
-      "settings_category": "Jackett",
-      "tags": [
-        "jackett",
-        "handoff"
-      ],
-      "entry": "verba/jackett_handoff.py",
-      "sha256": "7d63c47c6a109734f741ff694a06d3d07eeaddac4781f6a2251aa22ce91545cd"
-    },
-    {
-      "id": "jackett_indexer_info",
-      "name": "Jackett Indexer Info",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Show status/privacy/configuration details for a specific Jackett indexer.",
-      "portals": [
-        "discord",
-        "webui",
-        "macos",
-        "irc",
-        "homeassistant",
-        "homekit",
-        "matrix",
-        "telegram",
-        "xbmc"
-      ],
-      "notifier": false,
-      "settings_category": "Jackett",
-      "tags": [
-        "jackett",
-        "indexer_info"
-      ],
-      "entry": "verba/jackett_indexer_info.py",
-      "sha256": "555fc3f266b08130579b49f7d08c0f8b618578ce8ebc7fa4c304b0290e079a72"
-    },
-    {
-      "id": "jackett_indexers",
-      "name": "Jackett Indexers",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Show Jackett indexer inventory with scope and privacy breakdown.",
-      "portals": [
-        "discord",
-        "webui",
-        "macos",
-        "irc",
-        "homeassistant",
-        "homekit",
-        "matrix",
-        "telegram",
-        "xbmc"
-      ],
-      "notifier": false,
-      "settings_category": "Jackett",
-      "tags": [
-        "jackett",
-        "indexers"
-      ],
-      "entry": "verba/jackett_indexers.py",
-      "sha256": "032d58d825cf8aa462f9cc9652df7775df46a05188439e853c9a05e52634c618"
-    },
-    {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
       "version": "1.0.0",
@@ -769,32 +691,6 @@
       ],
       "entry": "verba/jackett_search_torrents.py",
       "sha256": "1d40a6cd63fe5cc3a1a9ce45c5bacd53454e520c2b06382cef61f0edc72338ae"
-    },
-    {
-      "id": "jackett_source_lookup",
-      "name": "Jackett Source Lookup",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Map a cached Jackett result back to its source indexer/tracker.",
-      "portals": [
-        "discord",
-        "webui",
-        "macos",
-        "irc",
-        "homeassistant",
-        "homekit",
-        "matrix",
-        "telegram",
-        "xbmc"
-      ],
-      "notifier": false,
-      "settings_category": "Jackett",
-      "tags": [
-        "jackett",
-        "source_lookup"
-      ],
-      "entry": "verba/jackett_source_lookup.py",
-      "sha256": "62091653c32ea4b326381a3f5f9642c3a96c8491f7d23d6bbfdac86e06ab7c9f"
     },
     {
       "id": "joke_api",

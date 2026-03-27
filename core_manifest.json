@@ -13,13 +13,13 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "23dba03b95b59d4d4d648ced9fda777fa7c403c6e5c9afd86fbf897332dd4190"
+      "sha256": "fd686547b92255ecfd7b4984af72a0b49e9dc8a1f09eaf58c6716e3fea984515"
     },
     {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "3d5732b2e80f4ac3e143b6745e87c3f9bfc823402a170f69f1b63a474e80678c"
+      "sha256": "7395f2a4a63df02ae40d57ce1e6c9b1718336d816a7a639c60f020e547456a18"
     },
     {
       "id": "rss",

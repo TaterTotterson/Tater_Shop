@@ -2010,6 +2010,8 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
                 "subtitle": f"{platform} · {'Enabled' if enabled else 'Disabled'} · {recurrence_text} · next: {due_text}",
                 "save_action": "ai_tasks_save_schedule",
                 "remove_action": "ai_tasks_remove_schedule",
+                "run_action": "ai_tasks_run_now",
+                "run_label": "Run Now",
                 "remove_confirm": f"Remove scheduled task {reminder_id}?",
                 "fields": [
                     {
@@ -2017,13 +2019,6 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
                         "label": "Enabled",
                         "type": "checkbox",
                         "value": bool(enabled),
-                    },
-                    {
-                        "key": "run_now",
-                        "label": "Run Now",
-                        "type": "checkbox",
-                        "description": "Queue an immediate run when you click Save.",
-                        "value": False,
                     },
                     {
                         "key": "title",
@@ -2257,10 +2252,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 targets = _ai_tasks_ui_target_from_text(platform, "")
 
         enabled = _ai_tasks_ui_is_enabled(_value("enabled", current.get("enabled")), True)
-        run_now = _ai_tasks_ui_is_enabled(_value("run_now", False), False)
-        run_now_ts = float(time.time()) if run_now else 0.0
-        if run_now and enabled:
-            schedule_payload["next_run_ts"] = run_now_ts
         current.update(
             {
                 "platform": platform,
@@ -2274,14 +2265,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         _ai_tasks_ui_save_reminder(client, reminder_id, current)
         due_ts = _ai_tasks_ui_as_float(schedule_payload.get("next_run_ts"), 0.0)
         _ai_tasks_ui_set_due(client, reminder_id, due_ts if enabled else 0.0)
-        if run_now:
-            if enabled:
-                return {"ok": True, "message": f"Saved task {title} and queued it to run now.", "id": reminder_id}
-            return {
-                "ok": True,
-                "message": f"Saved task {title}. Run-now was skipped because the task is disabled.",
-                "id": reminder_id,
-            }
         return {"ok": True, "message": f"Saved task {title}.", "id": reminder_id}
 
     if action_name == "ai_tasks_remove_schedule":
@@ -2294,6 +2277,35 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         _ai_tasks_ui_delete_schedule(client, reminder_id)
         title = _ai_tasks_ui_clean_text(existing.get("title")) or reminder_id
         return {"ok": True, "message": f"Removed task {title}.", "id": reminder_id}
+
+    if action_name == "ai_tasks_run_now":
+        reminder_id = _ai_tasks_ui_clean_text(_value("id"))
+        if not reminder_id:
+            raise ValueError("Task id is required.")
+        current = _ai_tasks_ui_load_reminder(client, reminder_id)
+        if not isinstance(current, dict):
+            raise KeyError("Scheduled task not found.")
+
+        title = _ai_tasks_ui_clean_text(current.get("title")) or reminder_id
+        enabled = _ai_tasks_ui_is_enabled(current.get("enabled"), True)
+        if not enabled:
+            return {
+                "ok": True,
+                "message": f"Task {title} is disabled. Enable it to run now.",
+                "id": reminder_id,
+            }
+
+        schedule_payload = current.get("schedule") if isinstance(current.get("schedule"), dict) else {}
+        if not schedule_payload:
+            raise ValueError("This task has no valid schedule.")
+
+        run_now_ts = float(time.time())
+        schedule_payload["next_run_ts"] = run_now_ts
+        schedule_payload.setdefault("anchor_ts", run_now_ts)
+        current["schedule"] = schedule_payload
+        _ai_tasks_ui_save_reminder(client, reminder_id, current)
+        _ai_tasks_ui_set_due(client, reminder_id, run_now_ts)
+        return {"ok": True, "message": f"Queued task {title} to run now.", "id": reminder_id}
 
     raise ValueError(f"Unknown action: {action_name}")
 

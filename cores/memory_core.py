@@ -706,7 +706,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.9"
+__version__ = "1.0.10"
 
 
 load_dotenv()
@@ -716,6 +716,8 @@ logger.setLevel(logging.INFO)
 
 CORE_SETTINGS = {
     "category": "Memory Core Settings",
+    # Allow Hydra memory kernel tools even when the background extraction loop is stopped.
+    "hydra_tools_require_running": False,
     "required": {
         "interval_seconds": {
             "label": "Interval (sec)",
@@ -5638,7 +5640,7 @@ async def run_hydra_kernel_tool(
     redis_client: Any = None,
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
-    func = _as_text(tool_id).strip()
+    func = _as_text(tool_id).strip().lower()
     payload_args = dict(args or {})
     payload_origin = payload_args.get("origin") if isinstance(payload_args.get("origin"), dict) else origin
     redis_obj = redis_client if redis_client is not None else globals().get("redis_client")
@@ -5649,7 +5651,7 @@ async def run_hydra_kernel_tool(
             "error": "memory store is unavailable.",
         }
 
-    if func == "memory_add":
+    if func in {"memory_add", "memory_store", "memory_save", "memory_set"}:
         return await _hydra_memory_add(
             args=payload_args,
             platform=platform,
@@ -5659,7 +5661,7 @@ async def run_hydra_kernel_tool(
             redis_obj=redis_obj,
         )
 
-    if func == "memory_remove":
+    if func in {"memory_remove", "memory_forget", "memory_delete", "memory_clear"}:
         return await _hydra_memory_remove(
             args=payload_args,
             platform=platform,
