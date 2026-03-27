@@ -2,14 +2,15 @@
 import asyncio
 import time
 import os
+import json
 import feedparser
 import logging
 import requests
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env, redis_client
-from notify import core_notifier_platforms, dispatch_notification
+from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
 __version__ = "1.0.6"
 
@@ -60,6 +61,136 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _rss_clean_targets_dict(raw: Any) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in raw.items():
+        token = _clean_text(key)
+        text = _clean_text(value)
+        if token and text:
+            out[token] = text
+    return out
+
+
+def _rss_load_destination_catalog(client: Any) -> Dict[str, Any]:
+    if client is None:
+        return {"platforms": []}
+    try:
+        payload = notifier_destination_catalog(redis_client=client, limit=250)
+    except Exception:
+        return {"platforms": []}
+    if not isinstance(payload, dict):
+        return {"platforms": []}
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, list):
+        payload["platforms"] = []
+    return payload
+
+
+def _rss_catalog_platform_row(catalog: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    rows = catalog.get("platforms") if isinstance(catalog, dict) else []
+    if not isinstance(rows, list):
+        return {}
+    wanted = _clean_text(platform).lower()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = _clean_text(row.get("platform")).lower()
+        if token == wanted:
+            return row
+    return {}
+
+
+def _rss_encode_destination_value(platform: str, targets: Dict[str, Any]) -> str:
+    plat = _clean_text(platform).lower()
+    if not plat:
+        return ""
+    payload = {
+        "platform": plat,
+        "targets": _rss_clean_targets_dict(targets),
+    }
+    try:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return ""
+
+
+def _rss_decode_destination_value(raw_value: Any) -> Tuple[str, Dict[str, str]]:
+    value = _clean_text(raw_value)
+    if not value:
+        return "", {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return "", {}
+    if not isinstance(parsed, dict):
+        return "", {}
+    platform = _clean_text(parsed.get("platform")).lower()
+    targets = _rss_clean_targets_dict(parsed.get("targets"))
+    return platform, targets
+
+
+def _rss_target_from_text(platform: str, text_value: Any) -> Dict[str, str]:
+    platform_name = _clean_text(platform).lower()
+    text = _clean_text(text_value)
+    if not text:
+        return {}
+    if platform_name == "discord":
+        if text.isdigit():
+            return {"channel_id": text}
+        return {"channel": text}
+    if platform_name == "irc":
+        return {"channel": text}
+    if platform_name == "matrix":
+        return {"room_id": text}
+    if platform_name == "telegram":
+        return {"chat_id": text}
+    return {}
+
+
+def _rss_destination_options_for_platform(
+    platform: str,
+    *,
+    catalog: Dict[str, Any],
+    current_targets: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    platform_name = _clean_text(platform).lower()
+    row = _rss_catalog_platform_row(catalog, platform_name)
+    requires_target = bool(row.get("requires_target")) if isinstance(row, dict) else True
+
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    if requires_target:
+        out.append({"value": "", "label": "(Select destination)"})
+        seen.add("")
+    else:
+        default_value = _rss_encode_destination_value(platform_name, {})
+        out.append({"value": default_value, "label": "Portal defaults"})
+        seen.add(default_value)
+
+    destinations = row.get("destinations") if isinstance(row, dict) else []
+    if isinstance(destinations, list):
+        for item in destinations:
+            if not isinstance(item, dict):
+                continue
+            targets = _rss_clean_targets_dict(item.get("targets"))
+            value = _rss_encode_destination_value(platform_name, targets)
+            if not value or value in seen:
+                continue
+            label = _clean_text(item.get("label")) or value
+            out.append({"value": value, "label": label})
+            seen.add(value)
+
+    current_clean = _rss_clean_targets_dict(current_targets)
+    if current_clean:
+        current_value = _rss_encode_destination_value(platform_name, current_clean)
+        if current_value and current_value not in seen:
+            out.append({"value": current_value, "label": "Current target"})
+
+    return out
+
+
 def _portal_row(portals: Dict[str, Any], portal_key: str) -> Dict[str, Any]:
     if not isinstance(portals, dict):
         return {}
@@ -99,14 +230,17 @@ def _feed_form_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "discord": {
             "enabled": _as_bool_flag(_portal_row(portals, "discord").get("enabled"), False),
+            "destination": _rss_encode_destination_value("discord", discord_targets) if discord_targets else "",
             "channel_id": _clean_text(discord_targets.get("channel_id")),
         },
         "irc": {
             "enabled": _as_bool_flag(_portal_row(portals, "irc").get("enabled"), False),
+            "destination": _rss_encode_destination_value("irc", irc_targets) if irc_targets else "",
             "channel": _clean_text(irc_targets.get("channel")),
         },
         "matrix": {
             "enabled": _as_bool_flag(_portal_row(portals, "matrix").get("enabled"), False),
+            "destination": _rss_encode_destination_value("matrix", matrix_targets) if matrix_targets else "",
             "room_id": _clean_text(matrix_targets.get("room_id")),
         },
         "homeassistant": {
@@ -127,6 +261,7 @@ def _feed_form_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         },
         "telegram": {
             "enabled": _as_bool_flag(_portal_row(portals, "telegram").get("enabled"), False),
+            "destination": _rss_encode_destination_value("telegram", telegram_targets) if telegram_targets else "",
             "chat_id": _clean_text(telegram_targets.get("chat_id")),
         },
         "webui": {
@@ -154,8 +289,15 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
     discord = _row("discord")
     discord_enabled = _as_bool_flag(discord.get("enabled"), False)
+    discord_destination = _clean_text(discord.get("destination"))
     discord_channel = _clean_text(discord.get("channel_id"))
-    discord_targets: Dict[str, Any] = {}
+    discord_dest_platform, discord_dest_targets = _rss_decode_destination_value(discord_destination)
+    if discord_dest_platform == "discord":
+        discord_targets: Dict[str, Any] = dict(discord_dest_targets)
+    elif discord_destination:
+        discord_targets = _rss_target_from_text("discord", discord_destination)
+    else:
+        discord_targets = {}
     if discord_channel:
         discord_targets["channel_id"] = discord_channel
     if (not discord_enabled) or discord_targets:
@@ -163,8 +305,15 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
     irc = _row("irc")
     irc_enabled = _as_bool_flag(irc.get("enabled"), False)
+    irc_destination = _clean_text(irc.get("destination"))
     irc_channel = _clean_text(irc.get("channel"))
-    irc_targets: Dict[str, Any] = {}
+    irc_dest_platform, irc_dest_targets = _rss_decode_destination_value(irc_destination)
+    if irc_dest_platform == "irc":
+        irc_targets: Dict[str, Any] = dict(irc_dest_targets)
+    elif irc_destination:
+        irc_targets = _rss_target_from_text("irc", irc_destination)
+    else:
+        irc_targets = {}
     if irc_channel:
         irc_targets["channel"] = irc_channel
     if (not irc_enabled) or irc_targets:
@@ -172,8 +321,15 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
     matrix = _row("matrix")
     matrix_enabled = _as_bool_flag(matrix.get("enabled"), False)
+    matrix_destination = _clean_text(matrix.get("destination"))
     matrix_room = _clean_text(matrix.get("room_id"))
-    matrix_targets: Dict[str, Any] = {}
+    matrix_dest_platform, matrix_dest_targets = _rss_decode_destination_value(matrix_destination)
+    if matrix_dest_platform == "matrix":
+        matrix_targets: Dict[str, Any] = dict(matrix_dest_targets)
+    elif matrix_destination:
+        matrix_targets = _rss_target_from_text("matrix", matrix_destination)
+    else:
+        matrix_targets = {}
     if matrix_room:
         matrix_targets["room_id"] = matrix_room
     if (not matrix_enabled) or matrix_targets:
@@ -225,8 +381,15 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
     telegram = _row("telegram")
     telegram_enabled = _as_bool_flag(telegram.get("enabled"), False)
+    telegram_destination = _clean_text(telegram.get("destination"))
     telegram_chat = _clean_text(telegram.get("chat_id"))
-    telegram_targets: Dict[str, Any] = {}
+    telegram_dest_platform, telegram_dest_targets = _rss_decode_destination_value(telegram_destination)
+    if telegram_dest_platform == "telegram":
+        telegram_targets: Dict[str, Any] = dict(telegram_dest_targets)
+    elif telegram_destination:
+        telegram_targets = _rss_target_from_text("telegram", telegram_destination)
+    else:
+        telegram_targets = {}
     if telegram_chat:
         telegram_targets["chat_id"] = telegram_chat
     if (not telegram_enabled) or telegram_targets:
@@ -280,6 +443,7 @@ def _feed_rows(client) -> List[Dict[str, Any]]:
                 "enabled": _as_bool_flag(raw.get("enabled"), False),
                 "last_ts": last_ts,
                 "last_text": last_text,
+                "portals_raw": raw.get("portals") if isinstance(raw.get("portals"), dict) else {},
                 "portals": _feed_form_from_cfg(raw),
             }
         )
@@ -297,10 +461,12 @@ def _as_choices(values: List[str]) -> List[Dict[str, str]]:
 
 
 def _rss_manager_ui(client) -> Dict[str, Any]:
+    catalog = _rss_load_destination_catalog(client)
     forms = []
     for feed in _feed_rows(client):
         url = _clean_text(feed.get("url"))
         portals = feed.get("portals") if isinstance(feed.get("portals"), dict) else {}
+        portals_raw = feed.get("portals_raw") if isinstance(feed.get("portals_raw"), dict) else {}
         discord = portals.get("discord") if isinstance(portals.get("discord"), dict) else {}
         irc = portals.get("irc") if isinstance(portals.get("irc"), dict) else {}
         matrix = portals.get("matrix") if isinstance(portals.get("matrix"), dict) else {}
@@ -309,6 +475,44 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
         telegram = portals.get("telegram") if isinstance(portals.get("telegram"), dict) else {}
         webui = portals.get("webui") if isinstance(portals.get("webui"), dict) else {}
         wordpress = portals.get("wordpress") if isinstance(portals.get("wordpress"), dict) else {}
+        discord_targets = _portal_targets(portals_raw, "discord")
+        irc_targets = _portal_targets(portals_raw, "irc")
+        matrix_targets = _portal_targets(portals_raw, "matrix")
+        telegram_targets = _portal_targets(portals_raw, "telegram")
+
+        discord_destination_options = _rss_destination_options_for_platform(
+            "discord",
+            catalog=catalog,
+            current_targets=discord_targets,
+        )
+        irc_destination_options = _rss_destination_options_for_platform(
+            "irc",
+            catalog=catalog,
+            current_targets=irc_targets,
+        )
+        matrix_destination_options = _rss_destination_options_for_platform(
+            "matrix",
+            catalog=catalog,
+            current_targets=matrix_targets,
+        )
+        telegram_destination_options = _rss_destination_options_for_platform(
+            "telegram",
+            catalog=catalog,
+            current_targets=telegram_targets,
+        )
+
+        discord_destination_value = _clean_text(discord.get("destination"))
+        if not discord_destination_value and discord_targets:
+            discord_destination_value = _rss_encode_destination_value("discord", discord_targets)
+        irc_destination_value = _clean_text(irc.get("destination"))
+        if not irc_destination_value and irc_targets:
+            irc_destination_value = _rss_encode_destination_value("irc", irc_targets)
+        matrix_destination_value = _clean_text(matrix.get("destination"))
+        if not matrix_destination_value and matrix_targets:
+            matrix_destination_value = _rss_encode_destination_value("matrix", matrix_targets)
+        telegram_destination_value = _clean_text(telegram.get("destination"))
+        if not telegram_destination_value and telegram_targets:
+            telegram_destination_value = _rss_encode_destination_value("telegram", telegram_targets)
 
         forms.append(
             {
@@ -337,8 +541,16 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "value": _as_bool_flag(discord.get("enabled"), False),
                             },
                             {
+                                "key": "portals.discord.destination",
+                                "label": "Room / Destination",
+                                "type": "select",
+                                "description": "Choose a Discord destination from discovered rooms/channels.",
+                                "options": discord_destination_options,
+                                "value": discord_destination_value,
+                            },
+                            {
                                 "key": "portals.discord.channel_id",
-                                "label": "Channel ID",
+                                "label": "Channel ID (manual fallback)",
                                 "type": "text",
                                 "value": _clean_text(discord.get("channel_id")),
                             },
@@ -354,8 +566,16 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "value": _as_bool_flag(irc.get("enabled"), False),
                             },
                             {
+                                "key": "portals.irc.destination",
+                                "label": "Room / Destination",
+                                "type": "select",
+                                "description": "Choose an IRC destination from discovered channels.",
+                                "options": irc_destination_options,
+                                "value": irc_destination_value,
+                            },
+                            {
                                 "key": "portals.irc.channel",
-                                "label": "Channel",
+                                "label": "Channel (manual fallback)",
                                 "type": "text",
                                 "value": _clean_text(irc.get("channel")),
                             },
@@ -371,8 +591,16 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "value": _as_bool_flag(matrix.get("enabled"), False),
                             },
                             {
+                                "key": "portals.matrix.destination",
+                                "label": "Room / Destination",
+                                "type": "select",
+                                "description": "Choose a Matrix destination from discovered rooms.",
+                                "options": matrix_destination_options,
+                                "value": matrix_destination_value,
+                            },
+                            {
                                 "key": "portals.matrix.room_id",
-                                "label": "Room ID",
+                                "label": "Room ID (manual fallback)",
                                 "type": "text",
                                 "value": _clean_text(matrix.get("room_id")),
                             },
@@ -472,8 +700,16 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "value": _as_bool_flag(telegram.get("enabled"), False),
                             },
                             {
+                                "key": "portals.telegram.destination",
+                                "label": "Room / Destination",
+                                "type": "select",
+                                "description": "Choose a Telegram destination from discovered chats.",
+                                "options": telegram_destination_options,
+                                "value": telegram_destination_value,
+                            },
+                            {
                                 "key": "portals.telegram.chat_id",
-                                "label": "Chat ID",
+                                "label": "Chat ID (manual fallback)",
                                 "type": "text",
                                 "value": _clean_text(telegram.get("chat_id")),
                             },
@@ -542,6 +778,8 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
         "empty_message": "No RSS feeds configured yet.",
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Feed Settings",
+        "item_fields_popup": True,
+        "item_fields_popup_label": "Feed Settings",
         "item_sections_in_dropdown": True,
         "manager_tabs": [
             {
@@ -995,14 +1233,17 @@ def _payload_portals_from_values(values: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "discord": {
             "enabled": _as_bool_flag(_payload_value(values, "portals.discord.enabled", False), False),
+            "destination": _clean_text(_payload_value(values, "portals.discord.destination", "")),
             "channel_id": _clean_text(_payload_value(values, "portals.discord.channel_id", "")),
         },
         "irc": {
             "enabled": _as_bool_flag(_payload_value(values, "portals.irc.enabled", False), False),
+            "destination": _clean_text(_payload_value(values, "portals.irc.destination", "")),
             "channel": _clean_text(_payload_value(values, "portals.irc.channel", "")),
         },
         "matrix": {
             "enabled": _as_bool_flag(_payload_value(values, "portals.matrix.enabled", False), False),
+            "destination": _clean_text(_payload_value(values, "portals.matrix.destination", "")),
             "room_id": _clean_text(_payload_value(values, "portals.matrix.room_id", "")),
         },
         "homeassistant": {
@@ -1026,6 +1267,7 @@ def _payload_portals_from_values(values: Dict[str, Any]) -> Dict[str, Any]:
         },
         "telegram": {
             "enabled": _as_bool_flag(_payload_value(values, "portals.telegram.enabled", False), False),
+            "destination": _clean_text(_payload_value(values, "portals.telegram.destination", "")),
             "chat_id": _clean_text(_payload_value(values, "portals.telegram.chat_id", "")),
         },
         "webui": {

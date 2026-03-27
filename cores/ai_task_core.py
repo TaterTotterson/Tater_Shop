@@ -18,7 +18,7 @@ from helpers import (
     redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
-from notify import dispatch_notification
+from notify import dispatch_notification, notifier_destination_catalog
 from notify.queue import (
     ALLOWED_PLATFORMS,
     load_default_targets,
@@ -742,7 +742,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         ],
         "items": items,
         "empty_message": "No scheduled AI tasks found.",
-        "ui": _ai_tasks_ui_manager_payload(sort_rows),
+        "ui": _ai_tasks_ui_manager_payload(sort_rows, redis_obj=client),
     }
 
 
@@ -1590,17 +1590,220 @@ def _ai_tasks_ui_clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _ai_tasks_ui_platform_options(schedules: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, str]]:
+def _ai_tasks_ui_load_destination_catalog(redis_obj: Any) -> Dict[str, Any]:
+    if redis_obj is None:
+        return {"platforms": []}
+    try:
+        payload = notifier_destination_catalog(redis_client=redis_obj, limit=250)
+    except Exception:
+        return {"platforms": []}
+    if not isinstance(payload, dict):
+        return {"platforms": []}
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, list):
+        payload["platforms"] = []
+    return payload
+
+
+def _ai_tasks_ui_catalog_platform_map(catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    rows = catalog.get("platforms") if isinstance(catalog, dict) else []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        platform = _ai_tasks_ui_clean_text(row.get("platform")).lower()
+        if not platform:
+            continue
+        out[platform] = row
+    return out
+
+
+def _ai_tasks_ui_clean_targets_dict(raw: Any) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in raw.items():
+        token = _ai_tasks_ui_clean_text(key)
+        text = _ai_tasks_ui_clean_text(value)
+        if token and text:
+            out[token] = text
+    return out
+
+
+def _ai_tasks_ui_destination_label(platform: str, targets: Dict[str, Any]) -> str:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    payload = _ai_tasks_ui_clean_targets_dict(targets)
+    if platform_name == "discord":
+        channel = _ai_tasks_ui_clean_text(payload.get("channel") or payload.get("channel_id"))
+        guild = _ai_tasks_ui_clean_text(payload.get("guild_id"))
+        if channel and guild:
+            return f"{channel} • guild {guild}"
+        return channel or (f"guild {guild}" if guild else "Discord target")
+    if platform_name == "irc":
+        return _ai_tasks_ui_clean_text(payload.get("channel")) or "IRC channel"
+    if platform_name == "matrix":
+        return (
+            _ai_tasks_ui_clean_text(payload.get("room_alias") or payload.get("room_id") or payload.get("channel"))
+            or "Matrix room"
+        )
+    if platform_name == "telegram":
+        channel = _ai_tasks_ui_clean_text(payload.get("channel"))
+        chat_id = _ai_tasks_ui_clean_text(payload.get("chat_id"))
+        if channel and chat_id and channel != chat_id:
+            return f"{channel} • {chat_id}"
+        return channel or chat_id or "Telegram chat"
+    if platform_name == "homeassistant":
+        return _ai_tasks_ui_clean_text(payload.get("device_service")) or "Home Assistant defaults"
+    if platform_name == "webui":
+        return "WebUI chat"
+    if platform_name == "macos":
+        scope = _ai_tasks_ui_clean_text(payload.get("scope"))
+        device_id = _ai_tasks_ui_clean_text(payload.get("device_id"))
+        if scope and device_id:
+            return f"{scope} • {device_id}"
+        return scope or device_id or "macOS target"
+    return _ai_tasks_ui_target_to_text(platform_name, payload) or "Destination"
+
+
+def _ai_tasks_ui_encode_destination_value(platform: str, targets: Dict[str, Any]) -> str:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    if not platform_name:
+        return ""
+    payload = {
+        "platform": platform_name,
+        "targets": _ai_tasks_ui_clean_targets_dict(targets),
+    }
+    try:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return ""
+
+
+def _ai_tasks_ui_decode_destination_value(raw_value: Any) -> Tuple[str, Dict[str, str]]:
+    value = _ai_tasks_ui_clean_text(raw_value)
+    if not value:
+        return "", {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return "", {}
+    if not isinstance(parsed, dict):
+        return "", {}
+    platform = _ai_tasks_ui_clean_text(parsed.get("platform")).lower()
+    targets = _ai_tasks_ui_clean_targets_dict(parsed.get("targets"))
+    return platform, targets
+
+
+def _ai_tasks_ui_platform_options(
+    schedules: Optional[List[Dict[str, Any]]] = None,
+    *,
+    redis_obj: Any = None,
+    catalog: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
     names: List[str] = []
+    labels: Dict[str, str] = {}
     for token in _AI_TASKS_UI_DEFAULT_PORTALS + ["webui"]:
         name = _ai_tasks_ui_clean_text(token).lower()
-        if name and name not in names:
+        if not name:
+            continue
+        if name not in names:
             names.append(name)
+        labels.setdefault(name, name)
+
+    catalog_payload = catalog if isinstance(catalog, dict) else _ai_tasks_ui_load_destination_catalog(redis_obj)
+    for platform_name, row in _ai_tasks_ui_catalog_platform_map(catalog_payload).items():
+        if platform_name not in names:
+            names.append(platform_name)
+        label = _ai_tasks_ui_clean_text(row.get("label")) or platform_name
+        labels[platform_name] = label
+
     for row in schedules or []:
         name = _ai_tasks_ui_clean_text(row.get("platform")).lower()
-        if name and name not in names:
+        if not name:
+            continue
+        if name not in names:
             names.append(name)
-    return [{"value": name, "label": name} for name in names]
+        labels.setdefault(name, name)
+
+    return [{"value": name, "label": labels.get(name, name)} for name in names]
+
+
+def _ai_tasks_ui_destination_options_for_platform(
+    platform: str,
+    *,
+    catalog: Dict[str, Any],
+    current_targets: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    platform_row = _ai_tasks_ui_catalog_platform_map(catalog).get(platform_name, {})
+    requires_target = bool(platform_row.get("requires_target")) if isinstance(platform_row, dict) else False
+    if not isinstance(platform_row, dict):
+        platform_row = {}
+
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    if requires_target:
+        out.append({"value": "", "label": "(Select destination)"})
+        seen.add("")
+    else:
+        default_value = _ai_tasks_ui_encode_destination_value(platform_name, {})
+        out.append({"value": default_value, "label": "Portal defaults"})
+        seen.add(default_value)
+
+    destinations = platform_row.get("destinations")
+    if isinstance(destinations, list):
+        for row in destinations:
+            if not isinstance(row, dict):
+                continue
+            targets = _ai_tasks_ui_clean_targets_dict(row.get("targets"))
+            value = _ai_tasks_ui_encode_destination_value(platform_name, targets)
+            if not value or value in seen:
+                continue
+            label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, targets)
+            out.append({"value": value, "label": label})
+            seen.add(value)
+
+    current_clean = _ai_tasks_ui_clean_targets_dict(current_targets)
+    if current_clean:
+        current_value = _ai_tasks_ui_encode_destination_value(platform_name, current_clean)
+        if current_value and current_value not in seen:
+            out.append(
+                {
+                    "value": current_value,
+                    "label": f"{_ai_tasks_ui_destination_label(platform_name, current_clean)} (current)",
+                }
+            )
+
+    return out
+
+
+def _ai_tasks_ui_destination_options_all_platforms(*, catalog: Dict[str, Any]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = [{"value": "", "label": "(Select destination)"}]
+    seen: set[str] = {""}
+    for platform_name, platform_row in _ai_tasks_ui_catalog_platform_map(catalog).items():
+        platform_label = _ai_tasks_ui_clean_text(platform_row.get("label")) or platform_name
+        requires_target = bool(platform_row.get("requires_target"))
+        if not requires_target:
+            value = _ai_tasks_ui_encode_destination_value(platform_name, {})
+            if value and value not in seen:
+                out.append({"value": value, "label": f"{platform_label}: defaults"})
+                seen.add(value)
+        destinations = platform_row.get("destinations")
+        if not isinstance(destinations, list):
+            continue
+        for row in destinations:
+            if not isinstance(row, dict):
+                continue
+            targets = _ai_tasks_ui_clean_targets_dict(row.get("targets"))
+            value = _ai_tasks_ui_encode_destination_value(platform_name, targets)
+            if not value or value in seen:
+                continue
+            label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, targets)
+            out.append({"value": value, "label": f"{platform_label}: {label}"})
+            seen.add(value)
+    return out
 
 
 def _ai_tasks_ui_target_to_text(platform: str, targets: Dict[str, Any]) -> str:
@@ -1977,9 +2180,16 @@ def _ai_tasks_ui_load_reminder(redis_client, reminder_id: str) -> Optional[Dict[
     return parsed
 
 
-def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: Any = None) -> Dict[str, Any]:
     rows = list(schedules or [])
-    platform_options = _ai_tasks_ui_platform_options(rows)
+    catalog = _ai_tasks_ui_load_destination_catalog(redis_obj)
+    platform_map = _ai_tasks_ui_catalog_platform_map(catalog)
+    platform_options = _ai_tasks_ui_platform_options(rows, redis_obj=redis_obj, catalog=catalog)
+    add_destination_options = _ai_tasks_ui_destination_options_all_platforms(catalog=catalog)
+    default_platform = "homeassistant"
+    option_values = [str(item.get("value") or "").strip().lower() for item in platform_options]
+    if default_platform not in option_values:
+        default_platform = option_values[0] if option_values else default_platform
     forms: List[Dict[str, Any]] = []
 
     for row in rows[:120]:
@@ -1994,7 +2204,19 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
         task_prompt = _ai_tasks_ui_clean_text(row.get("task_prompt") or row.get("message"))
         recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
         schedule_text = _ai_tasks_ui_schedule_edit_text(schedule)
-        target_text = _ai_tasks_ui_target_to_text(platform, row.get("targets") if isinstance(row.get("targets"), dict) else {})
+        targets_payload = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+        destination_options = _ai_tasks_ui_destination_options_for_platform(
+            platform,
+            catalog=catalog,
+            current_targets=targets_payload,
+        )
+        requires_target = bool(platform_map.get(platform, {}).get("requires_target"))
+        if targets_payload:
+            destination_value = _ai_tasks_ui_encode_destination_value(platform, targets_payload)
+        elif requires_target:
+            destination_value = ""
+        else:
+            destination_value = _ai_tasks_ui_encode_destination_value(platform, {})
 
         due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
         if due_ts > 0:
@@ -2047,11 +2269,12 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
                         "value": platform,
                     },
                     {
-                        "key": "target",
-                        "label": "Target (optional)",
-                        "type": "text",
-                        "description": "Discord channel ID, IRC channel, Matrix room ID, Telegram chat ID, or Home Assistant service.",
-                        "value": target_text,
+                        "key": "destination",
+                        "label": "Room / Destination",
+                        "type": "select",
+                        "description": "Choose where this task should post output.",
+                        "options": destination_options,
+                        "value": destination_value,
                     },
                 ],
             }
@@ -2080,6 +2303,8 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
         "items_tab_label": "Current Tasks",
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Task Settings",
+        "item_fields_popup": True,
+        "item_fields_popup_label": "Task Settings",
         "add_form": {
             "action": "ai_tasks_add_schedule",
             "submit_label": "Add Task",
@@ -2109,12 +2334,14 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]]) -> Dict[str, A
                     "label": "Portal",
                     "type": "select",
                     "options": platform_options,
-                    "value": "homeassistant",
+                    "value": default_platform,
                 },
                 {
-                    "key": "target",
-                    "label": "Target (optional)",
-                    "type": "text",
+                    "key": "destination",
+                    "label": "Room / Destination (optional)",
+                    "type": "select",
+                    "description": "Portal rooms/channels discovered by the notifier destination catalog.",
+                    "options": add_destination_options,
                     "value": "",
                 },
                 {
@@ -2173,12 +2400,28 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             raise ValueError("Schedule is required.")
         schedule_payload = _parse_schedule_text(schedule_text)
 
+        catalog = _ai_tasks_ui_load_destination_catalog(client)
         platform = _ai_tasks_ui_clean_text(_value("platform")).lower() or "homeassistant"
-        allowed_platforms = {str(item.get("value") or "").strip().lower() for item in _ai_tasks_ui_platform_options([])}
+        allowed_platforms = {
+            str(item.get("value") or "").strip().lower()
+            for item in _ai_tasks_ui_platform_options([], redis_obj=client, catalog=catalog)
+        }
+        destination_raw = _ai_tasks_ui_clean_text(_value("destination"))
+        destination_platform, destination_targets = _ai_tasks_ui_decode_destination_value(destination_raw)
+        if destination_platform and destination_platform in allowed_platforms:
+            platform = destination_platform
         if platform not in allowed_platforms:
             raise ValueError(f"Unsupported portal: {platform}")
 
-        target_text = _ai_tasks_ui_clean_text(_value("target"))
+        targets: Dict[str, Any] = dict(destination_targets) if isinstance(destination_targets, dict) else {}
+        if destination_raw and not destination_platform and not targets:
+            targets = _ai_tasks_ui_target_from_text(platform, destination_raw)
+        if not targets and not destination_platform:
+            # Legacy/manual fallback for old payloads that still submit a text target field.
+            target_text = _ai_tasks_ui_clean_text(_value("target"))
+            if target_text:
+                targets = _ai_tasks_ui_target_from_text(platform, target_text)
+
         enabled = _ai_tasks_ui_is_enabled(_value("enabled", True), True)
         title = _ai_tasks_ui_clean_text(_value("title"))
         if not title:
@@ -2191,7 +2434,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "platform": platform,
             "title": title,
             "task_prompt": task_prompt,
-            "targets": _ai_tasks_ui_target_from_text(platform, target_text),
+            "targets": targets,
             "origin": {},
             "meta": {},
             "schedule": schedule_payload,
@@ -2216,8 +2459,12 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if not task_prompt:
             raise ValueError("Task prompt is required.")
 
+        catalog = _ai_tasks_ui_load_destination_catalog(client)
         platform = _ai_tasks_ui_clean_text(_value("platform")).lower() or _ai_tasks_ui_clean_text(current.get("platform")).lower()
-        allowed_platforms = {str(item.get("value") or "").strip().lower() for item in _ai_tasks_ui_platform_options([])}
+        allowed_platforms = {
+            str(item.get("value") or "").strip().lower()
+            for item in _ai_tasks_ui_platform_options([], redis_obj=client, catalog=catalog)
+        }
         if platform not in allowed_platforms:
             raise ValueError(f"Unsupported portal: {platform}")
 
@@ -2243,13 +2490,35 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if not title:
             title = _ai_tasks_ui_derive_title(_ai_tasks_ui_clean_text(current.get("title")), task_prompt)
 
-        target_changed = ("target" in values) or ("target" in body)
-        if target_changed:
-            targets = _ai_tasks_ui_target_from_text(platform, _ai_tasks_ui_clean_text(_value("target")))
+        current_platform = _ai_tasks_ui_clean_text(current.get("platform")).lower()
+        current_targets = current.get("targets") if isinstance(current.get("targets"), dict) else {}
+        current_destination_value = _ai_tasks_ui_encode_destination_value(current_platform, current_targets)
+
+        destination_raw = _ai_tasks_ui_clean_text(_value("destination"))
+        destination_platform, destination_targets = _ai_tasks_ui_decode_destination_value(destination_raw)
+        if destination_platform and destination_platform in allowed_platforms:
+            stale_destination_for_platform_switch = (
+                platform != current_platform
+                and destination_raw
+                and destination_raw == current_destination_value
+            )
+            if not stale_destination_for_platform_switch:
+                platform = destination_platform
+
+        if destination_platform and destination_platform == platform:
+            targets = dict(destination_targets)
+        elif destination_platform and destination_platform != platform:
+            targets = {}
+        elif destination_raw:
+            targets = _ai_tasks_ui_target_from_text(platform, destination_raw)
         else:
-            targets = current.get("targets") if isinstance(current.get("targets"), dict) else {}
-            if not targets and platform != _ai_tasks_ui_clean_text(current.get("platform")).lower():
-                targets = _ai_tasks_ui_target_from_text(platform, "")
+            target_changed = ("target" in values) or ("target" in body)
+            if target_changed:
+                targets = _ai_tasks_ui_target_from_text(platform, _ai_tasks_ui_clean_text(_value("target")))
+            elif platform != current_platform:
+                targets = {}
+            else:
+                targets = current_targets
 
         enabled = _ai_tasks_ui_is_enabled(_value("enabled", current.get("enabled")), True)
         current.update(
