@@ -5,7 +5,7 @@
       "id": "discord",
       "name": "Discord",
       "module_key": "discord_portal",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Discord integration portal for Tater.",
       "settings_category": "Discord Settings",
@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "95d21eac5bc2cfc12cce6b05e8f8296a3640f40ca5c2c08d1522e80f1a709ff7"
+      "sha256": "cae453b494ca087bf7819a5dc118f469df480ae07775aef16f04e7150565d40d"
     },
     {
       "id": "ha_automations",
