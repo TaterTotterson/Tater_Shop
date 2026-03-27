@@ -706,7 +706,7 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.10"
+__version__ = "1.0.13"
 
 
 load_dotenv()
@@ -4857,6 +4857,64 @@ def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) 
     return _as_text(source.get("text")).strip()
 
 
+def _hydra_auto_link_identities_enabled(*, args: Dict[str, Any], redis_obj: Any) -> bool:
+    settings = _hydra_memory_context_settings(redis_obj)
+    configured = _as_bool(settings.get("auto_link_identities"), False)
+    if not isinstance(args, dict):
+        return configured
+    if "auto_link_identities" in args:
+        return _as_bool(args.get("auto_link_identities"), configured)
+    return configured
+
+
+def _hydra_doc_fact_count(*, redis_obj: Any, redis_key: str) -> int:
+    key = _as_text(redis_key).strip()
+    if not key:
+        return 0
+    try:
+        doc = load_memory_doc(redis_obj, key)
+    except Exception:
+        return 0
+    facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
+    return len(facts) if isinstance(facts, dict) else 0
+
+
+def _hydra_user_doc_candidates(
+    *,
+    redis_obj: Any,
+    normalized_platform: str,
+    user_id: str,
+    display_name: str,
+    auto_link_identities: bool,
+    create: bool,
+) -> List[str]:
+    legacy_key = user_doc_key(normalized_platform, user_id)
+    identity_key = resolve_user_doc_key(
+        redis_obj,
+        normalized_platform,
+        user_id,
+        create=(create if auto_link_identities else False),
+        display_name=display_name,
+        auto_link_name=True,
+    )
+
+    ordered: List[str] = []
+    if auto_link_identities:
+        ordered.extend([identity_key, legacy_key])
+    else:
+        ordered.extend([legacy_key, identity_key])
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in ordered:
+        token = _as_text(item).strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
 def _hydra_user_target(
     *,
     args: Dict[str, Any],
@@ -4881,23 +4939,38 @@ def _hydra_user_target(
     if isinstance(args, dict):
         requested_platform = _as_text(args.get("platform")).strip()
     normalized_platform = _hydra_platform(requested_platform or platform)
-    doc_key = (
-        resolve_user_doc_key(
-            redis_obj,
-            normalized_platform,
-            user_id,
-            create=create,
-            display_name=display_name,
-            auto_link_name=True,
-        )
-        or user_doc_key(normalized_platform, user_id)
+    auto_link_identities = _hydra_auto_link_identities_enabled(args=args, redis_obj=redis_obj)
+    doc_candidates = _hydra_user_doc_candidates(
+        redis_obj=redis_obj,
+        normalized_platform=normalized_platform,
+        user_id=user_id,
+        display_name=display_name,
+        auto_link_identities=auto_link_identities,
+        create=create,
     )
+    doc_key = ""
+    if doc_candidates:
+        best_key = ""
+        best_count = -1
+        for candidate in doc_candidates:
+            fact_count = _hydra_doc_fact_count(redis_obj=redis_obj, redis_key=candidate)
+            if fact_count > best_count:
+                best_count = fact_count
+                best_key = candidate
+        if best_count > 0 and best_key:
+            doc_key = best_key
+        else:
+            doc_key = doc_candidates[0]
+    if not doc_key:
+        doc_key = user_doc_key(normalized_platform, user_id)
     return {
         "ok": True,
         "platform": normalized_platform,
         "user_id": user_id,
         "display_name": display_name,
+        "auto_link_identities": auto_link_identities,
         "doc_key": doc_key,
+        "doc_candidates": doc_candidates,
     }
 
 
@@ -5166,10 +5239,12 @@ def _hydra_remove_targets_from_value(value: Any, targets: List[Any]) -> Tuple[An
 
 
 def _hydra_remove_plan(args: Dict[str, Any], llm_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    request_text = _as_text((args or {}).get("text")).strip().lower()
+    del args
     parsed = llm_payload if isinstance(llm_payload, dict) else {}
     keys = parsed.get("remove_keys") if isinstance(parsed.get("remove_keys"), list) else []
     values = parsed.get("remove_values") if isinstance(parsed.get("remove_values"), list) else []
+    if not values:
+        values = parsed.get("remove_items") if isinstance(parsed.get("remove_items"), list) else []
 
     deduped_keys: List[str] = []
     seen_keys: set[str] = set()
@@ -5188,20 +5263,6 @@ def _hydra_remove_plan(args: Dict[str, Any], llm_payload: Optional[Dict[str, Any
             continue
         seen_tokens.add(token)
         deduped_values.append(item)
-
-    # Practical fallback for the memory_add workflow:
-    # memory_add stores under user_wants_you_to_remember, so forget/remove requests
-    # should default to removing that slot if planner produced no explicit targets.
-    if (
-        not deduped_keys
-        and not deduped_values
-        and request_text
-        and any(
-            token in request_text
-            for token in ("forget", "remove", "delete", "clear", "memory", "remember")
-        )
-    ):
-        deduped_keys.append("user_wants_you_to_remember")
 
     return {"keys": deduped_keys, "values": deduped_values}
 
@@ -5527,8 +5588,11 @@ async def _hydra_memory_remove(
             "Return strict JSON object with optional arrays: remove_keys, remove_values.\n"
             "Rules:\n"
             "- remove_keys must contain exact keys from known_keys only.\n"
-            "- remove_values must contain exact literal values or dict keys present in known_facts values.\n"
-            "- Do not paraphrase, infer, or use fuzzy matching.\n"
+            "- remove_values must contain exact literal values present in known_facts values.\n"
+            "- For list-valued facts, output exact list item strings to remove.\n"
+            "- If user request is broad (example: 'remove discord'), map it to exact matching values from known_facts.\n"
+            "- Prefer value-level removals over key deletion unless user clearly asks to remove an entire fact key.\n"
+            "- Do not invent values; copy exact text from known_facts.\n"
             "- Return empty arrays when unsure.\n"
         ),
         payload={
@@ -5713,16 +5777,19 @@ def get_hydra_memory_context_payload(
     user_id = _hydra_origin_text(origin, "user_id", "dm_user_id", "user", "username", "sender")
     if user_id:
         display_name = _hydra_origin_text(origin, "username", "user", "sender", "display_name", "nick", "nickname")
-        if auto_link_identities:
-            user_key = resolve_user_doc_key(
-                redis_obj,
-                normalized_platform,
-                user_id,
-                create=False,
-                display_name=display_name or user_id,
-                auto_link_name=True,
-            ) or memory_core_user_doc_key(normalized_platform, user_id)
-        else:
+        target = _hydra_user_target(
+            args={
+                "user_id": user_id,
+                "display_name": display_name or user_id,
+                "auto_link_identities": auto_link_identities,
+            },
+            platform=normalized_platform,
+            origin=origin,
+            redis_obj=redis_obj,
+            create=False,
+        )
+        user_key = _as_text(target.get("doc_key")).strip() if isinstance(target, dict) else ""
+        if not user_key:
             user_key = memory_core_user_doc_key(normalized_platform, user_id)
 
         try:
