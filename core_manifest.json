@@ -13,7 +13,7 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "fd686547b92255ecfd7b4984af72a0b49e9dc8a1f09eaf58c6716e3fea984515"
+      "sha256": "9001eacc89cf7cf4d67cc0c3c4f6812a3f28ef3e0a536bca22b81092f7e14980"
     },
     {
       "id": "memory",
@@ -41,7 +41,7 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "50dcadda88e9b58923e4e4effd417c291a240dbeea4143852eb379a2a4a517ed"
+      "sha256": "951ae6bb890886f9ecb6af82a2a7f18349dcfb896b084a83f3debbf2e0afdffc"
     }
   ]
 }
