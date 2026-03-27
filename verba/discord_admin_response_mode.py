@@ -22,7 +22,7 @@ MAX_CHANNELS_PER_CATEGORY = 12
 ICON_MAX_BYTES = 10 * 1024 * 1024
 VALID_ROLE_PERMISSIONS = set(getattr(discord.Permissions, "VALID_FLAGS", {}).keys())
 VALID_CHANNEL_PERMISSIONS = set(getattr(discord.Permissions, "VALID_FLAGS", {}).keys())
-VALID_RESPONSE_ACTIONS = {"none", "add_current", "remove_current", "set_only_current", "clear_all"}
+VALID_RESPONSE_ACTIONS = {"none", "add_current", "remove_current"}
 DELETION_DISABLED_TEXT = (
     "Channel/category deletion is disabled in this plugin for safety. "
     "Please delete channels or categories manually in Discord."
@@ -148,7 +148,7 @@ class DiscordAdminResponseModePlugin(ToolVerba):
     name = "discord_admin_response_mode"
     verba_name = "Discord Admin Response Mode"
     pretty_name = "Discord Admin Response Mode"
-    version = "1.0.0"
+    version = "1.1.0"
     min_tater_version = "59"
     tags = ["discord", "response_mode"]
     fixed_route = "response_mode"
@@ -156,30 +156,29 @@ class DiscordAdminResponseModePlugin(ToolVerba):
     routing_keywords = [
         "discord",
         "always respond",
-        "channel",
-        "room",
+        "always respond here",
+        "response channel",
         "response mode",
-        "reply to every message",
-        "only respond to mentions",
-        "add current channel",
-        "remove current channel",
-        "set only current",
-        "clear all",
+        "reply without ping here",
+        "mention only here",
+        "stop always respond here",
+        "set response channel",
+        "unset response channel",
     ]
 
     usage = (
-        '{"function":"discord_admin_response_mode","arguments":{"query":"always respond in this channel"}}'
+        '{"function":"discord_admin_response_mode","arguments":{"query":"always respond here"}}'
     )
     description = (
-        "Manage Discord always-respond behavior from @mention only or always chat in this room."
+        "Set or unset the current Discord channel as an always-respond response channel."
     )
     when_to_use = (
-        "Use for requests about where Tater should always respond versus mention-only behavior."
+        "Use when the user wants Tater to always reply in this current Discord room, or to disable that for this room."
     )
     how_to_use = (
-        "Set `query` or `request` to a response-mode command (for example: always respond here, only this room, clear always respond)."
+        "Use `query`/`request` like: 'always respond here' to enable, or 'mention only here' to disable."
     )
-    verba_dec = "Discord response-mode channel controls."
+    verba_dec = "Toggle always-respond mode for the current Discord channel only."
     argument_schema = {
         "type": "object",
         "properties": {
@@ -193,7 +192,7 @@ class DiscordAdminResponseModePlugin(ToolVerba):
             },
             "response_channel_action": {
                 "type": "string",
-                "description": "Optional direct action override: add_current, remove_current, set_only_current, clear_all, or none.",
+                "description": "Optional direct action override: add_current, remove_current, or none.",
             },
             "dry_run": {
                 "type": "boolean",
@@ -203,12 +202,12 @@ class DiscordAdminResponseModePlugin(ToolVerba):
         "required": [],
     }
     common_needs = [
-        "A single natural-language response-mode command.",
+        "A single natural-language response-mode toggle command for this room.",
     ]
     missing_info_prompts = []
 
     waiting_prompt_template = (
-        "Write one short, natural status update to {mention} that you are working on their Discord admin request now. "
+        "Write one short, natural status update to {mention} that you are updating this room's Discord response mode now. "
         "Use fresh wording (avoid repeating stock phrases). "
         "Do not use markdown. Only output the message."
     )
@@ -330,6 +329,55 @@ class DiscordAdminResponseModePlugin(ToolVerba):
                 return value.strip()
         content = getattr(message, "content", "")
         return str(content or "").strip()
+
+    @classmethod
+    def _infer_response_action_from_request(cls, request_text: str) -> str:
+        lowered = cls._normalized_request_text(request_text)
+        if not lowered:
+            return "none"
+
+        remove_markers = (
+            "mention only here",
+            "only respond to ping here",
+            "stop always respond here",
+            "stop always talking here",
+            "disable always respond here",
+            "disable always respond in this room",
+            "disable always respond in this channel",
+            "turn off always respond here",
+            "remove this response channel",
+            "unset response channel",
+            "remove response channel",
+        )
+        if any(marker in lowered for marker in remove_markers):
+            return "remove_current"
+
+        add_markers = (
+            "always respond here",
+            "always respond in this room",
+            "always respond in this channel",
+            "always talk in this room",
+            "reply to every message in this room",
+            "reply without ping here",
+            "set this as response channel",
+            "set response channel here",
+            "add this response channel",
+        )
+        if any(marker in lowered for marker in add_markers):
+            return "add_current"
+
+        if "response channel" in lowered:
+            if any(token in lowered for token in ("disable", "remove", "unset", "off")):
+                return "remove_current"
+            if any(token in lowered for token in ("enable", "add", "set", "on")):
+                return "add_current"
+
+        if "always respond" in lowered and any(token in lowered for token in ("here", "room", "channel")):
+            if any(token in lowered for token in ("disable", "stop", "off", "mention only")):
+                return "remove_current"
+            return "add_current"
+
+        return "none"
 
     @staticmethod
     def _role_position(role: Any) -> int:
@@ -1900,12 +1948,6 @@ class DiscordAdminResponseModePlugin(ToolVerba):
         elif action == "remove_current":
             updated.discard(current_channel_id)
             action_summary = "Removed this room from always-response channels (ping-only here now)."
-        elif action == "set_only_current":
-            updated = {current_channel_id}
-            action_summary = "Set this room as the only always-response channel."
-        elif action == "clear_all":
-            updated = set()
-            action_summary = "Cleared always-response channels for this server (ping-only here now)."
         else:
             return {"ok": False, "error": "Unknown response channel action.", "channels": current, "guild_id": guild_id}
 
@@ -2587,13 +2629,14 @@ class DiscordAdminResponseModePlugin(ToolVerba):
         return summary
 
     async def handle_discord(self, message, args, llm_client):
+        del llm_client
         request_text = self._extract_request(args, message)
         if not request_text:
             return action_failure(
                 code="missing_request",
-                message="I need a Discord admin request to act on.",
-                needs=["Tell me what to configure (for example: setup this Discord for gaming)."],
-                say_hint="Ask for a concrete Discord admin request.",
+                message="I need a response-mode request like 'always respond here' or 'mention only here'.",
+                needs=["Say 'always respond here' to enable, or 'mention only here' to disable in this room."],
+                say_hint="Ask for a concrete response-mode command for the current room.",
             )
 
         if getattr(message, "guild", None) is None:
@@ -2603,250 +2646,54 @@ class DiscordAdminResponseModePlugin(ToolVerba):
                 say_hint="Explain this tool requires a guild channel context.",
             )
 
-        role_summary_prefix = ""
-        role_action_applied = False
-        route_info = await self._route_request_with_llm(request_text, message, llm_client)
-        route = str((route_info or {}).get("route") or "none").strip().lower()
-        if route not in {"none", "role", "response_mode", "setup"}:
-            route = "none"
-        role_action = str((route_info or {}).get("role_action") or "none").strip().lower()
-        if role_action not in {"none", "list_roles", "role_me", "role_self"}:
-            role_action = "none"
-        role_only = _coerce_bool((route_info or {}).get("role_only"), False)
-        direct_action = str((route_info or {}).get("response_channel_action") or "none").strip().lower()
-        if direct_action not in VALID_RESPONSE_ACTIONS:
-            direct_action = "none"
-        setup_requested = _coerce_bool((route_info or {}).get("setup_requested"), False)
-        setup_mode = str((route_info or {}).get("setup_mode") or "none").strip().lower()
-        if setup_mode not in {"none", "exact", "creative"}:
-            setup_mode = "none"
-        delete_requested = _coerce_bool((route_info or {}).get("delete_requested"), False)
-
-        heuristic_setup = self._infer_setup_route_from_request(request_text)
-        if route == "none" and str(heuristic_setup.get("route") or "") == "setup":
-            route = "setup"
-        if not setup_requested and bool(heuristic_setup.get("setup_requested")):
-            setup_requested = True
-        heuristic_setup_mode = str(heuristic_setup.get("setup_mode") or "none").strip().lower()
-        if setup_mode == "none" and heuristic_setup_mode in {"exact", "creative"}:
-            setup_mode = heuristic_setup_mode
-
-        parsed_role_command: Dict[str, Any] = {}
-        if role_action != "none":
-            parsed_role_command = {
-                "action": role_action,
-                "role": str((route_info or {}).get("role") or "").strip(),
-                "roles": list((route_info or {}).get("roles") or []),
-                "role_only": role_only,
-                "request_text": request_text,
-            }
-
-        if parsed_role_command:
-            role_result = await self._handle_direct_role_command(message, parsed_role_command)
-            if not bool(role_result.get("ok")):
-                return role_result
-            role_action_applied = True
-            role_summary_prefix = str(role_result.get("summary_for_user") or "").strip()
-            if role_only and direct_action == "none" and not setup_requested and not delete_requested:
-                return role_result
-
         args = args or {}
         dry_run = _coerce_bool(args.get("dry_run"), False)
         action_hint = str(args.get("response_channel_action") or "").strip().lower()
-        if action_hint in VALID_RESPONSE_ACTIONS:
-            direct_action = action_hint
+        action_aliases = {"set_only_current": "add_current", "clear_all": "remove_current"}
+        if action_hint in action_aliases:
+            action_hint = action_aliases[action_hint]
+        if action_hint not in VALID_RESPONSE_ACTIONS:
+            action_hint = "none"
 
-        needs_admin_actions = bool(
-            setup_requested or delete_requested or direct_action != "none" or route == "setup"
-        )
+        inferred_action = self._infer_response_action_from_request(request_text)
+        direct_action = action_hint if action_hint != "none" else inferred_action
+
+        if direct_action not in {"add_current", "remove_current"}:
+            return action_failure(
+                code="missing_response_mode_intent",
+                message="I can only toggle always-respond for the current channel.",
+                needs=[
+                    "Say `always respond here` to enable, or `mention only here` / `stop always respond here` to disable."
+                ],
+                say_hint="Explain this tool only toggles always-respond mode for the current room.",
+            )
+
         allowed, err = self._admin_allowed(message)
-        if needs_admin_actions and not allowed:
-            if role_action_applied:
-                reason = err or "This tool is restricted to the configured Discord admin user."
-                summary = role_summary_prefix or "Role command applied."
-                return action_success(
-                    facts={
-                        "role_action_applied": True,
-                        "admin_actions_applied": False,
-                    },
-                    data={"warnings": [reason]},
-                    summary_for_user=f"{summary} I could not apply additional Discord admin changes: {reason}",
-                    say_hint="Confirm the role command succeeded and explain why additional admin changes were skipped.",
-                )
+        if not allowed:
             return action_failure(
                 code="admin_only",
                 message=err or "This tool is restricted to the configured Discord admin user.",
                 say_hint="Explain that this tool is restricted to the configured Discord admin user.",
             )
 
-        if direct_action != "none" and not setup_requested and not delete_requested and route != "setup":
-            response_result = await self._apply_response_action(message, direct_action, dry_run=dry_run)
-            if not response_result.get("ok"):
-                return action_failure(
-                    code="response_channel_update_failed",
-                    message=str(response_result.get("error") or "Failed to update response channel settings."),
-                    say_hint="Explain the response channel update failed and why.",
-                )
-            response_summary = str(response_result.get("summary") or "Updated response channel settings.").strip()
-            if role_summary_prefix:
-                response_summary = f"{role_summary_prefix} {response_summary}".strip()
-            return action_success(
-                facts={
-                    "response_channel_action": direct_action,
-                    "response_channel_ids": sorted(response_result.get("channels") or []),
-                    "guild_id": int(response_result.get("guild_id") or 0),
-                    "dry_run": dry_run,
-                    "role_action_applied": role_action_applied,
-                },
-                summary_for_user=response_summary,
-                say_hint="Confirm the response channel mode update in plain language.",
-            )
-
-        should_plan = bool(setup_requested or delete_requested or route == "setup")
-        if should_plan and setup_mode == "none":
-            setup_mode = "creative" if route == "setup" else "exact"
-        llm_plan = (
-            await self._llm_plan(request_text, message.guild, llm_client, setup_mode=setup_mode)
-            if should_plan
-            else {}
-        )
-        plan = self._normalize_plan(llm_plan)
-        delete_requested = delete_requested or self._has_delete_intent(llm_plan) or self._has_destructive_delete_work(plan)
-        if direct_action != "none":
-            plan["response_channel_action"] = direct_action
-
-        if (
-            delete_requested
-            and not self._has_setup_work(plan)
-            and str(plan.get("response_channel_action") or "none") == "none"
-        ):
-            if role_action_applied:
-                summary = role_summary_prefix or "Role command applied."
-                return action_success(
-                    facts={
-                        "role_action_applied": True,
-                        "admin_actions_applied": False,
-                        "delete_requested_but_disabled": True,
-                    },
-                    data={"warnings": [DELETION_DISABLED_TEXT]},
-                    summary_for_user=f"{summary} {DELETION_DISABLED_TEXT}",
-                    say_hint="Confirm the role command succeeded and explain deletion is disabled.",
-                )
+        response_result = await self._apply_response_action(message, direct_action, dry_run=dry_run)
+        if not response_result.get("ok"):
             return action_failure(
-                code="deletion_disabled",
-                message=DELETION_DISABLED_TEXT,
-                needs=[
-                    "Delete the channels/categories manually in Discord, then tell me what else you want configured."
-                ],
-                say_hint="Explain deletion is disabled and ask the user to delete channels/categories manually in Discord.",
+                code="response_channel_update_failed",
+                message=str(response_result.get("error") or "Failed to update response channel settings."),
+                say_hint="Explain the response channel update failed and why.",
             )
 
-        if not self._has_setup_work(plan) and str(plan.get("response_channel_action") or "none") == "none":
-            if role_action_applied:
-                return action_success(
-                    facts={
-                        "role_action_applied": True,
-                        "admin_actions_applied": False,
-                    },
-                    summary_for_user=role_summary_prefix or "Role command applied.",
-                    say_hint="Confirm the role command and do not claim additional Discord admin changes were applied.",
-                )
-            return action_failure(
-                code="nothing_to_apply",
-                message="I could not find a concrete Discord admin change to apply.",
-                needs=[
-                    "Tell me the theme or exact setup you want (for example: setup this Discord for gaming with LFG channels)."
-                ],
-                say_hint="Ask for the desired Discord setup details.",
-            )
-
-        response_summary = ""
-        response_guild_id = int(getattr(getattr(message, "guild", None), "id", 0) or 0)
-        if str(plan.get("response_channel_action") or "none") != "none":
-            response_result = await self._apply_response_action(
-                message, str(plan.get("response_channel_action")), dry_run=dry_run
-            )
-            if not response_result.get("ok"):
-                return action_failure(
-                    code="response_channel_update_failed",
-                    message=str(response_result.get("error") or "Failed to update response channel settings."),
-                    say_hint="Explain the response channel update failed and why.",
-                )
-            response_guild_id = int(response_result.get("guild_id") or response_guild_id or 0)
-            response_summary = str(response_result.get("summary") or "").strip()
-
-        if dry_run:
-            planned_roles = len(plan.get("roles") or [])
-            planned_categories = len(plan.get("categories") or [])
-            planned_channels = sum(len(cat.get("channels") or []) for cat in list(plan.get("categories") or []))
-            planned_rename_channels = len(plan.get("rename_channels") or [])
-            summary = (
-                f"[Dry run] Planned {planned_roles} role(s), {planned_categories} category(ies), "
-                f"{planned_channels} channel(s), and {planned_rename_channels} channel rename(s)."
-            )
-            if delete_requested:
-                summary += f" {DELETION_DISABLED_TEXT}"
-            if response_summary:
-                summary = f"{response_summary} {summary}"
-            if role_summary_prefix:
-                summary = f"{role_summary_prefix} {summary}"
-            return action_success(
-                facts={
-                    "dry_run": True,
-                    "guild_id": response_guild_id,
-                    "planned_roles": planned_roles,
-                    "planned_categories": planned_categories,
-                    "planned_channels": planned_channels,
-                    "planned_rename_channels": planned_rename_channels,
-                    "delete_requested_but_disabled": delete_requested,
-                    "response_channel_action": plan.get("response_channel_action"),
-                },
-                data={"plan": plan},
-                summary_for_user=summary.strip(),
-                say_hint="Summarize the dry-run plan and ask if the user wants it applied.",
-            )
-
-        stats = await self._apply_plan(message, plan, args=args) if self._has_setup_work(plan) else {
-            "created_roles": [],
-            "updated_roles": [],
-            "skipped_existing_roles": [],
-            "created_categories": [],
-            "updated_categories": [],
-            "deleted_categories": [],
-            "skipped_existing_categories": [],
-            "created_channels": [],
-            "updated_channels": [],
-            "deleted_channels": [],
-            "skipped_existing_channels": [],
-            "updated_server_name": False,
-            "updated_icon": False,
-            "warnings": [],
-        }
-        summary = self._summarize_stats(stats)
-        if response_summary:
-            summary = f"{response_summary} {summary}"
-        if role_summary_prefix:
-            summary = f"{role_summary_prefix} {summary}"
-
+        response_summary = str(response_result.get("summary") or "Updated response channel settings.").strip()
         return action_success(
             facts={
-                "guild_id": response_guild_id,
-                "response_channel_action": plan.get("response_channel_action"),
-                "created_roles": len(stats.get("created_roles") or []),
-                "updated_roles": len(stats.get("updated_roles") or []),
-                "created_categories": len(stats.get("created_categories") or []),
-                "updated_categories": len(stats.get("updated_categories") or []),
-                "deleted_categories": len(stats.get("deleted_categories") or []),
-                "created_channels": len(stats.get("created_channels") or []),
-                "updated_channels": len(stats.get("updated_channels") or []),
-                "deleted_channels": len(stats.get("deleted_channels") or []),
-                "updated_server_name": bool(stats.get("updated_server_name")),
-                "updated_icon": bool(stats.get("updated_icon")),
-                "warnings": len(stats.get("warnings") or []),
+                "response_channel_action": direct_action,
+                "response_channel_ids": sorted(response_result.get("channels") or []),
+                "guild_id": int(response_result.get("guild_id") or 0),
+                "dry_run": dry_run,
             },
-            data={"warnings": list(stats.get("warnings") or [])[:10]},
-            summary_for_user=summary,
-            say_hint="Summarize what Discord admin changes were applied and mention any warnings briefly.",
+            summary_for_user=response_summary,
+            say_hint="Confirm the response channel mode update in plain language.",
         )
 
 

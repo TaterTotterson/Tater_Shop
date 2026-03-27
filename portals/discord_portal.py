@@ -32,7 +32,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 
 load_dotenv()
