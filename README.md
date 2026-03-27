@@ -63,12 +63,8 @@
 | `ha_sensors` | Read Home Assistant sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_switches` | Control Home Assistant switches and plugs. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_temperature` | Read Home Assistant ambient temperatures. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `jackett_handoff` | Build transfer payloads (magnet/torrent URI) from cached Jackett search results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
-| `jackett_indexer_info` | Show status/privacy/configuration details for a specific Jackett indexer. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
-| `jackett_indexers` | Show Jackett indexer inventory with scope and privacy breakdown. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `jackett_recent_uploads` | List and rank recent Jackett uploads across selected indexers. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `jackett_search_torrents` | Run Jackett torrent searches with filters and ranked results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
-| `jackett_source_lookup` | Map a cached Jackett result back to its source indexer/tracker. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
