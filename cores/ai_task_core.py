@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 load_dotenv()
 
@@ -2184,12 +2184,7 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
     rows = list(schedules or [])
     catalog = _ai_tasks_ui_load_destination_catalog(redis_obj)
     platform_map = _ai_tasks_ui_catalog_platform_map(catalog)
-    platform_options = _ai_tasks_ui_platform_options(rows, redis_obj=redis_obj, catalog=catalog)
     add_destination_options = _ai_tasks_ui_destination_options_all_platforms(catalog=catalog)
-    default_platform = "homeassistant"
-    option_values = [str(item.get("value") or "").strip().lower() for item in platform_options]
-    if default_platform not in option_values:
-        default_platform = option_values[0] if option_values else default_platform
     forms: List[Dict[str, Any]] = []
 
     for row in rows[:120]:
@@ -2205,14 +2200,18 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
         recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
         schedule_text = _ai_tasks_ui_schedule_edit_text(schedule)
         targets_payload = row.get("targets") if isinstance(row.get("targets"), dict) else {}
-        destination_options = _ai_tasks_ui_destination_options_for_platform(
-            platform,
-            catalog=catalog,
-            current_targets=targets_payload,
-        )
+        destination_options = _ai_tasks_ui_destination_options_all_platforms(catalog=catalog)
         requires_target = bool(platform_map.get(platform, {}).get("requires_target"))
         if targets_payload:
             destination_value = _ai_tasks_ui_encode_destination_value(platform, targets_payload)
+            known_values = {str(item.get("value") or "") for item in destination_options}
+            if destination_value and destination_value not in known_values:
+                destination_options.append(
+                    {
+                        "value": destination_value,
+                        "label": f"{platform}: {_ai_tasks_ui_destination_label(platform, targets_payload)} (current)",
+                    }
+                )
         elif requires_target:
             destination_value = ""
         else:
@@ -2260,13 +2259,6 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
                         "type": "text",
                         "description": "Examples: weekdays at 8am, every hour, on the 10th of every month, or 0 0 6 * * *",
                         "value": schedule_text,
-                    },
-                    {
-                        "key": "platform",
-                        "label": "Portal",
-                        "type": "select",
-                        "options": platform_options,
-                        "value": platform,
                     },
                     {
                         "key": "destination",
@@ -2330,17 +2322,10 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
                     "value": "",
                 },
                 {
-                    "key": "platform",
-                    "label": "Portal",
-                    "type": "select",
-                    "options": platform_options,
-                    "value": default_platform,
-                },
-                {
                     "key": "destination",
                     "label": "Room / Destination (optional)",
                     "type": "select",
-                    "description": "Portal rooms/channels discovered by the notifier destination catalog.",
+                    "description": "Known rooms/channels discovered by the notifier destination catalog.",
                     "options": add_destination_options,
                     "value": "",
                 },
