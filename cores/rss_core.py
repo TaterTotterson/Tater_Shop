@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.4"
+__version__ = "1.0.6"
 
 
 logger = logging.getLogger("rss")
@@ -98,24 +98,24 @@ def _feed_form_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "discord": {
-            "enabled": _as_bool_flag(_portal_row(portals, "discord").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "discord").get("enabled"), False),
             "channel_id": _clean_text(discord_targets.get("channel_id")),
         },
         "irc": {
-            "enabled": _as_bool_flag(_portal_row(portals, "irc").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "irc").get("enabled"), False),
             "channel": _clean_text(irc_targets.get("channel")),
         },
         "matrix": {
-            "enabled": _as_bool_flag(_portal_row(portals, "matrix").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "matrix").get("enabled"), False),
             "room_id": _clean_text(matrix_targets.get("room_id")),
         },
         "homeassistant": {
-            "enabled": _as_bool_flag(_portal_row(portals, "homeassistant").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "homeassistant").get("enabled"), False),
             "device_service": _clean_text(ha_targets.get("device_service")),
             "persistent_mode": ha_persistent_mode,
         },
         "ntfy": {
-            "enabled": _as_bool_flag(_portal_row(portals, "ntfy").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "ntfy").get("enabled"), False),
             "server": _clean_text(ntfy_targets.get("ntfy_server") or _RSS_NTFY_DEFAULT_SERVER),
             "topic": _clean_text(ntfy_targets.get("ntfy_topic")),
             "priority": _clean_text(ntfy_targets.get("ntfy_priority") or _RSS_NTFY_DEFAULT_PRIORITY),
@@ -126,11 +126,14 @@ def _feed_form_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "password": _clean_text(ntfy_targets.get("ntfy_password")),
         },
         "telegram": {
-            "enabled": _as_bool_flag(_portal_row(portals, "telegram").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "telegram").get("enabled"), False),
             "chat_id": _clean_text(telegram_targets.get("chat_id")),
         },
+        "webui": {
+            "enabled": _as_bool_flag(_portal_row(portals, "webui").get("enabled"), False),
+        },
         "wordpress": {
-            "enabled": _as_bool_flag(_portal_row(portals, "wordpress").get("enabled"), True),
+            "enabled": _as_bool_flag(_portal_row(portals, "wordpress").get("enabled"), False),
             "site_url": _clean_text(wp_targets.get("wordpress_site_url")),
             "username": _clean_text(wp_targets.get("wordpress_username")),
             "app_password": _clean_text(wp_targets.get("wordpress_app_password")),
@@ -150,7 +153,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
     out: Dict[str, Dict[str, Any]] = {}
 
     discord = _row("discord")
-    discord_enabled = _as_bool_flag(discord.get("enabled"), True)
+    discord_enabled = _as_bool_flag(discord.get("enabled"), False)
     discord_channel = _clean_text(discord.get("channel_id"))
     discord_targets: Dict[str, Any] = {}
     if discord_channel:
@@ -159,7 +162,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         out["discord"] = {"enabled": discord_enabled, "targets": discord_targets}
 
     irc = _row("irc")
-    irc_enabled = _as_bool_flag(irc.get("enabled"), True)
+    irc_enabled = _as_bool_flag(irc.get("enabled"), False)
     irc_channel = _clean_text(irc.get("channel"))
     irc_targets: Dict[str, Any] = {}
     if irc_channel:
@@ -168,7 +171,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         out["irc"] = {"enabled": irc_enabled, "targets": irc_targets}
 
     matrix = _row("matrix")
-    matrix_enabled = _as_bool_flag(matrix.get("enabled"), True)
+    matrix_enabled = _as_bool_flag(matrix.get("enabled"), False)
     matrix_room = _clean_text(matrix.get("room_id"))
     matrix_targets: Dict[str, Any] = {}
     if matrix_room:
@@ -177,7 +180,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         out["matrix"] = {"enabled": matrix_enabled, "targets": matrix_targets}
 
     homeassistant = _row("homeassistant")
-    ha_enabled = _as_bool_flag(homeassistant.get("enabled"), True)
+    ha_enabled = _as_bool_flag(homeassistant.get("enabled"), False)
     ha_device = _clean_text(homeassistant.get("device_service"))
     ha_persistent_mode = _clean_text(homeassistant.get("persistent_mode")).lower()
     ha_targets: Dict[str, Any] = {}
@@ -191,7 +194,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         out["homeassistant"] = {"enabled": ha_enabled, "targets": ha_targets}
 
     ntfy = _row("ntfy")
-    ntfy_enabled = _as_bool_flag(ntfy.get("enabled"), True)
+    ntfy_enabled = _as_bool_flag(ntfy.get("enabled"), False)
     ntfy_targets: Dict[str, Any] = {}
     ntfy_server = _clean_text(ntfy.get("server"))
     if ntfy_server and ntfy_server != _RSS_NTFY_DEFAULT_SERVER:
@@ -221,7 +224,7 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         out["ntfy"] = {"enabled": ntfy_enabled, "targets": ntfy_targets}
 
     telegram = _row("telegram")
-    telegram_enabled = _as_bool_flag(telegram.get("enabled"), True)
+    telegram_enabled = _as_bool_flag(telegram.get("enabled"), False)
     telegram_chat = _clean_text(telegram.get("chat_id"))
     telegram_targets: Dict[str, Any] = {}
     if telegram_chat:
@@ -229,8 +232,13 @@ def _portals_from_form(portals_form: Dict[str, Any]) -> Dict[str, Dict[str, Any]
     if (not telegram_enabled) or telegram_targets:
         out["telegram"] = {"enabled": telegram_enabled, "targets": telegram_targets}
 
+    webui = _row("webui")
+    webui_enabled = _as_bool_flag(webui.get("enabled"), False)
+    if not webui_enabled:
+        out["webui"] = {"enabled": False, "targets": {}}
+
     wordpress = _row("wordpress")
-    wp_enabled = _as_bool_flag(wordpress.get("enabled"), True)
+    wp_enabled = _as_bool_flag(wordpress.get("enabled"), False)
     wp_targets: Dict[str, Any] = {}
     wp_site_url = _clean_text(wordpress.get("site_url"))
     if wp_site_url:
@@ -269,7 +277,7 @@ def _feed_rows(client) -> List[Dict[str, Any]]:
         rows.append(
             {
                 "url": url,
-                "enabled": _as_bool_flag(raw.get("enabled"), True),
+                "enabled": _as_bool_flag(raw.get("enabled"), False),
                 "last_ts": last_ts,
                 "last_text": last_text,
                 "portals": _feed_form_from_cfg(raw),
@@ -299,6 +307,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
         homeassistant = portals.get("homeassistant") if isinstance(portals.get("homeassistant"), dict) else {}
         ntfy = portals.get("ntfy") if isinstance(portals.get("ntfy"), dict) else {}
         telegram = portals.get("telegram") if isinstance(portals.get("telegram"), dict) else {}
+        webui = portals.get("webui") if isinstance(portals.get("webui"), dict) else {}
         wordpress = portals.get("wordpress") if isinstance(portals.get("wordpress"), dict) else {}
 
         forms.append(
@@ -314,7 +323,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                         "key": "enabled",
                         "label": "Feed Enabled",
                         "type": "checkbox",
-                        "value": _as_bool_flag(feed.get("enabled"), True),
+                        "value": _as_bool_flag(feed.get("enabled"), False),
                     },
                 ],
                 "sections": [
@@ -325,7 +334,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.discord.enabled",
                                 "label": "Enable Discord Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(discord.get("enabled"), True),
+                                "value": _as_bool_flag(discord.get("enabled"), False),
                             },
                             {
                                 "key": "portals.discord.channel_id",
@@ -342,7 +351,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.irc.enabled",
                                 "label": "Enable IRC Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(irc.get("enabled"), True),
+                                "value": _as_bool_flag(irc.get("enabled"), False),
                             },
                             {
                                 "key": "portals.irc.channel",
@@ -359,7 +368,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.matrix.enabled",
                                 "label": "Enable Matrix Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(matrix.get("enabled"), True),
+                                "value": _as_bool_flag(matrix.get("enabled"), False),
                             },
                             {
                                 "key": "portals.matrix.room_id",
@@ -376,7 +385,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.homeassistant.enabled",
                                 "label": "Enable Home Assistant Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(homeassistant.get("enabled"), True),
+                                "value": _as_bool_flag(homeassistant.get("enabled"), False),
                             },
                             {
                                 "key": "portals.homeassistant.device_service",
@@ -400,7 +409,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.ntfy.enabled",
                                 "label": "Enable ntfy Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(ntfy.get("enabled"), True),
+                                "value": _as_bool_flag(ntfy.get("enabled"), False),
                             },
                             {
                                 "key": "portals.ntfy.server",
@@ -460,7 +469,7 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                                 "key": "portals.telegram.enabled",
                                 "label": "Enable Telegram Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(telegram.get("enabled"), True),
+                                "value": _as_bool_flag(telegram.get("enabled"), False),
                             },
                             {
                                 "key": "portals.telegram.chat_id",
@@ -471,13 +480,24 @@ def _rss_manager_ui(client) -> Dict[str, Any]:
                         ],
                     },
                     {
+                        "label": "WebUI",
+                        "fields": [
+                            {
+                                "key": "portals.webui.enabled",
+                                "label": "Enable WebUI Route",
+                                "type": "checkbox",
+                                "value": _as_bool_flag(webui.get("enabled"), False),
+                            },
+                        ],
+                    },
+                    {
                         "label": "WordPress",
                         "fields": [
                             {
                                 "key": "portals.wordpress.enabled",
                                 "label": "Enable WordPress Route",
                                 "type": "checkbox",
-                                "value": _as_bool_flag(wordpress.get("enabled"), True),
+                                "value": _as_bool_flag(wordpress.get("enabled"), False),
                             },
                             {
                                 "key": "portals.wordpress.site_url",
@@ -576,20 +596,21 @@ def _coerce_targets(payload) -> dict:
 def _rss_notifier_rules(settings: dict) -> dict:
     del settings
     return {
-        "discord": {"enabled": True, "targets": {}},
-        "irc": {"enabled": True, "targets": {}},
-        "matrix": {"enabled": True, "targets": {}},
-        "homeassistant": {"enabled": True, "targets": {}},
-        "ntfy": {"enabled": True, "targets": {}},
-        "telegram": {"enabled": True, "targets": {}},
-        "wordpress": {"enabled": True, "targets": {}},
+        "discord": {"enabled": False, "targets": {}},
+        "irc": {"enabled": False, "targets": {}},
+        "matrix": {"enabled": False, "targets": {}},
+        "homeassistant": {"enabled": False, "targets": {}},
+        "ntfy": {"enabled": False, "targets": {}},
+        "telegram": {"enabled": False, "targets": {}},
+        "webui": {"enabled": False, "targets": {}},
+        "wordpress": {"enabled": False, "targets": {}},
     }
 
 def _merge_feed_rules(global_rules: dict, feed_platforms: dict) -> dict:
     merged = {}
     for key, rule in (global_rules or {}).items():
         merged[key] = {
-            "enabled": bool(rule.get("enabled", True)),
+            "enabled": bool(rule.get("enabled", False)),
             "targets": _coerce_targets(rule.get("targets")),
         }
 
@@ -598,12 +619,12 @@ def _merge_feed_rules(global_rules: dict, feed_platforms: dict) -> dict:
             continue
         if key not in merged:
             merged[key] = {
-                "enabled": bool(conf.get("enabled", True)),
+                "enabled": bool(conf.get("enabled", False)),
                 "targets": _coerce_targets(conf.get("targets")),
             }
             continue
         if "enabled" in conf:
-            merged[key]["enabled"] = bool(conf.get("enabled", True))
+            merged[key]["enabled"] = bool(conf.get("enabled", False))
         targets = conf.get("targets") or {}
         if targets:
             merged[key]["targets"] = _coerce_targets(targets)
@@ -773,8 +794,8 @@ class RSSManager:
         }
 
         for platform_key in core_notifier_platforms():
-            rule = merged_rules.get(platform_key) or {"enabled": True, "targets": {}}
-            if not rule.get("enabled", True):
+            rule = merged_rules.get(platform_key) or {"enabled": False, "targets": {}}
+            if not rule.get("enabled", False):
                 continue
 
             targets = _coerce_targets(rule.get("targets"))
@@ -798,18 +819,18 @@ class RSSManager:
 
         enabled_notifiers = []
         for platform_key in core_notifier_platforms():
-            global_enabled = rules.get(platform_key, {}).get("enabled", True)
+            global_enabled = rules.get(platform_key, {}).get("enabled", False)
             if global_enabled:
                 enabled_notifiers.append(platform_key)
                 continue
 
             # Global disabled: check per-feed overrides for this platform.
             for _url, cfg in feeds.items():
-                if not cfg.get("enabled", True):
+                if not cfg.get("enabled", False):
                     continue
                 platforms = cfg.get("portals") or {}
                 pcfg = platforms.get(platform_key)
-                if pcfg and pcfg.get("enabled", True):
+                if pcfg and pcfg.get("enabled", False):
                     enabled_notifiers.append(platform_key)
                     break
 
@@ -834,7 +855,7 @@ class RSSManager:
                     if stop_event and stop_event.is_set():
                         break
                     try:
-                        if not feed_cfg.get("enabled", True):
+                        if not feed_cfg.get("enabled", False):
                             continue
                         last_ts = float(feed_cfg.get("last_ts") or 0.0)
                         feed_platforms = feed_cfg.get("portals") or {}
@@ -907,7 +928,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> dict:
     for feed_url, cfg in sorted(feeds.items(), key=lambda row: str(row[0]).lower()):
         feed_url = _clean_text(feed_url)
         config = cfg if isinstance(cfg, dict) else {}
-        enabled = _as_bool_flag(config.get("enabled"), True)
+        enabled = _as_bool_flag(config.get("enabled"), False)
         if enabled:
             enabled_count += 1
 
@@ -916,7 +937,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> dict:
             [
                 str(name).strip()
                 for name, portal_cfg in portals.items()
-                if str(name).strip() and isinstance(portal_cfg, dict) and bool(portal_cfg.get("enabled", True))
+                if str(name).strip() and isinstance(portal_cfg, dict) and bool(portal_cfg.get("enabled", False))
             ]
         )
         routes_text = ", ".join(enabled_portals) if enabled_portals else "default routing"
@@ -973,24 +994,24 @@ def _payload_value(values: Dict[str, Any], key: str, default: Any = "") -> Any:
 def _payload_portals_from_values(values: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "discord": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.discord.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.discord.enabled", False), False),
             "channel_id": _clean_text(_payload_value(values, "portals.discord.channel_id", "")),
         },
         "irc": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.irc.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.irc.enabled", False), False),
             "channel": _clean_text(_payload_value(values, "portals.irc.channel", "")),
         },
         "matrix": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.matrix.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.matrix.enabled", False), False),
             "room_id": _clean_text(_payload_value(values, "portals.matrix.room_id", "")),
         },
         "homeassistant": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.homeassistant.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.homeassistant.enabled", False), False),
             "device_service": _clean_text(_payload_value(values, "portals.homeassistant.device_service", "")),
             "persistent_mode": _clean_text(_payload_value(values, "portals.homeassistant.persistent_mode", "use_default")),
         },
         "ntfy": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.ntfy.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.ntfy.enabled", False), False),
             "server": _clean_text(_payload_value(values, "portals.ntfy.server", _RSS_NTFY_DEFAULT_SERVER)),
             "topic": _clean_text(_payload_value(values, "portals.ntfy.topic", "")),
             "priority": _clean_text(_payload_value(values, "portals.ntfy.priority", _RSS_NTFY_DEFAULT_PRIORITY)),
@@ -1004,11 +1025,14 @@ def _payload_portals_from_values(values: Dict[str, Any]) -> Dict[str, Any]:
             "password": _clean_text(_payload_value(values, "portals.ntfy.password", "")),
         },
         "telegram": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.telegram.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.telegram.enabled", False), False),
             "chat_id": _clean_text(_payload_value(values, "portals.telegram.chat_id", "")),
         },
+        "webui": {
+            "enabled": _as_bool_flag(_payload_value(values, "portals.webui.enabled", False), False),
+        },
         "wordpress": {
-            "enabled": _as_bool_flag(_payload_value(values, "portals.wordpress.enabled", True), True),
+            "enabled": _as_bool_flag(_payload_value(values, "portals.wordpress.enabled", False), False),
             "site_url": _clean_text(_payload_value(values, "portals.wordpress.site_url", "")),
             "username": _clean_text(_payload_value(values, "portals.wordpress.username", "")),
             "app_password": _clean_text(_payload_value(values, "portals.wordpress.app_password", "")),
@@ -1045,7 +1069,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             feed_url,
             {
                 "last_ts": 0.0,
-                "enabled": True,
+                "enabled": False,
                 "portals": {},
             },
         )
@@ -1060,7 +1084,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if feed_url not in existing:
             raise KeyError("Feed not found.")
 
-        enabled = _as_bool_flag(_payload_value(values, "enabled", True), True)
+        enabled = _as_bool_flag(_payload_value(values, "enabled", False), False)
         portals = _portals_from_form(_payload_portals_from_values(values))
         update_feed(
             client,
