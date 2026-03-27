@@ -713,7 +713,38 @@ if not callable(_value_fingerprint):
             return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:
             return str(value)
-__version__ = "1.0.16"
+_json_safe = _memory_store_module.get("_json_safe")
+if not callable(_json_safe):
+    def _json_safe(value: Any) -> Any:
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value
+        except Exception:
+            return str(value)
+_coerce_confidence = _memory_store_module.get("_coerce_confidence")
+if not callable(_coerce_confidence):
+    def _coerce_confidence(raw: Any) -> float:
+        try:
+            value = float(raw)
+        except Exception:
+            value = 0.0
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return float(value)
+_coerce_evidence = _memory_store_module.get("_coerce_evidence")
+if not callable(_coerce_evidence):
+    def _coerce_evidence(raw: Any) -> List[str]:
+        source = raw if isinstance(raw, list) else (list(raw) if isinstance(raw, tuple) else [])
+        out: List[str] = []
+        for item in source:
+            text = str(item or "").strip()
+            if not text or text in out:
+                continue
+            out.append(text)
+        return out[:12]
+__version__ = "1.0.17"
 
 
 load_dotenv()
