@@ -14,7 +14,7 @@ import threading
 import time
 from io import BytesIO
 import uuid
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from notify.queue import is_expired
 from notify.media import load_queue_attachments
 
@@ -44,6 +44,7 @@ logger = logging.getLogger("discord")
 NOTIFY_QUEUE_KEY = "notifyq:discord"
 NOTIFY_POLL_INTERVAL = 0.5
 ROOM_LABEL_PREFIX = "tater:room_label"
+ROOM_META_PREFIX = "tater:room_meta"
 DISCORD_SETTINGS_KEY = "discord_portal_settings"
 RESPONSE_CHANNEL_MAP_FIELD = "response_channel_ids_by_guild"
 RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC = 2.0
@@ -109,6 +110,14 @@ def _room_label_key(platform: str, room_id: Any) -> str:
     return f"{ROOM_LABEL_PREFIX}:{platform_name}:{scope_id}"
 
 
+def _room_meta_key(platform: str, room_id: Any) -> str:
+    platform_name = str(platform or "").strip().lower() or "unknown"
+    scope_id = str(room_id or "").strip()
+    if not scope_id:
+        return ""
+    return f"{ROOM_META_PREFIX}:{platform_name}:{scope_id}"
+
+
 def _save_room_label(platform: str, room_id: Any, label: Any) -> None:
     key = _room_label_key(platform, room_id)
     label_text = str(label or "").strip()
@@ -116,6 +125,28 @@ def _save_room_label(platform: str, room_id: Any, label: Any) -> None:
         return
     try:
         redis_client.set(key, label_text)
+    except Exception:
+        pass
+
+
+def _save_room_meta(platform: str, room_id: Any, meta: Any) -> None:
+    key = _room_meta_key(platform, room_id)
+    if not key or not isinstance(meta, dict):
+        return
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in meta.items():
+        token = str(raw_key or "").strip()
+        value_text = str(raw_value or "").strip()
+        if not token or not value_text:
+            continue
+        normalized[token] = value_text
+    if not normalized:
+        return
+    try:
+        redis_client.set(
+            key,
+            json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
     except Exception:
         pass
 
@@ -144,6 +175,34 @@ def _discord_channel_label(channel: Any) -> str:
     if name.startswith("#"):
         return name
     return f"#{name}"
+
+
+def _discord_channel_meta(channel: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    guild = getattr(channel, "guild", None)
+    try:
+        guild_id = int(getattr(guild, "id", 0) or 0)
+    except Exception:
+        guild_id = 0
+    if guild_id > 0:
+        out["guild_id"] = str(guild_id)
+
+    guild_name = str(getattr(guild, "name", "") or "").strip()
+    if guild_name:
+        out["guild_name"] = guild_name
+    return out
+
+
+def _save_discord_room_context(channel: Any) -> None:
+    if channel is None:
+        return
+    channel_id = str(getattr(channel, "id", "") or "").strip()
+    if not channel_id:
+        return
+    _save_room_label("discord", channel_id, _discord_channel_label(channel))
+    meta = _discord_channel_meta(channel)
+    if meta:
+        _save_room_meta("discord", channel_id, meta)
 
 
 def parse_response_channel_ids(raw: Any) -> set[int]:
@@ -225,6 +284,200 @@ def serialize_response_channel_map(channel_map: Dict[Any, Iterable[int]] | None)
                 continue
             out[str(guild_id)] = serialize_response_channel_ids(value or [])
     return json.dumps(out, sort_keys=True, separators=(",", ":"))
+
+
+def _positive_int_token(value: Any) -> str:
+    text = str(value or "").strip().strip("<>#")
+    if text.startswith("!"):
+        text = text[1:]
+    if not text:
+        return ""
+    try:
+        parsed = int(text)
+    except Exception:
+        return ""
+    if parsed <= 0:
+        return ""
+    return str(parsed)
+
+
+def _parse_discord_destination_selection(value: Any) -> Tuple[str, str]:
+    if isinstance(value, dict):
+        guild_id = _positive_int_token(value.get("guild_id"))
+        channel_id = _positive_int_token(value.get("channel_id"))
+        if guild_id and channel_id:
+            return guild_id, channel_id
+
+    token = str(value or "").strip()
+    if ":" not in token:
+        return "", ""
+    left, right = token.split(":", 1)
+    guild_id = _positive_int_token(left)
+    channel_id = _positive_int_token(right)
+    if not guild_id or not channel_id:
+        return "", ""
+    return guild_id, channel_id
+
+
+def _coerce_response_channel_map_for_webui_save(raw: Any) -> Optional[str]:
+    if isinstance(raw, (list, tuple, set)):
+        out: Dict[str, set[str]] = {}
+        for item in raw:
+            guild_id, channel_id = _parse_discord_destination_selection(item)
+            if not guild_id or not channel_id:
+                continue
+            out.setdefault(guild_id, set()).add(channel_id)
+        return serialize_response_channel_map(out)
+
+    if isinstance(raw, dict):
+        parsed = parse_response_channel_map(raw)
+        return serialize_response_channel_map(parsed)
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return "{}"
+
+        parsed = parse_response_channel_map(text)
+        if parsed or text in {"{}", "null"}:
+            return serialize_response_channel_map(parsed)
+
+        if ":" in text:
+            maybe_tokens = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
+            out: Dict[str, set[str]] = {}
+            matched = False
+            for item in maybe_tokens:
+                guild_id, channel_id = _parse_discord_destination_selection(item)
+                if not guild_id or not channel_id:
+                    continue
+                matched = True
+                out.setdefault(guild_id, set()).add(channel_id)
+            if matched:
+                return serialize_response_channel_map(out)
+    return None
+
+
+def _response_channel_map_selection_values(channel_map: Dict[Any, Iterable[int]] | None) -> List[str]:
+    parsed = parse_response_channel_map(channel_map or {})
+    out: List[str] = []
+    guild_ids = sorted(parsed.keys(), key=lambda token: int(_positive_int_token(token) or 0))
+    for guild_id in guild_ids:
+        channels = sorted(parsed.get(guild_id) or set(), key=lambda token: int(_positive_int_token(token) or 0))
+        for channel_id in channels:
+            out.append(f"{guild_id}:{channel_id}")
+    return out
+
+
+def _response_channel_option_rows(
+    *,
+    current_map: Dict[int, set[int]],
+    redis_client_obj: Any,
+    notifier_destination_catalog: Any,
+) -> List[Dict[str, str]]:
+    options_by_value: Dict[str, Dict[str, str]] = {}
+    catalog_payload = {}
+    if callable(notifier_destination_catalog):
+        try:
+            catalog_payload = notifier_destination_catalog(
+                redis_client=redis_client_obj if redis_client_obj is not None else redis_client,
+                platform="discord",
+                limit=500,
+            )
+        except Exception:
+            catalog_payload = {}
+
+    destinations: List[Dict[str, Any]] = []
+    for row in list(catalog_payload.get("platforms") or []):
+        if str(row.get("platform") or "").strip().lower() == "discord":
+            destinations = list(row.get("destinations") or [])
+            break
+
+    for row in destinations:
+        if not isinstance(row, dict):
+            continue
+        targets = row.get("targets")
+        if not isinstance(targets, dict):
+            continue
+        guild_id = _positive_int_token(targets.get("guild_id"))
+        channel_id = _positive_int_token(targets.get("channel_id"))
+        if not guild_id or not channel_id:
+            continue
+
+        value = f"{guild_id}:{channel_id}"
+        label = str(row.get("label") or "").strip()
+        channel_name = str(targets.get("channel") or "").strip()
+        guild_name = str(targets.get("guild_name") or "").strip()
+        if not label:
+            if channel_name and guild_name:
+                label = f"{channel_name} • {guild_name}"
+            elif channel_name:
+                label = f"{channel_name} • guild {guild_id}"
+            elif guild_name:
+                label = f"{channel_id} • {guild_name}"
+            else:
+                label = f"{channel_id} • guild {guild_id}"
+        options_by_value[value] = {"value": value, "label": label}
+
+    for guild_id, channels in (current_map or {}).items():
+        for channel_id in (channels or set()):
+            value = f"{guild_id}:{channel_id}"
+            if value in options_by_value:
+                continue
+            options_by_value[value] = {
+                "value": value,
+                "label": f"{channel_id} • guild {guild_id} (saved)",
+            }
+
+    return sorted(options_by_value.values(), key=lambda row: str(row.get("label") or "").lower())
+
+
+def webui_settings_fields(
+    *,
+    fields: Any,
+    current_settings: Any = None,
+    redis_client: Any = None,
+    notifier_destination_catalog: Any = None,
+    **_kwargs,
+) -> List[Dict[str, Any]]:
+    base_fields = list(fields or [])
+    current = current_settings if isinstance(current_settings, dict) else {}
+    raw_map = current.get(RESPONSE_CHANNEL_MAP_FIELD, "{}")
+    parsed_map = parse_response_channel_map(raw_map)
+    selected_values = _response_channel_map_selection_values(parsed_map)
+    options = _response_channel_option_rows(
+        current_map=parsed_map,
+        redis_client_obj=redis_client,
+        notifier_destination_catalog=notifier_destination_catalog,
+    )
+
+    out: List[Dict[str, Any]] = []
+    for item in base_fields:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        if str(item.get("key") or "").strip() != RESPONSE_CHANNEL_MAP_FIELD:
+            out.append(item)
+            continue
+
+        updated = dict(item)
+        updated["type"] = "multiselect"
+        updated["options"] = options
+        updated["value"] = selected_values
+        updated["default"] = []
+        base_desc = str(updated.get("description") or "").strip()
+        discover_desc = "Choose channels discovered from Discord destination catalog."
+        updated["description"] = f"{base_desc} {discover_desc}".strip()
+        out.append(updated)
+    return out
+
+
+def webui_prepare_settings_values(*, values: Any, **_kwargs) -> Dict[str, Any]:
+    out = dict(values or {})
+    if RESPONSE_CHANNEL_MAP_FIELD in out:
+        coerced = _coerce_response_channel_map_for_webui_save(out.get(RESPONSE_CHANNEL_MAP_FIELD))
+        if coerced is not None:
+            out[RESPONSE_CHANNEL_MAP_FIELD] = coerced
+    return out
 
 
 # ---- LM template helpers ----
@@ -617,7 +870,7 @@ class discord_portal(commands.Bot):
                     logger.warning("[notifyq] Discord channel not found; dropping item.")
                     continue
 
-                _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
+                _save_discord_room_context(channel)
 
                 message = (item.get("message") or "").strip()
                 title = item.get("title")
@@ -681,7 +934,7 @@ class discord_portal(commands.Bot):
         try:
             for guild in list(self.guilds or []):
                 for channel in list(getattr(guild, "text_channels", []) or []):
-                    _save_room_label("discord", getattr(channel, "id", ""), _discord_channel_label(channel))
+                    _save_discord_room_context(channel)
         except Exception:
             pass
         guild_override_count = len(self.response_channel_ids_by_guild)
@@ -772,7 +1025,7 @@ class discord_portal(commands.Bot):
         if message.author == self.user:
             return
 
-        _save_room_label("discord", message.channel.id, _discord_channel_label(message.channel))
+        _save_discord_room_context(message.channel)
         input_artifacts: list[Dict[str, Any]] = []
 
         # -------------------------
