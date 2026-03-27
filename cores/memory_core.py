@@ -706,7 +706,14 @@ summarize_memory_core_doc = _memory_store_module["summarize_doc"]
 user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_user_doc_key = _memory_store_module["user_doc_key"]
 memory_core_value_to_text = _memory_store_module["value_to_text"]
-__version__ = "1.0.14"
+_value_fingerprint = _memory_store_module.get("_value_fingerprint")
+if not callable(_value_fingerprint):
+    def _value_fingerprint(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return str(value)
+__version__ = "1.0.15"
 
 
 load_dotenv()
