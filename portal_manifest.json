@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "3c0df932447b6bef64a44369bda1ab565ae151945cc46ff9081cd7e5043563b2"
+      "sha256": "95d21eac5bc2cfc12cce6b05e8f8296a3640f40ca5c2c08d1522e80f1a709ff7"
     },
     {
       "id": "ha_automations",
