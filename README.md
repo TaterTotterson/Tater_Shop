@@ -44,7 +44,7 @@
 | `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui, macos |
 | `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui, macos |
 | `device_compare` | Natural-language device comparison with spec tables and optional per-game FPS benchmarks. | discord, webui, macos, matrix, telegram |
-| `discord_admin_response_mode` | Discord response-mode channel controls. | discord |
+| `discord_admin_response_mode` | Toggle always-respond mode for the current Discord channel only. | discord |
 | `discord_admin_roles` | Discord role listing and role assignment commands. | discord |
 | `discord_admin_setup` | Discord server setup and structural admin changes. | discord |
 | `events_query` | Natural-language semantic event-history search. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |

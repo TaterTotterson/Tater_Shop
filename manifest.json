@@ -166,9 +166,9 @@
     {
       "id": "discord_admin_response_mode",
       "name": "Discord Admin Response Mode",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "59",
-      "description": "Discord response-mode channel controls.",
+      "description": "Toggle always-respond mode for the current Discord channel only.",
       "portals": [
         "discord"
       ],
@@ -179,7 +179,7 @@
         "response_mode"
       ],
       "entry": "verba/discord_admin_response_mode.py",
-      "sha256": "f6282f59142e9eaf59e71ba72acf2cec55f22dd5eb88562394b94f279c7f001e"
+      "sha256": "d78b918e8328cee8c4373b3787f1d492c348d3e1d954a9b18baeb7e30289f319"
     },
     {
       "id": "discord_admin_roles",
