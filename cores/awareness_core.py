@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.20"
+__version__ = "1.0.22"
 
 load_dotenv()
 
@@ -2095,6 +2095,9 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
         placeholder="(None)",
         current_value=_text(rule.get("input_text_entity")),
     )
+    show_events = {"source_key": "brief_kind", "equals": "events_query_brief"}
+    show_weather = {"source_key": "brief_kind", "equals": "weather_brief"}
+    show_zen = {"source_key": "brief_kind", "equals": "zen_greeting"}
     return {
         "id": rule["id"],
         "group": "brief",
@@ -2147,9 +2150,22 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                             {"value": "last_24h", "label": "Last 24 Hours"},
                         ],
                         "value": _text(rule.get("timeframe") or "today"),
+                        "show_when": show_events,
                     },
-                    {"key": "area", "label": "Area Source (optional)", "type": "text", "value": _text(rule.get("area"))},
-                    {"key": "query", "label": "Query Hint (optional)", "type": "text", "value": _text(rule.get("query"))},
+                    {
+                        "key": "area",
+                        "label": "Area Source (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("area")),
+                        "show_when": show_events,
+                    },
+                    {
+                        "key": "query",
+                        "label": "Query Hint (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("query")),
+                        "show_when": show_events,
+                    },
                 ],
             },
             {
@@ -2160,6 +2176,7 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                         "label": "Hours",
                         "type": "number",
                         "value": _as_int(rule.get("hours"), 12, minimum=1, maximum=72),
+                        "show_when": show_weather,
                     }
                 ],
             },
@@ -2171,19 +2188,28 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                         "label": "Include Date",
                         "type": "checkbox",
                         "value": _bool(rule.get("include_date"), False),
+                        "show_when": show_zen,
                     },
-                    {"key": "tone", "label": "Tone", "type": "text", "value": _text(rule.get("tone") or "zen")},
+                    {
+                        "key": "tone",
+                        "label": "Tone",
+                        "type": "text",
+                        "value": _text(rule.get("tone") or "zen"),
+                        "show_when": show_zen,
+                    },
                     {
                         "key": "prompt_hint",
                         "label": "Prompt Hint",
                         "type": "text",
                         "value": _text(rule.get("prompt_hint")),
+                        "show_when": show_zen,
                     },
                     {
                         "key": "max_chars",
                         "label": "Max Characters",
                         "type": "number",
                         "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
+                        "show_when": show_zen,
                     },
                 ],
             },
@@ -2234,6 +2260,18 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_brief = {"source_key": "kind", "equals": "brief"}
     show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
+    show_brief_events = [
+        {"source_key": "kind", "equals": "brief"},
+        {"source_key": "brief_kind", "equals": "events_query_brief"},
+    ]
+    show_brief_weather = [
+        {"source_key": "kind", "equals": "brief"},
+        {"source_key": "brief_kind", "equals": "weather_brief"},
+    ]
+    show_brief_zen = [
+        {"source_key": "kind", "equals": "brief"},
+        {"source_key": "brief_kind", "equals": "zen_greeting"},
+    ]
     return {
         "kind": "settings_manager",
         "title": "Awareness Rule Manager",
@@ -2477,42 +2515,42 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         {"value": "last_24h", "label": "Last 24 Hours"},
                     ],
                     "value": "today",
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_events,
                 },
                 {
                     "key": "hours",
                     "label": "Hours (weather brief)",
                     "type": "number",
                     "value": 12,
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_weather,
                 },
                 {
                     "key": "include_date",
                     "label": "Include Date (zen)",
                     "type": "checkbox",
                     "value": False,
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_zen,
                 },
                 {
                     "key": "tone",
                     "label": "Tone (zen)",
                     "type": "text",
                     "value": "zen",
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_zen,
                 },
                 {
                     "key": "prompt_hint",
                     "label": "Prompt Hint (zen)",
                     "type": "text",
                     "value": "",
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_zen,
                 },
                 {
                     "key": "max_chars",
                     "label": "Max Characters (zen)",
                     "type": "number",
                     "value": 100,
-                    "show_when": show_brief,
+                    "show_when_all": show_brief_zen,
                 },
             ],
         },
