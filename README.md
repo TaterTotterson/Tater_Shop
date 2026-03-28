@@ -90,7 +90,7 @@
 | `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, macos, irc, homeassistant, matrix, homekit, telegram |
 | `premiumize_add_transfer` | Create Premiumize transfers from explicit magnet or HTTP(S) source links. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `premiumize_check_transfer` | Inspect a Premiumize transfer and report status, progress, and related files. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
-| `premiumize_get_links` | Get Premiumize stream/download links by magnet/URL or by chosen cloud item. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
+| `premiumize_get_links` | Get Premiumize stream/download links by magnet/URL. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `premiumize_list_files` | List Premiumize cloud folder contents with file/folder counts. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `premiumize_list_transfers` | Show Premiumize transfer queue/status with active, finished, and failed counts. | discord, webui, macos, irc, matrix, telegram, homeassistant, homekit, xbmc |
 | `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, matrix, telegram |
