@@ -2858,8 +2858,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "label": "Entry Sensors",
                 "source": "items",
                 "item_group": "entry_sensor",
-                "selector": True,
-                "selector_label": "Select Entry Sensor Rule",
+                "selector": False,
                 "empty_message": "No entry sensor rules configured.",
             },
             {
