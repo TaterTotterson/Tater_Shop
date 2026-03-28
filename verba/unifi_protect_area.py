@@ -169,10 +169,8 @@ def _platform_supports_media(platform: str) -> bool:
 # ----------------------------
 class ProtectClient:
     def __init__(self):
-        settings = redis_client.hgetall("verba_settings:UniFi Protect") or {}
-
-        base_url = (settings.get("UNIFI_PROTECT_BASE_URL") or "https://10.4.20.127").strip()
-        api_key = (settings.get("UNIFI_PROTECT_API_KEY") or "").strip()
+        base_url = (redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").strip()
+        api_key = (redis_client.get("tater:unifi_protect:api_key") or "").strip()
 
         # Vision endpoint settings (OpenAI-compatible)
         vision_settings = get_shared_vision_settings(
@@ -198,7 +196,7 @@ class ProtectClient:
         self.vision_api_key = vision_api_key
 
         if not self.api_key:
-            raise ValueError("UniFi Protect API key (UNIFI_PROTECT_API_KEY) not set in plugin settings.")
+            raise ValueError("UniFi Protect API key is missing. Set it in WebUI Settings -> Integrations -> UniFi Protect.")
 
         self.headers = {
             "X-API-KEY": self.api_key,
@@ -380,40 +378,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
         "Only output that message."
     )
 
-    required_settings = {
-        # Protect
-        "UNIFI_PROTECT_BASE_URL": {
-            "label": "UniFi Console Base URL",
-            "type": "text",
-            "default": "https://10.4.20.127",
-            "description": "Base URL of your UniFi console (example: https://10.4.20.127).",
-        },
-        "UNIFI_PROTECT_API_KEY": {
-            "label": "UniFi Protect Integration API Key",
-            "type": "text",
-            "default": "",
-            "description": "API key used as X-API-KEY header for Protect Integration endpoints.",
-        },
-        # Vision (OpenAI-compatible)
-        "VISION_API_BASE": {
-            "label": "Vision API Base URL",
-            "type": "text",
-            "default": "http://127.0.0.1:1234",
-            "description": "OpenAI-compatible base URL for vision (example: http://127.0.0.1:1234).",
-        },
-        "VISION_MODEL": {
-            "label": "Vision Model",
-            "type": "text",
-            "default": "qwen2.5-vl-7b-instruct",
-            "description": "OpenAI-compatible vision model name (example: qwen2.5-vl-7b-instruct).",
-        },
-        "VISION_API_KEY": {
-            "label": "Vision API Key (optional)",
-            "type": "text",
-            "default": "",
-            "description": "Optional. If blank, OPENAI_API_KEY env var will be used if present.",
-        },
-    }
+    required_settings = {}
 
     # ----------------------------
     # Settings / client
@@ -737,7 +702,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
                 code="unifi_protect_area_not_configured",
                 message=(
                     "UniFi Protect is not configured. "
-                    "Set UNIFI_PROTECT_BASE_URL and UNIFI_PROTECT_API_KEY in plugin settings."
+                    "Set UniFi Protect API settings in WebUI Settings -> Integrations -> UniFi Protect."
                 ),
                 say_hint="Explain required UniFi Protect settings are missing.",
             )
