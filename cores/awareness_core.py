@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 load_dotenv()
 
@@ -1031,10 +1031,10 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
         notify_result = await _notify_homeassistant(
-            title="Doorbell",
+            title=_text(rule.get("title") or "Doorbell"),
             message=spoken_line,
-            priority="normal",
-            send_phone_alerts=True,
+            priority=_text(rule.get("priority") or "normal"),
+            send_phone_alerts=_bool(rule.get("send_phone_alerts"), True),
             persistent_notifications=_bool(rule.get("persistent_notifications"), True),
             api_notification=_bool(rule.get("api_notification"), True),
             device_service=_text(rule.get("device_service")),
@@ -1773,6 +1773,20 @@ def _doorbell_form(
             {
                 "label": "Notifications",
                 "fields": [
+                    {"key": "title", "label": "Title", "type": "text", "value": _text(rule.get("title") or "Doorbell")},
+                    {
+                        "key": "priority",
+                        "label": "Priority",
+                        "type": "select",
+                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
+                        "value": _text(rule.get("priority") or "normal"),
+                    },
+                    {
+                        "key": "send_phone_alerts",
+                        "label": "Send Phone Alerts",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("send_phone_alerts"), True),
+                    },
                     {
                         "key": "notifications",
                         "label": "Send Notifications",
@@ -1936,6 +1950,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
+    show_camera = {"source_key": "kind", "equals": "camera"}
+    show_doorbell = {"source_key": "kind", "equals": "doorbell"}
+    show_brief = {"source_key": "kind", "equals": "brief"}
+    show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
     return {
         "kind": "settings_manager",
         "title": "Awareness Rule Manager",
@@ -1995,17 +2013,19 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": True},
                 {
                     "key": "camera_entity",
-                    "label": "Camera (camera/doorbell)",
+                    "label": "Camera / Doorbell Camera",
                     "type": "select",
                     "options": camera_options,
                     "value": "",
+                    "show_when": show_camera_or_doorbell,
                 },
                 {
                     "key": "area",
-                    "label": "Area (camera/doorbell/events)",
+                    "label": "Area",
                     "type": "select",
                     "options": area_options,
                     "value": "",
+                    "show_when": show_camera_or_doorbell,
                 },
                 {
                     "key": "trigger_entity",
@@ -2014,55 +2034,144 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "options": trigger_options,
                     "dependent_options": trigger_dependency,
                     "value": "",
+                    "show_when": show_camera,
+                },
+                {
+                    "key": "doorbell_trigger_entity",
+                    "label": "Trigger Entity",
+                    "type": "select",
+                    "options": doorbell_trigger_options,
+                    "dependent_options": doorbell_trigger_dependency,
+                    "value": "",
+                    "show_when": show_doorbell,
                 },
                 {
                     "key": "trigger_preset",
                     "label": "Trigger Mode",
                     "type": "select",
                     "options": [
+                        {"value": "", "label": "Default for Rule Type"},
                         {"value": "person_detected", "label": "Person Detected (camera)"},
                         {"value": "doorbell_pressed", "label": "Doorbell Pressed (doorbell)"},
                         {"value": "custom_state", "label": "Custom State"},
                     ],
-                    "value": "person_detected",
+                    "value": "",
+                    "show_when": show_camera_or_doorbell,
                 },
-                {"key": "trigger_to_state", "label": "To State (custom trigger)", "type": "text", "value": "on"},
-                {"key": "trigger_attribute", "label": "Attribute Key (custom trigger)", "type": "text", "value": ""},
+                {
+                    "key": "trigger_to_state",
+                    "label": "To State (custom trigger)",
+                    "type": "text",
+                    "value": "on",
+                    "show_when": show_camera_or_doorbell,
+                },
+                {
+                    "key": "trigger_attribute",
+                    "label": "Attribute Key (custom trigger)",
+                    "type": "text",
+                    "value": "",
+                    "show_when": show_camera_or_doorbell,
+                },
                 {
                     "key": "trigger_attribute_value",
                     "label": "Attribute Value (custom trigger)",
                     "type": "text",
                     "value": "",
+                    "show_when": show_camera_or_doorbell,
                 },
-                {"key": "query", "label": "Vision Hint (camera/events)", "type": "text", "value": ""},
-                {"key": "cooldown_seconds", "label": "Cooldown (camera sec)", "type": "number", "value": 30},
+                {
+                    "key": "query",
+                    "label": "Vision Hint",
+                    "type": "text",
+                    "value": "",
+                    "show_when": show_camera,
+                },
+                {
+                    "key": "cooldown_seconds",
+                    "label": "Cooldown (sec)",
+                    "type": "number",
+                    "value": 30,
+                    "show_when": show_camera,
+                },
                 {
                     "key": "notification_cooldown_seconds",
-                    "label": "Notification Cooldown (camera sec)",
+                    "label": "Notification Cooldown (sec)",
                     "type": "number",
                     "value": 0,
+                    "show_when": show_camera,
                 },
-                {"key": "ignore_vehicles", "label": "Ignore Vehicles (camera)", "type": "checkbox", "value": False},
-                {"key": "title", "label": "Notification Title (camera)", "type": "text", "value": "Camera Event"},
+                {
+                    "key": "ignore_vehicles",
+                    "label": "Ignore Vehicles",
+                    "type": "checkbox",
+                    "value": False,
+                    "show_when": show_camera,
+                },
+                {
+                    "key": "title",
+                    "label": "Notification Title",
+                    "type": "text",
+                    "value": "Camera Event",
+                    "show_when": show_camera_or_doorbell,
+                },
                 {
                     "key": "priority",
-                    "label": "Priority (camera)",
+                    "label": "Priority",
                     "type": "select",
                     "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                     "value": "high",
+                    "show_when": show_camera_or_doorbell,
                 },
-                {"key": "send_phone_alerts", "label": "Send Phone Alerts (camera)", "type": "checkbox", "value": False},
-                {"key": "notifications", "label": "Send Notifications (doorbell)", "type": "checkbox", "value": True},
+                {
+                    "key": "send_phone_alerts",
+                    "label": "Send Phone Alerts",
+                    "type": "checkbox",
+                    "value": False,
+                    "show_when": show_camera_or_doorbell,
+                },
+                {
+                    "key": "notifications",
+                    "label": "Send Notifications",
+                    "type": "checkbox",
+                    "value": True,
+                    "show_when": show_doorbell,
+                },
                 {
                     "key": "persistent_notifications",
                     "label": "Persistent Notifications",
                     "type": "checkbox",
                     "value": True,
+                    "show_when": show_camera_or_doorbell,
                 },
-                {"key": "api_notification", "label": "API Notification", "type": "checkbox", "value": True},
-                {"key": "device_service", "label": "Phone Notify Service (optional)", "type": "text", "value": ""},
-                {"key": "tts_entity", "label": "TTS Entity (doorbell)", "type": "select", "options": tts_options, "value": ""},
-                {"key": "players", "label": "Media Players (doorbell, one per line)", "type": "textarea", "value": ""},
+                {
+                    "key": "api_notification",
+                    "label": "API Notification",
+                    "type": "checkbox",
+                    "value": True,
+                    "show_when": show_camera_or_doorbell,
+                },
+                {
+                    "key": "device_service",
+                    "label": "Phone Notify Service (optional)",
+                    "type": "text",
+                    "value": "",
+                    "show_when": show_camera_or_doorbell,
+                },
+                {
+                    "key": "tts_entity",
+                    "label": "TTS Entity",
+                    "type": "select",
+                    "options": tts_options,
+                    "value": "",
+                    "show_when": show_doorbell,
+                },
+                {
+                    "key": "players",
+                    "label": "Media Players (one per line)",
+                    "type": "textarea",
+                    "value": "",
+                    "show_when": show_doorbell,
+                },
                 {
                     "key": "brief_kind",
                     "label": "Brief Type",
@@ -2073,14 +2182,22 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         {"value": "zen_greeting", "label": "Zen Greeting"},
                     ],
                     "value": "events_query_brief",
+                    "show_when": show_brief,
                 },
-                {"key": "interval_minutes", "label": "Interval Minutes (brief)", "type": "number", "value": 60},
+                {
+                    "key": "interval_minutes",
+                    "label": "Interval Minutes",
+                    "type": "number",
+                    "value": 60,
+                    "show_when": show_brief,
+                },
                 {
                     "key": "input_text_entity",
-                    "label": "Output input_text (brief, optional)",
+                    "label": "Output Text Block (input_text)",
                     "type": "select",
                     "options": input_text_options,
                     "value": "",
+                    "show_when": show_brief,
                 },
                 {
                     "key": "timeframe",
@@ -2092,19 +2209,42 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         {"value": "last_24h", "label": "Last 24 Hours"},
                     ],
                     "value": "today",
+                    "show_when": show_brief,
                 },
-                {"key": "hours", "label": "Hours (weather brief)", "type": "number", "value": 12},
-                {"key": "include_date", "label": "Include Date (zen)", "type": "checkbox", "value": False},
-                {"key": "tone", "label": "Tone (zen)", "type": "text", "value": "zen"},
-                {"key": "prompt_hint", "label": "Prompt Hint (zen)", "type": "text", "value": ""},
-                {"key": "max_chars", "label": "Max Characters (zen)", "type": "number", "value": 100},
                 {
-                    "key": "doorbell_trigger_entity",
-                    "label": "Doorbell Trigger Entity (optional override)",
-                    "type": "select",
-                    "options": doorbell_trigger_options,
-                    "dependent_options": doorbell_trigger_dependency,
+                    "key": "hours",
+                    "label": "Hours (weather brief)",
+                    "type": "number",
+                    "value": 12,
+                    "show_when": show_brief,
+                },
+                {
+                    "key": "include_date",
+                    "label": "Include Date (zen)",
+                    "type": "checkbox",
+                    "value": False,
+                    "show_when": show_brief,
+                },
+                {
+                    "key": "tone",
+                    "label": "Tone (zen)",
+                    "type": "text",
+                    "value": "zen",
+                    "show_when": show_brief,
+                },
+                {
+                    "key": "prompt_hint",
+                    "label": "Prompt Hint (zen)",
+                    "type": "text",
                     "value": "",
+                    "show_when": show_brief,
+                },
+                {
+                    "key": "max_chars",
+                    "label": "Max Characters (zen)",
+                    "type": "number",
+                    "value": 100,
+                    "show_when": show_brief,
                 },
             ],
         },
@@ -2175,14 +2315,22 @@ def _build_rule_from_values(
     trigger_entity_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
     if kind == "doorbell":
         trigger_entity_default = _value(values, payload, "doorbell_trigger_entity", trigger_entity_default)
+    trigger_preset_value = _text(_value(values, payload, "trigger_preset", previous.get("trigger_preset", ""))).lower()
+    if not trigger_preset_value:
+        if kind == "doorbell":
+            trigger_preset_value = "doorbell_pressed"
+        elif kind == "camera":
+            trigger_preset_value = "person_detected"
+    title_default = "Doorbell" if kind == "doorbell" else "Camera Event"
+    send_phone_default = True if kind == "doorbell" else False
+    priority_default = "normal" if kind == "doorbell" else "high"
+    priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
     base.update(
         {
             "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
             "area": _text(_value(values, payload, "area", previous.get("area", ""))),
             "trigger_entity": _text(trigger_entity_default),
-            "trigger_preset": _text(
-                _value(values, payload, "trigger_preset", previous.get("trigger_preset", ""))
-            ).lower(),
+            "trigger_preset": trigger_preset_value,
             "trigger_to_state": _text(
                 _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", "on"))
             ),
@@ -2219,14 +2367,11 @@ def _build_rule_from_values(
                 _value(values, payload, "ignore_vehicles", previous.get("ignore_vehicles", False)),
                 False,
             ),
-            "title": _text(_value(values, payload, "title", previous.get("title", "Camera Event"))),
-            "priority": "high"
-            if _text(_value(values, payload, "priority", previous.get("priority", "high"))).lower()
-            in {"critical", "high"}
-            else "normal",
+            "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
+            "priority": "high" if priority_value in {"critical", "high"} else "normal",
             "send_phone_alerts": _bool(
-                _value(values, payload, "send_phone_alerts", previous.get("send_phone_alerts", False)),
-                False,
+                _value(values, payload, "send_phone_alerts", previous.get("send_phone_alerts", send_phone_default)),
+                send_phone_default,
             ),
             "persistent_notifications": _bool(
                 _value(
