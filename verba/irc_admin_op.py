@@ -45,16 +45,13 @@ class IrcAdminOpPlugin(ToolVerba):
     name = "irc_admin_op"
     verba_name = "IRC Admin OP"
     pretty_name = "IRC Admin OP"
-    version = "1.3.0"
+    version = "1.3.1"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc"]
     usage = '{"function":"irc_admin_op","arguments":{"query":"op me"}}'
-    description = (
-        "Admin-gated IRC operator helper for the current user. "
-        "Sends ChanServ OP/VOICE for the requesting user in the current channel."
-    )
-    verba_dec = "Run admin-gated IRC op me / voice me commands."
+    description = "Gives the user op or voice in the current IRC channel."
+    verba_dec = "Gives the user op or voice in the current IRC channel."
     when_to_use = (
         "Use when an IRC admin explicitly asks to op themselves or voice themselves "
         "in the current channel."

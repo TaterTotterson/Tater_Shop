@@ -45,13 +45,13 @@ class IrcAdminTopicPlugin(ToolVerba):
     name = "irc_admin_topic"
     verba_name = "IRC Admin Topic"
     pretty_name = "IRC Admin Topic"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc"]
     usage = '{"function":"irc_admin_topic","arguments":{"query":"set topic to hello world"}}'
-    description = "Admin-gated IRC topic control for the current channel. Replaces topic text each run."
-    verba_dec = "Set the current IRC channel topic (admin-only)."
+    description = "Sets the current IRC channel topic to the requested text."
+    verba_dec = "Sets the current IRC channel topic to the requested text."
     when_to_use = (
         "Use when an IRC admin asks to set or replace the current channel topic."
     )
