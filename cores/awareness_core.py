@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.8"
+__version__ = "1.0.11"
 
 load_dotenv()
 
@@ -40,6 +40,18 @@ CORE_SETTINGS = {
             "options": ["2d", "7d", "30d", "forever"],
             "default": "7d",
             "description": "How long to retain awareness events written to Redis.",
+        },
+        "store_event_snapshots": {
+            "label": "Store Event Snapshots",
+            "type": "checkbox",
+            "default": True,
+            "description": "Store camera/doorbell snapshot images in Redis for future event gallery UI.",
+        },
+        "event_snapshot_max_kb": {
+            "label": "Snapshot Max Size (KB)",
+            "type": "number",
+            "default": 768,
+            "description": "Maximum JPEG size to store per event snapshot.",
         },
         "entity_catalog_ttl_sec": {
             "label": "Entity Catalog Cache (sec)",
@@ -84,6 +96,7 @@ _RULES_KEY = "awareness:rules"
 _EXEC_QUEUE_KEY = "awareness:exec_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
+_EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
@@ -244,6 +257,65 @@ def _runtime_get(client: Any) -> Dict[str, Any]:
 
 def _event_key(source: str) -> str:
     return f"{_EVENTS_PREFIX}{_slug(source or 'general')}"
+
+
+def _event_snapshot_key(snapshot_id: str) -> str:
+    return f"{_EVENT_SNAPSHOT_PREFIX}{_text(snapshot_id)}"
+
+
+def _snapshot_storage_enabled(client: Any) -> bool:
+    return _bool(_settings(client).get("store_event_snapshots"), True)
+
+
+def _snapshot_max_bytes(client: Any) -> int:
+    kb = _setting_int(client, "event_snapshot_max_kb", 768, minimum=64, maximum=8192)
+    return int(kb) * 1024
+
+
+def _store_event_snapshot(client: Any, image_bytes: bytes, *, content_type: str = "image/jpeg") -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    size = len(image_bytes or b"")
+    if redis_obj is None:
+        return {"stored": False, "reason": "redis_unavailable", "bytes": size}
+    if not image_bytes:
+        return {"stored": False, "reason": "empty_image", "bytes": size}
+    if not _snapshot_storage_enabled(redis_obj):
+        return {"stored": False, "reason": "disabled", "bytes": size}
+    max_bytes = _snapshot_max_bytes(redis_obj)
+    if size > max_bytes:
+        return {
+            "stored": False,
+            "reason": "too_large",
+            "bytes": size,
+            "max_bytes": max_bytes,
+        }
+
+    snapshot_id = uuid.uuid4().hex
+    payload = {
+        "id": snapshot_id,
+        "content_type": _text(content_type) or "image/jpeg",
+        "encoding": "base64",
+        "bytes": size,
+        "created_at": _now_iso(),
+        "data_b64": base64.b64encode(image_bytes).decode("ascii"),
+    }
+    key = _event_snapshot_key(snapshot_id)
+    try:
+        retention = _events_retention_seconds(redis_obj)
+        if retention is None:
+            redis_obj.set(key, json.dumps(payload))
+        else:
+            redis_obj.setex(key, max(60, int(retention)), json.dumps(payload))
+    except Exception:
+        logger.warning("[awareness] failed to store snapshot %s", snapshot_id, exc_info=True)
+        return {"stored": False, "reason": "store_failed", "bytes": size}
+
+    return {
+        "stored": True,
+        "snapshot_id": snapshot_id,
+        "bytes": size,
+        "content_type": payload["content_type"],
+    }
 
 
 def _trim_events_for_source(client: Any, source: str) -> None:
@@ -904,6 +976,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     if _within_cooldown(_camera_cooldown_key(camera), cooldown_seconds):
         return {"ok": True, "summary": f"Skipped '{rule.get('name')}' due to cooldown.", "skipped": "cooldown"}
     used_fallback = False
+    jpeg: bytes = b""
     try:
         jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
         summary = await _vision_describe(
@@ -920,6 +993,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         summary = "Motion event detected, but camera analysis was unavailable."
         used_fallback = True
     summary = _compact(summary) or "Motion event detected."
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
     event_payload = {
         "source": _slug(area),
         "title": f"{area.title()} motion",
@@ -934,6 +1008,14 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
             "trigger_entity": _text(event.get("entity_id")),
         },
     }
+    if snapshot_store.get("stored"):
+        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
     _mark_cooldown(_camera_cooldown_key(camera))
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
@@ -992,6 +1074,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     )
     players = _normalize_players(rule.get("players"))
     tts_entity = _text(rule.get("tts_entity") or "tts.piper")
+    jpeg: bytes = b""
     try:
         jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
         spoken_line = await _vision_describe(
@@ -1007,6 +1090,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     except Exception:
         logger.exception("[awareness] doorbell snapshot/vision failed for %s", camera)
         spoken_line = "Someone is at the door."
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
     if players:
         await _tts_speak(
             ha_base=ha["base"],
@@ -1031,6 +1115,14 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             "trigger_entity": _text(event.get("entity_id")),
         },
     }
+    if snapshot_store.get("stored"):
+        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
@@ -1096,9 +1188,16 @@ def _load_events_for_sources(
 ) -> List[Dict[str, Any]]:
     redis_obj = client or redis_client
     events: List[Dict[str, Any]] = []
+    end_index = -1
+    try:
+        parsed_limit = int(limit_per_source)
+        if parsed_limit > 0:
+            end_index = max(1, parsed_limit) - 1
+    except Exception:
+        end_index = -1
     for src in sources:
         try:
-            rows = redis_obj.lrange(_event_key(src), 0, max(1, int(limit_per_source)) - 1) or []
+            rows = redis_obj.lrange(_event_key(src), 0, end_index) or []
         except Exception:
             continue
         for row in rows:
@@ -1113,6 +1212,176 @@ def _load_events_for_sources(
             events.append(payload)
     events.sort(key=lambda item: _text(item.get("ha_time")), reverse=True)
     return events
+
+
+def _event_time_display(value: Any) -> str:
+    parsed = _parse_iso(value)
+    if parsed is not None:
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    raw = _text(value)
+    return raw or "n/a"
+
+
+def _load_event_snapshot_payload(client: Any, snapshot_id: str) -> Optional[Dict[str, Any]]:
+    sid = _text(snapshot_id)
+    if not sid:
+        return None
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return None
+    try:
+        raw = redis_obj.get(_event_snapshot_key(sid))
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _event_snapshot_preview(client: Any, event: Dict[str, Any]) -> Dict[str, Any]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    snapshot_id = _text(event.get("snapshot_id") or data.get("snapshot_id"))
+    if not snapshot_id:
+        return {}
+    payload = _load_event_snapshot_payload(client, snapshot_id)
+    if payload is None:
+        return {
+            "snapshot_id": snapshot_id,
+            "bytes": _as_int(data.get("snapshot_bytes"), 0, minimum=0),
+            "content_type": _text(data.get("snapshot_content_type") or "image/jpeg"),
+            "status": "missing",
+        }
+    content_type = _text(payload.get("content_type") or "image/jpeg")
+    byte_count = _as_int(payload.get("bytes"), 0, minimum=0)
+    data_b64 = _text(payload.get("data_b64"))
+    preview: Dict[str, Any] = {
+        "snapshot_id": snapshot_id,
+        "bytes": byte_count,
+        "content_type": content_type,
+    }
+    if data_b64:
+        preview["data_url"] = f"data:{content_type};base64,{data_b64}"
+    return preview
+
+
+def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
+    sources = _discover_event_sources(client)
+    if not sources:
+        return []
+    events = _load_events_for_sources(
+        client,
+        sources=sources,
+        start=datetime(1970, 1, 1),
+        end=datetime.now() + timedelta(days=1),
+        limit_per_source=0,
+    )
+    items: List[Dict[str, Any]] = []
+    for idx, event in enumerate(events):
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        event_time = _event_time_display(event.get("ha_time"))
+        source = _text(event.get("source"))
+        area = _text(data.get("area")) or source
+        event_type = _text(event.get("type"))
+        level = _text(event.get("level") or "info")
+        entity_id = _text(event.get("entity_id"))
+        reason = _text(data.get("reason"))
+        trigger_entity = _text(data.get("trigger_entity"))
+        title = _text(event.get("title"))
+        if not title and event_type:
+            title = event_type.replace("_", " ").title()
+        if not title:
+            title = "Awareness Event"
+        subtitle_parts = [event_time]
+        if area:
+            subtitle_parts.append(f"Area: {area}")
+        if event_type:
+            subtitle_parts.append(f"Type: {event_type}")
+        subtitle = " • ".join([part for part in subtitle_parts if part])
+
+        fields: List[Dict[str, Any]] = []
+        snapshot = _event_snapshot_preview(client, event)
+        if snapshot.get("data_url"):
+            caption_parts = []
+            if _as_int(snapshot.get("bytes"), 0, minimum=0) > 0:
+                caption_parts.append(f"{_as_int(snapshot.get('bytes'), 0, minimum=0)} bytes")
+            fields.append(
+                {
+                    "key": f"snapshot_{idx}",
+                    "label": "Snapshot",
+                    "type": "image",
+                    "src": _text(snapshot.get("data_url")),
+                    "alt": f"{title} snapshot",
+                    "caption": " • ".join(caption_parts),
+                }
+            )
+        elif _text(snapshot.get("snapshot_id")):
+            fields.append(
+                {
+                    "key": f"snapshot_status_{idx}",
+                    "label": "Snapshot",
+                    "type": "text",
+                    "value": f"Stored snapshot unavailable ({_text(snapshot.get('snapshot_id'))})",
+                    "read_only": True,
+                }
+            )
+
+        description = _text(event.get("message"))
+        if description:
+            fields.append(
+                {
+                    "key": f"description_{idx}",
+                    "label": "Description",
+                    "type": "textarea",
+                    "value": description,
+                    "read_only": True,
+                }
+            )
+
+        detail_rows: List[Dict[str, str]] = []
+        for label, value in [
+            ("Time", event_time),
+            ("Area", area),
+            ("Source", source),
+            ("Type", event_type),
+            ("Level", level),
+            ("Entity", entity_id),
+            ("Trigger", trigger_entity),
+            ("Reason", reason),
+        ]:
+            token = _text(value)
+            if token:
+                detail_rows.append({"field": label, "value": token})
+        if detail_rows:
+            fields.append(
+                {
+                    "key": f"details_{idx}",
+                    "label": "Details",
+                    "type": "table",
+                    "columns": [
+                        {"key": "field", "label": "Field"},
+                        {"key": "value", "label": "Value"},
+                    ],
+                    "rows": detail_rows,
+                }
+            )
+
+        item_id = _text(event.get("id")) or f"event_{idx}_{_slug(_text(event.get('ha_time')) or str(idx))}"
+        items.append(
+            {
+                "id": item_id,
+                "group": "event",
+                "title": title,
+                "subtitle": subtitle,
+                "fields_popup": False,
+                "fields_dropdown": False,
+                "fields": fields,
+            }
+        )
+    return items
 
 
 async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
@@ -1941,6 +2210,7 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     rules = _load_rules(client)
     catalog = _ha_entity_catalog()
+    event_forms = _event_items_for_ui(client)
     forms: List[Dict[str, Any]] = []
     for rule in sorted(
         rules.values(),
@@ -1953,6 +2223,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
             forms.append(_doorbell_form(rule, catalog, rules))
         elif kind == "brief":
             forms.append(_brief_form(rule, catalog))
+    all_forms = event_forms + forms
     camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
     area_options = _area_options(rules)
     trigger_options, trigger_dependency = _trigger_dependency_for_camera(
@@ -1985,9 +2256,16 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         "item_fields_popup": True,
         "item_fields_popup_label": "Rule Settings",
         "item_sections_in_dropdown": True,
-        "default_tab": "cameras",
+        "default_tab": "events",
         "manager_tabs": [
-            {"key": "create", "label": "Create Rule", "source": "add_form"},
+            {
+                "key": "events",
+                "label": "Events",
+                "source": "items",
+                "item_group": "event",
+                "selector": False,
+                "empty_message": "No stored awareness events found.",
+            },
             {
                 "key": "cameras",
                 "label": "Cameras",
@@ -2015,6 +2293,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "selector_label": "Select Brief Job",
                 "empty_message": "No brief jobs configured.",
             },
+            {"key": "create", "label": "Create Rule", "source": "add_form"},
         ],
         "add_form": {
             "action": "awareness_add_rule",
@@ -2246,7 +2525,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
             ],
         },
-        "item_forms": forms,
+        "item_forms": all_forms,
     }
 
 
