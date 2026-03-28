@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 load_dotenv()
 
@@ -1296,6 +1296,7 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         "media_players": [],
         "tts": [],
         "input_text": [],
+        "notify_services": [],
     }
     try:
         ha = _ha_config()
@@ -1340,6 +1341,34 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
             catalog["triggers"].append((entity_id, label))
             if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
                 catalog["doorbell_triggers"].append((entity_id, label))
+
+    try:
+        svc_resp = requests.get(
+            f"{ha['base']}/api/services",
+            headers=_ha_headers(ha["token"], json_content=False),
+            timeout=10,
+        )
+        svc_resp.raise_for_status()
+        domains = svc_resp.json() or []
+        for domain_row in domains:
+            if not isinstance(domain_row, dict):
+                continue
+            if _text(domain_row.get("domain")).lower() != "notify":
+                continue
+            services = domain_row.get("services")
+            if not isinstance(services, dict):
+                continue
+            for service_name, service_meta in services.items():
+                svc = _text(service_name)
+                if not svc:
+                    continue
+                full_service = f"notify.{svc}"
+                meta = service_meta if isinstance(service_meta, dict) else {}
+                nice_name = _text(meta.get("name"))
+                label = f"{nice_name} ({full_service})" if nice_name else full_service
+                catalog["notify_services"].append((full_service, label))
+    except Exception:
+        logger.debug("[awareness] notify service discovery failed", exc_info=True)
 
     for key in list(catalog.keys()):
         catalog[key] = sorted(catalog[key], key=lambda row: row[1].lower())
@@ -1519,6 +1548,11 @@ def _camera_form(
         rules,
         current_value=_text(rule.get("area")),
     )
+    notify_service_options = _choices_from_pairs(
+        catalog.get("notify_services") or [],
+        placeholder="(Default notify target)",
+        current_value=_text(rule.get("device_service")),
+    )
     return {
         "id": rule["id"],
         "group": "camera",
@@ -1647,7 +1681,8 @@ def _camera_form(
                     {
                         "key": "device_service",
                         "label": "Phone Notify Service (optional)",
-                        "type": "text",
+                        "type": "select",
+                        "options": notify_service_options,
                         "value": _text(rule.get("device_service")),
                     },
                 ],
@@ -1680,6 +1715,11 @@ def _doorbell_form(
         catalog.get("tts") or [],
         placeholder="(Select TTS entity)",
         current_value=_text(rule.get("tts_entity")),
+    )
+    notify_service_options = _choices_from_pairs(
+        catalog.get("notify_services") or [],
+        placeholder="(Default notify target)",
+        current_value=_text(rule.get("device_service")),
     )
     return {
         "id": rule["id"],
@@ -1808,7 +1848,8 @@ def _doorbell_form(
                     {
                         "key": "device_service",
                         "label": "Phone Notify Service (optional)",
-                        "type": "text",
+                        "type": "select",
+                        "options": notify_service_options,
                         "value": _text(rule.get("device_service")),
                     },
                 ],
@@ -1950,6 +1991,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
+    notify_service_options = _choices_from_pairs(
+        catalog.get("notify_services") or [],
+        placeholder="(Default notify target)",
+    )
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_brief = {"source_key": "kind", "equals": "brief"}
@@ -2153,7 +2198,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 {
                     "key": "device_service",
                     "label": "Phone Notify Service (optional)",
-                    "type": "text",
+                    "type": "select",
+                    "options": notify_service_options,
                     "value": "",
                     "show_when": show_camera_or_doorbell,
                 },
