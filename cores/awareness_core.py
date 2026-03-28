@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 load_dotenv()
 
@@ -353,10 +353,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "priority": "high"
                 if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
                 else "normal",
-                "send_phone_alerts": _bool(raw.get("send_phone_alerts"), False),
-                "persistent_notifications": _bool(raw.get("persistent_notifications"), False),
                 "api_notification": _bool(raw.get("api_notification"), True),
-                "device_service": _text(raw.get("device_service")),
+                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
         return base
@@ -373,10 +371,13 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
                 "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
+                "title": _text(raw.get("title") or "Doorbell"),
+                "priority": "high"
+                if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
+                else "normal",
                 "notifications": _bool(raw.get("notifications"), True),
-                "persistent_notifications": _bool(raw.get("persistent_notifications"), True),
                 "api_notification": _bool(raw.get("api_notification"), True),
-                "device_service": _text(raw.get("device_service")),
+                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
         return base
@@ -654,6 +655,18 @@ def _normalize_device_service(raw: Any) -> str:
     return text
 
 
+def _normalize_device_services(raw: Any) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in _normalize_players(raw):
+        token = _normalize_device_service(item)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
 def _camera_snapshot_sync(ha_base: str, token: str, camera_entity: str) -> bytes:
     url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
@@ -746,37 +759,57 @@ async def _notify_homeassistant(
     title: str,
     message: str,
     priority: str,
-    send_phone_alerts: bool,
-    persistent_notifications: bool,
     api_notification: bool,
-    device_service: str,
+    device_services: Any,
     origin: Dict[str, Any],
 ) -> Dict[str, Any]:
-    if not (send_phone_alerts or persistent_notifications or api_notification):
+    services = _normalize_device_services(device_services)
+    if not (services or api_notification):
         return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-    targets: Dict[str, Any] = {
-        "persistent": bool(persistent_notifications),
-        "api_notification": bool(api_notification),
-    }
-    service = _normalize_device_service(device_service)
-    if service and send_phone_alerts:
-        targets["device_service"] = service
     meta = {"priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal"}
-    try:
-        result = await dispatch_notification(
-            platform="homeassistant",
-            title=title,
-            content=message,
-            targets=targets,
-            origin=origin,
-            meta=meta,
+    sent_count = 0
+    errors: List[str] = []
+
+    async def _dispatch_once(targets: Dict[str, Any]) -> None:
+        nonlocal sent_count
+        try:
+            result = await dispatch_notification(
+                platform="homeassistant",
+                title=title,
+                content=message,
+                targets=targets,
+                origin=origin,
+                meta=meta,
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+            return
+        result_text = _text(result)
+        if result_text.lower().startswith("queued notification"):
+            sent_count += 1
+            return
+        errors.append(result_text or "homeassistant notifier returned empty result")
+
+    # Keep persistent notifications off in Awareness routing; this path is for
+    # API notifications and explicit notify services selected in the rule.
+    if api_notification:
+        await _dispatch_once({"persistent": False, "api_notification": True})
+
+    for service in services:
+        await _dispatch_once(
+            {
+                "persistent": False,
+                "api_notification": False,
+                "device_service": service,
+            }
         )
-    except Exception as exc:
-        return {"ok": False, "sent_count": 0, "error": str(exc)}
-    result_text = _text(result)
-    if result_text.lower().startswith("queued notification"):
-        return {"ok": True, "sent_count": 1, "result": result_text}
-    return {"ok": False, "sent_count": 0, "error": result_text or "homeassistant notifier returned empty result"}
+
+    if sent_count > 0:
+        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        if errors:
+            result["warnings"] = errors
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "homeassistant notifier failed"}
 
 
 def _tts_speak_sync(*, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
@@ -928,11 +961,9 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     }
     _append_event(redis_client, source=area, payload=event_payload)
     _mark_cooldown(_camera_cooldown_key(camera))
-    notify_requested = (
-        _bool(rule.get("send_phone_alerts"), False)
-        or _bool(rule.get("persistent_notifications"), False)
-        or _bool(rule.get("api_notification"), True)
-    )
+    device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+    api_notification = _bool(rule.get("api_notification"), True)
+    notify_requested = bool(device_services or api_notification)
     if summary.lower().startswith("nothing notable"):
         notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "nothing_notable"}
     elif (
@@ -951,10 +982,8 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
             title=_text(rule.get("title") or "Camera Event"),
             message=summary,
             priority=_text(rule.get("priority") or "high"),
-            send_phone_alerts=_bool(rule.get("send_phone_alerts"), False),
-            persistent_notifications=_bool(rule.get("persistent_notifications"), False),
-            api_notification=_bool(rule.get("api_notification"), True),
-            device_service=_text(rule.get("device_service")),
+            api_notification=api_notification,
+            device_services=device_services,
             origin={
                 "platform": "awareness_core",
                 "scope": "camera_rule",
@@ -1030,14 +1059,14 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     _append_event(redis_client, source=area, payload=event_payload)
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
+        device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+        api_notification = _bool(rule.get("api_notification"), True)
         notify_result = await _notify_homeassistant(
             title=_text(rule.get("title") or "Doorbell"),
             message=spoken_line,
             priority=_text(rule.get("priority") or "normal"),
-            send_phone_alerts=_bool(rule.get("send_phone_alerts"), True),
-            persistent_notifications=_bool(rule.get("persistent_notifications"), True),
-            api_notification=_bool(rule.get("api_notification"), True),
-            device_service=_text(rule.get("device_service")),
+            api_notification=api_notification,
+            device_services=device_services,
             origin={
                 "platform": "awareness_core",
                 "scope": "doorbell_rule",
@@ -1402,6 +1431,28 @@ def _choices_from_pairs(
     return out
 
 
+def _multiselect_choices_from_pairs(
+    pairs: List[Tuple[str, str]],
+    *,
+    current_values: Any = None,
+) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for value, label in pairs:
+        token = _text(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append({"value": token, "label": _text(label) or token})
+    for current in _normalize_players(current_values):
+        token = _text(current)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append({"value": token, "label": f"{token} (current)"})
+    return out
+
+
 def _players_text(value: Any) -> str:
     return "\n".join(_normalize_players(value))
 
@@ -1548,10 +1599,9 @@ def _camera_form(
         rules,
         current_value=_text(rule.get("area")),
     )
-    notify_service_options = _choices_from_pairs(
+    notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
-        placeholder="(Default notify target)",
-        current_value=_text(rule.get("device_service")),
+        current_values=rule.get("device_services") or rule.get("device_service"),
     )
     return {
         "id": rule["id"],
@@ -1661,29 +1711,17 @@ def _camera_form(
                         "value": _text(rule.get("priority") or "high"),
                     },
                     {
-                        "key": "send_phone_alerts",
-                        "label": "Send Phone Alerts",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("send_phone_alerts"), False),
-                    },
-                    {
-                        "key": "persistent_notifications",
-                        "label": "Persistent Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("persistent_notifications"), False),
-                    },
-                    {
                         "key": "api_notification",
                         "label": "API Notification",
                         "type": "checkbox",
                         "value": _bool(rule.get("api_notification"), True),
                     },
                     {
-                        "key": "device_service",
-                        "label": "Phone Notify Service (optional)",
-                        "type": "select",
+                        "key": "device_services",
+                        "label": "Phone Notify Services",
+                        "type": "multiselect",
                         "options": notify_service_options,
-                        "value": _text(rule.get("device_service")),
+                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
                 ],
             },
@@ -1716,10 +1754,9 @@ def _doorbell_form(
         placeholder="(Select TTS entity)",
         current_value=_text(rule.get("tts_entity")),
     )
-    notify_service_options = _choices_from_pairs(
+    notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
-        placeholder="(Default notify target)",
-        current_value=_text(rule.get("device_service")),
+        current_values=rule.get("device_services") or rule.get("device_service"),
     )
     return {
         "id": rule["id"],
@@ -1822,22 +1859,10 @@ def _doorbell_form(
                         "value": _text(rule.get("priority") or "normal"),
                     },
                     {
-                        "key": "send_phone_alerts",
-                        "label": "Send Phone Alerts",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("send_phone_alerts"), True),
-                    },
-                    {
                         "key": "notifications",
                         "label": "Send Notifications",
                         "type": "checkbox",
                         "value": _bool(rule.get("notifications"), True),
-                    },
-                    {
-                        "key": "persistent_notifications",
-                        "label": "Persistent Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("persistent_notifications"), True),
                     },
                     {
                         "key": "api_notification",
@@ -1846,11 +1871,11 @@ def _doorbell_form(
                         "value": _bool(rule.get("api_notification"), True),
                     },
                     {
-                        "key": "device_service",
-                        "label": "Phone Notify Service (optional)",
-                        "type": "select",
+                        "key": "device_services",
+                        "label": "Phone Notify Services",
+                        "type": "multiselect",
                         "options": notify_service_options,
-                        "value": _text(rule.get("device_service")),
+                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
                 ],
             },
@@ -1991,9 +2016,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
-    notify_service_options = _choices_from_pairs(
+    notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
-        placeholder="(Default notify target)",
     )
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
@@ -2168,25 +2192,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera_or_doorbell,
                 },
                 {
-                    "key": "send_phone_alerts",
-                    "label": "Send Phone Alerts",
-                    "type": "checkbox",
-                    "value": False,
-                    "show_when": show_camera_or_doorbell,
-                },
-                {
                     "key": "notifications",
                     "label": "Send Notifications",
                     "type": "checkbox",
                     "value": True,
                     "show_when": show_doorbell,
-                },
-                {
-                    "key": "persistent_notifications",
-                    "label": "Persistent Notifications",
-                    "type": "checkbox",
-                    "value": True,
-                    "show_when": show_camera_or_doorbell,
                 },
                 {
                     "key": "api_notification",
@@ -2196,11 +2206,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera_or_doorbell,
                 },
                 {
-                    "key": "device_service",
-                    "label": "Phone Notify Service (optional)",
-                    "type": "select",
+                    "key": "device_services",
+                    "label": "Phone Notify Services",
+                    "type": "multiselect",
                     "options": notify_service_options,
-                    "value": "",
+                    "value": [],
                     "show_when": show_camera_or_doorbell,
                 },
                 {
@@ -2368,9 +2378,14 @@ def _build_rule_from_values(
         elif kind == "camera":
             trigger_preset_value = "person_detected"
     title_default = "Doorbell" if kind == "doorbell" else "Camera Event"
-    send_phone_default = True if kind == "doorbell" else False
     priority_default = "normal" if kind == "doorbell" else "high"
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
+    device_services_value = _value(
+        values,
+        payload,
+        "device_services",
+        previous.get("device_services", previous.get("device_service", "")),
+    )
     base.update(
         {
             "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
@@ -2415,26 +2430,11 @@ def _build_rule_from_values(
             ),
             "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
             "priority": "high" if priority_value in {"critical", "high"} else "normal",
-            "send_phone_alerts": _bool(
-                _value(values, payload, "send_phone_alerts", previous.get("send_phone_alerts", send_phone_default)),
-                send_phone_default,
-            ),
-            "persistent_notifications": _bool(
-                _value(
-                    values,
-                    payload,
-                    "persistent_notifications",
-                    previous.get("persistent_notifications", True),
-                ),
-                True,
-            ),
             "api_notification": _bool(
                 _value(values, payload, "api_notification", previous.get("api_notification", True)),
                 True,
             ),
-            "device_service": _text(
-                _value(values, payload, "device_service", previous.get("device_service", ""))
-            ),
+            "device_services": _normalize_device_services(device_services_value),
             "tts_entity": _text(_value(values, payload, "tts_entity", previous.get("tts_entity", "tts.piper"))),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
