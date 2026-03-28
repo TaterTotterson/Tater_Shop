@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.6"
+__version__ = "1.0.8"
 
 load_dotenv()
 
@@ -766,7 +766,7 @@ async def _notify_homeassistant(
         errors.append(result_text or "homeassistant notifier returned empty result")
 
     # Keep persistent notifications off in Awareness routing; this path is for
-    # API notifications and explicit notify services selected in the rule.
+    # VoicePE/API notifications and explicit notify services selected in rule.
     if api_notification:
         await _dispatch_once({"persistent": False, "api_notification": True})
 
@@ -1674,7 +1674,7 @@ def _camera_form(
                     },
                     {
                         "key": "api_notification",
-                        "label": "API Notification",
+                        "label": "VoicePE Notifications",
                         "type": "checkbox",
                         "value": _bool(rule.get("api_notification"), True),
                     },
@@ -1819,7 +1819,7 @@ def _doorbell_form(
                     },
                     {
                         "key": "api_notification",
-                        "label": "API Notification",
+                        "label": "VoicePE Notifications",
                         "type": "checkbox",
                         "value": _bool(rule.get("api_notification"), True),
                     },
@@ -2142,7 +2142,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 {
                     "key": "api_notification",
-                    "label": "API Notification",
+                    "label": "VoicePE Notifications",
                     "type": "checkbox",
                     "value": True,
                     "show_when": show_camera_or_doorbell,
