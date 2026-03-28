@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.24"
+__version__ = "1.0.28"
 
 load_dotenv()
 
@@ -64,24 +64,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 5,
             "description": "How often the brief scheduler checks for due jobs.",
-        },
-        "weather_temp_entity": {
-            "label": "Weather Temperature Entity",
-            "type": "text",
-            "default": "sensor.outdoor_temperature",
-            "description": "Home Assistant temperature sensor entity_id used by Weather Brief jobs.",
-        },
-        "weather_wind_entity": {
-            "label": "Weather Wind Entity",
-            "type": "text",
-            "default": "sensor.outdoor_wind_speed",
-            "description": "Home Assistant wind speed sensor entity_id used by Weather Brief jobs.",
-        },
-        "weather_rain_entity": {
-            "label": "Weather Rain Entity",
-            "type": "text",
-            "default": "sensor.outdoor_rain_rate",
-            "description": "Home Assistant rain/precipitation sensor entity_id used by Weather Brief jobs.",
         },
     },
 }
@@ -536,6 +518,9 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
             "timeframe": _text(raw.get("timeframe") or "today").lower(),
             "area": _text(raw.get("area")),
             "hours": _as_int(raw.get("hours"), 12, minimum=1, maximum=72),
+            "weather_temp_entity": _text(raw.get("weather_temp_entity")),
+            "weather_wind_entity": _text(raw.get("weather_wind_entity")),
+            "weather_rain_entity": _text(raw.get("weather_rain_entity")),
             "query": _text(raw.get("query")),
             "include_date": _bool(raw.get("include_date"), False),
             "tone": _text(raw.get("tone") or "zen"),
@@ -929,8 +914,17 @@ def _ha_set_input_text_sync(ha_base: str, token: str, entity_id: str, value: str
     entity = _text(entity_id)
     if not entity:
         return
+    text_value = str(value or "")
+    max_len = _ha_get_input_text_max_len_sync(ha_base, token, entity)
+    if max_len is not None and len(text_value) > max_len:
+        text_value = text_value[:max_len]
+        logger.info(
+            "[awareness] truncated input_text payload for %s to %s chars",
+            entity,
+            max_len,
+        )
     url = f"{ha_base}/api/services/input_text/set_value"
-    payload = {"entity_id": entity, "value": value}
+    payload = {"entity_id": entity, "value": text_value}
     resp = requests.post(url, headers=_ha_headers(token), json=payload, timeout=10)
     if resp.status_code >= 400:
         raise RuntimeError(f"input_text.set_value HTTP {resp.status_code}: {resp.text[:200]}")
@@ -938,6 +932,35 @@ def _ha_set_input_text_sync(ha_base: str, token: str, entity_id: str, value: str
 
 async def _ha_set_input_text(ha_base: str, token: str, entity_id: str, value: str) -> None:
     await asyncio.to_thread(_ha_set_input_text_sync, ha_base, token, entity_id, value)
+
+
+def _ha_get_input_text_max_len_sync(ha_base: str, token: str, entity_id: str) -> Optional[int]:
+    entity = _text(entity_id)
+    if not entity:
+        return None
+    try:
+        resp = requests.get(
+            f"{ha_base}/api/states/{quote(entity, safe='')}",
+            headers=_ha_headers(token, json_content=False),
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return None
+        payload = resp.json() or {}
+        attrs = payload.get("attributes") if isinstance(payload, dict) else {}
+        if not isinstance(attrs, dict):
+            return None
+        for key in ("max", "max_length", "maxlen"):
+            raw = attrs.get(key)
+            try:
+                value = int(raw)
+            except Exception:
+                continue
+            if 1 <= value <= 10000:
+                return value
+    except Exception:
+        return None
+    return None
 
 
 def _ha_fetch_history_sync(
@@ -1405,6 +1428,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
 async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     del llm_client
     ha = _ha_config()
+    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
     start, end, label = _event_window(rule.get("timeframe"))
     area = _slug(rule.get("area")) if _text(rule.get("area")) else ""
     if area:
@@ -1421,7 +1445,7 @@ async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
             if msg:
                 top.append(msg)
         summary = "; ".join(top) if top else f"Activity detected {label}."
-    summary = _compact(summary, limit=240)
+    summary = _compact(summary, limit=max_chars)
     input_text_entity = _text(rule.get("input_text_entity"))
     if input_text_entity:
         try:
@@ -1434,6 +1458,7 @@ async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
 async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     del llm_client
     ha = _ha_config()
+    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
     core_settings = _settings(redis_client)
     # Legacy fallback keeps prior installs working after removing automation verbas.
     legacy_settings = (
@@ -1441,9 +1466,21 @@ async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str,
         or redis_client.hgetall("verba_settings: Weather Brief")
         or {}
     )
-    temp_entity = _text(core_settings.get("weather_temp_entity")) or _text(legacy_settings.get("TEMP_ENTITY"))
-    wind_entity = _text(core_settings.get("weather_wind_entity")) or _text(legacy_settings.get("WIND_ENTITY"))
-    rain_entity = _text(core_settings.get("weather_rain_entity")) or _text(legacy_settings.get("RAIN_ENTITY"))
+    temp_entity = (
+        _text(rule.get("weather_temp_entity"))
+        or _text(core_settings.get("weather_temp_entity"))
+        or _text(legacy_settings.get("TEMP_ENTITY"))
+    )
+    wind_entity = (
+        _text(rule.get("weather_wind_entity"))
+        or _text(core_settings.get("weather_wind_entity"))
+        or _text(legacy_settings.get("WIND_ENTITY"))
+    )
+    rain_entity = (
+        _text(rule.get("weather_rain_entity"))
+        or _text(core_settings.get("weather_rain_entity"))
+        or _text(legacy_settings.get("RAIN_ENTITY"))
+    )
     hours = _as_int(rule.get("hours"), 12, minimum=1, maximum=72)
     now = datetime.now()
     start = now - timedelta(hours=hours)
@@ -1478,7 +1515,7 @@ async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str,
         if metrics["rain"]:
             parts.append(f"rain ~{round(metrics['rain']['total'], 1)}" if metrics["rain"]["rained"] else "no rain")
         summary_text = ". ".join(parts) + "."
-    summary_text = _compact(summary_text, limit=240)
+    summary_text = _compact(summary_text, limit=max_chars)
     input_text_entity = _text(rule.get("input_text_entity")) or _text(legacy_settings.get("INPUT_TEXT_ENTITY"))
     if input_text_entity:
         try:
@@ -1539,14 +1576,14 @@ async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
     ha = _ha_config()
     now = datetime.now()
     greeting = _time_greeting(now)
-    max_chars = _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240)
+    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
     include_date = _bool(rule.get("include_date"), False)
     tone = _text(rule.get("tone") or "zen")
     prompt_hint = _text(rule.get("prompt_hint"))
     system = (
         "You write short, calming dashboard messages. "
         "One sentence, plain text, no markdown, no emojis, no quotes. "
-        f"Maximum {max_chars} characters."
+        f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER."
     )
     date_str = now.strftime("%A, %B %d") if include_date else ""
     user_payload = {
@@ -1591,7 +1628,7 @@ async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dic
     now = datetime.now()
     greeting = _time_greeting(now)
     date_text, time_text = _format_datetime_for_brief(now)
-    max_chars = _as_int(rule.get("max_chars"), 220, minimum=80, maximum=240)
+    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
     prompt_hint = _text(rule.get("prompt_hint"))
     recent_quotes = _normalize_quote_history(rule.get("quote_history"), limit=5)
     message = ""
@@ -1603,6 +1640,7 @@ async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dic
             "Return JSON only with keys message, quote, quote_source. "
             "message rules: plain text, natural flow, starts with the provided greeting, includes date and time. "
             "quote rules: provide one Alan Watts quote and avoid repeating any recent quotes provided. "
+            f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER (message + quote line). "
             "No markdown, no emojis."
         )
         user_payload = {
@@ -1705,6 +1743,10 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         "tts": [],
         "input_text": [],
         "notify_services": [],
+        "weather_sensors": [],
+        "weather_temp": [],
+        "weather_wind": [],
+        "weather_rain": [],
     }
     try:
         ha = _ha_config()
@@ -1729,6 +1771,23 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         name = _text(attrs.get("friendly_name"))
         return f"{name} ({entity_id})" if name else entity_id
 
+    def _is_temp_sensor(entity_id_lower: str, device_class: str, unit: str) -> bool:
+        if device_class == "temperature":
+            return True
+        if unit in {"°c", "°f", "c", "f"}:
+            return True
+        return any(token in entity_id_lower for token in ("temp", "temperature"))
+
+    def _is_wind_sensor(entity_id_lower: str, device_class: str) -> bool:
+        if device_class == "wind_speed":
+            return True
+        return "wind" in entity_id_lower
+
+    def _is_rain_sensor(entity_id_lower: str, device_class: str) -> bool:
+        if device_class in {"precipitation", "precipitation_intensity"}:
+            return True
+        return any(token in entity_id_lower for token in ("rain", "precip"))
+
     for row in states:
         if not isinstance(row, dict):
             continue
@@ -1737,6 +1796,11 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
             continue
         label = _label(row)
         lower = entity_id.lower()
+        attrs = row.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        device_class = _text(attrs.get("device_class")).lower()
+        unit = _text(attrs.get("unit_of_measurement")).lower()
         if lower.startswith("camera."):
             catalog["cameras"].append((entity_id, label))
         if lower.startswith("media_player."):
@@ -1745,6 +1809,14 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
             catalog["tts"].append((entity_id, label))
         if lower.startswith("input_text."):
             catalog["input_text"].append((entity_id, label))
+        if lower.startswith(("sensor.", "weather.")):
+            catalog["weather_sensors"].append((entity_id, label))
+            if _is_temp_sensor(lower, device_class, unit):
+                catalog["weather_temp"].append((entity_id, label))
+            if _is_wind_sensor(lower, device_class):
+                catalog["weather_wind"].append((entity_id, label))
+            if _is_rain_sensor(lower, device_class):
+                catalog["weather_rain"].append((entity_id, label))
         if lower.startswith(("binary_sensor.", "sensor.", "event.", "button.", "switch.", "input_boolean.")):
             catalog["triggers"].append((entity_id, label))
             if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
@@ -1782,6 +1854,12 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         catalog[key] = sorted(catalog[key], key=lambda row: row[1].lower())
     if not catalog["doorbell_triggers"]:
         catalog["doorbell_triggers"] = list(catalog["triggers"])
+    if not catalog["weather_temp"]:
+        catalog["weather_temp"] = list(catalog["weather_sensors"])
+    if not catalog["weather_wind"]:
+        catalog["weather_wind"] = list(catalog["weather_sensors"])
+    if not catalog["weather_rain"]:
+        catalog["weather_rain"] = list(catalog["weather_sensors"])
 
     with _ENTITY_CACHE_LOCK:
         _ENTITY_CACHE["ts"] = now_ts
@@ -2251,6 +2329,21 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
         placeholder="(None)",
         current_value=_text(rule.get("input_text_entity")),
     )
+    weather_temp_options = _choices_from_pairs(
+        catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
+        placeholder="(Select temperature sensor)",
+        current_value=_text(rule.get("weather_temp_entity")),
+    )
+    weather_wind_options = _choices_from_pairs(
+        catalog.get("weather_wind") or catalog.get("weather_sensors") or [],
+        placeholder="(Select wind sensor)",
+        current_value=_text(rule.get("weather_wind_entity")),
+    )
+    weather_rain_options = _choices_from_pairs(
+        catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
+        placeholder="(Select rain sensor)",
+        current_value=_text(rule.get("weather_rain_entity")),
+    )
     show_events = {"source_key": "brief_kind", "equals": "events_query_brief"}
     show_weather = {"source_key": "brief_kind", "equals": "weather_brief"}
     show_zen = {"source_key": "brief_kind", "equals": "zen_greeting"}
@@ -2336,6 +2429,30 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                         "type": "number",
                         "value": _as_int(rule.get("hours"), 12, minimum=1, maximum=72),
                         "show_when": show_weather,
+                    },
+                    {
+                        "key": "weather_temp_entity",
+                        "label": "Temperature Sensor",
+                        "type": "select",
+                        "options": weather_temp_options,
+                        "value": _text(rule.get("weather_temp_entity")),
+                        "show_when": show_weather,
+                    },
+                    {
+                        "key": "weather_wind_entity",
+                        "label": "Wind Sensor",
+                        "type": "select",
+                        "options": weather_wind_options,
+                        "value": _text(rule.get("weather_wind_entity")),
+                        "show_when": show_weather,
+                    },
+                    {
+                        "key": "weather_rain_entity",
+                        "label": "Rain Sensor",
+                        "type": "select",
+                        "options": weather_rain_options,
+                        "value": _text(rule.get("weather_rain_entity")),
+                        "show_when": show_weather,
                     }
                 ],
             },
@@ -2386,7 +2503,7 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                         "key": "max_chars",
                         "label": "Max Characters",
                         "type": "number",
-                        "value": _as_int(rule.get("max_chars"), 220, minimum=80, maximum=240),
+                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
                         "show_when": show_alan,
                     },
                     {
@@ -2436,6 +2553,18 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
+    weather_temp_options = _choices_from_pairs(
+        catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
+        placeholder="(Select temperature sensor)",
+    )
+    weather_wind_options = _choices_from_pairs(
+        catalog.get("weather_wind") or catalog.get("weather_sensors") or [],
+        placeholder="(Select wind sensor)",
+    )
+    weather_rain_options = _choices_from_pairs(
+        catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
+        placeholder="(Select rain sensor)",
+    )
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
     )
@@ -2716,6 +2845,30 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when_all": show_brief_weather,
                 },
                 {
+                    "key": "weather_temp_entity",
+                    "label": "Temperature Sensor (weather brief)",
+                    "type": "select",
+                    "options": weather_temp_options,
+                    "value": "",
+                    "show_when_all": show_brief_weather,
+                },
+                {
+                    "key": "weather_wind_entity",
+                    "label": "Wind Sensor (weather brief)",
+                    "type": "select",
+                    "options": weather_wind_options,
+                    "value": "",
+                    "show_when_all": show_brief_weather,
+                },
+                {
+                    "key": "weather_rain_entity",
+                    "label": "Rain Sensor (weather brief)",
+                    "type": "select",
+                    "options": weather_rain_options,
+                    "value": "",
+                    "show_when_all": show_brief_weather,
+                },
+                {
                     "key": "include_date",
                     "label": "Include Date (zen)",
                     "type": "checkbox",
@@ -2740,7 +2893,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "key": "max_chars",
                     "label": "Max Characters",
                     "type": "number",
-                    "value": 220,
+                    "value": 100,
                     "show_when_all": show_brief_zen_or_alan,
                 },
             ],
@@ -2906,6 +3059,15 @@ def _build_rule_from_values(
                 12,
                 minimum=1,
                 maximum=72,
+            ),
+            "weather_temp_entity": _text(
+                _value(values, payload, "weather_temp_entity", previous.get("weather_temp_entity", ""))
+            ),
+            "weather_wind_entity": _text(
+                _value(values, payload, "weather_wind_entity", previous.get("weather_wind_entity", ""))
+            ),
+            "weather_rain_entity": _text(
+                _value(values, payload, "weather_rain_entity", previous.get("weather_rain_entity", ""))
             ),
             "include_date": _bool(
                 _value(values, payload, "include_date", previous.get("include_date", False)),
