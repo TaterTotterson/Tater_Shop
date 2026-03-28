@@ -284,6 +284,33 @@
       "sha256": "c213bb956fd6200ec3d73df29001bd6d4bf6dc327463e2534de61b801e493fc4"
     },
     {
+      "id": "ha_camera_area",
+      "name": "Home Assistant Camera Area",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Find cameras in a Home Assistant area and describe what they see.",
+      "portals": [
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc"
+      ],
+      "notifier": false,
+      "settings_category": "Home Assistant Control",
+      "tags": [
+        "homeassistant",
+        "camera",
+        "area"
+      ],
+      "entry": "verba/ha_camera_area.py",
+      "sha256": "3f0d3b786296d58890eaf1de4ddadcfe12813df55f0045f6c9f592e1d9053d8c"
+    },
+    {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
       "version": "1.0.1",
