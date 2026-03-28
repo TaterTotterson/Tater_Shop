@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.13"
+__version__ = "1.0.15"
 
 load_dotenv()
 
@@ -1286,10 +1286,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
         source = _text(event.get("source"))
         area = _text(data.get("area")) or source
         event_type = _text(event.get("type"))
-        level = _text(event.get("level") or "info")
         entity_id = _text(event.get("entity_id"))
-        reason = _text(data.get("reason"))
-        trigger_entity = _text(data.get("trigger_entity"))
         title = _text(event.get("title"))
         if not title and event_type:
             title = event_type.replace("_", " ").title()
@@ -1298,8 +1295,8 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
         subtitle_parts = [event_time]
         if area:
             subtitle_parts.append(f"Area: {area}")
-        if event_type:
-            subtitle_parts.append(f"Type: {event_type}")
+        if entity_id:
+            subtitle_parts.append(f"Entity: {entity_id}")
         subtitle = " • ".join([part for part in subtitle_parts if part])
 
         fields: List[Dict[str, Any]] = []
@@ -1330,79 +1327,11 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             fields.append(
                 {
                     "key": f"description_{idx}",
-                    "label": "Description",
+                    "label": "",
                     "type": "textarea",
                     "value": description,
                     "read_only": True,
-                }
-            )
-        if entity_id:
-            fields.append(
-                {
-                    "key": f"entity_{idx}",
-                    "label": "Entity",
-                    "type": "text",
-                    "value": entity_id,
-                    "read_only": True,
-                }
-            )
-        if trigger_entity:
-            fields.append(
-                {
-                    "key": f"trigger_{idx}",
-                    "label": "Trigger",
-                    "type": "text",
-                    "value": trigger_entity,
-                    "read_only": True,
-                }
-            )
-
-        detail_rows: List[Dict[str, str]] = []
-        for label, value in [
-            ("Time", event_time),
-            ("Area", area),
-            ("Source", source),
-            ("Type", event_type),
-            ("Level", level),
-            ("Entity", entity_id),
-            ("Trigger", trigger_entity),
-            ("Reason", reason),
-        ]:
-            token = _text(value)
-            if token:
-                detail_rows.append({"field": label, "value": token})
-        popup_fields: List[Dict[str, Any]] = []
-        if detail_rows:
-            popup_fields.append(
-                {
-                    "key": f"details_{idx}",
-                    "label": "Details",
-                    "type": "table",
-                    "columns": [
-                        {"key": "field", "label": "Field"},
-                        {"key": "value", "label": "Value"},
-                    ],
-                    "rows": detail_rows,
-                }
-            )
-        if description:
-            popup_fields.append(
-                {
-                    "key": f"description_popup_{idx}",
-                    "label": "Description",
-                    "type": "textarea",
-                    "value": description,
-                    "read_only": True,
-                }
-            )
-        if _text(snapshot.get("snapshot_id")) and not snapshot.get("data_url"):
-            popup_fields.append(
-                {
-                    "key": f"snapshot_status_popup_{idx}",
-                    "label": "Snapshot",
-                    "type": "text",
-                    "value": f"Stored snapshot unavailable ({_text(snapshot.get('snapshot_id'))})",
-                    "read_only": True,
+                    "hide_label": True,
                 }
             )
 
@@ -1417,9 +1346,6 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                 "fields_dropdown": False,
                 "sections_in_dropdown": False,
                 "fields": fields,
-                "popup_fields": popup_fields,
-                "settings_label": "More Settings",
-                "settings_title": f"{title} • {event_time}",
             }
         )
     return items
@@ -2844,6 +2770,12 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             rule["updated_at"] = now_ts
             _save_rule(redis_client, rule)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error="")
+            summary = _compact(_text(result.get("summary")), limit=180)
+            rule_kind = _text(rule.get("kind")) or "unknown"
+            if summary:
+                logger.info("[awareness] rule %s (%s) ran via %s: %s", rule_id, rule_kind, reason, summary)
+            else:
+                logger.info("[awareness] rule %s (%s) ran via %s", rule_id, rule_kind, reason)
         except Exception as exc:
             now_ts = time.time()
             logger.exception("[awareness] rule execution failed for %s", rule_id)
@@ -2937,6 +2869,7 @@ async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
                         raise RuntimeError(f"HA websocket auth failed: {auth_data}")
                     await ws.send_json({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})
                     _runtime_set(redis_client, ws_connected=True, ws_url=ws_url)
+                    logger.info("[awareness] Home Assistant websocket connected: %s", ws_url)
                     while not (stop_event and stop_event.is_set()):
                         try:
                             msg = await ws.receive(timeout=1.0)
@@ -2975,6 +2908,8 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 
 
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
+    rules = _load_rules(redis_client)
+    enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
     _runtime_set(
         redis_client,
         started_at=time.time(),
@@ -2982,6 +2917,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         queue_depth=_queue_depth(redis_client),
         last_error="",
     )
+    logger.info("[awareness] core started (rules=%d enabled=%d)", len(rules), enabled_rules)
     tasks = [
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
@@ -2996,6 +2932,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         _runtime_set(redis_client, ws_connected=False)
+        logger.info("[awareness] core stopped")
 
 
 def run(stop_event=None):

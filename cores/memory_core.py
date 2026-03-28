@@ -744,7 +744,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.17"
+__version__ = "1.0.18"
 
 
 load_dotenv()
@@ -1989,6 +1989,8 @@ def _sleep_with_stop(seconds: int, stop_event) -> None:
 
 def run(stop_event=None):
     llm_client = None
+    llm_ready_logged = False
+    settings_logged = False
     logger.info("[memory_core] started")
 
     while True:
@@ -1997,11 +1999,17 @@ def run(stop_event=None):
 
         settings = _load_settings()
         interval_seconds = _as_int(settings.get("interval_seconds"), 180, min_value=30, max_value=3600)
+        if not settings_logged:
+            settings_logged = True
+            logger.info("[memory_core] extraction interval set to %ss", interval_seconds)
         cycle_start = time.time()
 
         if llm_client is None:
             try:
                 llm_client = get_llm_client_from_env()
+                if not llm_ready_logged and llm_client is not None:
+                    llm_ready_logged = True
+                    logger.info("[memory_core] LLM client initialized")
             except Exception as exc:
                 logger.warning("[memory_core] failed to initialize LLM client: %s", exc)
                 llm_client = None
@@ -2026,6 +2034,18 @@ def run(stop_event=None):
                     "updated_docs": str(stats.get("updated_docs") or 0),
                 },
             )
+            if (
+                int(stats.get("processed_messages") or 0) > 0
+                or int(stats.get("updated_facts") or 0) > 0
+                or int(stats.get("updated_docs") or 0) > 0
+            ):
+                logger.info(
+                    "[memory_core] cycle complete: scopes=%s processed=%s facts=%s docs=%s",
+                    int(stats.get("scanned_scopes") or 0),
+                    int(stats.get("processed_messages") or 0),
+                    int(stats.get("updated_facts") or 0),
+                    int(stats.get("updated_docs") or 0),
+                )
         except Exception as exc:
             logger.exception("[memory_core] cycle failed: %s", exc)
 
