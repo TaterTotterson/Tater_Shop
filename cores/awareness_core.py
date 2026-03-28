@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.15"
+__version__ = "1.0.16"
 
 load_dotenv()
 
@@ -2231,6 +2231,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "source": "items",
                 "item_group": "event",
                 "selector": False,
+                "page_size": 24,
                 "empty_message": "No stored awareness events found.",
             },
             {
