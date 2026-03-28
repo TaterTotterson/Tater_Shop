@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.31"
+__version__ = "1.0.32"
 
 load_dotenv()
 
@@ -523,6 +523,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state")),
+                "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
+                "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Entry Sensor"),
                 "priority": "high"
                 if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
@@ -1291,6 +1293,8 @@ async def _execute_entry_sensor_rule(
     action_label, action_token = _entry_state_action((new_state or {}).get("state"))
     sensor_name = _friendly_entity_name(entity_id, new_state or old_state)
     summary = _compact(f"{sensor_name} {action_label}.", limit=120)
+    spoken_action = "open" if action_token == "open" else ("closed" if action_token == "closed" else action_label)
+    spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
     event_payload = {
@@ -1311,6 +1315,27 @@ async def _execute_entry_sensor_rule(
         },
     }
     _append_event(redis_client, source=area, payload=event_payload)
+    players = _normalize_players(rule.get("players"))
+    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
+    tts_result: Dict[str, Any] = {
+        "ok": True,
+        "sent_count": 0,
+        "skipped": "open_only" if action_token != "open" else "no_players",
+    }
+    if action_token == "open" and players:
+        try:
+            ha = _ha_config()
+            await _tts_speak(
+                ha_base=ha["base"],
+                token=ha["token"],
+                tts_entity=tts_entity,
+                players=players,
+                message=spoken_line,
+            )
+            tts_result = {"ok": True, "sent_count": len(players)}
+        except Exception as exc:
+            logger.warning("[awareness] entry sensor TTS failed for %s: %s", entity_id, exc)
+            tts_result = {"ok": False, "sent_count": 0, "error": str(exc)}
     notify_result: Dict[str, Any]
     if action_token != "open":
         notify_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
@@ -1340,6 +1365,8 @@ async def _execute_entry_sensor_rule(
         "sensor_type": sensor_type,
         "entity_id": entity_id,
         "area": area,
+        "players": players,
+        "tts": tts_result,
         "notification": notify_result,
     }
 
@@ -2529,6 +2556,15 @@ def _entry_sensor_form(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
     )
+    tts_options = _choices_from_pairs(
+        catalog.get("tts") or [],
+        placeholder="(Select TTS entity)",
+        current_value=_text(rule.get("tts_entity")),
+    )
+    media_player_options = _multiselect_choices_from_pairs(
+        catalog.get("media_players") or [],
+        current_values=rule.get("players"),
+    )
     return {
         "id": rule["id"],
         "group": "entry_sensor",
@@ -2570,6 +2606,26 @@ def _entry_sensor_form(
             },
         ],
         "sections": [
+            {
+                "label": "TTS (open only)",
+                "fields": [
+                    {
+                        "key": "tts_entity",
+                        "label": "TTS Entity",
+                        "type": "select",
+                        "options": tts_options,
+                        "value": _text(rule.get("tts_entity") or "tts.piper"),
+                    },
+                    {
+                        "key": "players",
+                        "label": "Media Players",
+                        "type": "multiselect",
+                        "description": "When sensor opens, speak an alert on selected media_player entities.",
+                        "options": media_player_options,
+                        "value": _normalize_players(rule.get("players")),
+                    },
+                ],
+            },
             {
                 "label": "Notifications",
                 "fields": [
@@ -2869,6 +2925,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_entry = {"source_key": "kind", "equals": "entry_sensor"}
+    show_doorbell_or_entry = {"source_key": "kind", "any_of": ["doorbell", "entry_sensor"]}
     show_brief = {"source_key": "kind", "equals": "brief"}
     show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
     show_camera_or_doorbell_or_entry = {"source_key": "kind", "any_of": ["camera", "doorbell", "entry_sensor"]}
@@ -3075,7 +3132,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "label": "Notification Title",
                     "type": "text",
                     "value": "Camera Event",
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
                     "key": "priority",
@@ -3083,21 +3140,21 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "type": "select",
                     "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                     "value": "high",
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
                     "key": "notifications",
                     "label": "Send Notifications",
                     "type": "checkbox",
                     "value": True,
-                    "show_when": show_doorbell,
+                    "show_when": show_doorbell_or_entry,
                 },
                 {
                     "key": "api_notification",
                     "label": "VoicePE Notifications",
                     "type": "checkbox",
                     "value": True,
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
                     "key": "device_services",
@@ -3105,7 +3162,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "type": "multiselect",
                     "options": notify_service_options,
                     "value": [],
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
                     "key": "tts_entity",
@@ -3113,16 +3170,16 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "type": "select",
                     "options": tts_options,
                     "value": "",
-                    "show_when": show_doorbell,
+                    "show_when": show_doorbell_or_entry,
                 },
                 {
                     "key": "players",
                     "label": "Media Players",
                     "type": "multiselect",
-                    "description": "Select one or more media_player entities for doorbell TTS.",
+                    "description": "Select one or more media_player entities for doorbell/entry sensor TTS.",
                     "options": media_player_options,
                     "value": [],
-                    "show_when": show_doorbell,
+                    "show_when": show_doorbell_or_entry,
                 },
                 {
                     "key": "brief_kind",

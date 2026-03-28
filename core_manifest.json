@@ -19,7 +19,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "1.0.31",
+      "version": "1.0.32",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "bc7c980c59260946113536c72fc49752ef1ef42222bf85bb43f3ed57a281c382"
+      "sha256": "cb2244abf8a1ecebf2efb3cc27b760f0c4b6db2c3439d371e90f5288d8a7190b"
     },
     {
       "id": "memory",
