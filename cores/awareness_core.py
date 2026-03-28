@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.30"
+__version__ = "1.0.31"
 
 load_dotenv()
 
@@ -523,6 +523,13 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state")),
+                "title": _text(raw.get("title") or "Entry Sensor"),
+                "priority": "high"
+                if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
+                else "normal",
+                "notifications": _bool(raw.get("notifications"), False),
+                "api_notification": _bool(raw.get("api_notification"), True),
+                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
         return base
@@ -1304,12 +1311,36 @@ async def _execute_entry_sensor_rule(
         },
     }
     _append_event(redis_client, source=area, payload=event_payload)
+    notify_result: Dict[str, Any]
+    if action_token != "open":
+        notify_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
+    elif not _bool(rule.get("notifications"), False):
+        notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+    else:
+        device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+        api_notification = _bool(rule.get("api_notification"), True)
+        notify_result = await _notify_homeassistant(
+            title=_text(rule.get("title") or "Entry Sensor"),
+            message=summary,
+            priority=_text(rule.get("priority") or "normal"),
+            api_notification=api_notification,
+            device_services=device_services,
+            origin={
+                "platform": "awareness_core",
+                "scope": "entry_sensor_rule",
+                "rule_id": rule.get("id"),
+                "entity_id": entity_id,
+                "sensor_type": sensor_type,
+                "area": area,
+            },
+        )
     return {
         "ok": True,
         "summary": summary,
         "sensor_type": sensor_type,
         "entity_id": entity_id,
         "area": area,
+        "notification": notify_result,
     }
 
 
@@ -2494,6 +2525,10 @@ def _entry_sensor_form(
     sensor_type = _text(rule.get("sensor_type") or "door").lower()
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
+    notify_service_options = _multiselect_choices_from_pairs(
+        catalog.get("notify_services") or [],
+        current_values=rule.get("device_services") or rule.get("device_service"),
+    )
     return {
         "id": rule["id"],
         "group": "entry_sensor",
@@ -2533,6 +2568,45 @@ def _entry_sensor_form(
                 "options": area_options,
                 "value": _text(rule.get("area")),
             },
+        ],
+        "sections": [
+            {
+                "label": "Notifications",
+                "fields": [
+                    {
+                        "key": "notifications",
+                        "label": "Send Notifications (open only)",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("notifications"), False),
+                    },
+                    {
+                        "key": "title",
+                        "label": "Notification Title",
+                        "type": "text",
+                        "value": _text(rule.get("title") or "Entry Sensor"),
+                    },
+                    {
+                        "key": "priority",
+                        "label": "Priority",
+                        "type": "select",
+                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
+                        "value": _text(rule.get("priority") or "normal"),
+                    },
+                    {
+                        "key": "api_notification",
+                        "label": "VoicePE Notifications",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("api_notification"), True),
+                    },
+                    {
+                        "key": "device_services",
+                        "label": "Phone Notify Services",
+                        "type": "multiselect",
+                        "options": notify_service_options,
+                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
+                    },
+                ],
+            }
         ],
     }
 
@@ -3241,8 +3315,9 @@ def _build_rule_from_values(
         title_default = "Entry Sensor"
     else:
         title_default = "Camera Event"
-    priority_default = "normal" if kind == "doorbell" else "high"
+    priority_default = "normal" if kind in {"doorbell", "entry_sensor"} else "high"
     trigger_to_state_default = "on" if kind in {"camera", "doorbell"} else ""
+    notifications_default = False if kind == "entry_sensor" else True
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
     device_services_value = _value(
         values,
@@ -3302,8 +3377,8 @@ def _build_rule_from_values(
             "tts_entity": _text(_value(values, payload, "tts_entity", previous.get("tts_entity", "tts.piper"))),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
-                _value(values, payload, "notifications", previous.get("notifications", True)),
-                True,
+                _value(values, payload, "notifications", previous.get("notifications", notifications_default)),
+                notifications_default,
             ),
             "sensor_type": _text(_value(values, payload, "sensor_type", previous.get("sensor_type", "door"))).lower(),
             "sensor_entity": _text(

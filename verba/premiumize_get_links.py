@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeGetLinksPlugin(ToolVerba):
     name = "premiumize_get_links"
     verba_name = "Premiumize Get Links"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Premiumize Get Links"
     settings_category = "Premiumize"
@@ -30,7 +30,7 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         "Retrieve Premiumize direct/stream links from a source or cached file selection."
     )
     verba_dec = (
-        "Get Premiumize stream/download links by magnet/URL or by chosen cloud item."
+        "Get Premiumize stream/download links by magnet/URL."
     )
     waiting_prompt_template = (
         "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "

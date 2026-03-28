@@ -97,20 +97,7 @@ class UnifiNetworkLookupPlugin(ToolVerba):
         "Only output that message."
     )
 
-    required_settings = {
-        "UNIFI_BASE_URL": {
-            "label": "UniFi Console Base URL",
-            "type": "string",
-            "default": "https://10.4.20.1",
-            "description": "Base URL of your UniFi console (UDM/CloudKey), e.g. https://10.4.20.1",
-        },
-        "UNIFI_API_KEY": {
-            "label": "UniFi API Key",
-            "type": "string",
-            "default": "",
-            "description": "Create in UniFi Network → Settings → Control Plane → Integrations (API Key).",
-        },
-    }
+    required_settings = {}
 
     # ---- internal defaults (not exposed as settings) ----
     _DEFAULT_VERIFY_SSL = False
@@ -144,14 +131,10 @@ class UnifiNetworkLookupPlugin(ToolVerba):
     # Settings / HTTP helpers
     # -------------------------
     def _get_settings(self) -> Dict[str, str]:
-        s = (
-            redis_client.hgetall(f"verba_settings:{self.pretty_name}") or
-            redis_client.hgetall(f"verba_settings:{self.settings_category}") or
-            redis_client.hgetall(f"verba_settings: {self.pretty_name}") or
-            redis_client.hgetall(f"verba_settings: {self.settings_category}") or
-            {}
-        )
-        return s or {}
+        return {
+            "UNIFI_BASE_URL": (redis_client.get("tater:unifi_network:base_url") or "https://10.4.20.1").strip().rstrip("/"),
+            "UNIFI_API_KEY": (redis_client.get("tater:unifi_network:api_key") or "").strip(),
+        }
 
     def _base(self, s: Dict[str, str]) -> str:
         return (s.get("UNIFI_BASE_URL") or "https://10.4.20.1").rstrip("/")
@@ -159,7 +142,7 @@ class UnifiNetworkLookupPlugin(ToolVerba):
     def _api_key(self, s: Dict[str, str]) -> str:
         key = (s.get("UNIFI_API_KEY") or "").strip()
         if not key:
-            raise ValueError("UNIFI_API_KEY is missing in UniFi Network plugin settings.")
+            raise ValueError("UNIFI API key is missing. Set it in WebUI Settings -> Integrations -> UniFi Network.")
         return key
 
     def _headers(self, api_key: str) -> Dict[str, str]:

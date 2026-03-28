@@ -1224,9 +1224,9 @@
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
-      "description": "Get Premiumize stream/download links by magnet/URL or by chosen cloud item.",
+      "description": "Get Premiumize stream/download links by magnet/URL.",
       "portals": [
         "discord",
         "webui",
@@ -1245,7 +1245,7 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "3375a937313c73bb551a330ff62f288ea19215ac3646194ed02d99f7925f9540"
+      "sha256": "7e11312a8302ef072e1c178c8eae6dc06902db00eab83e6cafeb1cfdc651f5a6"
     },
     {
       "id": "premiumize_list_files",
@@ -1383,7 +1383,7 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "c4cb3c087b9c7f9bb3d94b8a5201e494a0f219207890936af37e89965659d9d6"
+      "sha256": "2d519b63d71381979c1dd1be8cec0df0a19f3110a857dfd637eb007ed011b16a"
     },
     {
       "id": "unifi_network_devices",
@@ -1409,7 +1409,7 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "98613fa0cd4d5294a5ec27b8cbd63364bae08ea8f709900a3cc545c1cf093b5b"
+      "sha256": "e7d2ec8e0ee96eb58fc5a03004a4fbb4738758c3eb6e8e954d371109af2dab02"
     },
     {
       "id": "unifi_network_health",
@@ -1435,7 +1435,7 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "a81c5c24b6594d3983ef5d75338832285c68112c315de0520c2b11a8b747bfaf"
+      "sha256": "53a2eef9766ea134bccea7f2257e267a55209d09a28411d702c440db00aa60a2"
     },
     {
       "id": "unifi_network_lookup",
@@ -1461,7 +1461,7 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "a8529cb3c1f2892a12f78ba02cb53cec7972c5064774b4b915c90c045211a57b"
+      "sha256": "fa729861930c85e62114c5d62cff23b21bc0cd9fba647bb753ac4da38755854c"
     },
     {
       "id": "unifi_protect_area",
@@ -1487,7 +1487,7 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "2ea6375a4297bfe93f345f9206c12483f473dff935bbd8e56ae1af02a4400f36"
+      "sha256": "1f8804c4ae768e8945e81e222fed1732037b8cfbffc03279e3fde96d681494cd"
     },
     {
       "id": "unifi_protect_camera",
@@ -1513,7 +1513,7 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "1e26fa55d1383bd53c0570e5ffb1edad63f1e2ecdf428fdf73f1c7ca1f3ccd35"
+      "sha256": "bbba717e9b8ee3c9f7710bb082eb0f0c7b97d2ab2d9263c15e1ee14ea0262e8e"
     },
     {
       "id": "unifi_protect_camera_info",
@@ -1539,7 +1539,7 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "e9639c577e423b8d32e0670ccc79dc91c059c55f3a5f2320be88710f91cba502"
+      "sha256": "9b5a41ece7395d0d19aa63dfdbf37ae9f562ff96e0cade91e2aee8585ef16038"
     },
     {
       "id": "unifi_protect_sensors",
@@ -1565,7 +1565,7 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "2ab9631ffdbe66dc46e4776c2a701ab8e47cec06f5d0578e11f074ee5cb0a788"
+      "sha256": "d7785c9a76ddb36e6a3a9749bf7edc5bb067622d213c312f0f669e2ec0158617"
     },
     {
       "id": "voicepe_remote_timer",
