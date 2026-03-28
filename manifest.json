@@ -598,9 +598,9 @@
     {
       "id": "irc_admin_op",
       "name": "IRC Admin OP",
-      "version": "1.3.0",
+      "version": "1.3.1",
       "min_tater_version": "59",
-      "description": "Run admin-gated IRC op me / voice me commands.",
+      "description": "Gives the user op or voice in the current IRC channel.",
       "portals": [
         "irc"
       ],
@@ -611,14 +611,14 @@
         "admin"
       ],
       "entry": "verba/irc_admin_op.py",
-      "sha256": "60310910a9160ea6115906898495236f189196fc7799fcaeb92e72c208ea45eb"
+      "sha256": "cd72156d57a097ee880813b261dea53c0bc223cf466a8bbef80f651927e60044"
     },
     {
       "id": "irc_admin_slap",
       "name": "IRC Admin Slap",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
-      "description": "Send a playful trout slap action in IRC (admin-only).",
+      "description": "Slaps the requested user in the current IRC channel.",
       "portals": [
         "irc"
       ],
@@ -629,14 +629,14 @@
         "admin"
       ],
       "entry": "verba/irc_admin_slap.py",
-      "sha256": "4f4a4c3197e3c4a2d844420f30153afcec4a867bcd7b85d1e2c7659d49e1d70c"
+      "sha256": "4fa54b49352f9df2901aad3d20b86e4ea9ac32e6b1fb3ea3135491ffe8a7b462"
     },
     {
       "id": "irc_admin_topic",
       "name": "IRC Admin Topic",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
-      "description": "Set the current IRC channel topic (admin-only).",
+      "description": "Sets the current IRC channel topic to the requested text.",
       "portals": [
         "irc"
       ],
@@ -647,7 +647,7 @@
         "admin"
       ],
       "entry": "verba/irc_admin_topic.py",
-      "sha256": "ec58f91ba8de15fcf8197b1719bb941400b9433107bb7b5cc9007f47abd6bccb"
+      "sha256": "ba8d4a2ff7b5f4b6c005007efc460c266bfaeebd0f16edb341b58ebeb51ae12a"
     },
     {
       "id": "jackett_recent_uploads",

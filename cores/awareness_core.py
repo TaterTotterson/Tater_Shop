@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.28"
+__version__ = "1.0.29"
 
 load_dotenv()
 
@@ -430,7 +430,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         return None
 
     kind = _text(raw.get("kind")).lower()
-    if kind not in {"camera", "doorbell", "brief"}:
+    if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:
         return None
 
     rule_id = _text(raw.get("id")) or str(uuid.uuid4())
@@ -500,6 +500,29 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "notifications": _bool(raw.get("notifications"), True),
                 "api_notification": _bool(raw.get("api_notification"), True),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+            }
+        )
+        return base
+
+    if kind == "entry_sensor":
+        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
+        sensor_entity = _text(raw.get("sensor_entity"))
+        if sensor_entity and sensor_entity not in trigger_entities:
+            trigger_entities = [sensor_entity]
+        if not trigger_entities:
+            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
+        sensor_type = _text(raw.get("sensor_type") or "door").lower()
+        if sensor_type not in {"door", "window", "garage"}:
+            sensor_type = "door"
+        area_value = _text(raw.get("area"))
+        base.update(
+            {
+                "sensor_entity": trigger_entities[0] if trigger_entities else sensor_entity,
+                "sensor_type": sensor_type,
+                "area": area_value or sensor_type,
+                "trigger_entities": trigger_entities,
+                "trigger_entity": trigger_entities[0] if trigger_entities else "",
+                "trigger_to_state": _text(raw.get("trigger_to_state")),
             }
         )
         return base
@@ -676,6 +699,26 @@ def _rule_matches_event(rule: Dict[str, Any], *, entity_id: str, new_state: Dict
     if trigger_entities and event_entity not in trigger_entities:
         return False
     return _state_matches_custom(rule, new_state, old_state)
+
+
+def _entry_state_action(state_value: Any) -> Tuple[str, str]:
+    state = _text(state_value).lower()
+    if state in {"on", "open", "opening", "unlocked"}:
+        return "opened", "open"
+    if state in {"off", "closed", "closing", "locked"}:
+        return "closed", "closed"
+    return f"changed to {state or 'unknown'}", "changed"
+
+
+def _friendly_entity_name(entity_id: str, state_obj: Dict[str, Any]) -> str:
+    attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    friendly = _text(attrs.get("friendly_name"))
+    if friendly:
+        return friendly
+    token = _entity_object_id(entity_id).replace("_", " ").strip()
+    return token or entity_id
 
 
 def _camera_cooldown_key(camera_entity: str) -> str:
@@ -1225,6 +1268,51 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     }
 
 
+async def _execute_entry_sensor_rule(
+    rule: Dict[str, Any],
+    llm_client: Any,
+    reason: str,
+    event: Dict[str, Any],
+) -> Dict[str, Any]:
+    del llm_client
+    sensor_type = _text(rule.get("sensor_type") or "door").lower()
+    if sensor_type not in {"door", "window", "garage"}:
+        sensor_type = "door"
+    entity_id = _text(event.get("entity_id")) or _text(rule.get("sensor_entity"))
+    new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
+    old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
+    action_label, action_token = _entry_state_action((new_state or {}).get("state"))
+    sensor_name = _friendly_entity_name(entity_id, new_state or old_state)
+    summary = _compact(f"{sensor_name} {action_label}.", limit=120)
+    title = _compact(f"{sensor_name} {action_label}", limit=90)
+    area = _text(rule.get("area")) or sensor_name
+    event_payload = {
+        "source": _slug(area),
+        "title": title,
+        "type": f"{sensor_type}_sensor_{action_token}",
+        "message": summary,
+        "entity_id": entity_id,
+        "ha_time": _now_iso(),
+        "level": "info",
+        "data": {
+            "area": area,
+            "sensor_type": sensor_type,
+            "reason": reason,
+            "trigger_entity": entity_id,
+            "new_state": _text((new_state or {}).get("state")),
+            "old_state": _text((old_state or {}).get("state")),
+        },
+    }
+    _append_event(redis_client, source=area, payload=event_payload)
+    return {
+        "ok": True,
+        "summary": summary,
+        "sensor_type": sensor_type,
+        "entity_id": entity_id,
+        "area": area,
+    }
+
+
 def _event_window(timeframe: str) -> Tuple[datetime, datetime, str]:
     now = datetime.now()
     token = _text(timeframe).lower()
@@ -1722,6 +1810,8 @@ async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, even
         return await _execute_camera_rule(rule, llm_client, reason, event)
     if kind == "doorbell":
         return await _execute_doorbell_rule(rule, llm_client, reason, event)
+    if kind == "entry_sensor":
+        return await _execute_entry_sensor_rule(rule, llm_client, reason, event)
     if kind == "brief":
         return await _execute_brief_rule(rule, llm_client)
     raise ValueError(f"Unsupported rule kind: {kind}")
@@ -1747,6 +1837,7 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         "weather_temp": [],
         "weather_wind": [],
         "weather_rain": [],
+        "entry_sensors": [],
     }
     try:
         ha = _ha_config()
@@ -1817,6 +1908,12 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
                 catalog["weather_wind"].append((entity_id, label))
             if _is_rain_sensor(lower, device_class):
                 catalog["weather_rain"].append((entity_id, label))
+        if lower.startswith(("binary_sensor.", "sensor.", "cover.")):
+            name_hint = f"{lower} {_text(attrs.get('friendly_name')).lower()}"
+            if device_class in {"door", "window", "garage_door", "opening"} or any(
+                token in name_hint for token in ("door", "window", "garage", "contact")
+            ):
+                catalog["entry_sensors"].append((entity_id, label))
         if lower.startswith(("binary_sensor.", "sensor.", "event.", "button.", "switch.", "input_boolean.")):
             catalog["triggers"].append((entity_id, label))
             if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
@@ -2323,6 +2420,65 @@ def _doorbell_form(
     }
 
 
+def _entry_sensor_form(
+    rule: Dict[str, Any],
+    catalog: Dict[str, List[Tuple[str, str]]],
+    rules: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    sensor_options = _choices_from_pairs(
+        catalog.get("entry_sensors") or catalog.get("triggers") or [],
+        placeholder="(Select door/window/garage sensor)",
+        current_value=_text(rule.get("sensor_entity") or rule.get("trigger_entity")),
+    )
+    area_options = _area_options(
+        rules,
+        current_value=_text(rule.get("area")),
+    )
+    sensor_type = _text(rule.get("sensor_type") or "door").lower()
+    if sensor_type not in {"door", "window", "garage"}:
+        sensor_type = "door"
+    return {
+        "id": rule["id"],
+        "group": "entry_sensor",
+        "title": _text(rule.get("name")) or "Entry sensor rule",
+        "subtitle": _rule_subtitle(rule),
+        "save_action": "awareness_save_rule",
+        "remove_action": "awareness_remove_rule",
+        "run_action": "awareness_run_now",
+        "run_label": "Run Now",
+        "remove_confirm": "Remove this entry sensor rule?",
+        "fields": [
+            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
+            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
+            {
+                "key": "sensor_type",
+                "label": "Sensor Type",
+                "type": "select",
+                "options": [
+                    {"value": "door", "label": "Door"},
+                    {"value": "window", "label": "Window"},
+                    {"value": "garage", "label": "Garage"},
+                ],
+                "value": sensor_type,
+            },
+            {
+                "key": "sensor_entity",
+                "label": "Sensor Entity",
+                "type": "select",
+                "options": sensor_options,
+                "value": _text(rule.get("sensor_entity") or rule.get("trigger_entity")),
+            },
+            {
+                "key": "area",
+                "label": "Area",
+                "type": "select",
+                "options": area_options,
+                "value": _text(rule.get("area")),
+            },
+        ],
+    }
+
+
 def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
     input_text_options = _choices_from_pairs(
         catalog.get("input_text") or [],
@@ -2534,6 +2690,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
             forms.append(_camera_form(rule, catalog, rules))
         elif kind == "doorbell":
             forms.append(_doorbell_form(rule, catalog, rules))
+        elif kind == "entry_sensor":
+            forms.append(_entry_sensor_form(rule, catalog, rules))
         elif kind == "brief":
             forms.append(_brief_form(rule, catalog))
     all_forms = event_forms + forms
@@ -2565,6 +2723,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
         placeholder="(Select rain sensor)",
     )
+    entry_sensor_options = _choices_from_pairs(
+        catalog.get("entry_sensors") or catalog.get("triggers") or [],
+        placeholder="(Select door/window/garage sensor)",
+    )
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
     )
@@ -2573,8 +2735,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
+    show_entry = {"source_key": "kind", "equals": "entry_sensor"}
     show_brief = {"source_key": "kind", "equals": "brief"}
     show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
+    show_camera_or_doorbell_or_entry = {"source_key": "kind", "any_of": ["camera", "doorbell", "entry_sensor"]}
     show_brief_events = [
         {"source_key": "kind", "equals": "brief"},
         {"source_key": "brief_kind", "equals": "events_query_brief"},
@@ -2631,6 +2795,15 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "empty_message": "No doorbell rules configured.",
             },
             {
+                "key": "entries",
+                "label": "Entry Sensors",
+                "source": "items",
+                "item_group": "entry_sensor",
+                "selector": True,
+                "selector_label": "Select Entry Sensor Rule",
+                "empty_message": "No entry sensor rules configured.",
+            },
+            {
                 "key": "briefs",
                 "label": "Briefs",
                 "source": "items",
@@ -2652,6 +2825,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "options": [
                         {"value": "camera", "label": "Camera"},
                         {"value": "doorbell", "label": "Doorbell"},
+                        {"value": "entry_sensor", "label": "Door/Window/Garage Sensor"},
                         {"value": "brief", "label": "Brief"},
                     ],
                     "value": "camera",
@@ -2672,7 +2846,27 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "type": "select",
                     "options": area_options,
                     "value": "",
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_camera_or_doorbell_or_entry,
+                },
+                {
+                    "key": "sensor_type",
+                    "label": "Sensor Type",
+                    "type": "select",
+                    "options": [
+                        {"value": "door", "label": "Door"},
+                        {"value": "window", "label": "Window"},
+                        {"value": "garage", "label": "Garage"},
+                    ],
+                    "value": "door",
+                    "show_when": show_entry,
+                },
+                {
+                    "key": "sensor_entity",
+                    "label": "Sensor Entity",
+                    "type": "select",
+                    "options": entry_sensor_options,
+                    "value": "",
+                    "show_when": show_entry,
                 },
                 {
                     "key": "trigger_entities",
@@ -2908,16 +3102,18 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     runtime = _runtime_get(client)
     camera_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "camera")
     doorbell_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "doorbell")
+    entry_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "entry_sensor")
     brief_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "brief")
     enabled_count = sum(1 for row in rules.values() if _bool(row.get("enabled"), True))
     ws_status = "Connected" if _bool(runtime.get("ws_connected"), False) else "Disconnected"
     return {
-        "summary": "Home Assistant awareness automation with camera triggers, doorbell alerts, and scheduled briefs.",
+        "summary": "Home Assistant awareness automation with camera, doorbell, and entry sensor triggers plus scheduled briefs.",
         "stats": [
             {"label": "Rules", "value": len(rules)},
             {"label": "Enabled", "value": enabled_count},
             {"label": "Cameras", "value": camera_count},
             {"label": "Doorbells", "value": doorbell_count},
+            {"label": "Entry Sensors", "value": entry_count},
             {"label": "Briefs", "value": brief_count},
             {"label": "Queue", "value": _queue_depth(client)},
             {"label": "HA WS", "value": ws_status},
@@ -2970,14 +3166,24 @@ def _build_rule_from_values(
     )
     if kind == "doorbell":
         trigger_entities_default = _value(values, payload, "doorbell_trigger_entities", trigger_entities_default)
+    if kind == "entry_sensor":
+        trigger_entities_default = _value(values, payload, "sensor_entity", trigger_entities_default)
     trigger_entities = _normalize_trigger_entities(trigger_entities_default)
     if not trigger_entities:
         legacy_trigger_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
         if kind == "doorbell":
             legacy_trigger_default = _value(values, payload, "doorbell_trigger_entity", legacy_trigger_default)
+        if kind == "entry_sensor":
+            legacy_trigger_default = _value(values, payload, "sensor_entity", legacy_trigger_default)
         trigger_entities = _normalize_trigger_entities(legacy_trigger_default)
-    title_default = "Doorbell" if kind == "doorbell" else "Camera Event"
+    if kind == "doorbell":
+        title_default = "Doorbell"
+    elif kind == "entry_sensor":
+        title_default = "Entry Sensor"
+    else:
+        title_default = "Camera Event"
     priority_default = "normal" if kind == "doorbell" else "high"
+    trigger_to_state_default = "on" if kind in {"camera", "doorbell"} else ""
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
     device_services_value = _value(
         values,
@@ -2992,7 +3198,7 @@ def _build_rule_from_values(
             "trigger_entities": trigger_entities,
             "trigger_entity": trigger_entities[0] if trigger_entities else "",
             "trigger_to_state": _text(
-                _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", "on"))
+                _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", trigger_to_state_default))
             ),
             "trigger_attribute": _text(
                 _value(values, payload, "trigger_attribute", previous.get("trigger_attribute", ""))
@@ -3039,6 +3245,15 @@ def _build_rule_from_values(
             "notifications": _bool(
                 _value(values, payload, "notifications", previous.get("notifications", True)),
                 True,
+            ),
+            "sensor_type": _text(_value(values, payload, "sensor_type", previous.get("sensor_type", "door"))).lower(),
+            "sensor_entity": _text(
+                _value(
+                    values,
+                    payload,
+                    "sensor_entity",
+                    previous.get("sensor_entity", trigger_entities[0] if trigger_entities else ""),
+                )
             ),
             "brief_kind": _text(
                 _value(values, payload, "brief_kind", previous.get("brief_kind", "events_query_brief"))
@@ -3100,6 +3315,14 @@ def _build_rule_from_values(
             raise ValueError("At least one media player is required for doorbell rules.")
         if not base["area"]:
             base["area"] = "front door"
+    elif kind == "entry_sensor":
+        if not base["trigger_entities"]:
+            raise ValueError("Sensor entity is required for entry sensor rules.")
+        base["sensor_entity"] = base["trigger_entities"][0]
+        if base["sensor_type"] not in {"door", "window", "garage"}:
+            base["sensor_type"] = "door"
+        if not base["area"]:
+            base["area"] = base["sensor_type"]
     elif kind == "brief":
         brief_kind = base["brief_kind"]
         if brief_kind not in {"events_query_brief", "weather_brief", "zen_greeting", "alan_watts_greeting"}:
@@ -3123,8 +3346,8 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         return {"ok": True, "message": "Entity catalog refreshed."}
     if action_name == "awareness_add_rule":
         kind = _text(_value(values, body, "kind")).lower()
-        if kind not in {"camera", "doorbell", "brief"}:
-            raise ValueError("Rule type must be camera, doorbell, or brief.")
+        if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:
+            raise ValueError("Rule type must be camera, doorbell, entry_sensor, or brief.")
         rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=None)
         _save_rule(client, rule)
         return {"ok": True, "id": rule["id"], "message": "Awareness rule added."}
@@ -3245,7 +3468,7 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
     rules = _load_rules(redis_client)
     for rule in rules.values():
         kind = _text(rule.get("kind"))
-        if kind not in {"camera", "doorbell"}:
+        if kind not in {"camera", "doorbell", "entry_sensor"}:
             continue
         if not _bool(rule.get("enabled"), True):
             continue

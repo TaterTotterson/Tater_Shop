@@ -44,13 +44,13 @@ class IrcAdminSlapPlugin(ToolVerba):
     name = "irc_admin_slap"
     verba_name = "IRC Admin Slap"
     pretty_name = "IRC Admin Slap"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc"]
     usage = '{"function":"irc_admin_slap","arguments":{"query":"slap john"}}'
-    description = "Admin-gated playful IRC slap action for a target nick."
-    verba_dec = "Send a playful trout slap action in IRC (admin-only)."
+    description = "Slaps the requested user in the current IRC channel."
+    verba_dec = "Slaps the requested user in the current IRC channel."
     when_to_use = "Use when an IRC admin asks to slap a target user (for fun)."
     common_needs = []
     missing_info_prompts = []
