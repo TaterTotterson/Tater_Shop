@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 load_dotenv()
 
@@ -1340,6 +1340,26 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                     "read_only": True,
                 }
             )
+        if entity_id:
+            fields.append(
+                {
+                    "key": f"entity_{idx}",
+                    "label": "Entity",
+                    "type": "text",
+                    "value": entity_id,
+                    "read_only": True,
+                }
+            )
+        if trigger_entity:
+            fields.append(
+                {
+                    "key": f"trigger_{idx}",
+                    "label": "Trigger",
+                    "type": "text",
+                    "value": trigger_entity,
+                    "read_only": True,
+                }
+            )
 
         detail_rows: List[Dict[str, str]] = []
         for label, value in [
@@ -1355,17 +1375,23 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             token = _text(value)
             if token:
                 detail_rows.append({"field": label, "value": token})
+        sections: List[Dict[str, Any]] = []
         if detail_rows:
-            fields.append(
+            sections.append(
                 {
-                    "key": f"details_{idx}",
-                    "label": "Details",
-                    "type": "table",
-                    "columns": [
-                        {"key": "field", "label": "Field"},
-                        {"key": "value", "label": "Value"},
+                    "label": "More Details",
+                    "fields": [
+                        {
+                            "key": f"details_{idx}",
+                            "label": "Details",
+                            "type": "table",
+                            "columns": [
+                                {"key": "field", "label": "Field"},
+                                {"key": "value", "label": "Value"},
+                            ],
+                            "rows": detail_rows,
+                        }
                     ],
-                    "rows": detail_rows,
                 }
             )
 
@@ -1378,7 +1404,9 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                 "subtitle": subtitle,
                 "fields_popup": False,
                 "fields_dropdown": False,
+                "sections_in_dropdown": False,
                 "fields": fields,
+                "sections": sections,
             }
         )
     return items
