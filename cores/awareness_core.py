@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.12"
+__version__ = "1.0.13"
 
 load_dotenv()
 
@@ -1305,9 +1305,6 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
         fields: List[Dict[str, Any]] = []
         snapshot = _event_snapshot_preview(client, event)
         if snapshot.get("data_url"):
-            caption_parts = []
-            if _as_int(snapshot.get("bytes"), 0, minimum=0) > 0:
-                caption_parts.append(f"{_as_int(snapshot.get('bytes'), 0, minimum=0)} bytes")
             fields.append(
                 {
                     "key": f"snapshot_{idx}",
@@ -1315,7 +1312,6 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                     "type": "image",
                     "src": _text(snapshot.get("data_url")),
                     "alt": f"{title} snapshot",
-                    "caption": " • ".join(caption_parts),
                 }
             )
         elif _text(snapshot.get("snapshot_id")):
@@ -1375,23 +1371,38 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             token = _text(value)
             if token:
                 detail_rows.append({"field": label, "value": token})
-        sections: List[Dict[str, Any]] = []
+        popup_fields: List[Dict[str, Any]] = []
         if detail_rows:
-            sections.append(
+            popup_fields.append(
                 {
-                    "label": "More Details",
-                    "fields": [
-                        {
-                            "key": f"details_{idx}",
-                            "label": "Details",
-                            "type": "table",
-                            "columns": [
-                                {"key": "field", "label": "Field"},
-                                {"key": "value", "label": "Value"},
-                            ],
-                            "rows": detail_rows,
-                        }
+                    "key": f"details_{idx}",
+                    "label": "Details",
+                    "type": "table",
+                    "columns": [
+                        {"key": "field", "label": "Field"},
+                        {"key": "value", "label": "Value"},
                     ],
+                    "rows": detail_rows,
+                }
+            )
+        if description:
+            popup_fields.append(
+                {
+                    "key": f"description_popup_{idx}",
+                    "label": "Description",
+                    "type": "textarea",
+                    "value": description,
+                    "read_only": True,
+                }
+            )
+        if _text(snapshot.get("snapshot_id")) and not snapshot.get("data_url"):
+            popup_fields.append(
+                {
+                    "key": f"snapshot_status_popup_{idx}",
+                    "label": "Snapshot",
+                    "type": "text",
+                    "value": f"Stored snapshot unavailable ({_text(snapshot.get('snapshot_id'))})",
+                    "read_only": True,
                 }
             )
 
@@ -1406,7 +1417,9 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                 "fields_dropdown": False,
                 "sections_in_dropdown": False,
                 "fields": fields,
-                "sections": sections,
+                "popup_fields": popup_fields,
+                "settings_label": "More Settings",
+                "settings_title": f"{title} • {event_time}",
             }
         )
     return items
