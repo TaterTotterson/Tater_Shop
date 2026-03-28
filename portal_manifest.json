@@ -16,20 +16,6 @@
       "sha256": "cae453b494ca087bf7819a5dc118f469df480ae07775aef16f04e7150565d40d"
     },
     {
-      "id": "ha_automations",
-      "name": "Automation",
-      "module_key": "ha_automations_portal",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Automation integration portal for Tater.",
-      "settings_category": "Automation Settings",
-      "required_settings_count": 4,
-      "autostart_key": "ha_automations_portal_running",
-      "tags": [],
-      "entry": "portals/ha_automations_portal.py",
-      "sha256": "ec8c43c6f1ed1e364c6cc19a333938a2a0a4282b0b9458b6c447095580f1ee8b"
-    },
-    {
       "id": "homeassistant",
       "name": "Home Assistant",
       "module_key": "homeassistant_portal",

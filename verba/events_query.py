@@ -1,13 +1,9 @@
 # verba/events_query.py
-import asyncio
 import hashlib
 import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
-
-import httpx
 
 from verba_base import ToolVerba
 from helpers import redis_client, extract_json
@@ -100,14 +96,6 @@ class EventsQueryPlugin(ToolVerba):
                     return value.strip()
         return ""
 
-    def _automation_base(self) -> str:
-        try:
-            raw = redis_client.hget("ha_automations_portal_settings", "bind_port")
-            port = int(raw) if raw is not None else 8788
-        except Exception:
-            port = 8788
-        return f"http://127.0.0.1:{port}"
-
     @staticmethod
     def _discover_sources() -> List[str]:
         prefix = "tater:automations:events:"
@@ -125,38 +113,39 @@ class EventsQueryPlugin(ToolVerba):
     async def _fetch_one_source(
         self,
         *,
-        client: httpx.AsyncClient,
-        base: str,
         source: str,
         since: datetime,
         until: datetime,
         limit: int,
+        client: Any = None,
+        base: str = "",
     ) -> List[Dict[str, Any]]:
-        params = {
-            "source": source,
-            "since": self._iso(since),
-            "until": self._iso(until),
-            "limit": max(1, min(1000, int(limit))),
-        }
-        url = f"{base}/tater-ha/v1/events/search?{urlencode(params)}"
+        del client, base
+        key = f"tater:automations:events:{source}"
+        upper = max(1, min(1000, int(limit)))
         try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            payload = resp.json() if "application/json" in str(resp.headers.get("content-type") or "").lower() else {}
-            items = payload.get("items") if isinstance(payload, dict) else []
-            if not isinstance(items, list):
-                return []
-            out: List[Dict[str, Any]] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                normalized = dict(item)
-                normalized.setdefault("source", source)
-                out.append(normalized)
-            return out
+            rows = redis_client.lrange(key, 0, upper - 1) or []
         except Exception as exc:
             logger.warning("[events_query] fetch failed for source=%s: %s", source, exc)
             return []
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                item = json.loads(row)
+            except Exception:
+                continue
+            if not isinstance(item, dict):
+                continue
+            event_dt = self._event_dt(item)
+            if event_dt is None:
+                continue
+            if event_dt < since or event_dt > until:
+                continue
+            normalized = dict(item)
+            normalized.setdefault("source", source)
+            out.append(normalized)
+        return out
 
     async def _fetch_sources_window(
         self,
@@ -168,32 +157,20 @@ class EventsQueryPlugin(ToolVerba):
     ) -> List[Dict[str, Any]]:
         if not sources:
             return []
-        base = self._automation_base()
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                tasks = [
-                    self._fetch_one_source(
-                        client=client,
-                        base=base,
-                        source=source,
-                        since=since,
-                        until=until,
-                        limit=per_source_limit,
-                    )
-                    for source in sources
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-        except Exception as exc:
-            logger.error("[events_query] fetch window failed: %s", exc)
-            return []
-
         merged: List[Dict[str, Any]] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("[events_query] fetch task failed: %s", result)
+        for source in sources:
+            out: List[Dict[str, Any]] = []
+            try:
+                out = await self._fetch_one_source(
+                    source=source,
+                    since=since,
+                    until=until,
+                    limit=per_source_limit,
+                )
+            except Exception as exc:
+                logger.warning("[events_query] fetch task failed: %s", exc)
                 continue
-            if isinstance(result, list):
-                merged.extend(result)
+            merged.extend(out)
         return merged
 
     @staticmethod

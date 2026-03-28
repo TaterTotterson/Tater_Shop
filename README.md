@@ -12,6 +12,7 @@
 | Core ID | Module | Description |
 |-------------|--------|-------------|
 | `ai_task` | `ai_task_core` | AI Task Scheduler Core integration core for Tater. |
+| `awareness` | `awareness_core` | Awareness Core integration core for Tater. |
 | `memory` | `memory_core` | Memory Core integration core for Tater. |
 | `rss` | `rss_core` | RSS Core integration core for Tater. |
 
@@ -20,7 +21,6 @@
 | Portal ID | Module | Description |
 |-------------|--------|-------------|
 | `discord` | `discord_portal` | Discord integration portal for Tater. |
-| `ha_automations` | `ha_automations_portal` | Automation integration portal for Tater. |
 | `homeassistant` | `homeassistant_portal` | Home Assistant integration portal for Tater. |
 | `homekit` | `homekit_portal` | HomeKit / Siri integration portal for Tater. |
 | `irc` | `irc_portal` | IRC integration portal for Tater. |
@@ -108,13 +108,7 @@
 
 ### ⚙️ Automation Verbas (Home Assistant)
 
-| Verba ID | Description | Portals |
-|------------|-------------|----------|
-| `camera_event` | Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier. | automation |
-| `doorbell_alert` | Handle doorbell events: snapshot, describe with vision, announce, and log notifications. | automation |
-| `events_query_brief` | Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant. | automation |
-| `weather_brief` | Give a short automation-friendly recap of recent weather conditions. | automation |
-| `zen_greeting` | Generate a calming daily greeting and message for dashboards. | automation |
+*(none)*
 
 ### 📡 RSS Notifier Verbas
 
