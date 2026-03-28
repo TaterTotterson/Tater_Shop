@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 load_dotenv()
 
@@ -87,6 +87,23 @@ _EVENTS_PREFIX = "tater:automations:events:"
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
+_AREA_PRESETS = [
+    "camera",
+    "doorbell",
+    "events",
+    "front yard",
+    "back yard",
+    "front door",
+    "back door",
+    "driveway",
+    "garage",
+    "living room",
+    "kitchen",
+    "hallway",
+    "office",
+    "bedroom",
+    "patio",
+]
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
@@ -1369,16 +1386,138 @@ def _rule_subtitle(rule: Dict[str, Any]) -> str:
     return f"{enabled} - {kind} - last: {last_run}"
 
 
-def _camera_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
+def _to_area_label(area_value: str) -> str:
+    value = _text(area_value).replace("_", " ").strip()
+    if not value:
+        return ""
+    return " ".join(part.capitalize() for part in value.split())
+
+
+def _area_options(rules: Dict[str, Dict[str, Any]], *, current_value: str = "") -> List[Dict[str, str]]:
+    candidates: set[str] = set()
+    for preset in _AREA_PRESETS:
+        token = _text(preset).lower()
+        if token:
+            candidates.add(token)
+    for source in _discover_event_sources(redis_client):
+        token = _text(source).replace("_", " ").lower()
+        if token:
+            candidates.add(" ".join(token.split()))
+    for rule in (rules or {}).values():
+        area = _text((rule or {}).get("area")).lower()
+        if area:
+            candidates.add(" ".join(area.split()))
+
+    out: List[Dict[str, str]] = [{"value": "", "label": "(Select area)"}]
+    seen: set[str] = {""}
+    for area in sorted(candidates):
+        if area in seen:
+            continue
+        seen.add(area)
+        out.append({"value": area, "label": _to_area_label(area) or area})
+
+    current = _text(current_value).lower()
+    if current and current not in seen:
+        out.append({"value": current, "label": _to_area_label(current) or f"{current} (current)"})
+    return out
+
+
+def _entity_object_id(entity_id: str) -> str:
+    token = _text(entity_id).lower()
+    if "." in token:
+        return token.split(".", 1)[1]
+    return token
+
+
+def _camera_aliases(camera_entity: str) -> List[str]:
+    object_id = _entity_object_id(camera_entity)
+    aliases: set[str] = {object_id}
+    for suffix in ("_high", "_low", "_snapshot", "_stream", "_still"):
+        if object_id.endswith(suffix):
+            aliases.add(object_id[: -len(suffix)])
+    parts = [part for part in re.split(r"[_\-.]+", object_id) if part]
+    if len(parts) >= 2:
+        aliases.add("_".join(parts[:2]))
+    if parts:
+        aliases.add(parts[0])
+    return sorted([item for item in aliases if len(item) >= 3], key=len, reverse=True)
+
+
+def _trigger_matches_camera(camera_entity: str, trigger_entity: str) -> bool:
+    trigger_object = _entity_object_id(trigger_entity)
+    for alias in _camera_aliases(camera_entity):
+        if alias and alias in trigger_object:
+            return True
+    return False
+
+
+def _trigger_dependency_for_camera(
+    *,
+    catalog: Dict[str, List[Tuple[str, str]]],
+    current_camera: str,
+    current_trigger: str,
+    doorbell: bool,
+) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    trigger_pairs = catalog.get("doorbell_triggers") if doorbell else catalog.get("triggers")
+    trigger_pairs = trigger_pairs if isinstance(trigger_pairs, list) else []
+    cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
+
+    default_options = _choices_from_pairs(
+        trigger_pairs,
+        placeholder="(Select trigger entity)",
+        current_value=current_trigger if not _text(current_camera) else "",
+    )
+
+    options_by_source: Dict[str, List[Dict[str, str]]] = {}
+    for camera_entity, _label in cameras:
+        token = _text(camera_entity)
+        if not token:
+            continue
+        narrowed_pairs = [pair for pair in trigger_pairs if _trigger_matches_camera(token, pair[0])]
+        if not narrowed_pairs:
+            continue
+        options_by_source[token] = _choices_from_pairs(
+            narrowed_pairs,
+            placeholder="(Select trigger entity)",
+            current_value=current_trigger if _text(current_camera) == token else "",
+        )
+
+    current_camera_token = _text(current_camera)
+    current_trigger_token = _text(current_trigger)
+    if current_camera_token and current_camera_token not in options_by_source and current_trigger_token:
+        options_by_source[current_camera_token] = _choices_from_pairs(
+            [],
+            placeholder="(Select trigger entity)",
+            current_value=current_trigger_token,
+            current_label=f"{current_trigger_token} (current)",
+        )
+
+    return default_options, {
+        "source_key": "camera_entity",
+        "options_by_source": options_by_source,
+        "default_options": default_options,
+    }
+
+
+def _camera_form(
+    rule: Dict[str, Any],
+    catalog: Dict[str, List[Tuple[str, str]]],
+    rules: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
     camera_options = _choices_from_pairs(
         catalog.get("cameras") or [],
         placeholder="(Select camera)",
         current_value=_text(rule.get("camera_entity")),
     )
-    trigger_options = _choices_from_pairs(
-        catalog.get("triggers") or [],
-        placeholder="(Select trigger entity)",
-        current_value=_text(rule.get("trigger_entity")),
+    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
+        catalog=catalog,
+        current_camera=_text(rule.get("camera_entity")),
+        current_trigger=_text(rule.get("trigger_entity")),
+        doorbell=False,
+    )
+    area_options = _area_options(
+        rules,
+        current_value=_text(rule.get("area")),
     )
     return {
         "id": rule["id"],
@@ -1400,7 +1539,13 @@ def _camera_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]
                 "options": camera_options,
                 "value": _text(rule.get("camera_entity")),
             },
-            {"key": "area", "label": "Area", "type": "text", "value": _text(rule.get("area"))},
+            {
+                "key": "area",
+                "label": "Area",
+                "type": "select",
+                "options": area_options,
+                "value": _text(rule.get("area")),
+            },
         ],
         "sections": [
             {
@@ -1411,6 +1556,7 @@ def _camera_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]
                         "label": "Trigger Entity",
                         "type": "select",
                         "options": trigger_options,
+                        "dependent_options": trigger_dependency,
                         "value": _text(rule.get("trigger_entity")),
                     },
                     {
@@ -1510,16 +1656,25 @@ def _camera_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]
     }
 
 
-def _doorbell_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
+def _doorbell_form(
+    rule: Dict[str, Any],
+    catalog: Dict[str, List[Tuple[str, str]]],
+    rules: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
     camera_options = _choices_from_pairs(
         catalog.get("cameras") or [],
         placeholder="(Select camera)",
         current_value=_text(rule.get("camera_entity")),
     )
-    trigger_options = _choices_from_pairs(
-        catalog.get("doorbell_triggers") or [],
-        placeholder="(Select trigger entity)",
-        current_value=_text(rule.get("trigger_entity")),
+    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
+        catalog=catalog,
+        current_camera=_text(rule.get("camera_entity")),
+        current_trigger=_text(rule.get("trigger_entity")),
+        doorbell=True,
+    )
+    area_options = _area_options(
+        rules,
+        current_value=_text(rule.get("area")),
     )
     tts_options = _choices_from_pairs(
         catalog.get("tts") or [],
@@ -1546,7 +1701,13 @@ def _doorbell_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]
                 "options": camera_options,
                 "value": _text(rule.get("camera_entity")),
             },
-            {"key": "area", "label": "Area", "type": "text", "value": _text(rule.get("area"))},
+            {
+                "key": "area",
+                "label": "Area",
+                "type": "select",
+                "options": area_options,
+                "value": _text(rule.get("area")),
+            },
         ],
         "sections": [
             {
@@ -1557,6 +1718,7 @@ def _doorbell_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]
                         "label": "Trigger Entity",
                         "type": "select",
                         "options": trigger_options,
+                        "dependent_options": trigger_dependency,
                         "value": _text(rule.get("trigger_entity")),
                     },
                     {
@@ -1753,16 +1915,24 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     ):
         kind = _text(rule.get("kind")).lower()
         if kind == "camera":
-            forms.append(_camera_form(rule, catalog))
+            forms.append(_camera_form(rule, catalog, rules))
         elif kind == "doorbell":
-            forms.append(_doorbell_form(rule, catalog))
+            forms.append(_doorbell_form(rule, catalog, rules))
         elif kind == "brief":
             forms.append(_brief_form(rule, catalog))
     camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
-    trigger_options = _choices_from_pairs(catalog.get("triggers") or [], placeholder="(Select trigger entity)")
-    doorbell_trigger_options = _choices_from_pairs(
-        catalog.get("doorbell_triggers") or [],
-        placeholder="(Select trigger entity)",
+    area_options = _area_options(rules)
+    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
+        catalog=catalog,
+        current_camera="",
+        current_trigger="",
+        doorbell=False,
+    )
+    doorbell_trigger_options, doorbell_trigger_dependency = _trigger_dependency_for_camera(
+        catalog=catalog,
+        current_camera="",
+        current_trigger="",
+        doorbell=True,
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
@@ -1830,12 +2000,19 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "options": camera_options,
                     "value": "",
                 },
-                {"key": "area", "label": "Area (camera/doorbell/events)", "type": "text", "value": ""},
+                {
+                    "key": "area",
+                    "label": "Area (camera/doorbell/events)",
+                    "type": "select",
+                    "options": area_options,
+                    "value": "",
+                },
                 {
                     "key": "trigger_entity",
                     "label": "Trigger Entity",
                     "type": "select",
                     "options": trigger_options,
+                    "dependent_options": trigger_dependency,
                     "value": "",
                 },
                 {
@@ -1926,6 +2103,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "label": "Doorbell Trigger Entity (optional override)",
                     "type": "select",
                     "options": doorbell_trigger_options,
+                    "dependent_options": doorbell_trigger_dependency,
                     "value": "",
                 },
             ],
