@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 load_dotenv()
 
@@ -2606,7 +2606,12 @@ async def run_hydra_kernel_tool(
 
 
 def run(stop_event: Optional[object] = None):
-    logger.info("[AI Tasks] Scheduler service started.")
+    queued = 0
+    try:
+        queued = int(redis_client.zcard(REMINDER_DUE_ZSET) or 0)
+    except Exception:
+        queued = 0
+    logger.info("[AI Tasks] Scheduler service started (queued=%d).", queued)
     llm_client = get_llm_client_from_env()
 
     loop = asyncio.new_event_loop()
@@ -2687,6 +2692,8 @@ def run(stop_event: Optional[object] = None):
                 )
                 if isinstance(result, str) and result.startswith("Cannot queue"):
                     logger.warning(f"[AI Tasks] {result} (reminder {reminder_id})")
+                else:
+                    logger.info("[AI Tasks] Reminder %s queued to %s.", reminder_id, dest)
             except Exception as e:
                 logger.error(f"[AI Tasks] Failed to enqueue reminder {reminder_id}: {e}")
 

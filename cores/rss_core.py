@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 
 logger = logging.getLogger("rss")
@@ -1081,12 +1081,16 @@ class RSSManager:
 
     async def poll_feeds(self, stop_event=None):
         logger.info("Starting RSS feed polling...")
+        no_notifier_logged = False
         try:
             while not (stop_event and stop_event.is_set()):
                 if not self.any_notifier_enabled():
-                    logger.debug("No notifier routes are enabled. Skipping RSS check.")
+                    if not no_notifier_logged:
+                        no_notifier_logged = True
+                        logger.info("[RSS] No notifier routes are enabled. Polling is idle.")
                     await asyncio.sleep(_get_poll_interval())
                     continue
+                no_notifier_logged = False
 
                 feeds = self.get_feeds()
                 for feed_url, feed_cfg in feeds.items():
@@ -1352,6 +1356,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
 
 
 def run(stop_event=None):
+    logger.info("[RSS] Core starting.")
     llm_client = get_llm_client_from_env()
 
     loop = asyncio.new_event_loop()
@@ -1363,6 +1368,8 @@ def run(stop_event=None):
     while not (stop_event and stop_event.is_set()):
         try:
             rss_manager = RSSManager(llm_client=llm_client)
+            feed_count = len(rss_manager.get_feeds())
+            logger.info("[RSS] Poller active with %d configured feed(s).", feed_count)
             loop.run_until_complete(rss_manager.poll_feeds(stop_event=stop_event))
 
             if stop_event and stop_event.is_set():
@@ -1387,3 +1394,4 @@ def run(stop_event=None):
         loop.close()
     except Exception:
         pass
+    logger.info("[RSS] Core stopped.")
