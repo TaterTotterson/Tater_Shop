@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.22"
+__version__ = "1.0.24"
 
 load_dotenv()
 
@@ -405,6 +405,44 @@ def _normalize_trigger_entities(value: Any) -> List[str]:
     return out
 
 
+def _normalize_quote_history(value: Any, *, limit: int = 5) -> List[str]:
+    raw_value = value
+    if isinstance(value, str):
+        token = value.strip()
+        if token.startswith("[") and token.endswith("]"):
+            try:
+                raw_value = json.loads(token)
+            except Exception:
+                raw_value = value
+    items = _normalize_players(raw_value)
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = _compact(_text(item), limit=220)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+def _quote_history_with_new(history: Any, quote: str, *, limit: int = 5) -> List[str]:
+    clean_quote = _compact(_text(quote), limit=220)
+    merged: List[str] = []
+    if clean_quote:
+        merged.append(clean_quote)
+    for item in _normalize_quote_history(history, limit=max(1, int(limit)) * 2):
+        if clean_quote and item.lower() == clean_quote.lower():
+            continue
+        merged.append(item)
+    return _normalize_quote_history(merged, limit=limit)
+
+
 def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
@@ -503,6 +541,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
             "tone": _text(raw.get("tone") or "zen"),
             "prompt_hint": _text(raw.get("prompt_hint")),
             "max_chars": _as_int(raw.get("max_chars"), 100, minimum=40, maximum=240),
+            "quote_history": _normalize_quote_history(raw.get("quote_history") or raw.get("last_quotes"), limit=5),
         }
     )
     return base
@@ -1460,6 +1499,40 @@ def _time_greeting(dt: datetime) -> str:
     return "Hello"
 
 
+def _json_object_from_text(text: Any) -> Dict[str, Any]:
+    raw = _text(text)
+    if not raw:
+        return {}
+    candidate = raw
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        payload = json.loads(candidate)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        pass
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            payload = json.loads(candidate[start : end + 1])
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _format_datetime_for_brief(now: datetime) -> Tuple[str, str]:
+    date_text = now.strftime("%A, %B %d, %Y")
+    time_text = now.strftime("%I:%M %p").lstrip("0")
+    return date_text, time_text
+
+
 async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     if llm_client is None:
         raise ValueError("LLM client is unavailable for zen greeting generation.")
@@ -1513,12 +1586,95 @@ async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
     return {"ok": True, "summary": output}
 
 
+async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+    ha = _ha_config()
+    now = datetime.now()
+    greeting = _time_greeting(now)
+    date_text, time_text = _format_datetime_for_brief(now)
+    max_chars = _as_int(rule.get("max_chars"), 220, minimum=80, maximum=240)
+    prompt_hint = _text(rule.get("prompt_hint"))
+    recent_quotes = _normalize_quote_history(rule.get("quote_history"), limit=5)
+    message = ""
+    quote = ""
+    quote_source = "Alan Watts"
+    if llm_client is not None:
+        system = (
+            "You write warm greeting cards in a reflective, conversational voice. "
+            "Return JSON only with keys message, quote, quote_source. "
+            "message rules: plain text, natural flow, starts with the provided greeting, includes date and time. "
+            "quote rules: provide one Alan Watts quote and avoid repeating any recent quotes provided. "
+            "No markdown, no emojis."
+        )
+        user_payload = {
+            "greeting": greeting,
+            "date": date_text,
+            "time": time_text,
+            "recent_quotes_do_not_repeat": recent_quotes,
+            "max_total_chars": max_chars,
+            "extra_hint": prompt_hint,
+            "instruction": (
+                "Write a smooth greeting for the user and include a single quote line."
+            ),
+        }
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                temperature=0.8,
+                max_tokens=180,
+                timeout_ms=30_000,
+            )
+            parsed = _json_object_from_text((resp.get("message") or {}).get("content"))
+            message = _text(parsed.get("message"))
+            quote = _text(parsed.get("quote"))
+            quote_source = _text(parsed.get("quote_source") or "Alan Watts")
+        except Exception as exc:
+            logger.info("[awareness] alan watts greeting generation failed, using fallback: %s", exc)
+    if not message:
+        message = f"{greeting}. It's {date_text} at {time_text}, and this moment is enough to begin gently."
+    elif not message.lower().startswith(greeting.lower()):
+        message = f"{greeting}. {message}"
+    if date_text.lower() not in message.lower():
+        message = f"{message} Today is {date_text}."
+    if time_text.lower() not in message.lower():
+        message = f"{message} The time is {time_text}."
+    quote_line = ""
+    if quote:
+        quote_line = f"\"{quote}\" - {quote_source}"
+    output = f"{message}\n\n{quote_line}".strip() if quote_line else message
+    if len(output) > max_chars and quote_line:
+        allowed_message = max_chars - len(quote_line) - 2
+        if allowed_message >= 40:
+            message = _compact(message, limit=allowed_message)
+            output = f"{message}\n\n{quote_line}".strip()
+    if len(output) > max_chars:
+        output = _compact(output, limit=max_chars)
+    input_text_entity = _text(rule.get("input_text_entity"))
+    if input_text_entity:
+        try:
+            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, output)
+        except Exception as exc:
+            logger.warning("[awareness] alan watts greeting failed to write %s: %s", input_text_entity, exc)
+    history = _quote_history_with_new(recent_quotes, quote, limit=5) if quote else recent_quotes
+    return {
+        "ok": True,
+        "summary": output,
+        "quote": quote,
+        "quote_source": quote_source,
+        "rule_updates": {"quote_history": history},
+    }
+
+
 async def _execute_brief_rule(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     kind = _text(rule.get("brief_kind")).lower()
     if kind == "weather_brief":
         return await _run_weather_brief(rule, llm_client)
     if kind == "zen_greeting":
         return await _run_zen_greeting(rule, llm_client)
+    if kind == "alan_watts_greeting":
+        return await _run_alan_watts_greeting(rule, llm_client)
     return await _run_events_brief(rule, llm_client)
 
 
@@ -2098,6 +2254,8 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
     show_events = {"source_key": "brief_kind", "equals": "events_query_brief"}
     show_weather = {"source_key": "brief_kind", "equals": "weather_brief"}
     show_zen = {"source_key": "brief_kind", "equals": "zen_greeting"}
+    show_alan = {"source_key": "brief_kind", "equals": "alan_watts_greeting"}
+    quote_history_preview = "\n".join(_normalize_quote_history(rule.get("quote_history"), limit=5))
     return {
         "id": rule["id"],
         "group": "brief",
@@ -2119,6 +2277,7 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                     {"value": "events_query_brief", "label": "Events Brief"},
                     {"value": "weather_brief", "label": "Weather Brief"},
                     {"value": "zen_greeting", "label": "Zen Greeting"},
+                    {"value": "alan_watts_greeting", "label": "Alan Watts Greeting"},
                 ],
                 "value": _text(rule.get("brief_kind") or "events_query_brief"),
             },
@@ -2213,6 +2372,33 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
                     },
                 ],
             },
+            {
+                "label": "Alan Watts Greeting",
+                "fields": [
+                    {
+                        "key": "prompt_hint",
+                        "label": "Prompt Hint",
+                        "type": "text",
+                        "value": _text(rule.get("prompt_hint")),
+                        "show_when": show_alan,
+                    },
+                    {
+                        "key": "max_chars",
+                        "label": "Max Characters",
+                        "type": "number",
+                        "value": _as_int(rule.get("max_chars"), 220, minimum=80, maximum=240),
+                        "show_when": show_alan,
+                    },
+                    {
+                        "key": "quote_history_preview",
+                        "label": "Recent Quotes (last 5, auto)",
+                        "type": "textarea",
+                        "read_only": True,
+                        "value": quote_history_preview,
+                        "show_when": show_alan,
+                    },
+                ],
+            },
         ],
     }
 
@@ -2271,6 +2457,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     show_brief_zen = [
         {"source_key": "kind", "equals": "brief"},
         {"source_key": "brief_kind", "equals": "zen_greeting"},
+    ]
+    show_brief_zen_or_alan = [
+        {"source_key": "kind", "equals": "brief"},
+        {"source_key": "brief_kind", "any_of": ["zen_greeting", "alan_watts_greeting"]},
     ]
     return {
         "kind": "settings_manager",
@@ -2486,6 +2676,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         {"value": "events_query_brief", "label": "Events Brief"},
                         {"value": "weather_brief", "label": "Weather Brief"},
                         {"value": "zen_greeting", "label": "Zen Greeting"},
+                        {"value": "alan_watts_greeting", "label": "Alan Watts Greeting"},
                     ],
                     "value": "events_query_brief",
                     "show_when": show_brief,
@@ -2540,17 +2731,17 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 {
                     "key": "prompt_hint",
-                    "label": "Prompt Hint (zen)",
+                    "label": "Prompt Hint",
                     "type": "text",
                     "value": "",
-                    "show_when_all": show_brief_zen,
+                    "show_when_all": show_brief_zen_or_alan,
                 },
                 {
                     "key": "max_chars",
-                    "label": "Max Characters (zen)",
+                    "label": "Max Characters",
                     "type": "number",
-                    "value": 100,
-                    "show_when_all": show_brief_zen,
+                    "value": 220,
+                    "show_when_all": show_brief_zen_or_alan,
                 },
             ],
         },
@@ -2728,6 +2919,7 @@ def _build_rule_from_values(
                 minimum=40,
                 maximum=240,
             ),
+            "quote_history": _normalize_quote_history(previous.get("quote_history") or previous.get("last_quotes"), limit=5),
         }
     )
     if kind == "camera":
@@ -2748,8 +2940,10 @@ def _build_rule_from_values(
             base["area"] = "front door"
     elif kind == "brief":
         brief_kind = base["brief_kind"]
-        if brief_kind not in {"events_query_brief", "weather_brief", "zen_greeting"}:
-            raise ValueError("Brief type must be events_query_brief, weather_brief, or zen_greeting.")
+        if brief_kind not in {"events_query_brief", "weather_brief", "zen_greeting", "alan_watts_greeting"}:
+            raise ValueError(
+                "Brief type must be events_query_brief, weather_brief, zen_greeting, or alan_watts_greeting."
+            )
         if base["next_run_ts"] <= 0:
             base["next_run_ts"] = now_ts + (base["interval_minutes"] * 60)
     return _normalize_rule(base) or base
@@ -2822,6 +3016,10 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
         try:
             result = await _execute_rule(rule, llm_client, reason, event_payload)
             now_ts = time.time()
+            rule_updates = result.get("rule_updates") if isinstance(result, dict) else {}
+            if isinstance(rule_updates, dict):
+                for key, value in rule_updates.items():
+                    rule[key] = value
             rule["last_run_ts"] = now_ts
             rule["last_status"] = "ok"
             rule["last_summary"] = _text(result.get("summary"))
