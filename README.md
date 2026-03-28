@@ -63,6 +63,9 @@
 | `ha_sensors` | Read Home Assistant sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_switches` | Control Home Assistant switches and plugs. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_temperature` | Read Home Assistant ambient temperatures. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `irc_admin_op` | Run admin-gated IRC op me / voice me commands. | irc |
+| `irc_admin_slap` | Send a playful trout slap action in IRC (admin-only). | irc |
+| `irc_admin_topic` | Set the current IRC channel topic (admin-only). | irc |
 | `jackett_recent_uploads` | List and rank recent Jackett uploads across selected indexers. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `jackett_search_torrents` | Run Jackett torrent searches with filters and ranked results. | discord, webui, macos, irc, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc, xbmc |
