@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.4"
+__version__ = "1.0.6"
 
 load_dotenv()
 
@@ -309,6 +309,30 @@ def _normalize_players(value: Any) -> List[str]:
     return out
 
 
+def _normalize_trigger_entities(value: Any) -> List[str]:
+    raw_value = value
+    if isinstance(value, str):
+        token = value.strip()
+        if token.startswith("[") and token.endswith("]"):
+            try:
+                decoded = json.loads(token)
+                raw_value = decoded
+            except Exception:
+                raw_value = value
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in _normalize_players(raw_value):
+        token = _text(item)
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(token)
+    return out
+
+
 def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
@@ -334,12 +358,15 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     }
 
     if kind == "camera":
+        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
+        if not trigger_entities:
+            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
         base.update(
             {
                 "camera_entity": _text(raw.get("camera_entity")),
                 "area": _text(raw.get("area")) or "camera",
-                "trigger_entity": _text(raw.get("trigger_entity")),
-                "trigger_preset": _text(raw.get("trigger_preset") or "person_detected").lower(),
+                "trigger_entities": trigger_entities,
+                "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
                 "trigger_attribute": _text(raw.get("trigger_attribute")),
                 "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
@@ -360,12 +387,15 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         return base
 
     if kind == "doorbell":
+        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
+        if not trigger_entities:
+            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
         base.update(
             {
                 "camera_entity": _text(raw.get("camera_entity")),
                 "area": _text(raw.get("area")) or "front door",
-                "trigger_entity": _text(raw.get("trigger_entity")),
-                "trigger_preset": _text(raw.get("trigger_preset") or "doorbell_pressed").lower(),
+                "trigger_entities": trigger_entities,
+                "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
                 "trigger_attribute": _text(raw.get("trigger_attribute")),
                 "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
@@ -514,61 +544,6 @@ def _ha_ws_url(base: str) -> str:
     return base.replace("http://", "ws://", 1) + "/api/websocket"
 
 
-def _ha_state_truthy(state_value: Any) -> bool:
-    token = _text(state_value).lower()
-    return token in {"on", "true", "1", "home", "detected", "pressed", "open", "ringing"}
-
-
-def _state_indicates_person(entity_id: str, new_state: Dict[str, Any]) -> bool:
-    state_token = _text((new_state or {}).get("state")).lower()
-    attrs = (new_state or {}).get("attributes") or {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-    if "person" in _text(entity_id).lower() and _ha_state_truthy(state_token):
-        return True
-    direct = [
-        state_token,
-        _text(attrs.get("event_type")).lower(),
-        _text(attrs.get("label")).lower(),
-        _text(attrs.get("object")).lower(),
-        _text(attrs.get("detected_object")).lower(),
-        _text(attrs.get("description")).lower(),
-    ]
-    if any("person" in token for token in direct if token):
-        return True
-    for key in ("labels", "objects", "detections", "detected_objects"):
-        value = attrs.get(key)
-        if isinstance(value, list):
-            for item in value:
-                if "person" in _text(item).lower():
-                    return True
-        elif isinstance(value, str) and "person" in value.lower():
-            return True
-    return state_token in {"person", "detected"}
-
-
-def _state_indicates_doorbell(entity_id: str, new_state: Dict[str, Any]) -> bool:
-    attrs = (new_state or {}).get("attributes") or {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-    checks = [
-        _text(entity_id).lower(),
-        _text((new_state or {}).get("state")).lower(),
-        _text(attrs.get("event_type")).lower(),
-        _text(attrs.get("friendly_name")).lower(),
-        _text(attrs.get("device_class")).lower(),
-        _text(attrs.get("label")).lower(),
-    ]
-    has_token = any(
-        any(token in item for token in ("doorbell", "ring", "ding", "button", "press"))
-        for item in checks
-        if item
-    )
-    if has_token and _ha_state_truthy((new_state or {}).get("state")):
-        return True
-    return _text((new_state or {}).get("state")).lower() in {"pressed", "ringing", "ring", "ding"}
-
-
 def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
     expected_state = _text(rule.get("trigger_to_state")).lower()
     actual_state = _text((new_state or {}).get("state")).lower()
@@ -596,14 +571,14 @@ def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_s
 
 
 def _rule_matches_event(rule: Dict[str, Any], *, entity_id: str, new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
-    trigger_entity = _text(rule.get("trigger_entity")).lower()
-    if trigger_entity and _text(entity_id).lower() != trigger_entity:
+    trigger_entities = [token.lower() for token in _normalize_trigger_entities(rule.get("trigger_entities"))]
+    if not trigger_entities:
+        legacy = _text(rule.get("trigger_entity")).lower()
+        if legacy:
+            trigger_entities = [legacy]
+    event_entity = _text(entity_id).lower()
+    if trigger_entities and event_entity not in trigger_entities:
         return False
-    preset = _text(rule.get("trigger_preset")).lower()
-    if preset == "person_detected":
-        return _state_indicates_person(entity_id, new_state)
-    if preset == "doorbell_pressed":
-        return _state_indicates_doorbell(entity_id, new_state)
     return _state_matches_custom(rule, new_state, old_state)
 
 
@@ -1535,17 +1510,17 @@ def _trigger_dependency_for_camera(
     *,
     catalog: Dict[str, List[Tuple[str, str]]],
     current_camera: str,
-    current_trigger: str,
+    current_triggers: Any,
     doorbell: bool,
 ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     trigger_pairs = catalog.get("doorbell_triggers") if doorbell else catalog.get("triggers")
     trigger_pairs = trigger_pairs if isinstance(trigger_pairs, list) else []
     cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
+    current_trigger_values = _normalize_trigger_entities(current_triggers)
 
-    default_options = _choices_from_pairs(
+    default_options = _multiselect_choices_from_pairs(
         trigger_pairs,
-        placeholder="(Select trigger entity)",
-        current_value=current_trigger if not _text(current_camera) else "",
+        current_values=current_trigger_values if not _text(current_camera) else [],
     )
 
     options_by_source: Dict[str, List[Dict[str, str]]] = {}
@@ -1556,20 +1531,16 @@ def _trigger_dependency_for_camera(
         narrowed_pairs = [pair for pair in trigger_pairs if _trigger_matches_camera(token, pair[0])]
         if not narrowed_pairs:
             continue
-        options_by_source[token] = _choices_from_pairs(
+        options_by_source[token] = _multiselect_choices_from_pairs(
             narrowed_pairs,
-            placeholder="(Select trigger entity)",
-            current_value=current_trigger if _text(current_camera) == token else "",
+            current_values=current_trigger_values if _text(current_camera) == token else [],
         )
 
     current_camera_token = _text(current_camera)
-    current_trigger_token = _text(current_trigger)
-    if current_camera_token and current_camera_token not in options_by_source and current_trigger_token:
-        options_by_source[current_camera_token] = _choices_from_pairs(
+    if current_camera_token and current_camera_token not in options_by_source and current_trigger_values:
+        options_by_source[current_camera_token] = _multiselect_choices_from_pairs(
             [],
-            placeholder="(Select trigger entity)",
-            current_value=current_trigger_token,
-            current_label=f"{current_trigger_token} (current)",
+            current_values=current_trigger_values,
         )
 
     return default_options, {
@@ -1592,7 +1563,7 @@ def _camera_form(
     trigger_options, trigger_dependency = _trigger_dependency_for_camera(
         catalog=catalog,
         current_camera=_text(rule.get("camera_entity")),
-        current_trigger=_text(rule.get("trigger_entity")),
+        current_triggers=rule.get("trigger_entities") or rule.get("trigger_entity"),
         doorbell=False,
     )
     area_options = _area_options(
@@ -1636,26 +1607,17 @@ def _camera_form(
                 "label": "Trigger",
                 "fields": [
                     {
-                        "key": "trigger_entity",
-                        "label": "Trigger Entity",
-                        "type": "select",
+                        "key": "trigger_entities",
+                        "label": "Trigger Entities",
+                        "type": "multiselect",
+                        "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
                         "options": trigger_options,
                         "dependent_options": trigger_dependency,
-                        "value": _text(rule.get("trigger_entity")),
-                    },
-                    {
-                        "key": "trigger_preset",
-                        "label": "Trigger Mode",
-                        "type": "select",
-                        "options": [
-                            {"value": "person_detected", "label": "Person Detected"},
-                            {"value": "custom_state", "label": "Custom State"},
-                        ],
-                        "value": _text(rule.get("trigger_preset") or "person_detected"),
+                        "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
                     },
                     {
                         "key": "trigger_to_state",
-                        "label": "To State",
+                        "label": "To State (optional)",
                         "type": "text",
                         "value": _text(rule.get("trigger_to_state") or "on"),
                     },
@@ -1742,7 +1704,7 @@ def _doorbell_form(
     trigger_options, trigger_dependency = _trigger_dependency_for_camera(
         catalog=catalog,
         current_camera=_text(rule.get("camera_entity")),
-        current_trigger=_text(rule.get("trigger_entity")),
+        current_triggers=rule.get("trigger_entities") or rule.get("trigger_entity"),
         doorbell=True,
     )
     area_options = _area_options(
@@ -1791,26 +1753,17 @@ def _doorbell_form(
                 "label": "Trigger",
                 "fields": [
                     {
-                        "key": "trigger_entity",
-                        "label": "Trigger Entity",
-                        "type": "select",
+                        "key": "trigger_entities",
+                        "label": "Trigger Entities",
+                        "type": "multiselect",
+                        "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
                         "options": trigger_options,
                         "dependent_options": trigger_dependency,
-                        "value": _text(rule.get("trigger_entity")),
-                    },
-                    {
-                        "key": "trigger_preset",
-                        "label": "Trigger Mode",
-                        "type": "select",
-                        "options": [
-                            {"value": "doorbell_pressed", "label": "Doorbell Pressed"},
-                            {"value": "custom_state", "label": "Custom State"},
-                        ],
-                        "value": _text(rule.get("trigger_preset") or "doorbell_pressed"),
+                        "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
                     },
                     {
                         "key": "trigger_to_state",
-                        "label": "To State",
+                        "label": "To State (optional)",
                         "type": "text",
                         "value": _text(rule.get("trigger_to_state") or "on"),
                     },
@@ -2005,13 +1958,13 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     trigger_options, trigger_dependency = _trigger_dependency_for_camera(
         catalog=catalog,
         current_camera="",
-        current_trigger="",
+        current_triggers=[],
         doorbell=False,
     )
     doorbell_trigger_options, doorbell_trigger_dependency = _trigger_dependency_for_camera(
         catalog=catalog,
         current_camera="",
-        current_trigger="",
+        current_triggers=[],
         doorbell=True,
     )
     tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
@@ -2097,53 +2050,42 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera_or_doorbell,
                 },
                 {
-                    "key": "trigger_entity",
-                    "label": "Trigger Entity",
-                    "type": "select",
+                    "key": "trigger_entities",
+                    "label": "Trigger Entities",
+                    "type": "multiselect",
+                    "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
                     "options": trigger_options,
                     "dependent_options": trigger_dependency,
-                    "value": "",
+                    "value": [],
                     "show_when": show_camera,
                 },
                 {
-                    "key": "doorbell_trigger_entity",
-                    "label": "Trigger Entity",
-                    "type": "select",
+                    "key": "doorbell_trigger_entities",
+                    "label": "Trigger Entities",
+                    "type": "multiselect",
+                    "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
                     "options": doorbell_trigger_options,
                     "dependent_options": doorbell_trigger_dependency,
-                    "value": "",
+                    "value": [],
                     "show_when": show_doorbell,
                 },
                 {
-                    "key": "trigger_preset",
-                    "label": "Trigger Mode",
-                    "type": "select",
-                    "options": [
-                        {"value": "", "label": "Default for Rule Type"},
-                        {"value": "person_detected", "label": "Person Detected (camera)"},
-                        {"value": "doorbell_pressed", "label": "Doorbell Pressed (doorbell)"},
-                        {"value": "custom_state", "label": "Custom State"},
-                    ],
-                    "value": "",
-                    "show_when": show_camera_or_doorbell,
-                },
-                {
                     "key": "trigger_to_state",
-                    "label": "To State (custom trigger)",
+                    "label": "To State (optional)",
                     "type": "text",
                     "value": "on",
                     "show_when": show_camera_or_doorbell,
                 },
                 {
                     "key": "trigger_attribute",
-                    "label": "Attribute Key (custom trigger)",
+                    "label": "Attribute Key (optional)",
                     "type": "text",
                     "value": "",
                     "show_when": show_camera_or_doorbell,
                 },
                 {
                     "key": "trigger_attribute_value",
-                    "label": "Attribute Value (custom trigger)",
+                    "label": "Attribute Value (optional)",
                     "type": "text",
                     "value": "",
                     "show_when": show_camera_or_doorbell,
@@ -2368,15 +2310,20 @@ def _build_rule_from_values(
         "last_summary": _text(previous.get("last_summary")),
         "last_error": _text(previous.get("last_error")),
     }
-    trigger_entity_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
+    trigger_entities_default = _value(
+        values,
+        payload,
+        "trigger_entities",
+        previous.get("trigger_entities", previous.get("trigger_entity", "")),
+    )
     if kind == "doorbell":
-        trigger_entity_default = _value(values, payload, "doorbell_trigger_entity", trigger_entity_default)
-    trigger_preset_value = _text(_value(values, payload, "trigger_preset", previous.get("trigger_preset", ""))).lower()
-    if not trigger_preset_value:
+        trigger_entities_default = _value(values, payload, "doorbell_trigger_entities", trigger_entities_default)
+    trigger_entities = _normalize_trigger_entities(trigger_entities_default)
+    if not trigger_entities:
+        legacy_trigger_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
         if kind == "doorbell":
-            trigger_preset_value = "doorbell_pressed"
-        elif kind == "camera":
-            trigger_preset_value = "person_detected"
+            legacy_trigger_default = _value(values, payload, "doorbell_trigger_entity", legacy_trigger_default)
+        trigger_entities = _normalize_trigger_entities(legacy_trigger_default)
     title_default = "Doorbell" if kind == "doorbell" else "Camera Event"
     priority_default = "normal" if kind == "doorbell" else "high"
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
@@ -2390,8 +2337,8 @@ def _build_rule_from_values(
         {
             "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
             "area": _text(_value(values, payload, "area", previous.get("area", ""))),
-            "trigger_entity": _text(trigger_entity_default),
-            "trigger_preset": trigger_preset_value,
+            "trigger_entities": trigger_entities,
+            "trigger_entity": trigger_entities[0] if trigger_entities else "",
             "trigger_to_state": _text(
                 _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", "on"))
             ),
@@ -2478,15 +2425,15 @@ def _build_rule_from_values(
     if kind == "camera":
         if not base["camera_entity"]:
             raise ValueError("Camera entity is required for camera rules.")
-        if not base["trigger_entity"]:
-            raise ValueError("Trigger entity is required for camera rules.")
+        if not base["trigger_entities"]:
+            raise ValueError("At least one trigger entity is required for camera rules.")
         if not base["area"]:
             base["area"] = "camera"
     elif kind == "doorbell":
         if not base["camera_entity"]:
             raise ValueError("Camera entity is required for doorbell rules.")
-        if not base["trigger_entity"]:
-            raise ValueError("Trigger entity is required for doorbell rules.")
+        if not base["trigger_entities"]:
+            raise ValueError("At least one trigger entity is required for doorbell rules.")
         if not base["players"]:
             raise ValueError("At least one media player is required for doorbell rules.")
         if not base["area"]:
