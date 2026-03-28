@@ -43,21 +43,6 @@
       "sha256": "eb62e6c8f9d2e44a8828aba26fa6626f767b39b9b05b8b4fbfc76e5e13bfdad9"
     },
     {
-      "id": "camera_event",
-      "name": "Camera Event",
-      "version": "1.2.2",
-      "min_tater_version": "59",
-      "description": "Capture a camera snapshot, describe it, store an event, and optionally notify via Home Assistant Notifier.",
-      "portals": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Camera Event",
-      "tags": [],
-      "entry": "verba/camera_event.py",
-      "sha256": "139c8f7978f655299639ff60489c9e2389da3742f718203125fb517797e50c7f"
-    },
-    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
       "version": "1.0.4",
@@ -218,21 +203,6 @@
       "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
     },
     {
-      "id": "doorbell_alert",
-      "name": "Doorbell Alert",
-      "version": "1.0.5",
-      "min_tater_version": "59",
-      "description": "Handle doorbell events: snapshot, describe with vision, announce, and log notifications.",
-      "portals": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Doorbell Alert",
-      "tags": [],
-      "entry": "verba/doorbell_alert.py",
-      "sha256": "180bb47de4fd8759aae91617164f5f7a81f302476fb31dcecd83a4baf19754c3"
-    },
-    {
       "id": "events_query",
       "name": "Events Query",
       "version": "2.0.0",
@@ -252,22 +222,7 @@
       "settings_category": "Events Query",
       "tags": [],
       "entry": "verba/events_query.py",
-      "sha256": "2e24a9c76b2047fe8c43e313fc4e5bf384575b319aee2180fbabeddb0bdf68ea"
-    },
-    {
-      "id": "events_query_brief",
-      "name": "Events Query Brief",
-      "version": "1.0.2",
-      "min_tater_version": "59",
-      "description": "Produce a terse dashboard-friendly summary of recent home events and optionally write it to Home Assistant.",
-      "portals": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Events Query",
-      "tags": [],
-      "entry": "verba/events_query_brief.py",
-      "sha256": "d03786843160fa484b95d6a276250f58d20259168083108c2d1e7cc3d7a923ad"
+      "sha256": "1f79f226c57d197db32f2cdc1dab0884e83011dee68fff23b3a092886876c359"
     },
     {
       "id": "find_my_phone",
@@ -1582,21 +1537,6 @@
       "sha256": "96fa35b24650a54c36dc22f937cf4da80de9078ee6d45675e0bee7e0c3c049b1"
     },
     {
-      "id": "weather_brief",
-      "name": "Weather Brief",
-      "version": "1.0.2",
-      "min_tater_version": "59",
-      "description": "Give a short automation-friendly recap of recent weather conditions.",
-      "portals": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Weather Brief",
-      "tags": [],
-      "entry": "verba/weather_brief.py",
-      "sha256": "504086e8c5b2fb65980728021b0cb9a93ee66c4f96ca6e19b961dbdc898164ee"
-    },
-    {
       "id": "weather_forecast",
       "name": "Weather Forecast",
       "version": "1.1.5",
@@ -1653,21 +1593,6 @@
       "tags": [],
       "entry": "verba/youtube_summary.py",
       "sha256": "6e88de3f4ad92ec05bafc382cd3686bf8ce5e0462ddaaec8b784647d609aaf79"
-    },
-    {
-      "id": "zen_greeting",
-      "name": "Zen Greeting",
-      "version": "1.0.2",
-      "min_tater_version": "59",
-      "description": "Generate a calming daily greeting and message for dashboards.",
-      "portals": [
-        "automation"
-      ],
-      "notifier": false,
-      "settings_category": "Zen Greeting",
-      "tags": [],
-      "entry": "verba/zen_greeting.py",
-      "sha256": "64a2ea1581bf0c5b00ab0cf53845d8870a5a82000e3316fa3352a800c849974e"
     }
   ]
 }

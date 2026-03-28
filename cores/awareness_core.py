@@ -1,0 +1,2382 @@
+import asyncio
+import base64
+import json
+import logging
+import re
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
+
+import aiohttp
+import requests
+from dotenv import load_dotenv
+
+from helpers import get_llm_client_from_env, redis_client
+from notify import dispatch_notification
+from vision_settings import get_vision_settings as get_shared_vision_settings
+
+__version__ = "1.0.0"
+
+load_dotenv()
+
+logger = logging.getLogger("awareness_core")
+logger.setLevel(logging.INFO)
+
+CORE_SETTINGS = {
+    "category": "Awareness Core Settings",
+    "required": {
+        "ws_reconnect_seconds": {
+            "label": "HA WS Reconnect (sec)",
+            "type": "number",
+            "default": 5,
+            "description": "Seconds between Home Assistant websocket reconnect attempts.",
+        },
+        "events_retention": {
+            "label": "Events Retention",
+            "type": "select",
+            "options": ["2d", "7d", "30d", "forever"],
+            "default": "7d",
+            "description": "How long to retain awareness events written to Redis.",
+        },
+        "entity_catalog_ttl_sec": {
+            "label": "Entity Catalog Cache (sec)",
+            "type": "number",
+            "default": 30,
+            "description": "How long to cache Home Assistant entity discovery for UI dropdowns.",
+        },
+        "brief_scheduler_tick_sec": {
+            "label": "Brief Scheduler Tick (sec)",
+            "type": "number",
+            "default": 5,
+            "description": "How often the brief scheduler checks for due jobs.",
+        },
+        "weather_temp_entity": {
+            "label": "Weather Temperature Entity",
+            "type": "text",
+            "default": "sensor.outdoor_temperature",
+            "description": "Home Assistant temperature sensor entity_id used by Weather Brief jobs.",
+        },
+        "weather_wind_entity": {
+            "label": "Weather Wind Entity",
+            "type": "text",
+            "default": "sensor.outdoor_wind_speed",
+            "description": "Home Assistant wind speed sensor entity_id used by Weather Brief jobs.",
+        },
+        "weather_rain_entity": {
+            "label": "Weather Rain Entity",
+            "type": "text",
+            "default": "sensor.outdoor_rain_rate",
+            "description": "Home Assistant rain/precipitation sensor entity_id used by Weather Brief jobs.",
+        },
+    },
+}
+
+CORE_WEBUI_TAB = {
+    "label": "Awareness",
+    "order": 20,
+    "requires_running": True,
+}
+
+_RULES_KEY = "awareness:rules"
+_EXEC_QUEUE_KEY = "awareness:exec_queue"
+_RUNTIME_KEY = "awareness:runtime"
+_EVENTS_PREFIX = "tater:automations:events:"
+
+_TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
+_FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
+
+_ENTITY_CACHE_LOCK = threading.Lock()
+_ENTITY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = _text(value).lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    return bool(default)
+
+
+def _as_int(value: Any, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        out = int(float(value))
+    except Exception:
+        out = int(default)
+    if minimum is not None:
+        out = max(int(minimum), out)
+    if maximum is not None:
+        out = min(int(maximum), out)
+    return out
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _slug(value: str) -> str:
+    text = _text(value).lower()
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^a-z0-9_:-]", "", text)
+    return text or "unknown"
+
+
+def _now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    raw = _text(value)
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except Exception:
+            return None
+
+
+def _fmt_ts(ts: Any) -> str:
+    try:
+        val = float(ts)
+    except Exception:
+        return "n/a"
+    if val <= 0:
+        return "n/a"
+    return datetime.fromtimestamp(val).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _settings(client: Any) -> Dict[str, str]:
+    redis_obj = client or redis_client
+    data = redis_obj.hgetall("awareness_core_settings") if redis_obj else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _setting_int(client: Any, key: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    return _as_int(_settings(client).get(key), default, minimum=minimum, maximum=maximum)
+
+
+def _events_retention_seconds(client: Any) -> Optional[int]:
+    token = _text(_settings(client).get("events_retention") or "7d").lower()
+    mapping = {
+        "2d": 2 * 24 * 60 * 60,
+        "7d": 7 * 24 * 60 * 60,
+        "30d": 30 * 24 * 60 * 60,
+        "forever": None,
+    }
+    return mapping.get(token, mapping["7d"])
+
+
+def _runtime_set(client: Any, **fields: Any) -> None:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return
+    payload: Dict[str, Any] = {"updated_at": time.time()}
+    payload.update(fields)
+    clean = {k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in payload.items()}
+    try:
+        redis_obj.hset(_RUNTIME_KEY, mapping=clean)
+    except Exception:
+        logger.debug("[awareness] failed to update runtime state", exc_info=True)
+
+
+def _runtime_get(client: Any) -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return {}
+    raw = redis_obj.hgetall(_RUNTIME_KEY) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        token = _text(value)
+        if not token:
+            out[key] = ""
+            continue
+        try:
+            out[key] = float(token)
+            continue
+        except Exception:
+            pass
+        low = token.lower()
+        if low in _TRUE_TOKENS:
+            out[key] = True
+        elif low in _FALSE_TOKENS:
+            out[key] = False
+        else:
+            out[key] = token
+    return out
+
+
+def _event_key(source: str) -> str:
+    return f"{_EVENTS_PREFIX}{_slug(source or 'general')}"
+
+
+def _trim_events_for_source(client: Any, source: str) -> None:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return
+    retention = _events_retention_seconds(redis_obj)
+    if retention is None:
+        return
+    cutoff = datetime.now() - timedelta(seconds=retention)
+    key = _event_key(source)
+    try:
+        raw = redis_obj.lrange(key, 0, -1) or []
+    except Exception:
+        return
+
+    keep: List[str] = []
+    for row in raw:
+        try:
+            payload = json.loads(row)
+            ts = _parse_iso(payload.get("ha_time"))
+            if ts and ts >= cutoff:
+                keep.append(row)
+        except Exception:
+            continue
+
+    try:
+        pipe = redis_obj.pipeline()
+        pipe.delete(key)
+        if keep:
+            pipe.rpush(key, *keep)
+        pipe.execute()
+    except Exception:
+        logger.debug("[awareness] failed to trim events for %s", key, exc_info=True)
+
+
+def _append_event(client: Any, *, source: str, payload: Dict[str, Any]) -> None:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return
+    key = _event_key(source)
+    try:
+        redis_obj.lpush(key, json.dumps(payload))
+    except Exception:
+        logger.warning("[awareness] failed to append event for %s", key, exc_info=True)
+        return
+    _trim_events_for_source(redis_obj, source)
+
+
+def _normalize_players(value: Any) -> List[str]:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        text = str(value or "")
+        parts = [chunk.strip() for chunk in text.replace(",", "\n").split("\n") if chunk.strip()]
+    seen: set[str] = set()
+    out: List[str] = []
+    for item in parts:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+
+    kind = _text(raw.get("kind")).lower()
+    if kind not in {"camera", "doorbell", "brief"}:
+        return None
+
+    rule_id = _text(raw.get("id")) or str(uuid.uuid4())
+    now_ts = time.time()
+
+    base: Dict[str, Any] = {
+        "id": rule_id,
+        "kind": kind,
+        "name": _text(raw.get("name")) or f"{kind.title()} rule",
+        "enabled": _bool(raw.get("enabled"), True),
+        "created_at": _as_float(raw.get("created_at"), now_ts),
+        "updated_at": _as_float(raw.get("updated_at"), now_ts),
+        "last_run_ts": _as_float(raw.get("last_run_ts"), 0.0),
+        "last_status": _text(raw.get("last_status")),
+        "last_summary": _text(raw.get("last_summary")),
+        "last_error": _text(raw.get("last_error")),
+    }
+
+    if kind == "camera":
+        base.update(
+            {
+                "camera_entity": _text(raw.get("camera_entity")),
+                "area": _text(raw.get("area")) or "camera",
+                "trigger_entity": _text(raw.get("trigger_entity")),
+                "trigger_preset": _text(raw.get("trigger_preset") or "person_detected").lower(),
+                "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
+                "trigger_attribute": _text(raw.get("trigger_attribute")),
+                "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
+                "query": _text(raw.get("query") or "brief camera alert"),
+                "cooldown_seconds": _as_int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
+                "notification_cooldown_seconds": _as_int(
+                    raw.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
+                ),
+                "ignore_vehicles": _bool(raw.get("ignore_vehicles"), False),
+                "title": _text(raw.get("title") or "Camera Event"),
+                "priority": "high"
+                if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
+                else "normal",
+                "send_phone_alerts": _bool(raw.get("send_phone_alerts"), False),
+                "persistent_notifications": _bool(raw.get("persistent_notifications"), False),
+                "api_notification": _bool(raw.get("api_notification"), True),
+                "device_service": _text(raw.get("device_service")),
+            }
+        )
+        return base
+
+    if kind == "doorbell":
+        base.update(
+            {
+                "camera_entity": _text(raw.get("camera_entity")),
+                "area": _text(raw.get("area")) or "front door",
+                "trigger_entity": _text(raw.get("trigger_entity")),
+                "trigger_preset": _text(raw.get("trigger_preset") or "doorbell_pressed").lower(),
+                "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
+                "trigger_attribute": _text(raw.get("trigger_attribute")),
+                "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
+                "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
+                "players": _normalize_players(raw.get("players")),
+                "notifications": _bool(raw.get("notifications"), True),
+                "persistent_notifications": _bool(raw.get("persistent_notifications"), True),
+                "api_notification": _bool(raw.get("api_notification"), True),
+                "device_service": _text(raw.get("device_service")),
+            }
+        )
+        return base
+
+    interval = _as_int(raw.get("interval_minutes"), 60, minimum=1, maximum=10080)
+    next_run_ts = _as_float(raw.get("next_run_ts"), 0.0)
+    if next_run_ts <= 0:
+        next_run_ts = now_ts + (interval * 60)
+
+    base.update(
+        {
+            "brief_kind": _text(raw.get("brief_kind") or "events_query_brief").lower(),
+            "interval_minutes": interval,
+            "next_run_ts": next_run_ts,
+            "input_text_entity": _text(raw.get("input_text_entity")),
+            "timeframe": _text(raw.get("timeframe") or "today").lower(),
+            "area": _text(raw.get("area")),
+            "hours": _as_int(raw.get("hours"), 12, minimum=1, maximum=72),
+            "query": _text(raw.get("query")),
+            "include_date": _bool(raw.get("include_date"), False),
+            "tone": _text(raw.get("tone") or "zen"),
+            "prompt_hint": _text(raw.get("prompt_hint")),
+            "max_chars": _as_int(raw.get("max_chars"), 100, minimum=40, maximum=240),
+        }
+    )
+    return base
+
+
+def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
+    redis_obj = client or redis_client
+    raw = redis_obj.hgetall(_RULES_KEY) if redis_obj else {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for _, row in raw.items():
+        try:
+            payload = json.loads(row)
+        except Exception:
+            continue
+        normalized = _normalize_rule(payload)
+        if not normalized:
+            continue
+        out[normalized["id"]] = normalized
+    return out
+
+
+def _get_rule(client: Any, rule_id: str) -> Optional[Dict[str, Any]]:
+    rid = _text(rule_id)
+    if not rid:
+        return None
+    redis_obj = client or redis_client
+    raw = redis_obj.hget(_RULES_KEY, rid)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return _normalize_rule(payload)
+
+
+def _save_rule(client: Any, rule: Dict[str, Any]) -> None:
+    redis_obj = client or redis_client
+    normalized = _normalize_rule(rule)
+    if not normalized:
+        raise ValueError("Invalid awareness rule payload.")
+    redis_obj.hset(_RULES_KEY, normalized["id"], json.dumps(normalized))
+
+
+def _remove_rule(client: Any, rule_id: str) -> bool:
+    redis_obj = client or redis_client
+    rid = _text(rule_id)
+    if not rid:
+        return False
+    removed = redis_obj.hdel(_RULES_KEY, rid)
+    return bool(removed)
+
+
+def _queue_depth(client: Any) -> int:
+    redis_obj = client or redis_client
+    try:
+        return int(redis_obj.llen(_EXEC_QUEUE_KEY) or 0)
+    except Exception:
+        return 0
+
+
+def _enqueue_execution(client: Any, *, rule_id: str, reason: str, event: Optional[Dict[str, Any]] = None) -> None:
+    redis_obj = client or redis_client
+    payload = {
+        "rule_id": _text(rule_id),
+        "reason": _text(reason) or "manual",
+        "event": event or {},
+        "queued_at": time.time(),
+    }
+    redis_obj.lpush(_EXEC_QUEUE_KEY, json.dumps(payload))
+    _runtime_set(redis_obj, queue_depth=_queue_depth(redis_obj))
+
+
+def _dequeue_execution(client: Any) -> Optional[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    raw = redis_obj.rpop(_EXEC_QUEUE_KEY)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _ha_config() -> Dict[str, str]:
+    settings = redis_client.hgetall("homeassistant_settings") or {}
+    base = _text(settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
+    token = _text(settings.get("HA_TOKEN"))
+    if not token:
+        raise ValueError(
+            "Home Assistant token is not set. Open WebUI -> Settings -> Home Assistant Settings and add HA_TOKEN."
+        )
+    return {"base": base, "token": token}
+
+
+def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:
+    headers = {"Authorization": f"Bearer {token}"}
+    if json_content:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _ha_ws_url(base: str) -> str:
+    if base.startswith("https://"):
+        return base.replace("https://", "wss://", 1) + "/api/websocket"
+    return base.replace("http://", "ws://", 1) + "/api/websocket"
+
+
+def _ha_state_truthy(state_value: Any) -> bool:
+    token = _text(state_value).lower()
+    return token in {"on", "true", "1", "home", "detected", "pressed", "open", "ringing"}
+
+
+def _state_indicates_person(entity_id: str, new_state: Dict[str, Any]) -> bool:
+    state_token = _text((new_state or {}).get("state")).lower()
+    attrs = (new_state or {}).get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    if "person" in _text(entity_id).lower() and _ha_state_truthy(state_token):
+        return True
+    direct = [
+        state_token,
+        _text(attrs.get("event_type")).lower(),
+        _text(attrs.get("label")).lower(),
+        _text(attrs.get("object")).lower(),
+        _text(attrs.get("detected_object")).lower(),
+        _text(attrs.get("description")).lower(),
+    ]
+    if any("person" in token for token in direct if token):
+        return True
+    for key in ("labels", "objects", "detections", "detected_objects"):
+        value = attrs.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if "person" in _text(item).lower():
+                    return True
+        elif isinstance(value, str) and "person" in value.lower():
+            return True
+    return state_token in {"person", "detected"}
+
+
+def _state_indicates_doorbell(entity_id: str, new_state: Dict[str, Any]) -> bool:
+    attrs = (new_state or {}).get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    checks = [
+        _text(entity_id).lower(),
+        _text((new_state or {}).get("state")).lower(),
+        _text(attrs.get("event_type")).lower(),
+        _text(attrs.get("friendly_name")).lower(),
+        _text(attrs.get("device_class")).lower(),
+        _text(attrs.get("label")).lower(),
+    ]
+    has_token = any(
+        any(token in item for token in ("doorbell", "ring", "ding", "button", "press"))
+        for item in checks
+        if item
+    )
+    if has_token and _ha_state_truthy((new_state or {}).get("state")):
+        return True
+    return _text((new_state or {}).get("state")).lower() in {"pressed", "ringing", "ring", "ding"}
+
+
+def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
+    expected_state = _text(rule.get("trigger_to_state")).lower()
+    actual_state = _text((new_state or {}).get("state")).lower()
+    if expected_state and actual_state != expected_state:
+        return False
+    if not expected_state and _text((old_state or {}).get("state")).lower() == actual_state:
+        return False
+    attr_key = _text(rule.get("trigger_attribute"))
+    attr_expected = _text(rule.get("trigger_attribute_value")).lower()
+    if not attr_key:
+        return True
+    attrs = (new_state or {}).get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    attr_value = attrs.get(attr_key)
+    if isinstance(attr_value, list):
+        tokens = [_text(item).lower() for item in attr_value]
+        if not attr_expected:
+            return bool(tokens)
+        return any(attr_expected == token or attr_expected in token for token in tokens)
+    attr_text = _text(attr_value).lower()
+    if not attr_expected:
+        return bool(attr_text)
+    return attr_expected == attr_text or attr_expected in attr_text
+
+
+def _rule_matches_event(rule: Dict[str, Any], *, entity_id: str, new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
+    trigger_entity = _text(rule.get("trigger_entity")).lower()
+    if trigger_entity and _text(entity_id).lower() != trigger_entity:
+        return False
+    preset = _text(rule.get("trigger_preset")).lower()
+    if preset == "person_detected":
+        return _state_indicates_person(entity_id, new_state)
+    if preset == "doorbell_pressed":
+        return _state_indicates_doorbell(entity_id, new_state)
+    return _state_matches_custom(rule, new_state, old_state)
+
+
+def _camera_cooldown_key(camera_entity: str) -> str:
+    return f"tater:camera_event:last_ts:{camera_entity}"
+
+
+def _camera_notify_cooldown_key(camera_entity: str) -> str:
+    return f"tater:camera_event:last_notify_ts:{camera_entity}"
+
+
+def _within_cooldown(key: str, cooldown_seconds: int) -> bool:
+    try:
+        last = redis_client.get(key)
+        if not last:
+            return False
+        return (int(time.time()) - int(last)) < max(0, int(cooldown_seconds))
+    except Exception:
+        return False
+
+
+def _mark_cooldown(key: str) -> None:
+    try:
+        redis_client.set(key, str(int(time.time())))
+    except Exception:
+        logger.debug("[awareness] failed to mark cooldown key %s", key, exc_info=True)
+
+
+def _compact(text: str, limit: int = 220) -> str:
+    out = re.sub(r"\s+", " ", _text(text))
+    if len(out) <= limit:
+        return out
+    cut = out[:limit]
+    if " " in cut[40:]:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(".,;: ") + "..."
+
+
+def _normalize_device_service(raw: Any) -> str:
+    text = _text(raw)
+    if not text:
+        return ""
+    if text.lower().startswith("notify."):
+        return text.split(".", 1)[1].strip()
+    if "." in text:
+        left, right = text.split(".", 1)
+        if left.strip().lower() == "notify":
+            return right.strip()
+    return text
+
+
+def _camera_snapshot_sync(ha_base: str, token: str, camera_entity: str) -> bytes:
+    url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"camera_proxy HTTP {resp.status_code}: {resp.text[:200]}")
+    return resp.content
+
+
+async def _camera_snapshot(ha_base: str, token: str, camera_entity: str) -> bytes:
+    return await asyncio.to_thread(_camera_snapshot_sync, ha_base, token, camera_entity)
+
+
+def _vision_describe_sync(
+    *,
+    image_bytes: bytes,
+    api_base: str,
+    model: str,
+    api_key: str,
+    query: str,
+    ignore_vehicles: bool,
+    mode: str,
+) -> str:
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
+    if mode == "doorbell":
+        prompt = (
+            "Write one spoken doorbell sentence. Start with 'Someone is at the door'. "
+            "If a person is visible, mention count/clothing/package. "
+            "If no person is visible, still start that way and describe the scene."
+        )
+    else:
+        prompt = (
+            "Write one short sentence describing this camera snapshot. "
+            "Mention visible people and packages. "
+            "If nothing notable is happening output exactly: 'Nothing notable.' "
+            f"User hint: {query or 'brief camera alert'}"
+        )
+        if ignore_vehicles:
+            prompt += " Do not mention vehicles."
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a concise vision assistant."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": 120,
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    url = f"{api_base.rstrip('/')}/v1/chat/completions"
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=35)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Vision HTTP {resp.status_code}: {resp.text[:200]}")
+    body = resp.json() or {}
+    return _text(((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
+
+
+async def _vision_describe(
+    *,
+    image_bytes: bytes,
+    api_base: str,
+    model: str,
+    api_key: str,
+    query: str,
+    ignore_vehicles: bool,
+    mode: str,
+) -> str:
+    return await asyncio.to_thread(
+        _vision_describe_sync,
+        image_bytes=image_bytes,
+        api_base=api_base,
+        model=model,
+        api_key=api_key,
+        query=query,
+        ignore_vehicles=ignore_vehicles,
+        mode=mode,
+    )
+
+
+async def _notify_homeassistant(
+    *,
+    title: str,
+    message: str,
+    priority: str,
+    send_phone_alerts: bool,
+    persistent_notifications: bool,
+    api_notification: bool,
+    device_service: str,
+    origin: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not (send_phone_alerts or persistent_notifications or api_notification):
+        return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+    targets: Dict[str, Any] = {
+        "persistent": bool(persistent_notifications),
+        "api_notification": bool(api_notification),
+    }
+    service = _normalize_device_service(device_service)
+    if service and send_phone_alerts:
+        targets["device_service"] = service
+    meta = {"priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal"}
+    try:
+        result = await dispatch_notification(
+            platform="homeassistant",
+            title=title,
+            content=message,
+            targets=targets,
+            origin=origin,
+            meta=meta,
+        )
+    except Exception as exc:
+        return {"ok": False, "sent_count": 0, "error": str(exc)}
+    result_text = _text(result)
+    if result_text.lower().startswith("queued notification"):
+        return {"ok": True, "sent_count": 1, "result": result_text}
+    return {"ok": False, "sent_count": 0, "error": result_text or "homeassistant notifier returned empty result"}
+
+
+def _tts_speak_sync(*, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
+    if not players:
+        return
+    payload_template = {"entity_id": tts_entity, "message": message, "cache": True}
+    headers = _ha_headers(token)
+    for player in players:
+        payload = dict(payload_template)
+        payload["media_player_entity_id"] = player
+        primary = requests.post(f"{ha_base}/api/services/tts/speak", headers=headers, json=payload, timeout=15)
+        if primary.status_code < 400:
+            continue
+        fallback = requests.post(f"{ha_base}/api/services/tts/piper_say", headers=headers, json=payload, timeout=15)
+        if fallback.status_code >= 400:
+            raise RuntimeError(f"TTS failed (speak:{primary.status_code}, piper_say:{fallback.status_code})")
+
+
+async def _tts_speak(*, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
+    await asyncio.to_thread(
+        _tts_speak_sync,
+        ha_base=ha_base,
+        token=token,
+        tts_entity=tts_entity,
+        players=players,
+        message=message,
+    )
+
+
+def _ha_set_input_text_sync(ha_base: str, token: str, entity_id: str, value: str) -> None:
+    entity = _text(entity_id)
+    if not entity:
+        return
+    url = f"{ha_base}/api/services/input_text/set_value"
+    payload = {"entity_id": entity, "value": value}
+    resp = requests.post(url, headers=_ha_headers(token), json=payload, timeout=10)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"input_text.set_value HTTP {resp.status_code}: {resp.text[:200]}")
+
+
+async def _ha_set_input_text(ha_base: str, token: str, entity_id: str, value: str) -> None:
+    await asyncio.to_thread(_ha_set_input_text_sync, ha_base, token, entity_id, value)
+
+
+def _ha_fetch_history_sync(
+    ha_base: str,
+    token: str,
+    entities: List[str],
+    start: datetime,
+    end: datetime,
+) -> Dict[str, List[Dict[str, Any]]]:
+    clean_entities = [entity for entity in entities if _text(entity)]
+    if not clean_entities:
+        return {}
+    start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
+    end_iso = end.strftime("%Y-%m-%dT%H:%M:%S")
+    url = f"{ha_base}/api/history/period/{start_iso}"
+    params = {"filter_entity_id": ",".join(clean_entities), "end_time": end_iso}
+    resp = requests.get(url, headers=_ha_headers(token, json_content=False), params=params, timeout=15)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"history HTTP {resp.status_code}: {resp.text[:200]}")
+    payload = resp.json() or []
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for series in payload:
+        if not isinstance(series, list) or not series:
+            continue
+        entity_id = _text((series[0] or {}).get("entity_id"))
+        if entity_id:
+            out[entity_id] = series
+    return out
+
+
+async def _ha_fetch_history(
+    ha_base: str,
+    token: str,
+    entities: List[str],
+    start: datetime,
+    end: datetime,
+) -> Dict[str, List[Dict[str, Any]]]:
+    return await asyncio.to_thread(_ha_fetch_history_sync, ha_base, token, entities, start, end)
+
+
+def _extract_numeric(series: List[Dict[str, Any]]) -> List[float]:
+    values: List[float] = []
+    for item in series or []:
+        state = _text((item or {}).get("state"))
+        if not state or state in {"unknown", "unavailable"}:
+            continue
+        try:
+            values.append(float(state))
+        except Exception:
+            continue
+    return values
+
+
+def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
+    if not values:
+        return None
+    return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
+
+
+async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    del llm_client
+    camera = _text(rule.get("camera_entity"))
+    area = _text(rule.get("area")) or "camera"
+    if not camera:
+        raise ValueError("Camera rule is missing camera_entity.")
+    ha = _ha_config()
+    vision = get_shared_vision_settings(
+        default_api_base="http://127.0.0.1:1234",
+        default_model="qwen2.5-vl-7b-instruct",
+    )
+    cooldown_seconds = _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400)
+    notification_cooldown_seconds = _as_int(
+        rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
+    )
+    if _within_cooldown(_camera_cooldown_key(camera), cooldown_seconds):
+        return {"ok": True, "summary": f"Skipped '{rule.get('name')}' due to cooldown.", "skipped": "cooldown"}
+    used_fallback = False
+    try:
+        jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+        summary = await _vision_describe(
+            image_bytes=jpeg,
+            api_base=_text(vision.get("api_base")),
+            model=_text(vision.get("model")),
+            api_key=_text(vision.get("api_key")),
+            query=_text(rule.get("query") or "brief camera alert"),
+            ignore_vehicles=_bool(rule.get("ignore_vehicles"), False),
+            mode="camera",
+        )
+    except Exception:
+        logger.exception("[awareness] camera snapshot/vision failed for %s", camera)
+        summary = "Motion event detected, but camera analysis was unavailable."
+        used_fallback = True
+    summary = _compact(summary) or "Motion event detected."
+    event_payload = {
+        "source": _slug(area),
+        "title": f"{area.title()} motion",
+        "type": "camera_motion",
+        "message": summary,
+        "entity_id": camera,
+        "ha_time": _now_iso(),
+        "level": "info",
+        "data": {
+            "area": area,
+            "reason": reason,
+            "trigger_entity": _text(event.get("entity_id")),
+        },
+    }
+    _append_event(redis_client, source=area, payload=event_payload)
+    _mark_cooldown(_camera_cooldown_key(camera))
+    notify_requested = (
+        _bool(rule.get("send_phone_alerts"), False)
+        or _bool(rule.get("persistent_notifications"), False)
+        or _bool(rule.get("api_notification"), True)
+    )
+    if summary.lower().startswith("nothing notable"):
+        notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "nothing_notable"}
+    elif (
+        notify_requested
+        and notification_cooldown_seconds > 0
+        and _within_cooldown(_camera_notify_cooldown_key(camera), notification_cooldown_seconds)
+    ):
+        notify_result = {
+            "ok": True,
+            "sent_count": 0,
+            "skipped": "notification_cooldown",
+            "notification_cooldown_seconds": notification_cooldown_seconds,
+        }
+    else:
+        notify_result = await _notify_homeassistant(
+            title=_text(rule.get("title") or "Camera Event"),
+            message=summary,
+            priority=_text(rule.get("priority") or "high"),
+            send_phone_alerts=_bool(rule.get("send_phone_alerts"), False),
+            persistent_notifications=_bool(rule.get("persistent_notifications"), False),
+            api_notification=_bool(rule.get("api_notification"), True),
+            device_service=_text(rule.get("device_service")),
+            origin={
+                "platform": "awareness_core",
+                "scope": "camera_rule",
+                "rule_id": rule.get("id"),
+                "camera": camera,
+                "area": area,
+            },
+        )
+        if notify_result.get("ok") and int(notify_result.get("sent_count") or 0) > 0:
+            _mark_cooldown(_camera_notify_cooldown_key(camera))
+    return {
+        "ok": True,
+        "summary": summary,
+        "camera": camera,
+        "area": area,
+        "vision_fallback_used": used_fallback,
+        "notification": notify_result,
+    }
+
+
+async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    del llm_client
+    camera = _text(rule.get("camera_entity"))
+    area = _text(rule.get("area")) or "front door"
+    if not camera:
+        raise ValueError("Doorbell rule is missing camera_entity.")
+    ha = _ha_config()
+    vision = get_shared_vision_settings(
+        default_api_base="http://127.0.0.1:1234",
+        default_model="qwen2.5-vl-7b-instruct",
+    )
+    players = _normalize_players(rule.get("players"))
+    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
+    try:
+        jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+        spoken_line = await _vision_describe(
+            image_bytes=jpeg,
+            api_base=_text(vision.get("api_base")),
+            model=_text(vision.get("model")),
+            api_key=_text(vision.get("api_key")),
+            query="doorbell alert",
+            ignore_vehicles=False,
+            mode="doorbell",
+        )
+        spoken_line = _compact(spoken_line, limit=180) or "Someone is at the door."
+    except Exception:
+        logger.exception("[awareness] doorbell snapshot/vision failed for %s", camera)
+        spoken_line = "Someone is at the door."
+    if players:
+        await _tts_speak(
+            ha_base=ha["base"],
+            token=ha["token"],
+            tts_entity=tts_entity,
+            players=players,
+            message=spoken_line,
+        )
+    event_payload = {
+        "source": _slug(area),
+        "title": "Doorbell",
+        "type": "doorbell",
+        "message": spoken_line,
+        "entity_id": camera,
+        "ha_time": _now_iso(),
+        "level": "info",
+        "data": {
+            "area": area,
+            "players": players,
+            "tts_entity": tts_entity,
+            "reason": reason,
+            "trigger_entity": _text(event.get("entity_id")),
+        },
+    }
+    _append_event(redis_client, source=area, payload=event_payload)
+    notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+    if _bool(rule.get("notifications"), True):
+        notify_result = await _notify_homeassistant(
+            title="Doorbell",
+            message=spoken_line,
+            priority="normal",
+            send_phone_alerts=True,
+            persistent_notifications=_bool(rule.get("persistent_notifications"), True),
+            api_notification=_bool(rule.get("api_notification"), True),
+            device_service=_text(rule.get("device_service")),
+            origin={
+                "platform": "awareness_core",
+                "scope": "doorbell_rule",
+                "rule_id": rule.get("id"),
+                "camera": camera,
+                "area": area,
+            },
+        )
+    return {
+        "ok": True,
+        "summary": spoken_line,
+        "camera": camera,
+        "area": area,
+        "players": players,
+        "notification": notify_result,
+    }
+
+
+def _event_window(timeframe: str) -> Tuple[datetime, datetime, str]:
+    now = datetime.now()
+    token = _text(timeframe).lower()
+    if token == "yesterday":
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1) - timedelta(seconds=1)
+        return start, end, "yesterday"
+    if token in {"last_24h", "last24h"}:
+        return now - timedelta(hours=24), now, "in the last 24 hours"
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1) - timedelta(seconds=1)
+    return start, end, "today"
+
+
+def _discover_event_sources(client: Any) -> List[str]:
+    redis_obj = client or redis_client
+    out: List[str] = []
+    try:
+        for key in redis_obj.scan_iter(match=f"{_EVENTS_PREFIX}*", count=500):
+            src = str(key).split(":", maxsplit=3)[-1]
+            if src and src not in out:
+                out.append(src)
+    except Exception:
+        return []
+    return out
+
+
+def _load_events_for_sources(
+    client: Any,
+    sources: List[str],
+    start: datetime,
+    end: datetime,
+    limit_per_source: int = 200,
+) -> List[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    events: List[Dict[str, Any]] = []
+    for src in sources:
+        try:
+            rows = redis_obj.lrange(_event_key(src), 0, max(1, int(limit_per_source)) - 1) or []
+        except Exception:
+            continue
+        for row in rows:
+            try:
+                payload = json.loads(row)
+            except Exception:
+                continue
+            ts = _parse_iso(payload.get("ha_time"))
+            if ts is None or ts < start or ts > end:
+                continue
+            payload.setdefault("source", src)
+            events.append(payload)
+    events.sort(key=lambda item: _text(item.get("ha_time")), reverse=True)
+    return events
+
+
+async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+    del llm_client
+    ha = _ha_config()
+    start, end, label = _event_window(rule.get("timeframe"))
+    area = _slug(rule.get("area")) if _text(rule.get("area")) else ""
+    if area:
+        sources = [area]
+    else:
+        sources = _discover_event_sources(redis_client)
+    events = _load_events_for_sources(redis_client, sources, start, end, limit_per_source=250)
+    if not events:
+        summary = f"No activity detected {label}."
+    else:
+        top: List[str] = []
+        for event in events[:3]:
+            msg = _text(event.get("message") or event.get("title"))
+            if msg:
+                top.append(msg)
+        summary = "; ".join(top) if top else f"Activity detected {label}."
+    summary = _compact(summary, limit=240)
+    input_text_entity = _text(rule.get("input_text_entity"))
+    if input_text_entity:
+        try:
+            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, summary)
+        except Exception as exc:
+            logger.warning("[awareness] events brief failed to write %s: %s", input_text_entity, exc)
+    return {"ok": True, "summary": summary, "timeframe": label, "event_count": len(events)}
+
+
+async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+    del llm_client
+    ha = _ha_config()
+    core_settings = _settings(redis_client)
+    # Legacy fallback keeps prior installs working after removing automation verbas.
+    legacy_settings = (
+        redis_client.hgetall("verba_settings:Weather Brief")
+        or redis_client.hgetall("verba_settings: Weather Brief")
+        or {}
+    )
+    temp_entity = _text(core_settings.get("weather_temp_entity")) or _text(legacy_settings.get("TEMP_ENTITY"))
+    wind_entity = _text(core_settings.get("weather_wind_entity")) or _text(legacy_settings.get("WIND_ENTITY"))
+    rain_entity = _text(core_settings.get("weather_rain_entity")) or _text(legacy_settings.get("RAIN_ENTITY"))
+    hours = _as_int(rule.get("hours"), 12, minimum=1, maximum=72)
+    now = datetime.now()
+    start = now - timedelta(hours=hours)
+    entities = [entity for entity in [temp_entity, wind_entity, rain_entity] if entity]
+    if not entities:
+        raise ValueError("Weather Brief sensors are not configured in verba settings.")
+    history = await _ha_fetch_history(ha["base"], ha["token"], entities, start, now)
+    metrics: Dict[str, Any] = {"temperature": None, "wind": None, "rain": None}
+    if temp_entity and temp_entity in history:
+        summary = _summary_stats(_extract_numeric(history[temp_entity]))
+        if summary:
+            metrics["temperature"] = summary
+    if wind_entity and wind_entity in history:
+        summary = _summary_stats(_extract_numeric(history[wind_entity]))
+        if summary:
+            metrics["wind"] = summary
+    if rain_entity and rain_entity in history:
+        vals = _extract_numeric(history[rain_entity])
+        if vals:
+            total = sum(v for v in vals if v >= 0)
+            metrics["rain"] = {"total": total, "max": max(vals), "rained": total > 0}
+    if not any(metrics.values()):
+        summary_text = f"No recent weather data available for the last {hours} hours."
+    else:
+        parts = [f"In the last {hours} hours"]
+        if metrics["temperature"]:
+            parts.append(
+                f"temps ranged {round(metrics['temperature']['min'])}-{round(metrics['temperature']['max'])}"
+            )
+        if metrics["wind"]:
+            parts.append(f"winds up to {round(metrics['wind']['max'])}")
+        if metrics["rain"]:
+            parts.append(f"rain ~{round(metrics['rain']['total'], 1)}" if metrics["rain"]["rained"] else "no rain")
+        summary_text = ". ".join(parts) + "."
+    summary_text = _compact(summary_text, limit=240)
+    input_text_entity = _text(rule.get("input_text_entity")) or _text(legacy_settings.get("INPUT_TEXT_ENTITY"))
+    if input_text_entity:
+        try:
+            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, summary_text)
+        except Exception as exc:
+            logger.warning("[awareness] weather brief failed to write %s: %s", input_text_entity, exc)
+    return {"ok": True, "summary": summary_text, "hours": hours}
+
+
+def _time_greeting(dt: datetime) -> str:
+    hour = dt.hour
+    if 5 <= hour < 12:
+        return "Good morning"
+    if 12 <= hour < 17:
+        return "Good afternoon"
+    if 17 <= hour < 22:
+        return "Good evening"
+    return "Hello"
+
+
+async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+    if llm_client is None:
+        raise ValueError("LLM client is unavailable for zen greeting generation.")
+    ha = _ha_config()
+    now = datetime.now()
+    greeting = _time_greeting(now)
+    max_chars = _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240)
+    include_date = _bool(rule.get("include_date"), False)
+    tone = _text(rule.get("tone") or "zen")
+    prompt_hint = _text(rule.get("prompt_hint"))
+    system = (
+        "You write short, calming dashboard messages. "
+        "One sentence, plain text, no markdown, no emojis, no quotes. "
+        f"Maximum {max_chars} characters."
+    )
+    date_str = now.strftime("%A, %B %d") if include_date else ""
+    user_payload = {
+        "time": now.strftime("%H:%M"),
+        "date": date_str,
+        "opening_greeting": greeting,
+        "tone": tone,
+        "extra_hint": prompt_hint,
+        "instruction": "Create a one-line zen message that starts with the greeting.",
+    }
+    output = ""
+    try:
+        resp = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            temperature=0.8,
+            max_tokens=90,
+            timeout_ms=30_000,
+        )
+        output = _text((resp.get("message") or {}).get("content"))
+    except Exception as exc:
+        logger.info("[awareness] zen greeting generation failed, using fallback: %s", exc)
+    if not output:
+        if include_date and date_str:
+            output = f"{greeting} - {date_str}. Breathe and begin gently."
+        else:
+            output = f"{greeting}. Breathe and begin gently."
+    output = _compact(output, limit=max_chars)
+    input_text_entity = _text(rule.get("input_text_entity"))
+    if input_text_entity:
+        try:
+            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, output)
+        except Exception as exc:
+            logger.warning("[awareness] zen greeting failed to write %s: %s", input_text_entity, exc)
+    return {"ok": True, "summary": output}
+
+
+async def _execute_brief_rule(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+    kind = _text(rule.get("brief_kind")).lower()
+    if kind == "weather_brief":
+        return await _run_weather_brief(rule, llm_client)
+    if kind == "zen_greeting":
+        return await _run_zen_greeting(rule, llm_client)
+    return await _run_events_brief(rule, llm_client)
+
+
+async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    kind = _text(rule.get("kind")).lower()
+    if kind == "camera":
+        return await _execute_camera_rule(rule, llm_client, reason, event)
+    if kind == "doorbell":
+        return await _execute_doorbell_rule(rule, llm_client, reason, event)
+    if kind == "brief":
+        return await _execute_brief_rule(rule, llm_client)
+    raise ValueError(f"Unsupported rule kind: {kind}")
+
+
+def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
+    cache_ttl = _setting_int(redis_client, "entity_catalog_ttl_sec", 30, minimum=5, maximum=600)
+    now_ts = time.time()
+    with _ENTITY_CACHE_LOCK:
+        if not force_refresh and (_ENTITY_CACHE.get("ts") or 0.0) + cache_ttl > now_ts:
+            data = _ENTITY_CACHE.get("data")
+            if isinstance(data, dict) and data:
+                return data
+    catalog: Dict[str, List[Tuple[str, str]]] = {
+        "cameras": [],
+        "triggers": [],
+        "doorbell_triggers": [],
+        "media_players": [],
+        "tts": [],
+        "input_text": [],
+    }
+    try:
+        ha = _ha_config()
+        resp = requests.get(
+            f"{ha['base']}/api/states",
+            headers=_ha_headers(ha["token"], json_content=False),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        states = resp.json() or []
+    except Exception:
+        with _ENTITY_CACHE_LOCK:
+            _ENTITY_CACHE["ts"] = now_ts
+            _ENTITY_CACHE["data"] = catalog
+        return catalog
+
+    def _label(entry: Dict[str, Any]) -> str:
+        entity_id = _text(entry.get("entity_id"))
+        attrs = entry.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        name = _text(attrs.get("friendly_name"))
+        return f"{name} ({entity_id})" if name else entity_id
+
+    for row in states:
+        if not isinstance(row, dict):
+            continue
+        entity_id = _text(row.get("entity_id"))
+        if not entity_id:
+            continue
+        label = _label(row)
+        lower = entity_id.lower()
+        if lower.startswith("camera."):
+            catalog["cameras"].append((entity_id, label))
+        if lower.startswith("media_player."):
+            catalog["media_players"].append((entity_id, label))
+        if lower.startswith("tts."):
+            catalog["tts"].append((entity_id, label))
+        if lower.startswith("input_text."):
+            catalog["input_text"].append((entity_id, label))
+        if lower.startswith(("binary_sensor.", "sensor.", "event.", "button.", "switch.", "input_boolean.")):
+            catalog["triggers"].append((entity_id, label))
+            if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
+                catalog["doorbell_triggers"].append((entity_id, label))
+
+    for key in list(catalog.keys()):
+        catalog[key] = sorted(catalog[key], key=lambda row: row[1].lower())
+    if not catalog["doorbell_triggers"]:
+        catalog["doorbell_triggers"] = list(catalog["triggers"])
+
+    with _ENTITY_CACHE_LOCK:
+        _ENTITY_CACHE["ts"] = now_ts
+        _ENTITY_CACHE["data"] = catalog
+    return catalog
+
+
+def _choices_from_pairs(
+    pairs: List[Tuple[str, str]],
+    *,
+    placeholder: str,
+    current_value: str = "",
+    current_label: str = "",
+) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = [{"value": "", "label": placeholder}]
+    seen: set[str] = {""}
+    for value, label in pairs:
+        token = _text(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append({"value": token, "label": _text(label) or token})
+    current = _text(current_value)
+    if current and current not in seen:
+        out.append({"value": current, "label": _text(current_label) or f"{current} (current)"})
+    return out
+
+
+def _players_text(value: Any) -> str:
+    return "\n".join(_normalize_players(value))
+
+
+def _rule_subtitle(rule: Dict[str, Any]) -> str:
+    kind = _text(rule.get("kind"))
+    enabled = "Enabled" if _bool(rule.get("enabled"), True) else "Disabled"
+    last_run = _fmt_ts(rule.get("last_run_ts"))
+    if kind == "brief":
+        return f"{enabled} - {kind} - next: {_fmt_ts(rule.get('next_run_ts'))} - last: {last_run}"
+    return f"{enabled} - {kind} - last: {last_run}"
+
+
+def _camera_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
+    camera_options = _choices_from_pairs(
+        catalog.get("cameras") or [],
+        placeholder="(Select camera)",
+        current_value=_text(rule.get("camera_entity")),
+    )
+    trigger_options = _choices_from_pairs(
+        catalog.get("triggers") or [],
+        placeholder="(Select trigger entity)",
+        current_value=_text(rule.get("trigger_entity")),
+    )
+    return {
+        "id": rule["id"],
+        "group": "camera",
+        "title": _text(rule.get("name")) or "Camera rule",
+        "subtitle": _rule_subtitle(rule),
+        "save_action": "awareness_save_rule",
+        "remove_action": "awareness_remove_rule",
+        "run_action": "awareness_run_now",
+        "run_label": "Run Now",
+        "remove_confirm": "Remove this camera rule?",
+        "fields": [
+            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
+            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
+            {
+                "key": "camera_entity",
+                "label": "Camera",
+                "type": "select",
+                "options": camera_options,
+                "value": _text(rule.get("camera_entity")),
+            },
+            {"key": "area", "label": "Area", "type": "text", "value": _text(rule.get("area"))},
+        ],
+        "sections": [
+            {
+                "label": "Trigger",
+                "fields": [
+                    {
+                        "key": "trigger_entity",
+                        "label": "Trigger Entity",
+                        "type": "select",
+                        "options": trigger_options,
+                        "value": _text(rule.get("trigger_entity")),
+                    },
+                    {
+                        "key": "trigger_preset",
+                        "label": "Trigger Mode",
+                        "type": "select",
+                        "options": [
+                            {"value": "person_detected", "label": "Person Detected"},
+                            {"value": "custom_state", "label": "Custom State"},
+                        ],
+                        "value": _text(rule.get("trigger_preset") or "person_detected"),
+                    },
+                    {
+                        "key": "trigger_to_state",
+                        "label": "To State",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_to_state") or "on"),
+                    },
+                    {
+                        "key": "trigger_attribute",
+                        "label": "Attribute Key (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_attribute")),
+                    },
+                    {
+                        "key": "trigger_attribute_value",
+                        "label": "Attribute Value (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_attribute_value")),
+                    },
+                ],
+            },
+            {
+                "label": "Detection",
+                "fields": [
+                    {"key": "query", "label": "Vision Hint", "type": "text", "value": _text(rule.get("query"))},
+                    {
+                        "key": "cooldown_seconds",
+                        "label": "Cooldown (sec)",
+                        "type": "number",
+                        "value": _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
+                    },
+                    {
+                        "key": "notification_cooldown_seconds",
+                        "label": "Notification Cooldown (sec)",
+                        "type": "number",
+                        "value": _as_int(
+                            rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
+                        ),
+                    },
+                    {
+                        "key": "ignore_vehicles",
+                        "label": "Ignore Vehicles",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("ignore_vehicles"), False),
+                    },
+                ],
+            },
+            {
+                "label": "Notifications",
+                "fields": [
+                    {"key": "title", "label": "Title", "type": "text", "value": _text(rule.get("title") or "Camera Event")},
+                    {
+                        "key": "priority",
+                        "label": "Priority",
+                        "type": "select",
+                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
+                        "value": _text(rule.get("priority") or "high"),
+                    },
+                    {
+                        "key": "send_phone_alerts",
+                        "label": "Send Phone Alerts",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("send_phone_alerts"), False),
+                    },
+                    {
+                        "key": "persistent_notifications",
+                        "label": "Persistent Notifications",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("persistent_notifications"), False),
+                    },
+                    {
+                        "key": "api_notification",
+                        "label": "API Notification",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("api_notification"), True),
+                    },
+                    {
+                        "key": "device_service",
+                        "label": "Phone Notify Service (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("device_service")),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _doorbell_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
+    camera_options = _choices_from_pairs(
+        catalog.get("cameras") or [],
+        placeholder="(Select camera)",
+        current_value=_text(rule.get("camera_entity")),
+    )
+    trigger_options = _choices_from_pairs(
+        catalog.get("doorbell_triggers") or [],
+        placeholder="(Select trigger entity)",
+        current_value=_text(rule.get("trigger_entity")),
+    )
+    tts_options = _choices_from_pairs(
+        catalog.get("tts") or [],
+        placeholder="(Select TTS entity)",
+        current_value=_text(rule.get("tts_entity")),
+    )
+    return {
+        "id": rule["id"],
+        "group": "doorbell",
+        "title": _text(rule.get("name")) or "Doorbell rule",
+        "subtitle": _rule_subtitle(rule),
+        "save_action": "awareness_save_rule",
+        "remove_action": "awareness_remove_rule",
+        "run_action": "awareness_run_now",
+        "run_label": "Run Now",
+        "remove_confirm": "Remove this doorbell rule?",
+        "fields": [
+            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
+            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
+            {
+                "key": "camera_entity",
+                "label": "Camera",
+                "type": "select",
+                "options": camera_options,
+                "value": _text(rule.get("camera_entity")),
+            },
+            {"key": "area", "label": "Area", "type": "text", "value": _text(rule.get("area"))},
+        ],
+        "sections": [
+            {
+                "label": "Trigger",
+                "fields": [
+                    {
+                        "key": "trigger_entity",
+                        "label": "Trigger Entity",
+                        "type": "select",
+                        "options": trigger_options,
+                        "value": _text(rule.get("trigger_entity")),
+                    },
+                    {
+                        "key": "trigger_preset",
+                        "label": "Trigger Mode",
+                        "type": "select",
+                        "options": [
+                            {"value": "doorbell_pressed", "label": "Doorbell Pressed"},
+                            {"value": "custom_state", "label": "Custom State"},
+                        ],
+                        "value": _text(rule.get("trigger_preset") or "doorbell_pressed"),
+                    },
+                    {
+                        "key": "trigger_to_state",
+                        "label": "To State",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_to_state") or "on"),
+                    },
+                    {
+                        "key": "trigger_attribute",
+                        "label": "Attribute Key (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_attribute")),
+                    },
+                    {
+                        "key": "trigger_attribute_value",
+                        "label": "Attribute Value (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("trigger_attribute_value")),
+                    },
+                ],
+            },
+            {
+                "label": "TTS",
+                "fields": [
+                    {
+                        "key": "tts_entity",
+                        "label": "TTS Entity",
+                        "type": "select",
+                        "options": tts_options,
+                        "value": _text(rule.get("tts_entity")),
+                    },
+                    {
+                        "key": "players",
+                        "label": "Media Players",
+                        "type": "textarea",
+                        "description": "One media_player entity per line.",
+                        "value": _players_text(rule.get("players")),
+                    },
+                ],
+            },
+            {
+                "label": "Notifications",
+                "fields": [
+                    {
+                        "key": "notifications",
+                        "label": "Send Notifications",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("notifications"), True),
+                    },
+                    {
+                        "key": "persistent_notifications",
+                        "label": "Persistent Notifications",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("persistent_notifications"), True),
+                    },
+                    {
+                        "key": "api_notification",
+                        "label": "API Notification",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("api_notification"), True),
+                    },
+                    {
+                        "key": "device_service",
+                        "label": "Phone Notify Service (optional)",
+                        "type": "text",
+                        "value": _text(rule.get("device_service")),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
+    input_text_options = _choices_from_pairs(
+        catalog.get("input_text") or [],
+        placeholder="(None)",
+        current_value=_text(rule.get("input_text_entity")),
+    )
+    return {
+        "id": rule["id"],
+        "group": "brief",
+        "title": _text(rule.get("name")) or "Brief job",
+        "subtitle": _rule_subtitle(rule),
+        "save_action": "awareness_save_rule",
+        "remove_action": "awareness_remove_rule",
+        "run_action": "awareness_run_now",
+        "run_label": "Run Now",
+        "remove_confirm": "Remove this brief job?",
+        "fields": [
+            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
+            {"key": "name", "label": "Job Name", "type": "text", "value": _text(rule.get("name"))},
+            {
+                "key": "brief_kind",
+                "label": "Brief Type",
+                "type": "select",
+                "options": [
+                    {"value": "events_query_brief", "label": "Events Brief"},
+                    {"value": "weather_brief", "label": "Weather Brief"},
+                    {"value": "zen_greeting", "label": "Zen Greeting"},
+                ],
+                "value": _text(rule.get("brief_kind") or "events_query_brief"),
+            },
+            {
+                "key": "interval_minutes",
+                "label": "Interval (minutes)",
+                "type": "number",
+                "value": _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080),
+            },
+            {
+                "key": "input_text_entity",
+                "label": "Output input_text (optional)",
+                "type": "select",
+                "options": input_text_options,
+                "value": _text(rule.get("input_text_entity")),
+            },
+        ],
+        "sections": [
+            {
+                "label": "Events Brief",
+                "fields": [
+                    {
+                        "key": "timeframe",
+                        "label": "Timeframe",
+                        "type": "select",
+                        "options": [
+                            {"value": "today", "label": "Today"},
+                            {"value": "yesterday", "label": "Yesterday"},
+                            {"value": "last_24h", "label": "Last 24 Hours"},
+                        ],
+                        "value": _text(rule.get("timeframe") or "today"),
+                    },
+                    {"key": "area", "label": "Area Source (optional)", "type": "text", "value": _text(rule.get("area"))},
+                    {"key": "query", "label": "Query Hint (optional)", "type": "text", "value": _text(rule.get("query"))},
+                ],
+            },
+            {
+                "label": "Weather Brief",
+                "fields": [
+                    {
+                        "key": "hours",
+                        "label": "Hours",
+                        "type": "number",
+                        "value": _as_int(rule.get("hours"), 12, minimum=1, maximum=72),
+                    }
+                ],
+            },
+            {
+                "label": "Zen Greeting",
+                "fields": [
+                    {
+                        "key": "include_date",
+                        "label": "Include Date",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("include_date"), False),
+                    },
+                    {"key": "tone", "label": "Tone", "type": "text", "value": _text(rule.get("tone") or "zen")},
+                    {
+                        "key": "prompt_hint",
+                        "label": "Prompt Hint",
+                        "type": "text",
+                        "value": _text(rule.get("prompt_hint")),
+                    },
+                    {
+                        "key": "max_chars",
+                        "label": "Max Characters",
+                        "type": "number",
+                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
+    rules = _load_rules(client)
+    catalog = _ha_entity_catalog()
+    forms: List[Dict[str, Any]] = []
+    for rule in sorted(
+        rules.values(),
+        key=lambda row: (_text(row.get("kind")), _text(row.get("name")).lower(), _text(row.get("id"))),
+    ):
+        kind = _text(rule.get("kind")).lower()
+        if kind == "camera":
+            forms.append(_camera_form(rule, catalog))
+        elif kind == "doorbell":
+            forms.append(_doorbell_form(rule, catalog))
+        elif kind == "brief":
+            forms.append(_brief_form(rule, catalog))
+    camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
+    trigger_options = _choices_from_pairs(catalog.get("triggers") or [], placeholder="(Select trigger entity)")
+    doorbell_trigger_options = _choices_from_pairs(
+        catalog.get("doorbell_triggers") or [],
+        placeholder="(Select trigger entity)",
+    )
+    tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
+    input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
+    return {
+        "kind": "settings_manager",
+        "title": "Awareness Rule Manager",
+        "empty_message": "No awareness rules configured yet.",
+        "item_fields_dropdown": True,
+        "item_fields_dropdown_label": "Rule Settings",
+        "item_fields_popup": True,
+        "item_fields_popup_label": "Rule Settings",
+        "item_sections_in_dropdown": True,
+        "default_tab": "cameras",
+        "manager_tabs": [
+            {"key": "create", "label": "Create Rule", "source": "add_form"},
+            {
+                "key": "cameras",
+                "label": "Cameras",
+                "source": "items",
+                "item_group": "camera",
+                "selector": True,
+                "selector_label": "Select Camera Rule",
+                "empty_message": "No camera rules configured.",
+            },
+            {
+                "key": "doorbells",
+                "label": "Doorbells",
+                "source": "items",
+                "item_group": "doorbell",
+                "selector": True,
+                "selector_label": "Select Doorbell Rule",
+                "empty_message": "No doorbell rules configured.",
+            },
+            {
+                "key": "briefs",
+                "label": "Briefs",
+                "source": "items",
+                "item_group": "brief",
+                "selector": True,
+                "selector_label": "Select Brief Job",
+                "empty_message": "No brief jobs configured.",
+            },
+        ],
+        "add_form": {
+            "action": "awareness_add_rule",
+            "submit_label": "Add Rule",
+            "fields": [
+                {
+                    "key": "kind",
+                    "label": "Rule Type",
+                    "type": "select",
+                    "options": [
+                        {"value": "camera", "label": "Camera"},
+                        {"value": "doorbell", "label": "Doorbell"},
+                        {"value": "brief", "label": "Brief"},
+                    ],
+                    "value": "camera",
+                },
+                {"key": "name", "label": "Name", "type": "text", "value": ""},
+                {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": True},
+                {
+                    "key": "camera_entity",
+                    "label": "Camera (camera/doorbell)",
+                    "type": "select",
+                    "options": camera_options,
+                    "value": "",
+                },
+                {"key": "area", "label": "Area (camera/doorbell/events)", "type": "text", "value": ""},
+                {
+                    "key": "trigger_entity",
+                    "label": "Trigger Entity",
+                    "type": "select",
+                    "options": trigger_options,
+                    "value": "",
+                },
+                {
+                    "key": "trigger_preset",
+                    "label": "Trigger Mode",
+                    "type": "select",
+                    "options": [
+                        {"value": "person_detected", "label": "Person Detected (camera)"},
+                        {"value": "doorbell_pressed", "label": "Doorbell Pressed (doorbell)"},
+                        {"value": "custom_state", "label": "Custom State"},
+                    ],
+                    "value": "person_detected",
+                },
+                {"key": "trigger_to_state", "label": "To State (custom trigger)", "type": "text", "value": "on"},
+                {"key": "trigger_attribute", "label": "Attribute Key (custom trigger)", "type": "text", "value": ""},
+                {
+                    "key": "trigger_attribute_value",
+                    "label": "Attribute Value (custom trigger)",
+                    "type": "text",
+                    "value": "",
+                },
+                {"key": "query", "label": "Vision Hint (camera/events)", "type": "text", "value": ""},
+                {"key": "cooldown_seconds", "label": "Cooldown (camera sec)", "type": "number", "value": 30},
+                {
+                    "key": "notification_cooldown_seconds",
+                    "label": "Notification Cooldown (camera sec)",
+                    "type": "number",
+                    "value": 0,
+                },
+                {"key": "ignore_vehicles", "label": "Ignore Vehicles (camera)", "type": "checkbox", "value": False},
+                {"key": "title", "label": "Notification Title (camera)", "type": "text", "value": "Camera Event"},
+                {
+                    "key": "priority",
+                    "label": "Priority (camera)",
+                    "type": "select",
+                    "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
+                    "value": "high",
+                },
+                {"key": "send_phone_alerts", "label": "Send Phone Alerts (camera)", "type": "checkbox", "value": False},
+                {"key": "notifications", "label": "Send Notifications (doorbell)", "type": "checkbox", "value": True},
+                {
+                    "key": "persistent_notifications",
+                    "label": "Persistent Notifications",
+                    "type": "checkbox",
+                    "value": True,
+                },
+                {"key": "api_notification", "label": "API Notification", "type": "checkbox", "value": True},
+                {"key": "device_service", "label": "Phone Notify Service (optional)", "type": "text", "value": ""},
+                {"key": "tts_entity", "label": "TTS Entity (doorbell)", "type": "select", "options": tts_options, "value": ""},
+                {"key": "players", "label": "Media Players (doorbell, one per line)", "type": "textarea", "value": ""},
+                {
+                    "key": "brief_kind",
+                    "label": "Brief Type",
+                    "type": "select",
+                    "options": [
+                        {"value": "events_query_brief", "label": "Events Brief"},
+                        {"value": "weather_brief", "label": "Weather Brief"},
+                        {"value": "zen_greeting", "label": "Zen Greeting"},
+                    ],
+                    "value": "events_query_brief",
+                },
+                {"key": "interval_minutes", "label": "Interval Minutes (brief)", "type": "number", "value": 60},
+                {
+                    "key": "input_text_entity",
+                    "label": "Output input_text (brief, optional)",
+                    "type": "select",
+                    "options": input_text_options,
+                    "value": "",
+                },
+                {
+                    "key": "timeframe",
+                    "label": "Timeframe (events brief)",
+                    "type": "select",
+                    "options": [
+                        {"value": "today", "label": "Today"},
+                        {"value": "yesterday", "label": "Yesterday"},
+                        {"value": "last_24h", "label": "Last 24 Hours"},
+                    ],
+                    "value": "today",
+                },
+                {"key": "hours", "label": "Hours (weather brief)", "type": "number", "value": 12},
+                {"key": "include_date", "label": "Include Date (zen)", "type": "checkbox", "value": False},
+                {"key": "tone", "label": "Tone (zen)", "type": "text", "value": "zen"},
+                {"key": "prompt_hint", "label": "Prompt Hint (zen)", "type": "text", "value": ""},
+                {"key": "max_chars", "label": "Max Characters (zen)", "type": "number", "value": 100},
+                {
+                    "key": "doorbell_trigger_entity",
+                    "label": "Doorbell Trigger Entity (optional override)",
+                    "type": "select",
+                    "options": doorbell_trigger_options,
+                    "value": "",
+                },
+            ],
+        },
+        "item_forms": forms,
+    }
+
+
+def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    rules = _load_rules(client)
+    runtime = _runtime_get(client)
+    camera_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "camera")
+    doorbell_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "doorbell")
+    brief_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "brief")
+    enabled_count = sum(1 for row in rules.values() if _bool(row.get("enabled"), True))
+    ws_status = "Connected" if _bool(runtime.get("ws_connected"), False) else "Disconnected"
+    return {
+        "summary": "Home Assistant awareness automation with camera triggers, doorbell alerts, and scheduled briefs.",
+        "stats": [
+            {"label": "Rules", "value": len(rules)},
+            {"label": "Enabled", "value": enabled_count},
+            {"label": "Cameras", "value": camera_count},
+            {"label": "Doorbells", "value": doorbell_count},
+            {"label": "Briefs", "value": brief_count},
+            {"label": "Queue", "value": _queue_depth(client)},
+            {"label": "HA WS", "value": ws_status},
+            {"label": "Last Event", "value": _fmt_ts(runtime.get("last_ws_event_ts"))},
+            {"label": "Last Run", "value": _fmt_ts(runtime.get("last_run_ts"))},
+        ],
+        "items": [],
+        "empty_message": "No awareness rules configured yet.",
+        "ui": _awareness_manager_ui(client),
+    }
+
+
+def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    values = payload.get("values")
+    return values if isinstance(values, dict) else {}
+
+
+def _value(values: Dict[str, Any], payload: Dict[str, Any], key: str, default: Any = "") -> Any:
+    if key in values:
+        return values.get(key)
+    return payload.get(key, default)
+
+
+def _build_rule_from_values(
+    *,
+    kind: str,
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    existing: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    now_ts = time.time()
+    previous = existing if isinstance(existing, dict) else {}
+    base: Dict[str, Any] = {
+        "id": _text(previous.get("id")) or str(uuid.uuid4()),
+        "kind": kind,
+        "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "name": _text(_value(values, payload, "name", previous.get("name"))) or f"{kind.title()} rule",
+        "created_at": _as_float(previous.get("created_at"), now_ts),
+        "updated_at": now_ts,
+        "last_run_ts": _as_float(previous.get("last_run_ts"), 0.0),
+        "last_status": _text(previous.get("last_status")),
+        "last_summary": _text(previous.get("last_summary")),
+        "last_error": _text(previous.get("last_error")),
+    }
+    trigger_entity_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
+    if kind == "doorbell":
+        trigger_entity_default = _value(values, payload, "doorbell_trigger_entity", trigger_entity_default)
+    base.update(
+        {
+            "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
+            "area": _text(_value(values, payload, "area", previous.get("area", ""))),
+            "trigger_entity": _text(trigger_entity_default),
+            "trigger_preset": _text(
+                _value(values, payload, "trigger_preset", previous.get("trigger_preset", ""))
+            ).lower(),
+            "trigger_to_state": _text(
+                _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", "on"))
+            ),
+            "trigger_attribute": _text(
+                _value(values, payload, "trigger_attribute", previous.get("trigger_attribute", ""))
+            ),
+            "trigger_attribute_value": _text(
+                _value(
+                    values,
+                    payload,
+                    "trigger_attribute_value",
+                    previous.get("trigger_attribute_value", ""),
+                )
+            ),
+            "query": _text(_value(values, payload, "query", previous.get("query", ""))),
+            "cooldown_seconds": _as_int(
+                _value(values, payload, "cooldown_seconds", previous.get("cooldown_seconds", 30)),
+                30,
+                minimum=0,
+                maximum=86400,
+            ),
+            "notification_cooldown_seconds": _as_int(
+                _value(
+                    values,
+                    payload,
+                    "notification_cooldown_seconds",
+                    previous.get("notification_cooldown_seconds", 0),
+                ),
+                0,
+                minimum=0,
+                maximum=86400,
+            ),
+            "ignore_vehicles": _bool(
+                _value(values, payload, "ignore_vehicles", previous.get("ignore_vehicles", False)),
+                False,
+            ),
+            "title": _text(_value(values, payload, "title", previous.get("title", "Camera Event"))),
+            "priority": "high"
+            if _text(_value(values, payload, "priority", previous.get("priority", "high"))).lower()
+            in {"critical", "high"}
+            else "normal",
+            "send_phone_alerts": _bool(
+                _value(values, payload, "send_phone_alerts", previous.get("send_phone_alerts", False)),
+                False,
+            ),
+            "persistent_notifications": _bool(
+                _value(
+                    values,
+                    payload,
+                    "persistent_notifications",
+                    previous.get("persistent_notifications", True),
+                ),
+                True,
+            ),
+            "api_notification": _bool(
+                _value(values, payload, "api_notification", previous.get("api_notification", True)),
+                True,
+            ),
+            "device_service": _text(
+                _value(values, payload, "device_service", previous.get("device_service", ""))
+            ),
+            "tts_entity": _text(_value(values, payload, "tts_entity", previous.get("tts_entity", "tts.piper"))),
+            "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
+            "notifications": _bool(
+                _value(values, payload, "notifications", previous.get("notifications", True)),
+                True,
+            ),
+            "brief_kind": _text(
+                _value(values, payload, "brief_kind", previous.get("brief_kind", "events_query_brief"))
+            ).lower(),
+            "interval_minutes": _as_int(
+                _value(values, payload, "interval_minutes", previous.get("interval_minutes", 60)),
+                60,
+                minimum=1,
+                maximum=10080,
+            ),
+            "next_run_ts": _as_float(previous.get("next_run_ts"), 0.0),
+            "input_text_entity": _text(
+                _value(values, payload, "input_text_entity", previous.get("input_text_entity", ""))
+            ),
+            "timeframe": _text(_value(values, payload, "timeframe", previous.get("timeframe", "today"))).lower(),
+            "hours": _as_int(
+                _value(values, payload, "hours", previous.get("hours", 12)),
+                12,
+                minimum=1,
+                maximum=72,
+            ),
+            "include_date": _bool(
+                _value(values, payload, "include_date", previous.get("include_date", False)),
+                False,
+            ),
+            "tone": _text(_value(values, payload, "tone", previous.get("tone", "zen"))),
+            "prompt_hint": _text(_value(values, payload, "prompt_hint", previous.get("prompt_hint", ""))),
+            "max_chars": _as_int(
+                _value(values, payload, "max_chars", previous.get("max_chars", 100)),
+                100,
+                minimum=40,
+                maximum=240,
+            ),
+        }
+    )
+    if kind == "camera":
+        if not base["camera_entity"]:
+            raise ValueError("Camera entity is required for camera rules.")
+        if not base["trigger_entity"]:
+            raise ValueError("Trigger entity is required for camera rules.")
+        if not base["area"]:
+            base["area"] = "camera"
+    elif kind == "doorbell":
+        if not base["camera_entity"]:
+            raise ValueError("Camera entity is required for doorbell rules.")
+        if not base["trigger_entity"]:
+            raise ValueError("Trigger entity is required for doorbell rules.")
+        if not base["players"]:
+            raise ValueError("At least one media player is required for doorbell rules.")
+        if not base["area"]:
+            base["area"] = "front door"
+    elif kind == "brief":
+        brief_kind = base["brief_kind"]
+        if brief_kind not in {"events_query_brief", "weather_brief", "zen_greeting"}:
+            raise ValueError("Brief type must be events_query_brief, weather_brief, or zen_greeting.")
+        if base["next_run_ts"] <= 0:
+            base["next_run_ts"] = now_ts + (base["interval_minutes"] * 60)
+    return _normalize_rule(base) or base
+
+
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    if client is None:
+        raise ValueError("Redis connection is unavailable.")
+    body = payload if isinstance(payload, dict) else {}
+    values = _payload_values(body)
+    action_name = _text(action).lower()
+    if action_name == "awareness_refresh_entities":
+        _ha_entity_catalog(force_refresh=True)
+        return {"ok": True, "message": "Entity catalog refreshed."}
+    if action_name == "awareness_add_rule":
+        kind = _text(_value(values, body, "kind")).lower()
+        if kind not in {"camera", "doorbell", "brief"}:
+            raise ValueError("Rule type must be camera, doorbell, or brief.")
+        rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=None)
+        _save_rule(client, rule)
+        return {"ok": True, "id": rule["id"], "message": "Awareness rule added."}
+    if action_name == "awareness_save_rule":
+        rule_id = _text(body.get("id"))
+        if not rule_id:
+            raise ValueError("Rule id is required.")
+        existing = _get_rule(client, rule_id)
+        if not existing:
+            raise KeyError("Awareness rule not found.")
+        kind = _text(existing.get("kind")).lower()
+        rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=existing)
+        _save_rule(client, rule)
+        return {"ok": True, "id": rule_id, "message": "Awareness rule saved."}
+    if action_name == "awareness_remove_rule":
+        rule_id = _text(body.get("id"))
+        if not rule_id:
+            raise ValueError("Rule id is required.")
+        deleted = _remove_rule(client, rule_id)
+        if not deleted:
+            raise KeyError("Awareness rule not found.")
+        return {"ok": True, "id": rule_id, "message": "Awareness rule removed."}
+    if action_name == "awareness_run_now":
+        rule_id = _text(body.get("id"))
+        if not rule_id:
+            raise ValueError("Rule id is required.")
+        existing = _get_rule(client, rule_id)
+        if not existing:
+            raise KeyError("Awareness rule not found.")
+        _enqueue_execution(client, rule_id=rule_id, reason="manual", event={})
+        return {"ok": True, "id": rule_id, "message": "Awareness rule queued to run now."}
+    raise ValueError(f"Unknown action: {action_name}")
+
+
+async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) -> None:
+    while not (stop_event and stop_event.is_set()):
+        job = _dequeue_execution(redis_client)
+        if not job:
+            await asyncio.sleep(0.25)
+            continue
+        _runtime_set(redis_client, queue_depth=_queue_depth(redis_client))
+        rule_id = _text(job.get("rule_id"))
+        reason = _text(job.get("reason") or "manual")
+        event_payload = job.get("event") if isinstance(job.get("event"), dict) else {}
+        rule = _get_rule(redis_client, rule_id)
+        if not rule:
+            logger.info("[awareness] skipping queued run for missing rule %s", rule_id)
+            continue
+        if not _bool(rule.get("enabled"), True) and reason != "manual":
+            continue
+        try:
+            result = await _execute_rule(rule, llm_client, reason, event_payload)
+            now_ts = time.time()
+            rule["last_run_ts"] = now_ts
+            rule["last_status"] = "ok"
+            rule["last_summary"] = _text(result.get("summary"))
+            rule["last_error"] = ""
+            if _text(rule.get("kind")) == "brief":
+                interval = _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080)
+                rule["next_run_ts"] = now_ts + (interval * 60)
+            rule["updated_at"] = now_ts
+            _save_rule(redis_client, rule)
+            _runtime_set(redis_client, last_run_ts=now_ts, last_error="")
+        except Exception as exc:
+            now_ts = time.time()
+            logger.exception("[awareness] rule execution failed for %s", rule_id)
+            rule["last_run_ts"] = now_ts
+            rule["last_status"] = "error"
+            rule["last_error"] = str(exc)
+            rule["updated_at"] = now_ts
+            _save_rule(redis_client, rule)
+            _runtime_set(redis_client, last_run_ts=now_ts, last_error=str(exc))
+
+
+async def _awareness_brief_scheduler_loop(stop_event: Optional[object]) -> None:
+    while not (stop_event and stop_event.is_set()):
+        tick = _setting_int(redis_client, "brief_scheduler_tick_sec", 5, minimum=1, maximum=60)
+        now_ts = time.time()
+        rules = _load_rules(redis_client)
+        for rule in rules.values():
+            if _text(rule.get("kind")) != "brief":
+                continue
+            if not _bool(rule.get("enabled"), True):
+                continue
+            interval = _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080)
+            next_run = _as_float(rule.get("next_run_ts"), 0.0)
+            if next_run <= 0:
+                rule["next_run_ts"] = now_ts + (interval * 60)
+                rule["updated_at"] = now_ts
+                _save_rule(redis_client, rule)
+                continue
+            if now_ts >= next_run:
+                _enqueue_execution(redis_client, rule_id=_text(rule.get("id")), reason="schedule", event={})
+                rule["next_run_ts"] = now_ts + (interval * 60)
+                rule["updated_at"] = now_ts
+                _save_rule(redis_client, rule)
+        await asyncio.sleep(float(tick))
+
+
+async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
+    if not isinstance(event_payload, dict):
+        return
+    entity_id = _text(event_payload.get("entity_id"))
+    if not entity_id:
+        return
+    new_state = event_payload.get("new_state") if isinstance(event_payload.get("new_state"), dict) else {}
+    old_state = event_payload.get("old_state") if isinstance(event_payload.get("old_state"), dict) else {}
+    rules = _load_rules(redis_client)
+    for rule in rules.values():
+        kind = _text(rule.get("kind"))
+        if kind not in {"camera", "doorbell"}:
+            continue
+        if not _bool(rule.get("enabled"), True):
+            continue
+        try:
+            if not _rule_matches_event(rule, entity_id=entity_id, new_state=new_state, old_state=old_state):
+                continue
+        except Exception:
+            logger.exception("[awareness] trigger match failed for rule %s", rule.get("id"))
+            continue
+        dedupe_key = (
+            f"awareness:dedupe:{_text(rule.get('id'))}:{entity_id}:{_text(new_state.get('state')).lower()}"
+        )
+        if redis_client.set(dedupe_key, "1", ex=2, nx=True) is None:
+            continue
+        _enqueue_execution(
+            redis_client,
+            rule_id=_text(rule.get("id")),
+            reason="trigger",
+            event={"entity_id": entity_id, "new_state": new_state, "old_state": old_state},
+        )
+
+
+async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
+    while not (stop_event and stop_event.is_set()):
+        reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
+        try:
+            ha = _ha_config()
+            ws_url = _ha_ws_url(ha["base"])
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                    first = await ws.receive(timeout=10)
+                    if first.type != aiohttp.WSMsgType.TEXT:
+                        raise RuntimeError("Unexpected HA websocket hello payload")
+                    hello = json.loads(first.data)
+                    if hello.get("type") != "auth_required":
+                        raise RuntimeError(f"Unexpected HA websocket hello: {hello}")
+                    await ws.send_json({"type": "auth", "access_token": ha["token"]})
+                    auth_resp = await ws.receive(timeout=10)
+                    if auth_resp.type != aiohttp.WSMsgType.TEXT:
+                        raise RuntimeError("Unexpected HA websocket auth payload")
+                    auth_data = json.loads(auth_resp.data)
+                    if auth_data.get("type") != "auth_ok":
+                        raise RuntimeError(f"HA websocket auth failed: {auth_data}")
+                    await ws.send_json({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})
+                    _runtime_set(redis_client, ws_connected=True, ws_url=ws_url)
+                    while not (stop_event and stop_event.is_set()):
+                        try:
+                            msg = await ws.receive(timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            payload = json.loads(msg.data)
+                            if payload.get("type") == "event":
+                                event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+                                if _text(event.get("event_type")) != "state_changed":
+                                    continue
+                                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                                await _handle_state_change_event(data)
+                                _runtime_set(redis_client, last_ws_event_ts=time.time())
+                            elif (
+                                payload.get("type") == "result"
+                                and payload.get("id") == 1
+                                and not payload.get("success")
+                            ):
+                                raise RuntimeError(f"HA subscribe_events failed: {payload}")
+                        elif msg.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}:
+                            raise RuntimeError("Home Assistant websocket connection closed")
+        except Exception as exc:
+            _runtime_set(redis_client, ws_connected=False, last_error=str(exc))
+            logger.warning("[awareness] websocket loop error: %s", exc)
+            await asyncio.sleep(float(reconnect_seconds))
+    _runtime_set(redis_client, ws_connected=False)
+
+
+async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
+    while not (stop_event and stop_event.is_set()):
+        sources = _discover_event_sources(redis_client)
+        for source in sources:
+            _trim_events_for_source(redis_client, source)
+        await asyncio.sleep(300.0)
+
+
+async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
+    _runtime_set(
+        redis_client,
+        started_at=time.time(),
+        ws_connected=False,
+        queue_depth=_queue_depth(redis_client),
+        last_error="",
+    )
+    tasks = [
+        asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
+        asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
+        asyncio.create_task(_awareness_ws_loop(stop_event)),
+        asyncio.create_task(_awareness_retention_loop(stop_event)),
+    ]
+    try:
+        while not (stop_event and stop_event.is_set()):
+            await asyncio.sleep(0.5)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _runtime_set(redis_client, ws_connected=False)
+
+
+def run(stop_event=None):
+    llm_client = get_llm_client_from_env()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_awareness_main(stop_event, llm_client))
+    except asyncio.CancelledError:
+        logger.info("[awareness] awareness core cancelled; stopping")
+    except KeyboardInterrupt:
+        logger.info("[awareness] awareness core interrupted; stopping")
+    except Exception:
+        logger.exception("[awareness] awareness core crashed")
+        raise
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
