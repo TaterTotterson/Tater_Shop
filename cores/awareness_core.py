@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.29"
+__version__ = "1.0.30"
 
 load_dotenv()
 
@@ -1838,6 +1838,9 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         "weather_wind": [],
         "weather_rain": [],
         "entry_sensors": [],
+        "entry_sensors_door": [],
+        "entry_sensors_window": [],
+        "entry_sensors_garage": [],
     }
     try:
         ha = _ha_config()
@@ -1910,10 +1913,21 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
                 catalog["weather_rain"].append((entity_id, label))
         if lower.startswith(("binary_sensor.", "sensor.", "cover.")):
             name_hint = f"{lower} {_text(attrs.get('friendly_name')).lower()}"
-            if device_class in {"door", "window", "garage_door", "opening"} or any(
-                token in name_hint for token in ("door", "window", "garage", "contact")
-            ):
+            is_garage = device_class == "garage_door" or "garage" in name_hint
+            is_window = device_class == "window" or "window" in name_hint
+            is_door = device_class in {"door", "opening"} or any(
+                token in name_hint for token in ("door", "contact", "opening")
+            )
+            if is_door:
                 catalog["entry_sensors"].append((entity_id, label))
+                catalog["entry_sensors_door"].append((entity_id, label))
+            if is_window:
+                catalog["entry_sensors"].append((entity_id, label))
+                catalog["entry_sensors_window"].append((entity_id, label))
+            # Garage options intentionally prefer cover.* so users select actionable garage door entities.
+            if is_garage and lower.startswith("cover."):
+                catalog["entry_sensors"].append((entity_id, label))
+                catalog["entry_sensors_garage"].append((entity_id, label))
         if lower.startswith(("binary_sensor.", "sensor.", "event.", "button.", "switch.", "input_boolean.")):
             catalog["triggers"].append((entity_id, label))
             if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
@@ -2124,6 +2138,49 @@ def _trigger_dependency_for_camera(
 
     return default_options, {
         "source_key": "camera_entity",
+        "options_by_source": options_by_source,
+        "default_options": default_options,
+    }
+
+
+def _entry_sensor_dependency_options(
+    *,
+    catalog: Dict[str, List[Tuple[str, str]]],
+    current_type: str,
+    current_entity: str,
+) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    sensor_type = _text(current_type).lower()
+    if sensor_type not in {"door", "window", "garage"}:
+        sensor_type = "door"
+    all_pairs = catalog.get("entry_sensors") or catalog.get("triggers") or []
+    door_pairs = catalog.get("entry_sensors_door") or all_pairs
+    window_pairs = catalog.get("entry_sensors_window") or all_pairs
+    garage_pairs = catalog.get("entry_sensors_garage") or []
+    placeholder = "(Select door/window/garage sensor)"
+    default_options = _choices_from_pairs(
+        all_pairs,
+        placeholder=placeholder,
+        current_value=_text(current_entity),
+    )
+    options_by_source: Dict[str, List[Dict[str, str]]] = {
+        "door": _choices_from_pairs(
+            door_pairs,
+            placeholder=placeholder,
+            current_value=_text(current_entity) if sensor_type == "door" else "",
+        ),
+        "window": _choices_from_pairs(
+            window_pairs,
+            placeholder=placeholder,
+            current_value=_text(current_entity) if sensor_type == "window" else "",
+        ),
+        "garage": _choices_from_pairs(
+            garage_pairs,
+            placeholder=placeholder,
+            current_value=_text(current_entity) if sensor_type == "garage" else "",
+        ),
+    }
+    return default_options, {
+        "source_key": "sensor_type",
         "options_by_source": options_by_source,
         "default_options": default_options,
     }
@@ -2425,10 +2482,10 @@ def _entry_sensor_form(
     catalog: Dict[str, List[Tuple[str, str]]],
     rules: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    sensor_options = _choices_from_pairs(
-        catalog.get("entry_sensors") or catalog.get("triggers") or [],
-        placeholder="(Select door/window/garage sensor)",
-        current_value=_text(rule.get("sensor_entity") or rule.get("trigger_entity")),
+    sensor_options, sensor_dependency = _entry_sensor_dependency_options(
+        catalog=catalog,
+        current_type=_text(rule.get("sensor_type") or "door"),
+        current_entity=_text(rule.get("sensor_entity") or rule.get("trigger_entity")),
     )
     area_options = _area_options(
         rules,
@@ -2466,6 +2523,7 @@ def _entry_sensor_form(
                 "label": "Sensor Entity",
                 "type": "select",
                 "options": sensor_options,
+                "dependent_options": sensor_dependency,
                 "value": _text(rule.get("sensor_entity") or rule.get("trigger_entity")),
             },
             {
@@ -2723,9 +2781,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
         placeholder="(Select rain sensor)",
     )
-    entry_sensor_options = _choices_from_pairs(
-        catalog.get("entry_sensors") or catalog.get("triggers") or [],
-        placeholder="(Select door/window/garage sensor)",
+    entry_sensor_options, entry_sensor_dependency = _entry_sensor_dependency_options(
+        catalog=catalog,
+        current_type="door",
+        current_entity="",
     )
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
@@ -2865,6 +2924,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "label": "Sensor Entity",
                     "type": "select",
                     "options": entry_sensor_options,
+                    "dependent_options": entry_sensor_dependency,
                     "value": "",
                     "show_when": show_entry,
                 },
