@@ -1487,7 +1487,7 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "1f8804c4ae768e8945e81e222fed1732037b8cfbffc03279e3fde96d681494cd"
+      "sha256": "c6c0670b0ec4bc9394c152fbcd96a6d671fab7633d11b8e696e7287e3687d5d5"
     },
     {
       "id": "unifi_protect_camera",
@@ -1513,7 +1513,7 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "bbba717e9b8ee3c9f7710bb082eb0f0c7b97d2ab2d9263c15e1ee14ea0262e8e"
+      "sha256": "5ed13b9d544912710b51d21170930f26019ca978f46ff9dc93d8412b70e0600f"
     },
     {
       "id": "unifi_protect_camera_info",
@@ -1539,7 +1539,7 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "9b5a41ece7395d0d19aa63dfdbf37ae9f562ff96e0cade91e2aee8585ef16038"
+      "sha256": "bc1c3833afd4ce65b1384dd4a97eff48e98cb2f4a16e02baa8659c2c07d20122"
     },
     {
       "id": "unifi_protect_sensors",
@@ -1565,7 +1565,7 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "d7785c9a76ddb36e6a3a9749bf7edc5bb067622d213c312f0f669e2ec0158617"
+      "sha256": "432cd873fedd28c20219566a1d3c43d58cadc5140a4d53c84ae474c49153e7c1"
     },
     {
       "id": "voicepe_remote_timer",
