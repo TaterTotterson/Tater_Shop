@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.16"
+__version__ = "1.0.20"
 
 load_dotenv()
 
@@ -958,6 +958,15 @@ def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
     return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
 
 
+def _is_nothing_notable_summary(value: Any) -> bool:
+    token = _text(value).lower()
+    if not token:
+        return False
+    token = re.sub(r"\s+", " ", token)
+    token = token.rstrip(".!? ")
+    return token == "nothing notable"
+
+
 async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
     del llm_client
     camera = _text(rule.get("camera_entity"))
@@ -993,35 +1002,37 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         summary = "Motion event detected, but camera analysis was unavailable."
         used_fallback = True
     summary = _compact(summary) or "Motion event detected."
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
-    event_payload = {
-        "source": _slug(area),
-        "title": f"{area.title()} motion",
-        "type": "camera_motion",
-        "message": summary,
-        "entity_id": camera,
-        "ha_time": _now_iso(),
-        "level": "info",
-        "data": {
-            "area": area,
-            "reason": reason,
-            "trigger_entity": _text(event.get("entity_id")),
-        },
-    }
-    if snapshot_store.get("stored"):
-        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    elif snapshot_store.get("reason"):
-        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    _append_event(redis_client, source=area, payload=event_payload)
+    nothing_notable = _is_nothing_notable_summary(summary)
+    if not nothing_notable:
+        snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+        event_payload = {
+            "source": _slug(area),
+            "title": f"{area.title()} motion",
+            "type": "camera_motion",
+            "message": summary,
+            "entity_id": camera,
+            "ha_time": _now_iso(),
+            "level": "info",
+            "data": {
+                "area": area,
+                "reason": reason,
+                "trigger_entity": _text(event.get("entity_id")),
+            },
+        }
+        if snapshot_store.get("stored"):
+            event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+            event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+            event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+            event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+        elif snapshot_store.get("reason"):
+            event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+            event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+        _append_event(redis_client, source=area, payload=event_payload)
     _mark_cooldown(_camera_cooldown_key(camera))
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
     api_notification = _bool(rule.get("api_notification"), True)
     notify_requested = bool(device_services or api_notification)
-    if summary.lower().startswith("nothing notable"):
+    if nothing_notable:
         notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "nothing_notable"}
     elif (
         notify_requested
@@ -1309,6 +1320,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                     "type": "image",
                     "src": _text(snapshot.get("data_url")),
                     "alt": f"{title} snapshot",
+                    "hide_label": True,
                 }
             )
         elif _text(snapshot.get("snapshot_id")):
@@ -1956,6 +1968,10 @@ def _doorbell_form(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
     )
+    media_player_options = _multiselect_choices_from_pairs(
+        catalog.get("media_players") or [],
+        current_values=rule.get("players"),
+    )
     return {
         "id": rule["id"],
         "group": "doorbell",
@@ -2030,9 +2046,10 @@ def _doorbell_form(
                     {
                         "key": "players",
                         "label": "Media Players",
-                        "type": "textarea",
-                        "description": "One media_player entity per line.",
-                        "value": _players_text(rule.get("players")),
+                        "type": "multiselect",
+                        "description": "Select one or more media_player entities for doorbell TTS.",
+                        "options": media_player_options,
+                        "value": _normalize_players(rule.get("players")),
                     },
                 ],
             },
@@ -2210,6 +2227,9 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
     )
+    media_player_options = _multiselect_choices_from_pairs(
+        catalog.get("media_players") or [],
+    )
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_brief = {"source_key": "kind", "equals": "brief"}
@@ -2218,6 +2238,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         "kind": "settings_manager",
         "title": "Awareness Rule Manager",
         "empty_message": "No awareness rules configured yet.",
+        "stats_refresh_button": True,
+        "stats_refresh_label": "Refresh",
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Rule Settings",
         "item_fields_popup": True,
@@ -2239,8 +2261,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "label": "Cameras",
                 "source": "items",
                 "item_group": "camera",
-                "selector": True,
-                "selector_label": "Select Camera Rule",
+                "selector": False,
                 "empty_message": "No camera rules configured.",
             },
             {
@@ -2412,9 +2433,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 {
                     "key": "players",
-                    "label": "Media Players (one per line)",
-                    "type": "textarea",
-                    "value": "",
+                    "label": "Media Players",
+                    "type": "multiselect",
+                    "description": "Select one or more media_player entities for doorbell TTS.",
+                    "options": media_player_options,
+                    "value": [],
                     "show_when": show_doorbell,
                 },
                 {
