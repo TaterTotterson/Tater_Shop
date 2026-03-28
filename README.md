@@ -51,6 +51,7 @@
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
 | `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, homeassistant, discord, telegram, matrix, irc |
+| `ha_camera_area` | Find cameras in a Home Assistant area and describe what they see. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_climate` | Control Home Assistant thermostats and HVAC entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_covers` | Control Home Assistant covers and garage doors. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_fans` | Control Home Assistant fans. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
