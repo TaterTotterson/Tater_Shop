@@ -1493,7 +1493,7 @@
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
@@ -1514,7 +1514,7 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "c6c0670b0ec4bc9394c152fbcd96a6d671fab7633d11b8e696e7287e3687d5d5"
+      "sha256": "a52dad9be467890f1cef508a169826b9e459c893f7cb5902f6d05c98d98a7596"
     },
     {
       "id": "unifi_protect_camera",
