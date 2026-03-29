@@ -36,7 +36,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.1.5"
+    version = "1.1.6"
     min_tater_version = "59"
     routing_keywords = [
         "weather",
@@ -248,7 +248,6 @@ class WeatherForecastPlugin(ToolVerba):
         return action_success(
             facts={"request": request_text, "result": msg},
             summary_for_user=msg,
-            say_hint="Provide the weather answer exactly as returned.",
             suggested_followups=["Want the forecast for another day or location?"],
         )
 
