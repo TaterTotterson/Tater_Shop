@@ -1251,7 +1251,7 @@
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet/URL.",
       "portals": [
@@ -1272,7 +1272,7 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "7e11312a8302ef072e1c178c8eae6dc06902db00eab83e6cafeb1cfdc651f5a6"
+      "sha256": "34ffd55bdd5eabb98b41aea1686908da4c5957fa0de266412c1268577716bf08"
     },
     {
       "id": "premiumize_list_files",
