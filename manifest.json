@@ -1620,7 +1620,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "portals": [
@@ -1638,7 +1638,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "b94264601cd8379736e58b0d5d26767c48fa0c500b8cd5c992da27ee5d1365f7"
+      "sha256": "84a72631939e0eb54ad05e0a4ecc70b91933a34cc6f0c5a0be44f8540761e60d"
     },
     {
       "id": "webdav_browser",
