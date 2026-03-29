@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeGetLinksPlugin(ToolVerba):
     name = "premiumize_get_links"
     verba_name = "Premiumize Get Links"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Premiumize Get Links"
     settings_category = "Premiumize"
@@ -27,7 +27,7 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         '{"function":"premiumize_get_links","arguments":{"query":"get direct links for magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
     )
     description = (
-        "Retrieve Premiumize direct/stream links from a source or cached file selection."
+        "Retrieve Premiumize direct/stream links for cached magnet or URL sources."
     )
     verba_dec = (
         "Get Premiumize stream/download links by magnet/URL."
@@ -61,15 +61,15 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         "Use when the request is for Premiumize download/stream links."
     )
     how_to_use = (
-        "Set `query` to a link request and include a full magnet/URL source or reference a known item."
+        "Set `query` to a link request and include a full magnet or URL source."
     )
     common_needs = [
-        "A link-retrieval request in query.",
+        "A link-retrieval request with a literal magnet or URL source.",
     ]
     missing_info_prompts = []
     example_calls = [
         '{"function":"premiumize_get_links","arguments":{"query":"get direct links for magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
-        '{"function":"premiumize_get_links","arguments":{"query":"get me the download link for item 2"}}',
+        '{"function":"premiumize_get_links","arguments":{"query":"get direct links for https://example.com/file.torrent"}}',
     ]
     routing_keywords = [
         "premiumize",
@@ -951,81 +951,50 @@ class PremiumizeGetLinksPlugin(ToolVerba):
     ) -> Dict[str, Any]:
         source_info = await self._resolve_source(args, intent, context)
         source = self._safe_text(source_info.get("source"))
-        if source:
-            links, err = await self._api_directdl(settings, source)
-            if err:
-                return action_failure(
-                    code="premiumize_directdl_failed",
-                    message=err,
-                    diagnosis=self._diagnosis(),
-                    say_hint="Explain direct link retrieval failed and suggest retrying.",
-                )
-            normalized_links = self._normalize_direct_links(links)
-            if not normalized_links:
-                return action_failure(
-                    code="no_links_available",
-                    message="Premiumize did not return direct links for that source yet.",
-                    say_hint="Explain no direct links are available yet and suggest checking transfer progress.",
-                )
-            self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
-            summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
-            return action_success(
-                facts={
-                    "action": "get_links",
-                    "source_type": source_info.get("source_type"),
-                    "link_count": len(normalized_links),
-                },
-                data={"links": normalized_links, "source": source_info},
-                summary_for_user=summary,
-                say_hint="Return the direct/stream links and identify the best link-ready file.",
-            )
-
-        cache = self._load_cache()
-        files = [f for f in cache.get("last_files") or [] if isinstance(f, dict)]
-        target = self._select_file(files, intent, cache) if files else None
-
-        if target and target.get("item_id") and not (target.get("download_link") or target.get("stream_link")):
-            payload, err = await self._api_item_details(settings, self._safe_text(target.get("item_id")))
-            if not err:
-                item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
-                if isinstance(item, dict):
-                    target = self._normalize_file_item(item)
-
-        if not target:
+        if not source:
             return action_failure(
-                code="link_target_not_found",
-                message="No Premiumize file or source could be resolved for link retrieval.",
-                needs=["Provide a file name/item id, or pass the exact magnet/URL URI in the request."],
-                say_hint="Explain a specific file target or literal source URI is required to fetch links.",
+                code="missing_source",
+                message="No explicit magnet or URL was provided for link retrieval.",
+                needs=["Pass the full magnet:? or http(s):// URI directly in query or source arguments."],
+                say_hint="Explain that this action requires a literal magnet or URL source.",
             )
 
-        self._save_cache(
-            {
-                "last_action": "get_links",
-                "last_item_id": target.get("item_id"),
-                "last_files": files[:80] if files else [target],
-            }
-        )
+        links, err = await self._api_directdl(settings, source)
+        if err:
+            err_l = err.lower()
+            if any(token in err_l for token in ("not cached", "not in cache", "cache")):
+                return action_failure(
+                    code="torrent_not_cached",
+                    message="Torrent is not cached on Premiumize.",
+                    say_hint="Explain that this torrent is not currently cached on Premiumize.",
+                )
+            return action_failure(
+                code="premiumize_directdl_failed",
+                message=err,
+                diagnosis=self._diagnosis(),
+                say_hint="Explain direct link retrieval failed and suggest retrying.",
+            )
 
-        summary = f"Retrieved links for '{target.get('name')}'."
-        if target.get("stream_link"):
-            summary += " Stream link is available."
-        elif target.get("download_link"):
-            summary += " Download link is available."
-        else:
-            summary += " No direct link found yet."
+        normalized_links = self._normalize_direct_links(links)
+        if not normalized_links:
+            return action_failure(
+                code="torrent_not_cached",
+                message="Torrent is not cached on Premiumize.",
+                say_hint="Explain that this torrent is not currently cached on Premiumize.",
+            )
+
+        self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
+        summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
 
         return action_success(
             facts={
                 "action": "get_links",
-                "item_id": target.get("item_id"),
-                "name": target.get("name"),
-                "has_download_link": bool(target.get("download_link")),
-                "has_stream_link": bool(target.get("stream_link")),
+                "source_type": source_info.get("source_type"),
+                "link_count": len(normalized_links),
             },
-            data={"file": target},
+            data={"links": normalized_links, "source": source_info},
             summary_for_user=summary,
-            say_hint="Return the requested file links and mention stream vs direct availability.",
+            say_hint="Return the direct/stream links and identify the best link-ready file.",
         )
 
     async def _run(self, args: Dict[str, Any], llm_client, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1052,39 +1021,13 @@ class PremiumizeGetLinksPlugin(ToolVerba):
             return action_failure(
                 code="missing_request",
                 message="No Premiumize request text was provided.",
-                needs=["Provide a Premiumize request. For transfers/links by source, include the exact magnet or URL URI."],
-                say_hint="Ask for a concrete Premiumize request and require a literal magnet/URL URI when needed.",
+                needs=["Provide a link request and include the exact magnet or URL URI."],
+                say_hint="Ask for a concrete link request with a literal magnet or URL source.",
             )
 
         intent = await self._resolve_intent(query, args or {}, llm_client)
-
-        action = self._safe_text(intent.get("action"))
-        if not action:
-            return action_failure(
-                code="intent_unresolved",
-                message="Could not determine the Premiumize action from the request.",
-                needs=[
-                    "Say one clear action: add transfer, list transfers, check transfer status, list files, or get links.",
-                ],
-                say_hint="Explain the request could not be routed and ask for a clearer Premiumize action.",
-            )
-
-        if action == "add_transfer":
-            return await self._act_add_transfer(args=args or {}, intent=intent, settings=settings, context=context)
-        if action == "list_transfers":
-            return await self._act_list_transfers(intent=intent, settings=settings)
-        if action == "check_transfer":
-            return await self._act_check_transfer(intent=intent, settings=settings)
-        if action == "list_files":
-            return await self._act_list_files(intent=intent, settings=settings)
-        if action == "get_links":
-            return await self._act_get_links(args=args or {}, intent=intent, settings=settings, context=context)
-
-        return action_failure(
-            code="unsupported_intent",
-            message=f"Unsupported Premiumize intent '{action}'.",
-            say_hint="Explain that request intent could not be mapped and ask for a clearer Premiumize task.",
-        )
+        intent["action"] = "get_links"
+        return await self._act_get_links(args=args or {}, intent=intent, settings=settings, context=context)
 
     # Platform handlers
     async def handle_discord(self, message, args, llm_client):
