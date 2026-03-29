@@ -308,7 +308,7 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "3a017e446d0e0ecb53d9599de424ae9fc082a8c9acf656d27d8d98d91d265d01"
+      "sha256": "cbcc1bf8a04429bafea474615af204c24741df8600d7c50d844d20969d902cac"
     },
     {
       "id": "ha_climate",
