@@ -123,17 +123,6 @@ class HAClient:
         data = self._req("GET", "/api/states")
         return data if isinstance(data, list) else []
 
-    def area_registry(self) -> List[dict]:
-        data = self._req("GET", "/api/config/area_registry")
-        return data if isinstance(data, list) else []
-
-    def entity_registry(self) -> List[dict]:
-        data = self._req("GET", "/api/config/entity_registry")
-        return data if isinstance(data, list) else []
-
-    def render_template(self, template: str) -> Any:
-        return self._req("POST", "/api/template", json_body={"template": template})
-
     def camera_proxy(self, entity_id: str) -> Tuple[bytes, str]:
         data, headers = self._req(
             "GET",
@@ -149,7 +138,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
@@ -189,121 +178,178 @@ class HACameraAreaPlugin(ToolVerba):
     def _normalize_area_name(text: str) -> str:
         return re.sub(r"\s+", " ", _coerce_text(text).strip().lower())
 
-    @staticmethod
-    def _camera_entity_ids_from_template_result(raw: Any) -> List[str]:
-        if isinstance(raw, list):
-            vals = raw
-        else:
-            text = _coerce_text(raw).strip()
-            if not text:
-                return []
-            vals = None
-            try:
-                parsed = json.loads(text)
-                if isinstance(parsed, list):
-                    vals = parsed
-            except Exception:
-                vals = None
-            if vals is None:
-                vals = re.findall(r"camera\.[a-zA-Z0-9_]+", text)
-        out: List[str] = []
+    def _camera_rows_from_states(self, states: List[dict]) -> List[dict]:
+        rows: List[dict] = []
         seen: set[str] = set()
-        for item in vals or []:
-            eid = _coerce_text(item).strip().lower()
-            if not eid.startswith("camera.") or eid in seen:
-                continue
-            seen.add(eid)
-            out.append(eid)
-        return out
-
-    def _cameras_from_template(self, client: HAClient, area_hint: str) -> List[str]:
-        area = _coerce_text(area_hint).strip().replace('"', '\\"')
-        if not area:
-            return []
-        template = (
-            "{% set ents = area_entities(\"" + area + "\") %}"
-            "{{ ents | select('match', '^camera\\\\.') | list | tojson }}"
-        )
-        try:
-            raw = client.render_template(template)
-        except Exception as exc:
-            logger.info("[ha_camera_area] template area lookup failed: %s", exc)
-            return []
-        return self._camera_entity_ids_from_template_result(raw)
-
-    def _match_area_row(self, area_hint: str, area_rows: List[dict]) -> Optional[dict]:
-        hint = self._normalize_area_name(area_hint)
-        if not hint:
-            return None
-
-        for row in area_rows:
-            name = self._normalize_area_name(row.get("name"))
-            area_id = self._normalize_area_name(row.get("area_id"))
-            if hint == name or hint == area_id:
-                return row
-        for row in area_rows:
-            name = self._normalize_area_name(row.get("name"))
-            area_id = self._normalize_area_name(row.get("area_id"))
-            if hint in name or hint in area_id:
-                return row
-
-        hint_words = [w for w in re.split(r"\s+", hint) if w]
-        best = None
-        best_score = 0
-        for row in area_rows:
-            name = self._normalize_area_name(row.get("name"))
-            score = sum(1 for w in hint_words if w and w in name)
-            if score > best_score:
-                best_score = score
-                best = row
-        return best if best_score > 0 else None
-
-    def _camera_name_map(self, states: List[dict]) -> Dict[str, str]:
-        out: Dict[str, str] = {}
         for st in states or []:
             if not isinstance(st, dict):
                 continue
             eid = _coerce_text(st.get("entity_id")).strip().lower()
-            if not eid.startswith("camera."):
+            if not eid.startswith("camera.") or eid in seen:
                 continue
+            seen.add(eid)
             attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
             name = _coerce_text(attrs.get("friendly_name") or eid).strip()
-            out[eid] = name or eid
-        return out
+            rows.append({"entity_id": eid, "name": name or eid})
+        return rows
 
-    def _cameras_from_registries(self, client: HAClient, area_hint: str) -> List[dict]:
-        try:
-            areas = client.area_registry()
-            entities = client.entity_registry()
-            states = client.list_states()
-        except Exception as exc:
-            logger.info("[ha_camera_area] registry lookup failed: %s", exc)
+    def _area_match_terms(self, area_hint: str) -> List[str]:
+        hint = self._normalize_area_name(area_hint)
+        if not hint:
             return []
 
-        area_row = self._match_area_row(area_hint, areas)
-        if not isinstance(area_row, dict):
-            return []
-        area_id = _coerce_text(area_row.get("area_id")).strip()
-        if not area_id:
-            return []
+        hint_words = [w for w in re.split(r"\s+", hint) if w]
+        # Area aliases let broad requests (e.g., "front") include nearby camera names.
+        alias_map: Dict[str, List[str]] = {
+            "front": ["front", "entry", "door", "doorbell", "porch", "driveway", "garage"],
+            "back": ["back", "rear", "yard", "backyard", "patio", "deck"],
+            "side": ["side", "gate", "path"],
+            "garage": ["garage", "driveway", "front"],
+            "driveway": ["driveway", "garage", "front"],
+            "yard": ["yard", "lawn", "front yard", "back yard"],
+        }
 
-        camera_names = self._camera_name_map(states)
-        rows: List[dict] = []
-        for ent in entities or []:
-            if not isinstance(ent, dict):
+        terms: List[str] = [hint]
+        for word in hint_words:
+            terms.append(word)
+            terms.extend(alias_map.get(word, []))
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            norm = self._normalize_area_name(term)
+            if not norm or norm in seen:
                 continue
-            eid = _coerce_text(ent.get("entity_id")).strip().lower()
+            seen.add(norm)
+            deduped.append(norm)
+        return deduped
+
+    def _match_cameras_by_name(self, camera_rows: List[dict], area_hint: str) -> List[dict]:
+        hint = self._normalize_area_name(area_hint)
+        if not hint:
+            return []
+
+        hint_words = [w for w in re.split(r"\s+", hint) if w]
+        terms = self._area_match_terms(hint)
+        scored: List[Tuple[int, str, dict]] = []
+        for cam in camera_rows or []:
+            if not isinstance(cam, dict):
+                continue
+            name_norm = self._normalize_area_name(cam.get("name") or cam.get("entity_id"))
+            if not name_norm:
+                continue
+            score = 0
+            if name_norm == hint:
+                score += 120
+            if hint and hint in name_norm:
+                score += 80
+            for term in terms:
+                if term and term in name_norm:
+                    score += 20
+            for word in hint_words:
+                if word and word in name_norm:
+                    score += 10
+            if score > 0:
+                scored.append((score, name_norm, cam))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+
+        matched: List[dict] = []
+        seen_ids: set[str] = set()
+        for _, _, cam in scored:
+            eid = _coerce_text(cam.get("entity_id")).strip().lower()
+            if not eid or eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+            matched.append(cam)
+        return matched
+
+    async def _match_cameras_with_ai(
+        self,
+        *,
+        area_hint: str,
+        camera_rows: List[dict],
+        llm_client: Any,
+    ) -> List[dict]:
+        hint = _coerce_text(area_hint).strip()
+        if not hint:
+            return []
+        if llm_client is None or not hasattr(llm_client, "chat"):
+            return []
+
+        candidates: List[dict] = []
+        by_id: Dict[str, dict] = {}
+        for cam in camera_rows or []:
+            if not isinstance(cam, dict):
+                continue
+            eid = _coerce_text(cam.get("entity_id")).strip().lower()
             if not eid.startswith("camera."):
                 continue
-            if _coerce_text(ent.get("area_id")).strip() != area_id:
-                continue
-            rows.append(
-                {
-                    "entity_id": eid,
-                    "name": camera_names.get(eid) or eid,
-                }
+            name = _coerce_text(cam.get("name") or eid).strip() or eid
+            row = {"entity_id": eid, "name": name}
+            candidates.append(row)
+            by_id[eid] = row
+        if not candidates:
+            return []
+
+        prompt = (
+            "Select Home Assistant camera entity_ids that best match the requested area.\n"
+            "Return strict JSON only: {\"camera_entity_ids\":[\"camera.one\",\"camera.two\"]}\n"
+            "Rules:\n"
+            "- Use only entity_ids from candidates.\n"
+            "- Match by camera names to the requested area phrase.\n"
+            "- Include nearby synonyms when reasonable (example: front can include driveway/garage/porch).\n"
+            "- Prefer precision over recall.\n"
+            "- No prose."
+        )
+        payload = {"requested_area": hint, "candidates": candidates}
+
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                max_tokens=220,
+                temperature=0.0,
             )
-        return rows
+        except Exception as exc:
+            logger.info("[ha_camera_area] AI camera match failed: %s", exc)
+            return []
+
+        content = _coerce_text((resp.get("message") or {}).get("content")).strip()
+        if not content:
+            return []
+
+        parsed = None
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            blob = extract_json(content)
+            if blob:
+                try:
+                    parsed = json.loads(blob)
+                except Exception:
+                    parsed = None
+        if not isinstance(parsed, dict):
+            return []
+
+        ids_raw = parsed.get("camera_entity_ids")
+        if not isinstance(ids_raw, list):
+            return []
+
+        out: List[dict] = []
+        seen: set[str] = set()
+        for item in ids_raw:
+            eid = _coerce_text(item).strip().lower()
+            if not eid.startswith("camera.") or eid in seen:
+                continue
+            row = by_id.get(eid)
+            if not isinstance(row, dict):
+                continue
+            seen.add(eid)
+            out.append(row)
+        return out
 
     async def _extract_area_from_query(self, query: str, llm_client: Any) -> str:
         text = _coerce_text(query).strip()
@@ -458,15 +504,7 @@ class HACameraAreaPlugin(ToolVerba):
         if not query:
             query = _extract_context_text(context or {})
 
-        area_hint = (
-            _coerce_text(payload.get("area")).strip()
-            or _coerce_text(payload.get("target")).strip()
-            or _coerce_text(payload.get("area_name")).strip()
-        )
-        if not area_hint:
-            area_hint = await self._extract_area_from_query(query, llm_client)
-        if not area_hint and query:
-            area_hint = query
+        area_hint = await self._extract_area_from_query(query, llm_client) if query else ""
         if not area_hint:
             return action_failure(
                 code="missing_area",
@@ -475,17 +513,20 @@ class HACameraAreaPlugin(ToolVerba):
                 say_hint="Ask the user for a specific area name.",
             )
 
-        cameras = self._cameras_from_template(client, area_hint)
-        camera_rows: List[dict] = []
-        if cameras:
-            try:
-                name_map = self._camera_name_map(client.list_states())
-            except Exception:
-                name_map = {}
-            for eid in cameras:
-                camera_rows.append({"entity_id": eid, "name": name_map.get(eid) or eid})
-        else:
-            camera_rows = self._cameras_from_registries(client, area_hint)
+        try:
+            all_states = client.list_states()
+        except Exception as exc:
+            logger.info("[ha_camera_area] failed to list camera states: %s", exc)
+            all_states = []
+
+        all_camera_rows = self._camera_rows_from_states(all_states)
+        camera_rows = await self._match_cameras_with_ai(
+            area_hint=area_hint,
+            camera_rows=all_camera_rows,
+            llm_client=llm_client,
+        )
+        if not camera_rows:
+            camera_rows = self._match_cameras_by_name(all_camera_rows, area_hint)
 
         if not camera_rows:
             return action_failure(
