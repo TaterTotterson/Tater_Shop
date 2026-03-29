@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettSearchTorrentsPlugin(ToolVerba):
     name = "jackett_search_torrents"
     verba_name = "Jackett Search Torrents"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Jackett Search Torrents"
     settings_category = "Jackett"
@@ -87,6 +87,7 @@ class JackettSearchTorrentsPlugin(ToolVerba):
     argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The Jackett search request (for example: find Ubuntu 24.04 torrents).'}, 'search_query': {'type': 'string', 'description': 'Optional explicit Jackett query text.'}, 'scope': {'type': 'string', 'description': 'Optional scope: all, public, or private.'}, 'indexers': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional list of indexer names/ids.'}, 'categories': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional category labels or IDs.'}, 'sort_by': {'type': 'string', 'description': 'Optional sort: best_match, seeders, newest, or size.'}, 'sort_direction': {'type': 'string', 'description': 'Optional sort direction: desc or asc.'}, 'min_seeders': {'type': 'integer', 'description': 'Optional minimum seeder count.'}, 'max_age_days': {'type': 'integer', 'description': 'Optional maximum age in days.'}, 'min_size': {'type': 'string', 'description': 'Optional minimum size (bytes or text like 2GB).'}, 'max_size': {'type': 'string', 'description': 'Optional maximum size (bytes or text like 20GB).'}, 'limit': {'type': 'integer', 'description': 'Optional max results to return (1-100).'}}, 'required': []}
 
     MAX_LIMIT = 100
+    RESULTS_OUTPUT_LIMIT = 10
     CACHE_TTL_SECONDS = 6 * 60 * 60
     CACHE_KEY = "tater:jackett:last_results"
     TORZNAB_NS = {"torznab": "http://torznab.com/schemas/2015/feed"}
@@ -853,20 +854,16 @@ class JackettSearchTorrentsPlugin(ToolVerba):
     def _top_result_preview(self, results: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for item in results[: max(0, int(limit))]:
-            transfer_uri, transfer_type = self._preferred_transfer_uri(item)
             out.append(
                 {
                     "rank": int(item.get("rank") or 0),
                     "result_id": self._safe_text(item.get("id")),
                     "title": self._safe_text(item.get("title")),
                     "indexer": self._safe_text(item.get("indexer")),
+                    "indexer_id": self._safe_text(item.get("indexer_id")),
                     "seeders": int(item.get("seeders") or 0),
-                    "size": self._safe_text(item.get("size")),
-                    "publish_date": self._safe_text(item.get("publish_date")),
-                    "transfer_uri": transfer_uri,
-                    "transfer_type": transfer_type,
-                    "magnet_url": self._safe_text(item.get("magnet_url")),
                     "torrent_url": self._safe_text(item.get("torrent_url")),
+                    "magnet_url": self._safe_text(item.get("magnet_url")),
                 }
             )
         return out
@@ -1243,7 +1240,14 @@ class JackettSearchTorrentsPlugin(ToolVerba):
             item.pop("raw_attrs", None)
         return ranked
 
-    def _summary_for_results(self, plan: Dict[str, Any], results: List[Dict[str, Any]], selected_indexers: List[Dict[str, Any]]) -> str:
+    def _summary_for_results(
+        self,
+        plan: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        selected_indexers: List[Dict[str, Any]],
+        *,
+        total_matches: int = 0,
+    ) -> str:
         action = plan.get("action")
         query = self._safe_text(plan.get("search_query"))
         if not results:
@@ -1254,9 +1258,9 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         scope_text = plan.get("scope", "all")
         idx_count = len(selected_indexers)
         if action == "recent":
-            base = f"Found {len(results)} recent uploads"
+            base = f"Found {max(0, int(total_matches or len(results)))} recent uploads"
         else:
-            base = f"Found {len(results)} Jackett results"
+            base = f"Found {max(0, int(total_matches or len(results)))} Jackett results"
         if query:
             base += f" for '{query}'"
         if scope_text == "all" and idx_count == 0:
@@ -1266,20 +1270,22 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         top_bits = [self._safe_text(top.get("title"), "Top result")]
         if int(top.get("seeders") or 0) > 0:
             top_bits.append(f"{int(top.get('seeders') or 0)} seeders")
-        if self._safe_text(top.get("indexer")):
-            top_bits.append(f"from {top.get('indexer')}")
-        if self._safe_text(top.get("publish_date")):
-            top_bits.append("newer-ranked")
-        preview = self._top_result_preview(results, limit=10)
+        preview = self._top_result_preview(
+            results,
+            limit=self.RESULTS_OUTPUT_LIMIT,
+        )
         if not preview:
             return f"{base} Top result: {', '.join(top_bits)}."
-        lines = [f"{base} Top result: {', '.join(top_bits)}.", "Top 10 (use result_id to select):"]
+        lines = [
+            f"{base} Top result: {', '.join(top_bits)}.",
+            "Top 10 compact results (use result_id to select):",
+        ]
         for row in preview:
-            transfer = row.get("transfer_uri") or "no transfer URI"
             lines.append(
                 f"{row.get('rank')}. [{row.get('result_id')}] {row.get('title')} | "
-                f"{row.get('seeders')} seeders | {row.get('size') or '?'} | "
-                f"{row.get('indexer') or 'unknown'} | {transfer}"
+                f"seeders={row.get('seeders')} | "
+                f"torrent_url={row.get('torrent_url') or 'none'} | "
+                f"magnet_url={row.get('magnet_url') or 'none'}"
             )
         return "\n".join(lines)
 
@@ -1291,7 +1297,7 @@ class JackettSearchTorrentsPlugin(ToolVerba):
                 "query": payload.get("query"),
                 "scope": payload.get("scope"),
                 "ranking": payload.get("ranking"),
-                "results": (payload.get("results") or [])[:120],
+                "results": (payload.get("results") or [])[: self.RESULTS_OUTPUT_LIMIT],
             }
             redis_client.set(self.CACHE_KEY, json.dumps(compact, ensure_ascii=False), ex=self.CACHE_TTL_SECONDS)
         except Exception as exc:
@@ -1601,6 +1607,10 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         filtered = self._filter_results(results, plan)
         ranked = self._rank_results(filtered, plan)
         ranked = ranked[: self._clamp_int(plan.get("limit") or 25, 1, self.MAX_LIMIT, 25)]
+        compact_top = self._top_result_preview(
+            ranked,
+            limit=self.RESULTS_OUTPUT_LIMIT,
+        )
 
         payload = {
             "action": action,
@@ -1609,11 +1619,12 @@ class JackettSearchTorrentsPlugin(ToolVerba):
             "sort_by": self._normalize_sort_by(plan.get("sort_by")),
             "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
             "selected_indexers": selected_indexers if not use_all_endpoint else [{"id": "all", "name": "all"}],
-            "result_count": len(ranked),
-            "results": ranked,
+            "result_count": len(compact_top),
+            "total_matches": len(ranked),
+            "results": compact_top,
             "missing_indexers": missing,
             "warnings": warnings[:10],
-            "top_results": self._top_result_preview(ranked, limit=10),
+            "top_results": compact_top,
             "ranking": {
                 "sort_by": self._normalize_sort_by(plan.get("sort_by")),
                 "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
@@ -1628,7 +1639,12 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         }
         self._cache_results(payload)
 
-        summary = self._summary_for_results(plan, ranked, selected_indexers if not use_all_endpoint else indexers)
+        summary = self._summary_for_results(
+            plan,
+            ranked,
+            selected_indexers if not use_all_endpoint else indexers,
+            total_matches=len(ranked),
+        )
         if warnings:
             summary += " Some indexers returned errors."
 
@@ -1637,16 +1653,15 @@ class JackettSearchTorrentsPlugin(ToolVerba):
                 "action": action,
                 "query": self._safe_text(plan.get("search_query")),
                 "scope": scope,
-                "result_count": len(ranked),
+                "result_count": len(compact_top),
+                "total_matches": len(ranked),
                 "sort_by": payload["ranking"]["sort_by"],
                 "top_result_title": ranked[0]["title"] if ranked else "",
-                "top_result_indexer": ranked[0]["indexer"] if ranked else "",
             },
             data=payload,
             summary_for_user=summary,
             say_hint=(
-                "Summarize ranked Jackett results and list the top 10 with result_id, seeders, size, indexer, "
-                "and transfer URI (magnet or torrent URL) so the user can select one for downloader handoff."
+                "List only the top 10 results in compact form with result_id, title, seeders, torrent_url, and magnet_url."
             ),
             suggested_followups=[
                 "Want me to sort these by newest or seeders?",
