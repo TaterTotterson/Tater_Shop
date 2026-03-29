@@ -146,7 +146,7 @@ class HACameraAreaPlugin(ToolVerba):
     tags = ["homeassistant", "camera", "area"]
 
     usage = '{"function":"ha_camera_area","arguments":{"query":"what is happening in the front yard"}}'
-    description = "Describes Home Assistant cameras in a requested area."
+    description = "Uses Home Assistant camera snapshots to report what is currently happening in requested areas."
     verba_dec = "Find cameras in a Home Assistant area and describe what they see."
     when_to_use = "Use when the user asks what cameras in an area are seeing right now."
     how_to_use = "Pass a natural-language area request in query, or provide area directly."
