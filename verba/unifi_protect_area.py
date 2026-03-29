@@ -352,7 +352,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     name = 'unifi_protect_area'
     verba_name = 'UniFi Protect Area'
-    version = '1.0.0'
+    version = '1.0.1'
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Area'
     settings_category = "UniFi Protect"
@@ -364,7 +364,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     usage = '{"function":"unifi_protect_area","arguments":{"query":"what is going on in the front yard"}}'
 
-    description = 'Capture snapshots from cameras in an area and summarize activity.'
+    description = 'Uses UniFi Protect camera snapshots to report what is currently happening in requested areas.'
     verba_dec = 'Describe activity across multiple cameras in a named area.'
     when_to_use = 'Use when the request is about what is happening in an area.'
     how_to_use = 'Set query to the area request, or provide area/target directly.'
