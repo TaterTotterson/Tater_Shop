@@ -138,7 +138,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
