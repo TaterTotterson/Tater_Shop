@@ -705,7 +705,7 @@
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -726,7 +726,7 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "1d40a6cd63fe5cc3a1a9ce45c5bacd53454e520c2b06382cef61f0edc72338ae"
+      "sha256": "df19d5cd97486ddff373adcf7403244ed3470a44e7c9985b3323ed7d5fab8ab4"
     },
     {
       "id": "joke_api",
