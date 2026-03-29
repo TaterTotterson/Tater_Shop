@@ -286,7 +286,7 @@
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
@@ -308,7 +308,7 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "3f0d3b786296d58890eaf1de4ddadcfe12813df55f0045f6c9f592e1d9053d8c"
+      "sha256": "3a017e446d0e0ecb53d9599de424ae9fc082a8c9acf656d27d8d98d91d265d01"
     },
     {
       "id": "ha_climate",
