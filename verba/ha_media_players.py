@@ -62,7 +62,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = 'ha_media_players'
     verba_name = 'Home Assistant Media Players'
-    version = '1.0.1'
+    version = '1.0.2'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Media Players'
     settings_category = 'Home Assistant Control'
@@ -117,6 +117,7 @@ class HAMediaPlayersPlugin(ToolVerba):
             "description": "Cache LLM chosen entity per-query+catalog (seconds)."
         },
     }
+    URL_RE = re.compile(r"(https?://[^\s\"'<>]+)", re.IGNORECASE)
 
     # ----------------------------
     # Settings helpers
@@ -349,6 +350,28 @@ class HAMediaPlayersPlugin(ToolVerba):
             if isinstance(o, str) and w in o.strip().lower():
                 return o
         return None
+
+    def _extract_first_url(self, text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        m = self.URL_RE.search(raw)
+        if not m:
+            return ""
+        return str(m.group(1) or "").strip()
+
+    def _extract_media_url(self, args: dict, query: str, desired: dict) -> str:
+        data = args or {}
+        desired = desired if isinstance(desired, dict) else {}
+        for key in ("media_url", "url", "link", "media_content_id", "source"):
+            url = self._extract_first_url(data.get(key))
+            if url:
+                return url
+        for key in ("media_url", "url", "link", "source"):
+            url = self._extract_first_url(desired.get(key))
+            if url:
+                return url
+        return self._extract_first_url(query)
 
     # ----------------------------
     # Candidate filtering helpers
@@ -709,7 +732,7 @@ class HAMediaPlayersPlugin(ToolVerba):
             "Schema:\n"
             "{\n"
             '  "intent": "get_temp|get_state|control|set_temperature",\n'
-            '  "action": "turn_on|turn_off|open|close|get_state|set_temperature|send_command",\n'
+            '  "action": "turn_on|turn_off|open|close|get_state|set_temperature|send_command|play_media",\n'
             '  "scope": "inside|outside|area:<name>|device:<phrase>|unknown",\n'
             f'  "domain_hint": "one of: {allowed_domain}",\n'
             '  "read_target": "none|state|target_temperature|current_temperature",\n'
@@ -735,6 +758,7 @@ class HAMediaPlayersPlugin(ToolVerba):
             "- For remotes, domain_hint=remote.\n"
             "- Use domain_hint=switch for switches, plugs, outlets, and simple power control for named devices like TVs, arcade cabinets, consoles, receivers, chargers, or lamps when they may actually be exposed as smart plugs/switches.\n"
             "- Use domain_hint=media_player for native playback/source/app/state requests or clearly native media-player device control.\n"
+            "- If the request includes an http/https media URL and asks to play/cast it, use intent=control, action=play_media, domain_hint=media_player.\n"
             "- For simple 'turn on/off the TV' style requests, domain_hint=switch is acceptable and preferred when the device could plausibly be controlled as a plug/switch.\n"
             "- 'mute', 'volume up', 'pause', 'play', 'home', 'back', 'menu' means action=send_command and desired.command.\n"
             "- If scope is a room/area (kitchen, living room), use scope=area:<name>.\n"
@@ -747,6 +771,7 @@ class HAMediaPlayersPlugin(ToolVerba):
             '- "power on the arcade" -> {"intent":"control","action":"turn_on","scope":"device:arcade","domain_hint":"switch","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
             '- "turn off the living room tv" -> {"intent":"control","action":"turn_off","scope":"area:living room","domain_hint":"switch","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
             '- "what is the living room tv playing" -> {"intent":"get_state","action":"get_state","scope":"area:living room","domain_hint":"media_player","read_target":"state","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
+            '- "play https://example.com/movie.m3u8 on the family room apple tv" -> {"intent":"control","action":"play_media","scope":"area:family room","domain_hint":"media_player","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
             '- "mute the roku" -> {"intent":"control","action":"send_command","scope":"device:roku","domain_hint":"remote","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":"mute"}}\n'
             '- "pause the family room apple tv" -> {"intent":"control","action":"send_command","scope":"area:family room","domain_hint":"remote","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":"pause"}}\n'
             '- "open the garage door" -> {"intent":"control","action":"open","scope":"device:garage door","domain_hint":"cover","read_target":"none","desired":{"temperature":null,"brightness_pct":null,"color_name":null,"activity":null,"command":null}}\n'
@@ -964,6 +989,16 @@ class HAMediaPlayersPlugin(ToolVerba):
         if a == "set_temperature" and d == "climate":
             return "set_temperature", {}
 
+        if d == "media_player":
+            if a in ("play_media", "play_url", "play_link", "play_from_url", "play_from_link"):
+                return "play_media", {}
+            if a in ("play", "media_play"):
+                return "media_play", {}
+            if a in ("pause", "media_pause"):
+                return "media_pause", {}
+            if a in ("stop", "media_stop"):
+                return "media_stop", {}
+
         # ✅ Remote mapping (Harmony/Apple TV/etc.)
         if d == "remote":
             if a in ("turn_on", "start", "power_on", "on"):
@@ -1167,7 +1202,7 @@ class HAMediaPlayersPlugin(ToolVerba):
         query = (args.get("query") or "").strip()
         if not query:
             return "Please provide a Home Assistant request in 'query'."
-        explicit_entity = ""
+        explicit_entity = str(args.get("entity_id") or "").strip()
 
         excluded = self._excluded_entities_set()
 
@@ -1196,6 +1231,14 @@ class HAMediaPlayersPlugin(ToolVerba):
         desired = intent.get("desired") or {}
         if not isinstance(desired, dict):
             desired = {}
+        media_url = self._extract_media_url(args, query, desired)
+        if media_url:
+            desired["media_url"] = media_url
+            if not action or action in {"get_state", "send_command"}:
+                action = "play_media"
+            intent_type = "control"
+            if not domain_hint:
+                domain_hint = "media_player"
 
         route_info = await self._route_query(
             query,
@@ -1557,6 +1600,19 @@ class HAMediaPlayersPlugin(ToolVerba):
                 except Exception as e:
                     logger.error(f"[ha_media_players] remote post-state error: {e}")
                     return "Done."
+
+            if entity_domain == "media_player" and service == "play_media":
+                media_url = self._extract_media_url(args, query, desired)
+                if not media_url:
+                    return "Tell me which media URL to play, for example an http or https link."
+                media_content_type = str(
+                    args.get("media_content_type")
+                    or desired.get("media_content_type")
+                    or "video"
+                ).strip() or "video"
+                payload["media_content_id"] = media_url
+                payload["media_content_type"] = media_content_type
+                extras_txt_parts.append(f"stream {media_content_type}")
 
             # Generic non-remote control path
             try:
