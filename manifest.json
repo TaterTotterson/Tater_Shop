@@ -313,7 +313,7 @@
     {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "min_tater_version": "59",
       "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
@@ -334,7 +334,7 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "634dd29174a4cd7b9899ade50b221ff2b8414aca4bf339eb2fdadf23fc38d75a"
+      "sha256": "8a51a8f9803b9ff5f5f78b64ce0799ed70de9511c146852e04b9a78c1d646265"
     },
     {
       "id": "ha_covers",
