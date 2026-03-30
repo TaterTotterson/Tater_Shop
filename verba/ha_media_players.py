@@ -62,7 +62,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = 'ha_media_players'
     verba_name = 'Home Assistant Media Players'
-    version = '1.0.2'
+    version = '1.0.3'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Media Players'
     settings_category = 'Home Assistant Control'
@@ -74,7 +74,7 @@ class HAMediaPlayersPlugin(ToolVerba):
 
     usage = '{"function":"ha_media_players","arguments":{"query":"what is the living room tv playing"}}'
 
-    description = 'Control media players and check playback state, source, and what is playing.'
+    description = 'Control media players, play media URLs, and check playback state, source, and what is playing.'
     verba_dec = 'Control Home Assistant media players.'
     when_to_use = 'Use for media playback state, source/app checks, and media player power/playback controls.'
     common_needs = ['media player/device and action (for example: living room tv + what is playing)']
