@@ -57,7 +57,7 @@
 | `ha_fans` | Control Home Assistant fans. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_lights` | Control Home Assistant lights. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_locks` | Control Home Assistant lock entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `ha_media_players` | Control Home Assistant media players. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_media_players` | Media-player control for Home Assistant. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_remotes` | Control Home Assistant remotes and remote commands. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_scenes` | Control Home Assistant scenes. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_scripts` | Control Home Assistant scripts. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
