@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.6"
+__version__ = "1.0.8"
 
 load_dotenv()
 
@@ -1931,88 +1931,87 @@ def _ai_tasks_kernel_extract_request_text(args: Dict[str, Any], origin: Optional
     return ""
 
 
-def _ai_tasks_kernel_expand_multi_light_commands(task_text: str) -> str:
-    text = str(task_text or "").strip()
-    if not text:
-        return ""
-
-    pattern = re.compile(
-        r"\bset\s+([a-z0-9\s,&'/-]+?)\s+lights?\s+to\s+([^.;,\n]+)",
-        flags=re.IGNORECASE,
-    )
-
-    def _expand(match: re.Match[str]) -> str:
-        rooms_blob = str(match.group(1) or "").strip()
-        level_blob = str(match.group(2) or "").strip()
-        if not rooms_blob or not level_blob:
-            return match.group(0)
-        if "," not in rooms_blob and not re.search(r"\band\b", rooms_blob, flags=re.IGNORECASE):
-            return match.group(0)
-
-        parts = re.split(r",|\band\b", rooms_blob, flags=re.IGNORECASE)
-        rooms = [str(part or "").strip(" ,.-") for part in parts if str(part or "").strip(" ,.-")]
-        if len(rooms) < 2:
-            return match.group(0)
-
-        commands = [f"Set {room} lights to {level_blob}" for room in rooms]
-        return ". ".join(commands)
-
-    return pattern.sub(_expand, text)
-
-
-def _ai_tasks_kernel_clean_task_prompt(task_text: Any) -> str:
-    raw = str(task_text or "").strip()
-    if not raw:
-        return ""
-
-    cleaned = _normalize_runtime_task_prompt(raw) or raw
-    cleaned = re.sub(r"^\s*(?:hey\s+)?tater[\s,:-]+", "", cleaned, flags=re.IGNORECASE).strip()
-
-    schedule_prefixes = (
-        r"^\s*(?:every|each)\s+(?:second|minute|hour)\b\s*(?:,|:|-)?\s*",
-        r"^\s*every\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
-        r"^\s*(?:every\s+day|everyday|daily|each\s+day|weekdays?|weekends?)\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*(?:every\s+week|each\s+week|weekly)\b(?:\s+on\s+[a-z,\s]+)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*\s+of\s+(?:every|each)\s+month\b(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*(?:every\s+month|each\s+month|monthly)\b(?:\s+on\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)(?:\s*(?:,|and)\s*(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th))*)?(?:\s+at\s+\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?)?\s*(?:,|:|-)?\s*",
-        r"^\s*(?:in|after)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b\s*(?:,|:|-)?\s*",
-        r"^\s*(?:at|@)\s*\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm)?\b\s*(?:,|:|-)?\s*",
-    )
-    for pattern in schedule_prefixes:
-        candidate = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
-        if candidate:
-            cleaned = candidate
-
-    cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
-    cleaned = _ai_tasks_kernel_expand_multi_light_commands(cleaned)
-    cleaned = " ".join(cleaned.split())
-    if not cleaned:
-        return raw
-    if cleaned and cleaned[0].islower():
-        cleaned = cleaned[0].upper() + cleaned[1:]
-    if cleaned and not re.search(r"[.!?]$", cleaned):
-        cleaned += "."
-    return cleaned
-
-
-def _ai_tasks_kernel_extract_target_hint(raw_text: Any) -> str:
+def _ai_tasks_kernel_parse_json_object(raw_text: Any) -> Dict[str, Any]:
     text = str(raw_text or "").strip()
     if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _ai_tasks_kernel_refine_task_prompt(task_prompt: str, request_text: str, llm_client: Any) -> str:
+    base = str(task_prompt or "").strip()
+    if not base or llm_client is None:
         return ""
-    explicit = re.search(
-        r"\b(?:in|to|on)\s+(?:the\s+)?(?:(?:channel|room|chat)\s+)?(#[A-Za-z0-9][A-Za-z0-9._:-]*|![^\s]+|@[A-Za-z0-9_]+)\b",
-        text,
-        flags=re.IGNORECASE,
+
+    system_prompt = (
+        "Rewrite scheduled task content into execution-only text.\n"
+        "Remove schedule/time/calendar phrases (for example 'every weekday at 6:00 AM').\n"
+        "Remove scheduling verbs and wording (create/schedule/remind/cancel/update/at/every).\n"
+        "Remove assistant-addressing lead-ins (for example 'hey tater').\n"
+        "If one sentence targets multiple Home Assistant lights/areas, split into separate action sentences.\n"
+        "Keep only what should happen when the task runs.\n"
+        "Return strict JSON only: {\"task_prompt\":\"...\"}\n"
     )
-    if explicit:
-        return str(explicit.group(1) or "").strip()
-    matrix_ref = re.search(r"([!#][A-Za-z0-9._:-]+:[A-Za-z0-9._:-]+)", text)
-    if matrix_ref:
-        return str(matrix_ref.group(1) or "").strip()
+    user_prompt = (
+        f"Original request: {request_text}\n"
+        f"Candidate task prompt: {base}\n"
+        "Return execution-only task text."
+    )
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=180,
+            timeout_ms=20_000,
+        )
+        content = str((response.get("message") or {}).get("content") or "").strip()
+        parsed = _ai_tasks_kernel_parse_json_object(content)
+        refined = str(parsed.get("task_prompt") or "").strip()
+        if refined:
+            return refined
+    except Exception:
+        return ""
     return ""
 
 
-def _ai_tasks_kernel_coerce_targets(args: Dict[str, Any], request_text: str) -> Dict[str, Any]:
+async def _ai_tasks_kernel_extract_target_hint(raw_text: Any, llm_client: Any) -> str:
+    text = str(raw_text or "").strip()
+    if not text or llm_client is None:
+        return ""
+    system_prompt = (
+        "Extract the single explicit destination hint from a user request.\n"
+        "Return strict JSON only: {\"target_hint\":\"...\"}\n"
+        "Use empty string when no explicit destination/channel/room/chat/service is present.\n"
+        "Preserve the exact token if present (examples: #general, !room:id, @bot, device_service name).\n"
+    )
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.0,
+            max_tokens=100,
+            timeout_ms=15_000,
+        )
+        content = str((response.get("message") or {}).get("content") or "").strip()
+        parsed = _ai_tasks_kernel_parse_json_object(content)
+        hint = str(parsed.get("target_hint") or "").strip()
+        if hint:
+            return hint
+    except Exception:
+        return ""
+    return ""
+
+
+def _ai_tasks_kernel_collect_explicit_targets(args: Dict[str, Any]) -> Dict[str, Any]:
     payload = args if isinstance(args, dict) else {}
     targets = payload.get("targets")
     out: Dict[str, Any] = dict(targets) if isinstance(targets, dict) else {}
@@ -2034,8 +2033,13 @@ def _ai_tasks_kernel_coerce_targets(args: Dict[str, Any], request_text: str) -> 
         if "channel" not in out and "room_id" not in out and "chat_id" not in out and "channel_id" not in out:
             out["channel"] = text
 
+    return out
+
+
+async def _ai_tasks_kernel_coerce_targets(args: Dict[str, Any], request_text: str, llm_client: Any) -> Dict[str, Any]:
+    out = _ai_tasks_kernel_collect_explicit_targets(args)
     if not out:
-        hint = _ai_tasks_kernel_extract_target_hint(request_text)
+        hint = await _ai_tasks_kernel_extract_target_hint(request_text, llm_client)
         if hint:
             out["channel"] = hint
 
@@ -2114,6 +2118,7 @@ async def _ai_tasks_kernel_schedule(
     platform: str,
     origin: Optional[Dict[str, Any]],
     redis_obj: Any,
+    llm_client: Any = None,
 ) -> Dict[str, Any]:
     payload = dict(args or {})
     origin_payload = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
@@ -2140,16 +2145,16 @@ async def _ai_tasks_kernel_schedule(
         or request_text
         or ""
     ).strip()
-    task_prompt = _ai_tasks_kernel_clean_task_prompt(raw_task_prompt)
+    task_prompt = await _ai_tasks_kernel_refine_task_prompt(raw_task_prompt, request_text, llm_client)
     if not task_prompt:
-        return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
+        return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: LLM task normalization failed."}
 
-    raw_targets = _ai_tasks_kernel_coerce_targets(payload, request_text)
+    raw_targets = await _ai_tasks_kernel_coerce_targets(payload, request_text, llm_client)
     requested_dest = normalize_platform(payload.get("platform"))
     origin_dest = normalize_platform(origin_payload.get("platform"))
     dest = origin_dest or runtime_platform or requested_dest
     if requested_dest and requested_dest in ALLOWED_PLATFORMS and requested_dest != dest:
-        explicit_arg_targets = _ai_tasks_kernel_coerce_targets(payload, "")
+        explicit_arg_targets = _ai_tasks_kernel_collect_explicit_targets(payload)
         requested_targets = _ai_tasks_kernel_normalize_targets(requested_dest, explicit_arg_targets)
         # Only allow cross-platform overrides when explicit target routing is provided.
         if requested_targets:
@@ -2699,7 +2704,7 @@ async def run_hydra_kernel_tool(
     redis_client: Any = None,
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
-    del scope, llm_client
+    del scope
     func = str(tool_id or "").strip().lower()
     if func != "ai_tasks":
         return None
@@ -2711,6 +2716,7 @@ async def run_hydra_kernel_tool(
         platform=platform,
         origin=origin,
         redis_obj=redis_obj,
+        llm_client=llm_client,
     )
 
 
