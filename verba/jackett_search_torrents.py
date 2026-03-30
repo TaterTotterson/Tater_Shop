@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettSearchTorrentsPlugin(ToolVerba):
     name = "jackett_search_torrents"
     verba_name = "Jackett Search Torrents"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Jackett Search Torrents"
     settings_category = "Jackett"
@@ -87,7 +87,7 @@ class JackettSearchTorrentsPlugin(ToolVerba):
     argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The Jackett search request (for example: find Ubuntu 24.04 torrents).'}, 'search_query': {'type': 'string', 'description': 'Optional explicit Jackett query text.'}, 'scope': {'type': 'string', 'description': 'Optional scope: all, public, or private.'}, 'indexers': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional list of indexer names/ids.'}, 'categories': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional category labels or IDs.'}, 'sort_by': {'type': 'string', 'description': 'Optional sort: best_match, seeders, newest, or size.'}, 'sort_direction': {'type': 'string', 'description': 'Optional sort direction: desc or asc.'}, 'min_seeders': {'type': 'integer', 'description': 'Optional minimum seeder count.'}, 'max_age_days': {'type': 'integer', 'description': 'Optional maximum age in days.'}, 'min_size': {'type': 'string', 'description': 'Optional minimum size (bytes or text like 2GB).'}, 'max_size': {'type': 'string', 'description': 'Optional maximum size (bytes or text like 20GB).'}, 'limit': {'type': 'integer', 'description': 'Optional max results to return (1-100).'}}, 'required': []}
 
     MAX_LIMIT = 100
-    RESULTS_OUTPUT_LIMIT = 10
+    RESULTS_OUTPUT_LIMIT = 5
     CACHE_TTL_SECONDS = 6 * 60 * 60
     CACHE_KEY = "tater:jackett:last_results"
     TORZNAB_NS = {"torznab": "http://torznab.com/schemas/2015/feed"}
@@ -1278,14 +1278,16 @@ class JackettSearchTorrentsPlugin(ToolVerba):
             return f"{base} Top result: {', '.join(top_bits)}."
         lines = [
             f"{base} Top result: {', '.join(top_bits)}.",
-            "Top 10 compact results (use result_id to select):",
+            f"Top {self.RESULTS_OUTPUT_LIMIT} compact results (use result_id to select):",
         ]
         for row in preview:
+            has_torrent = "yes" if self._safe_text(row.get("torrent_url")) else "no"
+            has_magnet = "yes" if self._safe_text(row.get("magnet_url")) else "no"
             lines.append(
                 f"{row.get('rank')}. [{row.get('result_id')}] {row.get('title')} | "
                 f"seeders={row.get('seeders')} | "
-                f"torrent_url={row.get('torrent_url') or 'none'} | "
-                f"magnet_url={row.get('magnet_url') or 'none'}"
+                f"torrent_uri={has_torrent} | "
+                f"magnet_uri={has_magnet}"
             )
         return "\n".join(lines)
 
@@ -1624,7 +1626,6 @@ class JackettSearchTorrentsPlugin(ToolVerba):
             "results": compact_top,
             "missing_indexers": missing,
             "warnings": warnings[:10],
-            "top_results": compact_top,
             "ranking": {
                 "sort_by": self._normalize_sort_by(plan.get("sort_by")),
                 "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
@@ -1661,7 +1662,7 @@ class JackettSearchTorrentsPlugin(ToolVerba):
             data=payload,
             summary_for_user=summary,
             say_hint=(
-                "List only the top 10 results in compact form with result_id, title, seeders, torrent_url, and magnet_url."
+                "List only the top 5 results in compact form with result_id, title, seeders, and URI availability."
             ),
             suggested_followups=[
                 "Want me to sort these by newest or seeders?",
