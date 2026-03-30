@@ -679,7 +679,7 @@
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
@@ -700,12 +700,12 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "b68127cdb11c1ff0864ce20bec7f7f9d179355d0b712fe8193456894a6764a98"
+      "sha256": "5a93f13dc5c0c9c23ba18f58af765c60aa6e28b444c1609a0cb571cf3de9e3ee"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -726,7 +726,7 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "df19d5cd97486ddff373adcf7403244ed3470a44e7c9985b3323ed7d5fab8ab4"
+      "sha256": "1fc074ebe423608ed0c4dc74ec230e29321ce250d314b8694642fb11a5074ba0"
     },
     {
       "id": "joke_api",
