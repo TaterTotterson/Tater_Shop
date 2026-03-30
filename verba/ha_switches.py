@@ -54,7 +54,7 @@ class HAClient:
 class HASwitchesPlugin(ToolVerba):
     name = 'ha_switches'
     verba_name = 'Home Assistant Switches'
-    version = '2.0.0'
+    version = '2.0.1'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Switches'
     settings_category = "Home Assistant Control"
@@ -281,7 +281,7 @@ class HASwitchesPlugin(ToolVerba):
             "{\n"
             f'  "action": "{actions}",\n'
             '  "target": "<short room/device phrase or empty>",\n'
-            '  "read_target": "state|target_temperature|current_temperature|none",\n'
+            '  "read_target": "state|none",\n'
             '  "params": {\n'
             '    "temperature": <number or null>,\n'
             '    "brightness_pct": <int 0-100 or null>,\n'
@@ -294,7 +294,7 @@ class HASwitchesPlugin(ToolVerba):
             "Rules:\n"
             f"- action must be one of: {actions}.\n"
             "- target is the user-mentioned room/device phrase when present.\n"
-            "- Use read_target=state for status checks unless a specific climate target/current temperature read is requested.\n"
+            "- Use read_target=state for status checks.\n"
             "- For control actions use read_target=none.\n"
             f"{focus}"
             "Examples:\n"
