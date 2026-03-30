@@ -54,7 +54,7 @@ class HAClient:
 class HAClimatePlugin(ToolVerba):
     name = 'ha_climate'
     verba_name = 'Home Assistant Climate'
-    version = '2.0.0'
+    version = '2.1.0'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Climate'
     settings_category = "Home Assistant Control"
@@ -65,23 +65,33 @@ class HAClimatePlugin(ToolVerba):
     forced_domain_hint = 'climate'
 
     usage = '{"function":"ha_climate","arguments":{"query":"set hallway thermostat to 72"}}'
-    description = 'Control thermostat and HVAC settings like target temperature and current state.'
+    description = 'Control Home Assistant climate entities and return full current HVAC status (mode, action, temperatures, setpoints, humidity, fan, preset).'
     verba_dec = 'Control Home Assistant thermostats and HVAC entities.'
-    when_to_use = 'Use for thermostat state checks, mode/status checks, and target temperature changes.'
-    how_to_use = 'Pass a natural-language query describing the thermostat action and area/device.'
-    common_needs = ['Thermostat/device and action (for example: hallway thermostat + set to 72).']
+    when_to_use = 'Use for full thermostat status, HVAC mode changes (heat/cool/auto/off), and setpoint changes.'
+    how_to_use = 'Pass a natural-language query describing the thermostat action and area/device, including optional mode + setpoint together.'
+    common_needs = ['Thermostat/device and action (for example: hallway thermostat + set cool to 72).']
     missing_info_prompts = ['Which thermostat should I control?']
     example_calls = ['{"function":"ha_climate","arguments":{"query":"set hallway thermostat to 72"}}', '{"function":"ha_climate","arguments":{"query":"what is the office thermostat set to"}}']
 
     entity_domains: List[str] = ['climate']
     interpret_actions: List[str] = ['get_state', 'set_temperature', 'set_hvac_mode', 'turn_on', 'turn_off']
     service_map: Dict[str, Optional[str]] = {'get_state': None, 'set_temperature': 'set_temperature', 'set_hvac_mode': 'set_hvac_mode', 'turn_on': 'turn_on', 'turn_off': 'turn_off'}
-    required_action_params: Dict[str, List[str]] = {'set_temperature': ['temperature'], 'set_hvac_mode': ['hvac_mode']}
-    optional_action_params: Dict[str, List[str]] = {}
+    required_action_params: Dict[str, List[str]] = {'set_temperature': [], 'set_hvac_mode': ['hvac_mode']}
+    optional_action_params: Dict[str, List[str]] = {'set_temperature': ['hvac_mode', 'target_temp_low', 'target_temp_high']}
     param_payload_keys: Dict[str, str] = {}
     summary_attribute_keys: List[str] = ['hvac_mode', 'hvac_action', 'temperature', 'current_temperature']
-    interpret_focus: str = '- Use set_temperature when user asks to set thermostat target temperature.\n- Use set_hvac_mode when user asks for heat/cool/auto/off mode.\n- For simple status questions use get_state.'
-    interpret_examples: List[str] = ['set hallway thermostat to 72 -> action=set_temperature, target=hallway thermostat, params.temperature=72, read_target=none', 'set office thermostat to cool mode -> action=set_hvac_mode, target=office thermostat, params.hvac_mode=cool, read_target=none', 'what is the office thermostat set to -> action=get_state, target=office thermostat, read_target=target_temperature']
+    interpret_focus: str = (
+        '- Use set_temperature when user asks to set thermostat target temperature.\n'
+        '- Use set_hvac_mode when user asks for heat/cool/auto/off mode only.\n'
+        '- If user asks for mode and setpoint together, prefer action=set_temperature and include both params.hvac_mode and params.temperature.\n'
+        '- For status/info questions use get_state with read_target=all.'
+    )
+    interpret_examples: List[str] = [
+        'set hallway thermostat to 72 -> action=set_temperature, target=hallway thermostat, params.temperature=72, read_target=none',
+        'set office thermostat to cool mode -> action=set_hvac_mode, target=office thermostat, params.hvac_mode=cool, read_target=none',
+        'set office thermostat to cool 70 -> action=set_temperature, target=office thermostat, params.hvac_mode=cool, params.temperature=70, read_target=none',
+        'what is the office thermostat set to -> action=get_state, target=office thermostat, read_target=all',
+    ]
 
     domain_read_only: bool = False
     include_binary_sensor: bool = False
@@ -281,9 +291,11 @@ class HAClimatePlugin(ToolVerba):
             "{\n"
             f'  "action": "{actions}",\n'
             '  "target": "<short room/device phrase or empty>",\n'
-            '  "read_target": "state|target_temperature|current_temperature|none",\n'
+            '  "read_target": "all|state|target_temperature|current_temperature|hvac_mode|none",\n'
             '  "params": {\n'
             '    "temperature": <number or null>,\n'
+            '    "target_temp_low": <number or null>,\n'
+            '    "target_temp_high": <number or null>,\n'
             '    "brightness_pct": <int 0-100 or null>,\n'
             '    "color_name": "<string or empty>",\n'
             '    "percentage": <int 0-100 or null>,\n'
@@ -294,7 +306,7 @@ class HAClimatePlugin(ToolVerba):
             "Rules:\n"
             f"- action must be one of: {actions}.\n"
             "- target is the user-mentioned room/device phrase when present.\n"
-            "- Use read_target=state for status checks unless a specific climate target/current temperature read is requested.\n"
+            "- Use read_target=all for climate status checks unless a specific field is requested.\n"
             "- For control actions use read_target=none.\n"
             f"{focus}"
             "Examples:\n"
@@ -310,11 +322,15 @@ class HAClimatePlugin(ToolVerba):
             return {}
 
         target = self._coerce_text(payload.get("target"))
-        read_target = self._coerce_text(payload.get("read_target")).lower() or "state"
+        read_target = self._coerce_text(payload.get("read_target")).lower() or "all"
+        if read_target not in {"all", "state", "target_temperature", "current_temperature", "hvac_mode", "none"}:
+            read_target = "all"
         params_in = payload.get("params") if isinstance(payload.get("params"), dict) else {}
 
         params: Dict[str, Any] = {}
         params["temperature"] = self._normalize_number(params_in.get("temperature"))
+        params["target_temp_low"] = self._normalize_number(params_in.get("target_temp_low"))
+        params["target_temp_high"] = self._normalize_number(params_in.get("target_temp_high"))
 
         brightness = self._normalize_int(params_in.get("brightness_pct"))
         if brightness is not None:
@@ -398,6 +414,30 @@ class HAClimatePlugin(ToolVerba):
         if action not in self.service_map:
             return None, {}, f"Unsupported action '{action}' for {self.name}."
 
+        if action == "set_temperature":
+            temperature = self._action_param_value(params, "temperature")
+            target_temp_low = self._action_param_value(params, "target_temp_low")
+            target_temp_high = self._action_param_value(params, "target_temp_high")
+            hvac_mode = self._coerce_text(self._action_param_value(params, "hvac_mode")).lower()
+
+            payload: Dict[str, Any] = {}
+            if temperature is not None:
+                payload["temperature"] = temperature
+            if target_temp_low is not None:
+                payload["target_temp_low"] = target_temp_low
+            if target_temp_high is not None:
+                payload["target_temp_high"] = target_temp_high
+            if hvac_mode:
+                payload["hvac_mode"] = hvac_mode
+
+            has_single_target = payload.get("temperature") is not None
+            has_range_target = payload.get("target_temp_low") is not None and payload.get("target_temp_high") is not None
+            if not has_single_target and not has_range_target:
+                if hvac_mode:
+                    return "set_hvac_mode", {"hvac_mode": hvac_mode}, None
+                return None, {}, "Action 'set_temperature' requires temperature or target_temp_low+target_temp_high."
+            return "set_temperature", payload, None
+
         service = self.service_map.get(action)
         if service is None:
             return None, {}, None
@@ -421,37 +461,97 @@ class HAClimatePlugin(ToolVerba):
 
         return service, payload, None
 
-    def _state_summary(self, *, entity_id: str, state_payload: dict, read_target: str) -> str:
+    def _climate_snapshot(self, *, entity_id: str, state_payload: dict) -> Dict[str, Any]:
         st = state_payload if isinstance(state_payload, dict) else {}
         attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
         if not isinstance(attrs, dict):
             attrs = {}
 
-        name = self._coerce_text(attrs.get("friendly_name")) or entity_id
-        state = self._coerce_text(st.get("state")) or "unknown"
-        unit = self._coerce_text(attrs.get("unit_of_measurement"))
+        unit = self._coerce_text(attrs.get("temperature_unit")) or self._coerce_text(attrs.get("unit_of_measurement"))
+        snapshot: Dict[str, Any] = {
+            "entity_id": entity_id,
+            "name": self._coerce_text(attrs.get("friendly_name")) or entity_id,
+            "state": self._coerce_text(st.get("state")) or "unknown",
+            "hvac_mode": self._coerce_text(attrs.get("hvac_mode")) or self._coerce_text(st.get("state")),
+            "hvac_action": self._coerce_text(attrs.get("hvac_action")),
+            "temperature_unit": unit,
+            "target_temperature": attrs.get("temperature"),
+            "target_temp_low": attrs.get("target_temp_low"),
+            "target_temp_high": attrs.get("target_temp_high"),
+            "current_temperature": attrs.get("current_temperature"),
+            "current_humidity": attrs.get("current_humidity"),
+            "target_humidity": attrs.get("humidity"),
+            "fan_mode": self._coerce_text(attrs.get("fan_mode")),
+            "preset_mode": self._coerce_text(attrs.get("preset_mode")),
+            "swing_mode": self._coerce_text(attrs.get("swing_mode")),
+        }
+        return snapshot
 
+    def _state_summary(self, *, entity_id: str, state_payload: dict, read_target: str) -> str:
+        snap = self._climate_snapshot(entity_id=entity_id, state_payload=state_payload)
+        name = self._coerce_text(snap.get("name")) or entity_id
+        unit = self._coerce_text(snap.get("temperature_unit"))
         read_target = self._coerce_text(read_target).lower()
+
         if read_target == "target_temperature":
-            value = attrs.get("temperature")
+            value = snap.get("target_temperature")
+            low = snap.get("target_temp_low")
+            high = snap.get("target_temp_high")
             if value is not None:
                 return f"{name} target temperature is {value}{(' ' + unit) if unit else ''}."
+            if low is not None and high is not None:
+                return f"{name} target range is {low}-{high}{(' ' + unit) if unit else ''}."
         if read_target == "current_temperature":
-            value = attrs.get("current_temperature")
+            value = snap.get("current_temperature")
             if value is not None:
                 return f"{name} current temperature is {value}{(' ' + unit) if unit else ''}."
+        if read_target == "hvac_mode":
+            mode = self._coerce_text(snap.get("hvac_mode"))
+            if mode:
+                return f"{name} is in {mode} mode."
 
-        if self.temperature_only:
-            return f"{name} is {state}{(' ' + unit) if unit else ''}."
+        # Default/all summary
+        pieces: List[str] = []
+        mode = self._coerce_text(snap.get("hvac_mode")) or self._coerce_text(snap.get("state"))
+        action = self._coerce_text(snap.get("hvac_action"))
+        if mode:
+            if action:
+                pieces.append(f"mode {mode} ({action})")
+            else:
+                pieces.append(f"mode {mode}")
 
-        extras: List[str] = []
-        for key in self.summary_attribute_keys or []:
-            if attrs.get(key) not in (None, "", []):
-                extras.append(f"{key.replace('_', ' ')} {attrs.get(key)}")
+        current_temp = snap.get("current_temperature")
+        if current_temp is not None:
+            pieces.append(f"current {current_temp}{(' ' + unit) if unit else ''}")
 
-        if extras:
-            return f"{name} is {state}; " + ", ".join(extras) + "."
-        return f"{name} is {state}."
+        target_temp = snap.get("target_temperature")
+        target_low = snap.get("target_temp_low")
+        target_high = snap.get("target_temp_high")
+        if target_temp is not None:
+            pieces.append(f"setpoint {target_temp}{(' ' + unit) if unit else ''}")
+        elif target_low is not None and target_high is not None:
+            pieces.append(f"setpoint range {target_low}-{target_high}{(' ' + unit) if unit else ''}")
+
+        current_humidity = snap.get("current_humidity")
+        if current_humidity is not None:
+            pieces.append(f"humidity {current_humidity}%")
+        target_humidity = snap.get("target_humidity")
+        if target_humidity is not None:
+            pieces.append(f"target humidity {target_humidity}%")
+
+        fan_mode = self._coerce_text(snap.get("fan_mode"))
+        if fan_mode:
+            pieces.append(f"fan {fan_mode}")
+        preset_mode = self._coerce_text(snap.get("preset_mode"))
+        if preset_mode:
+            pieces.append(f"preset {preset_mode}")
+        swing_mode = self._coerce_text(snap.get("swing_mode"))
+        if swing_mode:
+            pieces.append(f"swing {swing_mode}")
+
+        if pieces:
+            return f"{name}: " + ", ".join(pieces) + "."
+        return f"{name} is {self._coerce_text(snap.get('state')) or 'unknown'}."
 
     def _ensure_llm_available(self, llm_client) -> Optional[dict]:
         if llm_client is not None:
@@ -562,7 +662,7 @@ class HAClimatePlugin(ToolVerba):
                 say_hint="Explain entity lookup failed and suggest retrying.",
             )
 
-        read_target = self._coerce_text(intent.get("read_target")).lower() or "state"
+        read_target = self._coerce_text(intent.get("read_target")).lower() or "all"
         params = intent.get("params") if isinstance(intent.get("params"), dict) else {}
 
         service, service_payload, payload_error = self._build_service_payload(action=action, params=params)
@@ -578,6 +678,7 @@ class HAClimatePlugin(ToolVerba):
             try:
                 state = client.get_state(entity_id)
                 state_dict = state if isinstance(state, dict) else {}
+                snapshot = self._climate_snapshot(entity_id=entity_id, state_payload=state_dict)
                 summary = self._state_summary(entity_id=entity_id, state_payload=state_dict, read_target=read_target)
                 return action_success(
                     facts={
@@ -585,10 +686,21 @@ class HAClimatePlugin(ToolVerba):
                         "entity_id": entity_id,
                         "domain": selected.get("domain"),
                         "read_target": read_target,
+                        "hvac_mode": snapshot.get("hvac_mode"),
+                        "hvac_action": snapshot.get("hvac_action"),
+                        "current_temperature": snapshot.get("current_temperature"),
+                        "target_temperature": snapshot.get("target_temperature"),
+                        "target_temp_low": snapshot.get("target_temp_low"),
+                        "target_temp_high": snapshot.get("target_temp_high"),
+                        "fan_mode": snapshot.get("fan_mode"),
+                        "preset_mode": snapshot.get("preset_mode"),
+                        "current_humidity": snapshot.get("current_humidity"),
+                        "target_humidity": snapshot.get("target_humidity"),
                     },
                     data={
                         "entity_id": entity_id,
                         "state": state,
+                        "climate_snapshot": snapshot,
                         "intent": intent,
                     },
                     summary_for_user=summary,
@@ -619,8 +731,11 @@ class HAClimatePlugin(ToolVerba):
 
         summary = ""
         state_after: Any = {}
+        snapshot_after: Dict[str, Any] = {}
         try:
             state_after = client.get_state(entity_id)
+            if isinstance(state_after, dict):
+                snapshot_after = self._climate_snapshot(entity_id=entity_id, state_payload=state_after)
             summary = self._state_summary(
                 entity_id=entity_id,
                 state_payload=state_after if isinstance(state_after, dict) else {},
@@ -635,6 +750,11 @@ class HAClimatePlugin(ToolVerba):
                 "service": service,
                 "entity_id": entity_id,
                 "domain": selected.get("domain"),
+                "hvac_mode": snapshot_after.get("hvac_mode"),
+                "current_temperature": snapshot_after.get("current_temperature"),
+                "target_temperature": snapshot_after.get("target_temperature"),
+                "target_temp_low": snapshot_after.get("target_temp_low"),
+                "target_temp_high": snapshot_after.get("target_temp_high"),
             },
             data={
                 "entity_id": entity_id,
@@ -643,6 +763,7 @@ class HAClimatePlugin(ToolVerba):
                 "payload": payload,
                 "intent": intent,
                 "state_after": state_after,
+                "climate_snapshot_after": snapshot_after,
             },
             summary_for_user=summary,
             say_hint="Confirm what was executed and include resulting state when available.",
