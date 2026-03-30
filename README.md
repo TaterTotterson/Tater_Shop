@@ -55,13 +55,13 @@
 | `ha_climate` | Control Home Assistant thermostats and HVAC entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_covers` | Control Home Assistant covers and garage doors. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_fans` | Control Home Assistant fans. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `ha_lights` | Control a single Home Assistant light target (single light or single area) each call. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_lights` | Control Home Assistant lights. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_locks` | Control Home Assistant lock entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_media_players` | Media-player control for Home Assistant. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `ha_remotes` | Control Home Assistant remotes and remote commands. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_remotes` | Control Home Assistant remote entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_scenes` | Control Home Assistant scenes. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_scripts` | Control Home Assistant scripts. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
-| `ha_sensors` | Read Home Assistant sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
+| `ha_sensors` | Read Home Assistant sensor and binary_sensor entities. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_switches` | Control Home Assistant switches and plugs. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `ha_temperature` | Read Home Assistant ambient temperatures. | homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc |
 | `irc_admin_op` | Gives the user op or voice in the current IRC channel. | irc |
