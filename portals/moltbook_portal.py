@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name, redis_client
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -7934,7 +7934,13 @@ class MoltbookPortal:
                 continue
             if _name_match_tokens(author) & set(self_names):
                 continue
-            if self._is_taterassistant_post_welcomed(post_id):
+
+            # Backfill-safe fellow sync:
+            # even if this post was already welcomed in a prior run, still classify/update
+            # when the author is missing from the fellow list (for cache rebuilds/missed runs).
+            welcomed = self._is_taterassistant_post_welcomed(post_id)
+            known_fellow_before = self._is_known_fellow_tater_agent(author)
+            if welcomed and known_fellow_before:
                 continue
             if not self._is_fellow_tater_intro_post(post):
                 continue
@@ -7947,6 +7953,8 @@ class MoltbookPortal:
                 if follow_target:
                     self._follow_agent_name(follow_target, self_names=self_names)
 
+            if welcomed:
+                continue
             if not config.reply_enabled or not account.can_participate:
                 continue
 
