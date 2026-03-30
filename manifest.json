@@ -573,7 +573,7 @@
     {
       "id": "ha_switches",
       "name": "Home Assistant Switches",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant switches and plugs.",
       "portals": [
@@ -594,7 +594,7 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "cefb4b1e7131405bd6e170a0cbeef6288b9e40f9a9cd2b38f2b1bd723fc8cab2"
+      "sha256": "dafc036da243cee29eb26c4226c47a4d0ade1065272e6b746b3075337d0fc495"
     },
     {
       "id": "ha_temperature",
