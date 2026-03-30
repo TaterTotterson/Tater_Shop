@@ -53,7 +53,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = "ha_media_players"
     verba_name = "Home Assistant Media Players"
-    version = "2.0.0"
+    version = "2.0.2"
     min_tater_version = "59"
     pretty_name = "Home Assistant Media Players"
     settings_category = "Home Assistant Control"
@@ -159,20 +159,22 @@ class HAMediaPlayersPlugin(ToolVerba):
         llm_client,
         system: str,
         user_payload: dict,
-        max_tokens: int = 220,
+        max_tokens: Optional[int] = 220,
         temperature: float = 0.0,
     ) -> dict:
         if llm_client is None:
             return {}
         try:
-            resp = await llm_client.chat(
-                messages=[
+            kwargs: Dict[str, Any] = {
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+                "temperature": temperature,
+            }
+            if isinstance(max_tokens, int) and max_tokens > 0:
+                kwargs["max_tokens"] = int(max_tokens)
+            resp = await llm_client.chat(**kwargs)
             text = self._coerce_text((resp.get("message", {}) or {}).get("content", ""))
             raw = extract_json(text) or ""
             if not raw:
@@ -261,10 +263,10 @@ class HAMediaPlayersPlugin(ToolVerba):
             llm_client=llm_client,
             system=system,
             user_payload={"query": q},
-            max_tokens=120,
+            max_tokens=None,
             temperature=0.0,
         )
-        url = self._coerce_text(obj.get("url"))
+        url = self._coerce_text(obj.get("url")).rstrip(").,;!?]}\"'")
         if url.startswith("http://") or url.startswith("https://"):
             return url
         return ""
