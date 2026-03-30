@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 load_dotenv()
 
@@ -84,6 +84,33 @@ _WEEKDAY_TOKEN_MAP = {
     "sat": 5,
     "saturday": 5,
     "saturdays": 5,
+}
+_AI_TASK_TITLE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "broadcast",
+    "create",
+    "each",
+    "every",
+    "fetch",
+    "for",
+    "from",
+    "get",
+    "including",
+    "in",
+    "message",
+    "on",
+    "set",
+    "that",
+    "the",
+    "to",
+    "today",
+    "turn",
+    "weekday",
+    "weekdays",
+    "with",
 }
 
 
@@ -596,6 +623,8 @@ async def _render_scheduled_message(
         "Keep replies concise and task-focused.\n"
         "Do not use repo_browser.* tool syntax.\n"
         "Execute the task now; do not create, modify, or cancel schedules.\n"
+        "If a task names multiple Home Assistant entities (for example multiple lights), "
+        "run separate tool calls per entity instead of one bundled call.\n"
         "Return only the requested deliverable content.\n"
         "Do not include process commentary or meta-prefaces such as "
         "\"Since no existing ... was found\".\n"
@@ -1573,17 +1602,54 @@ def _ai_tasks_ui_recurrence_label(schedule: Dict[str, Any], interval: float) -> 
     return "One-shot"
 
 
+def _ai_tasks_ui_auto_title(command_text: str, *, max_words: int = 4, max_chars: int = 44) -> str:
+    seed = " ".join(str(command_text or "").split()).strip()
+    if not seed:
+        return "Scheduled task"
+
+    lowered = seed.lower()
+    if "hooked joke" in lowered or "huuked joke" in lowered:
+        return "Hooked Joke"
+    if ("wake up" in lowered or "wake-up" in lowered or "morning" in lowered) and "light" in lowered and (
+        "forecast" in lowered or "weather" in lowered
+    ):
+        return "Morning Wake Routine"
+    if "joke" in lowered:
+        return "Joke Routine"
+    if "weather" in lowered and "forecast" in lowered:
+        return "Weather Forecast"
+    if "weather" in lowered:
+        return "Weather Routine"
+    if "light" in lowered:
+        return "Lighting Routine"
+
+    words = re.findall(r"[A-Za-z0-9']+", seed)
+    filtered = [w for w in words if str(w).strip().lower() not in _AI_TASK_TITLE_STOPWORDS]
+    chosen = filtered[:max_words] or words[:max_words]
+    if not chosen:
+        return "Scheduled task"
+
+    title = " ".join(chosen).strip()
+    if not title:
+        return "Scheduled task"
+    if title.islower():
+        title = title.title()
+    if len(title) > max_chars:
+        title = title[: max_chars - 3].rstrip() + "..."
+    return title
+
+
 def _ai_tasks_ui_derive_title(raw_title: str, command_text: str) -> str:
     title = str(raw_title or "").strip()
     seed = " ".join(str(command_text or "").split()).strip()
     if title:
         # Older titles may be auto-truncated (ending in "..."). Prefer the full prompt when available.
         if title.endswith("...") and seed and len(seed) > len(title):
-            return seed
+            return _ai_tasks_ui_auto_title(seed)
         return title
     if not seed:
         return "Scheduled task"
-    return seed
+    return _ai_tasks_ui_auto_title(seed)
 
 
 def _ai_tasks_ui_clean_text(value: Any) -> str:
@@ -1865,6 +1931,35 @@ def _ai_tasks_kernel_extract_request_text(args: Dict[str, Any], origin: Optional
     return ""
 
 
+def _ai_tasks_kernel_expand_multi_light_commands(task_text: str) -> str:
+    text = str(task_text or "").strip()
+    if not text:
+        return ""
+
+    pattern = re.compile(
+        r"\bset\s+([a-z0-9\s,&'/-]+?)\s+lights?\s+to\s+([^.;,\n]+)",
+        flags=re.IGNORECASE,
+    )
+
+    def _expand(match: re.Match[str]) -> str:
+        rooms_blob = str(match.group(1) or "").strip()
+        level_blob = str(match.group(2) or "").strip()
+        if not rooms_blob or not level_blob:
+            return match.group(0)
+        if "," not in rooms_blob and not re.search(r"\band\b", rooms_blob, flags=re.IGNORECASE):
+            return match.group(0)
+
+        parts = re.split(r",|\band\b", rooms_blob, flags=re.IGNORECASE)
+        rooms = [str(part or "").strip(" ,.-") for part in parts if str(part or "").strip(" ,.-")]
+        if len(rooms) < 2:
+            return match.group(0)
+
+        commands = [f"Set {room} lights to {level_blob}" for room in rooms]
+        return ". ".join(commands)
+
+    return pattern.sub(_expand, text)
+
+
 def _ai_tasks_kernel_clean_task_prompt(task_text: Any) -> str:
     raw = str(task_text or "").strip()
     if not raw:
@@ -1889,6 +1984,7 @@ def _ai_tasks_kernel_clean_task_prompt(task_text: Any) -> str:
             cleaned = candidate
 
     cleaned = re.sub(r"^(?:to\s+)", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+    cleaned = _ai_tasks_kernel_expand_multi_light_commands(cleaned)
     cleaned = " ".join(cleaned.split())
     if not cleaned:
         return raw
@@ -2023,8 +2119,17 @@ async def _ai_tasks_kernel_schedule(
     origin_payload = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
     if isinstance(origin, dict):
         for key, value in origin.items():
-            if key not in origin_payload:
+            if value in (None, ""):
+                continue
+            if key not in origin_payload or origin_payload.get(key) in (None, ""):
                 origin_payload[key] = value
+            elif key == "platform":
+                # Trust the runtime event platform over model-inferred origin payload.
+                origin_payload[key] = value
+
+    runtime_platform = normalize_platform(platform)
+    if runtime_platform in ALLOWED_PLATFORMS:
+        origin_payload["platform"] = runtime_platform
 
     request_text = _ai_tasks_kernel_extract_request_text(payload, origin_payload)
 
@@ -2039,11 +2144,16 @@ async def _ai_tasks_kernel_schedule(
     if not task_prompt:
         return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing task prompt"}
 
-    dest = normalize_platform(payload.get("platform"))
-    if not dest:
-        dest = normalize_platform(origin_payload.get("platform"))
-    if not dest:
-        dest = normalize_platform(platform)
+    raw_targets = _ai_tasks_kernel_coerce_targets(payload, request_text)
+    requested_dest = normalize_platform(payload.get("platform"))
+    origin_dest = normalize_platform(origin_payload.get("platform"))
+    dest = origin_dest or runtime_platform or requested_dest
+    if requested_dest and requested_dest in ALLOWED_PLATFORMS and requested_dest != dest:
+        explicit_arg_targets = _ai_tasks_kernel_coerce_targets(payload, "")
+        requested_targets = _ai_tasks_kernel_normalize_targets(requested_dest, explicit_arg_targets)
+        # Only allow cross-platform overrides when explicit target routing is provided.
+        if requested_targets:
+            dest = requested_dest
     if dest not in ALLOWED_PLATFORMS:
         return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing destination platform"}
 
@@ -2096,7 +2206,6 @@ async def _ai_tasks_kernel_schedule(
     title = str(payload.get("title") or "").strip() or _ai_tasks_ui_derive_title("", task_prompt)
     cron_text = str(schedule_result.get("cron") or recurrence.get("cron") or "").strip()
 
-    raw_targets = _ai_tasks_kernel_coerce_targets(payload, request_text)
     normalized_targets = _ai_tasks_kernel_normalize_targets(dest, raw_targets)
     defaults = load_default_targets(dest, redis_obj)
     fallback_defaults = _ai_tasks_kernel_load_platform_fallback_targets(dest, redis_obj)
