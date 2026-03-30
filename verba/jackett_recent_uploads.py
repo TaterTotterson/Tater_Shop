@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettRecentUploadsPlugin(ToolVerba):
     name = "jackett_recent_uploads"
     verba_name = "Jackett Recent Uploads"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Jackett Recent Uploads"
     settings_category = "Jackett"
@@ -87,6 +87,7 @@ class JackettRecentUploadsPlugin(ToolVerba):
     argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The recent-upload request (for example: newest anime uploads).'}, 'scope': {'type': 'string', 'description': 'Optional scope: all, public, or private.'}, 'indexers': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional list of indexer names/ids.'}, 'categories': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional category labels or IDs.'}, 'min_seeders': {'type': 'integer', 'description': 'Optional minimum seeder count.'}, 'max_age_days': {'type': 'integer', 'description': 'Optional maximum age in days.'}, 'limit': {'type': 'integer', 'description': 'Optional max results to return (1-100).'}}, 'required': []}
 
     MAX_LIMIT = 100
+    RESULTS_OUTPUT_LIMIT = 5
     CACHE_TTL_SECONDS = 6 * 60 * 60
     CACHE_KEY = "tater:jackett:last_results"
     TORZNAB_NS = {"torznab": "http://torznab.com/schemas/2015/feed"}
@@ -1270,10 +1271,13 @@ class JackettRecentUploadsPlugin(ToolVerba):
             top_bits.append(f"from {top.get('indexer')}")
         if self._safe_text(top.get("publish_date")):
             top_bits.append("newer-ranked")
-        preview = self._top_result_preview(results, limit=10)
+        preview = self._top_result_preview(results, limit=self.RESULTS_OUTPUT_LIMIT)
         if not preview:
             return f"{base} Top result: {', '.join(top_bits)}."
-        lines = [f"{base} Top result: {', '.join(top_bits)}.", "Top 10 (use result_id to select):"]
+        lines = [
+            f"{base} Top result: {', '.join(top_bits)}.",
+            f"Top {self.RESULTS_OUTPUT_LIMIT} (use result_id to select):",
+        ]
         for row in preview:
             transfer = row.get("transfer_uri") or "no transfer URI"
             lines.append(
@@ -1291,7 +1295,7 @@ class JackettRecentUploadsPlugin(ToolVerba):
                 "query": payload.get("query"),
                 "scope": payload.get("scope"),
                 "ranking": payload.get("ranking"),
-                "results": (payload.get("results") or [])[:120],
+                "results": (payload.get("results") or [])[: self.RESULTS_OUTPUT_LIMIT],
             }
             redis_client.set(self.CACHE_KEY, json.dumps(compact, ensure_ascii=False), ex=self.CACHE_TTL_SECONDS)
         except Exception as exc:
@@ -1602,6 +1606,7 @@ class JackettRecentUploadsPlugin(ToolVerba):
         ranked = self._rank_results(filtered, plan)
         ranked = ranked[: self._clamp_int(plan.get("limit") or 25, 1, self.MAX_LIMIT, 25)]
 
+        capped_results = ranked[: self.RESULTS_OUTPUT_LIMIT]
         payload = {
             "action": action,
             "query": self._safe_text(plan.get("search_query")),
@@ -1609,11 +1614,12 @@ class JackettRecentUploadsPlugin(ToolVerba):
             "sort_by": self._normalize_sort_by(plan.get("sort_by")),
             "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
             "selected_indexers": selected_indexers if not use_all_endpoint else [{"id": "all", "name": "all"}],
-            "result_count": len(ranked),
-            "results": ranked,
+            "result_count": len(capped_results),
+            "total_matches": len(ranked),
+            "results": capped_results,
             "missing_indexers": missing,
             "warnings": warnings[:10],
-            "top_results": self._top_result_preview(ranked, limit=10),
+            "top_results": self._top_result_preview(capped_results, limit=self.RESULTS_OUTPUT_LIMIT),
             "ranking": {
                 "sort_by": self._normalize_sort_by(plan.get("sort_by")),
                 "sort_direction": self._normalize_sort_direction(plan.get("sort_direction"), plan.get("sort_by")),
@@ -1637,7 +1643,8 @@ class JackettRecentUploadsPlugin(ToolVerba):
                 "action": action,
                 "query": self._safe_text(plan.get("search_query")),
                 "scope": scope,
-                "result_count": len(ranked),
+                "result_count": len(capped_results),
+                "total_matches": len(ranked),
                 "sort_by": payload["ranking"]["sort_by"],
                 "top_result_title": ranked[0]["title"] if ranked else "",
                 "top_result_indexer": ranked[0]["indexer"] if ranked else "",
@@ -1645,7 +1652,7 @@ class JackettRecentUploadsPlugin(ToolVerba):
             data=payload,
             summary_for_user=summary,
             say_hint=(
-                "Summarize ranked Jackett results and list the top 10 with result_id, seeders, size, indexer, "
+                "Summarize ranked Jackett results and list the top 5 with result_id, seeders, size, indexer, "
                 "and transfer URI (magnet or torrent URL) so the user can select one for downloader handoff."
             ),
             suggested_followups=[
