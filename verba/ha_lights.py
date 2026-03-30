@@ -62,7 +62,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '1.0.2'
+    version = '1.0.3'
     min_tater_version = '59'
     pretty_name = 'Home Assistant Lights'
     settings_category = 'Home Assistant Control'
@@ -74,10 +74,10 @@ class HALightsPlugin(ToolVerba):
 
     usage = '{"function":"ha_lights","arguments":{"query":"turn off office lights"}}'
 
-    description = 'Turn on and off lights and change brightness in the house'
-    verba_dec = 'Control Home Assistant lights.'
-    when_to_use = 'Use when the request is specifically about lights, brightness, or color.'
-    common_needs = ['light/device and action (for example: office lights + turn off)']
+    description = 'Control one Home Assistant light or one light area per call (power, brightness, color).'
+    verba_dec = 'Control a single Home Assistant light target (single light or single area) each call.'
+    when_to_use = 'Use when the request is specifically for one light target (single light or single area), brightness, or color.'
+    common_needs = ['single light/area target and action (for example: office lights + turn off)']
     missing_info_prompts = []
 
     waiting_prompt_template = (
