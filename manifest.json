@@ -443,7 +443,7 @@
     {
       "id": "ha_media_players",
       "name": "Home Assistant Media Players",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "min_tater_version": "59",
       "description": "Media-player control for Home Assistant.",
       "portals": [
@@ -464,7 +464,7 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "1bfe325f30a4c6d4b8ea1159c8808d3adf75e31e7abed4bb7721651939a6948a"
+      "sha256": "15a74c15f25c8e52bd68512145ab007a30cdf9aea8d69fbbd0aa2da7fc1134a1"
     },
     {
       "id": "ha_remotes",

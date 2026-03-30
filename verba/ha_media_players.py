@@ -53,7 +53,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = "ha_media_players"
     verba_name = "Home Assistant Media Players"
-    version = "2.0.3"
+    version = "2.0.4"
     min_tater_version = "59"
     pretty_name = "Home Assistant Media Players"
     settings_category = "Home Assistant Control"
@@ -358,7 +358,7 @@ class HAMediaPlayersPlugin(ToolVerba):
         _push_attempt(base_payload)
         if service == "play_media":
             default_type = self._coerce_text(base_payload.get("media_content_type")).lower() or "video"
-            for alt_type in ("video", "video/mp4", "url"):
+            for alt_type in ("video", "video/mp4"):
                 if alt_type == default_type:
                     continue
                 variant = dict(base_payload)
