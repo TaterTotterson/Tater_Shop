@@ -53,7 +53,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = "ha_media_players"
     verba_name = "Home Assistant Media Players"
-    version = "2.0.2"
+    version = "2.0.3"
     min_tater_version = "59"
     pretty_name = "Home Assistant Media Players"
     settings_category = "Home Assistant Control"
@@ -328,6 +328,65 @@ class HAMediaPlayersPlugin(ToolVerba):
             return a
         return ""
 
+    async def _call_media_service_with_retries(
+        self,
+        *,
+        client: HAClient,
+        service: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        base_payload: Dict[str, Any] = dict(payload or {})
+        attempted_payloads: List[Dict[str, Any]] = []
+
+        def _push_attempt(row: Dict[str, Any]) -> None:
+            if not isinstance(row, dict):
+                return
+            entity_id = self._coerce_text(row.get("entity_id")).lower()
+            media_content_id = self._coerce_text(row.get("media_content_id"))
+            media_content_type = self._coerce_text(row.get("media_content_type")).lower()
+            key = (entity_id, media_content_id, media_content_type)
+            for prev in attempted_payloads:
+                prev_key = (
+                    self._coerce_text(prev.get("entity_id")).lower(),
+                    self._coerce_text(prev.get("media_content_id")),
+                    self._coerce_text(prev.get("media_content_type")).lower(),
+                )
+                if key == prev_key:
+                    return
+            attempted_payloads.append(dict(row))
+
+        _push_attempt(base_payload)
+        if service == "play_media":
+            default_type = self._coerce_text(base_payload.get("media_content_type")).lower() or "video"
+            for alt_type in ("video", "video/mp4", "url"):
+                if alt_type == default_type:
+                    continue
+                variant = dict(base_payload)
+                variant["media_content_type"] = alt_type
+                _push_attempt(variant)
+
+        last_exc: Optional[Exception] = None
+        used_payload: Dict[str, Any] = dict(base_payload)
+        for candidate in attempted_payloads:
+            used_payload = dict(candidate)
+            try:
+                client.call_service(service, candidate)
+                return {
+                    "ok": True,
+                    "payload": used_payload,
+                    "attempt_count": len(attempted_payloads),
+                    "last_error": "",
+                }
+            except Exception as exc:
+                last_exc = exc
+
+        return {
+            "ok": False,
+            "payload": used_payload,
+            "attempt_count": len(attempted_payloads),
+            "last_error": str(last_exc or ""),
+        }
+
     def _state_summary(self, entity_id: str, state_payload: dict) -> str:
         st = state_payload if isinstance(state_payload, dict) else {}
         attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
@@ -475,12 +534,24 @@ class HAMediaPlayersPlugin(ToolVerba):
             payload["media_content_id"] = media_url
             payload["media_content_type"] = media_type
 
-        try:
-            client.call_service(service, payload)
-        except Exception as exc:
+        service_result = await self._call_media_service_with_retries(
+            client=client,
+            service=service,
+            payload=payload,
+        )
+        payload = dict(service_result.get("payload") or payload)
+        if not service_result.get("ok"):
+            exc = self._coerce_text(service_result.get("last_error"))
+            attempts = int(service_result.get("attempt_count") or 1)
+            suffix = ""
+            if service == "play_media":
+                suffix = (
+                    " Home Assistant/Apple TV rejected playback details. "
+                    "Try a different URL or verify the Apple TV can directly reach this media source."
+                )
             return action_failure(
                 code="service_call_failed",
-                message=f"Home Assistant media_player.{service} failed for {entity_id}: {exc}",
+                message=f"Home Assistant media_player.{service} failed for {entity_id} after {attempts} attempt(s): {exc}{suffix}",
                 diagnosis=self._ha_diagnosis(),
                 needs=["Retry or choose a different media player target."],
                 say_hint="Explain the Home Assistant service call failed and ask whether to retry.",
