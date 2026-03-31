@@ -29,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.19"
+__version__ = "1.0.20"
 
 load_dotenv()
 
@@ -49,7 +49,7 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
-SCHEDULER_EXCLUDED_TOOLS = {"ai_tasks"}
+SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
     def __init__(self, **kwargs):
@@ -599,9 +599,6 @@ async def _render_scheduled_message(
         "Do not include process commentary or meta-prefaces such as "
         "\"Since no existing ... was found\".\n"
         "If the task asks for creative output (for example a joke), provide it directly.\n"
-        "If the task asks you to write or phrase a reminder/check-in message, do not call tools; "
-        "just write the final outgoing message text that should be sent to the user.\n"
-        "Never restate the instruction as 'remind the user ...'; instead, write the message itself.\n"
     )
 
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2577,14 +2574,7 @@ async def _ai_tasks_kernel_schedule(
             resolved_targets or {},
             redis_obj=redis_obj,
         )
-        task_prompt = (
-            "Write the exact user-facing reminder/check-in message to send right now. "
-            f"This message will be delivered to {destination_phrase}. "
-            f"Requested reminder: {reminder_body}. "
-            "Do not call tools. Do not describe what you are doing. "
-            "Do not say 'remind the user' or mention internal scheduling. "
-            "Output only the final message text to send."
-        )
+        task_prompt = f"send a message to {destination_phrase} reminding the user to {reminder_body}"
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()
