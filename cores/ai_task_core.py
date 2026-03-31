@@ -3,6 +3,7 @@ import calendar
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -28,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.21"
+__version__ = "1.0.22"
 
 load_dotenv()
 
@@ -48,7 +49,7 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
-SCHEDULER_EXCLUDED_TOOLS = {"ai_tasks"}
+SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
     def __init__(self, **kwargs):
@@ -1507,51 +1508,15 @@ def _ai_tasks_ui_clean_targets_dict(raw: Any) -> Dict[str, str]:
     return out
 
 
-def _ai_tasks_ui_is_generic_discord_name(value: Any) -> bool:
-    token = _ai_tasks_ui_clean_text(value).strip().lower()
-    return token in {"discord", "#discord", "discord channel", "#discord channel", "discord target"}
-
-
-def _ai_tasks_ui_destination_row_label(platform: str, row: Dict[str, Any], row_targets: Dict[str, Any]) -> str:
-    platform_name = _ai_tasks_ui_clean_text(platform).lower()
-    if not isinstance(row, dict):
-        row = {}
-    candidates: List[Any] = [
-        row.get("label"),
-        row.get("name"),
-        row.get("title"),
-        row.get("display_name"),
-        row.get("destination"),
-        row.get("channel_name"),
-        row.get("room_name"),
-    ]
-    for candidate in candidates:
-        label = _ai_tasks_ui_clean_text(candidate)
-        if not label:
-            continue
-        if platform_name == "discord" and _ai_tasks_ui_is_generic_discord_name(label):
-            continue
-        return label
-    if platform_name == "discord":
-        channel = _ai_tasks_ui_clean_text(row_targets.get("channel"))
-        if channel and not _ai_tasks_ui_is_generic_discord_name(channel):
-            return channel
-    return _ai_tasks_ui_destination_label(platform_name, row_targets)
-
-
 def _ai_tasks_ui_destination_label(platform: str, targets: Dict[str, Any]) -> str:
     platform_name = _ai_tasks_ui_clean_text(platform).lower()
     payload = _ai_tasks_ui_clean_targets_dict(targets)
     if platform_name == "discord":
-        channel = _ai_tasks_ui_clean_text(payload.get("channel"))
-        channel_id = _ai_tasks_ui_clean_text(payload.get("channel_id"))
+        channel = _ai_tasks_ui_clean_text(payload.get("channel") or payload.get("channel_id"))
         guild = _ai_tasks_ui_clean_text(payload.get("guild_id"))
-        if _ai_tasks_ui_is_generic_discord_name(channel):
-            channel = ""
-        channel_or_id = channel or channel_id
-        if channel_or_id and guild:
-            return f"{channel_or_id} • guild {guild}"
-        return channel_or_id or (f"guild {guild}" if guild else "Discord target")
+        if channel and guild:
+            return f"{channel} • guild {guild}"
+        return channel or (f"guild {guild}" if guild else "Discord target")
     if platform_name == "irc":
         return _ai_tasks_ui_clean_text(payload.get("channel")) or "IRC channel"
     if platform_name == "matrix":
@@ -1578,37 +1543,6 @@ def _ai_tasks_ui_destination_label(platform: str, targets: Dict[str, Any]) -> st
     return _ai_tasks_ui_target_to_text(platform_name, payload) or "Destination"
 
 
-def _ai_tasks_ui_destination_matches(platform: str, current_targets: Dict[str, Any], row_targets: Dict[str, Any]) -> bool:
-    platform_name = _ai_tasks_ui_clean_text(platform).lower()
-    current = _ai_tasks_ui_clean_targets_dict(current_targets)
-    row = _ai_tasks_ui_clean_targets_dict(row_targets)
-    if not current or not row:
-        return False
-    if platform_name == "discord":
-        current_channel_id = _ai_tasks_ui_clean_text(current.get("channel_id"))
-        row_channel_id = _ai_tasks_ui_clean_text(row.get("channel_id"))
-        if current_channel_id and row_channel_id and current_channel_id == row_channel_id:
-            current_guild = _ai_tasks_ui_clean_text(current.get("guild_id"))
-            row_guild = _ai_tasks_ui_clean_text(row.get("guild_id"))
-            return not current_guild or not row_guild or current_guild == row_guild
-    if platform_name == "matrix":
-        current_room = _ai_tasks_ui_clean_text(current.get("room_id") or current.get("room_alias"))
-        row_room = _ai_tasks_ui_clean_text(row.get("room_id") or row.get("room_alias"))
-        if current_room and row_room and current_room == row_room:
-            return True
-    if platform_name == "telegram":
-        current_chat = _ai_tasks_ui_clean_text(current.get("chat_id"))
-        row_chat = _ai_tasks_ui_clean_text(row.get("chat_id"))
-        if current_chat and row_chat and current_chat == row_chat:
-            return True
-    if platform_name == "irc":
-        current_channel = _ai_tasks_ui_clean_text(current.get("channel"))
-        row_channel = _ai_tasks_ui_clean_text(row.get("channel"))
-        if current_channel and row_channel and current_channel == row_channel:
-            return True
-    return False
-
-
 def _ai_tasks_ui_destination_phrase(
     platform: str,
     targets: Dict[str, Any],
@@ -1630,8 +1564,8 @@ def _ai_tasks_ui_destination_phrase(
                 continue
             row_targets = _ai_tasks_ui_clean_targets_dict(row.get("targets"))
             row_value = _ai_tasks_ui_encode_destination_value(platform_name, row_targets)
-            if (encoded_current and row_value == encoded_current) or _ai_tasks_ui_destination_matches(platform_name, clean_targets, row_targets):
-                row_label = _ai_tasks_ui_destination_row_label(platform_name, row, row_targets)
+            if encoded_current and row_value == encoded_current:
+                row_label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, row_targets)
                 if row_label:
                     return f"{platform_label}: {row_label}"
 
@@ -1735,7 +1669,7 @@ def _ai_tasks_ui_destination_options_for_platform(
             value = _ai_tasks_ui_encode_destination_value(platform_name, targets)
             if not value or value in seen:
                 continue
-            label = _ai_tasks_ui_destination_row_label(platform_name, row, targets)
+            label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, targets)
             out.append({"value": value, "label": label})
             seen.add(value)
 
@@ -1751,65 +1685,6 @@ def _ai_tasks_ui_destination_options_for_platform(
             )
 
     return out
-
-
-def _ai_tasks_ui_resolve_destination_selection(
-    platform: str,
-    targets: Dict[str, Any],
-    *,
-    redis_obj: Any = None,
-    catalog: Optional[Dict[str, Any]] = None,
-    destination_value: str = "",
-) -> Dict[str, Any]:
-    platform_name = _ai_tasks_ui_clean_text(platform).lower()
-    clean_targets = _ai_tasks_ui_clean_targets(platform_name, targets if isinstance(targets, dict) else {})
-    catalog_payload = catalog if isinstance(catalog, dict) else _ai_tasks_ui_load_destination_catalog(redis_obj)
-    platform_row = (_ai_tasks_ui_catalog_platform_map(catalog_payload) or {}).get(platform_name, {})
-    platform_label = _ai_tasks_ui_clean_text(platform_row.get("label")) or platform_name or "destination"
-
-    selected_value = _ai_tasks_ui_clean_text(destination_value)
-    selected_platform, selected_targets = _ai_tasks_ui_decode_destination_value(selected_value) if selected_value else ("", {})
-    if selected_platform and selected_platform == platform_name and isinstance(selected_targets, dict):
-        clean_targets = _ai_tasks_ui_clean_targets(platform_name, selected_targets)
-
-    destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else None
-    encoded_current = _ai_tasks_ui_encode_destination_value(platform_name, clean_targets) if platform_name else ""
-    chosen_row = None
-    if isinstance(destinations, list):
-        for row in destinations:
-            if not isinstance(row, dict):
-                continue
-            row_targets = _ai_tasks_ui_clean_targets(platform_name, row.get("targets") if isinstance(row.get("targets"), dict) else {})
-            row_value = _ai_tasks_ui_encode_destination_value(platform_name, row_targets)
-            if selected_value and row_value == selected_value:
-                chosen_row = (row, row_targets, row_value)
-                break
-            if encoded_current and row_value == encoded_current:
-                chosen_row = (row, row_targets, row_value)
-                break
-            if _ai_tasks_ui_destination_matches(platform_name, clean_targets, row_targets):
-                chosen_row = (row, row_targets, row_value)
-                break
-
-    if chosen_row:
-        row, row_targets, row_value = chosen_row
-        row_label = _ai_tasks_ui_destination_row_label(platform_name, row, row_targets)
-        full_label = f"{platform_label}: {row_label}" if row_label else (platform_label or "destination")
-        return {
-            "platform": platform_name,
-            "targets": row_targets,
-            "value": row_value or _ai_tasks_ui_encode_destination_value(platform_name, row_targets),
-            "label": full_label,
-        }
-
-    fallback_label = _ai_tasks_ui_destination_label(platform_name, clean_targets)
-    full_label = f"{platform_label}: {fallback_label}" if fallback_label else (platform_label or "destination")
-    return {
-        "platform": platform_name,
-        "targets": clean_targets,
-        "value": encoded_current or _ai_tasks_ui_encode_destination_value(platform_name, clean_targets),
-        "label": full_label,
-    }
 
 
 def _ai_tasks_ui_destination_options_all_platforms(*, catalog: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -1833,7 +1708,7 @@ def _ai_tasks_ui_destination_options_all_platforms(*, catalog: Dict[str, Any]) -
             value = _ai_tasks_ui_encode_destination_value(platform_name, targets)
             if not value or value in seen:
                 continue
-            label = _ai_tasks_ui_destination_row_label(platform_name, row, targets)
+            label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, targets)
             out.append({"value": value, "label": f"{platform_label}: {label}"})
             seen.add(value)
     return out
@@ -1959,6 +1834,171 @@ def _ai_tasks_kernel_clock_parts(raw: Any) -> Tuple[Optional[Tuple[int, int, int
     if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
         return None, "LLM schedule parser produced invalid clock values."
     return (hour, minute, second), ""
+
+
+def _ai_tasks_text_has_recurring_cues(text: str) -> bool:
+    value = str(text or "").strip().lower()
+    if not value:
+        return False
+    recurring_patterns = [
+        r"\bevery\b",
+        r"\bdaily\b",
+        r"\bweekly\b",
+        r"\bmonthly\b",
+        r"\bannually\b",
+        r"\bweekdays?\b",
+        r"\bweekends?\b",
+        r"\beach\s+(day|week|month|year)\b",
+        r"\bon\s+(mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)\b",
+    ]
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in recurring_patterns)
+
+
+def _ai_tasks_parse_compact_local_time_token(text: str) -> Optional[Tuple[int, int, int]]:
+    value = str(text or "").strip().lower()
+    if not value:
+        return None
+
+    match = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\b", value, flags=re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3) or 0)
+        ampm = (match.group(4) or "").lower()
+        if ampm:
+            if not (1 <= hour <= 12):
+                return None
+            if ampm == "am":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+        elif not (0 <= hour <= 23):
+            return None
+        if 0 <= minute <= 59 and 0 <= second <= 59:
+            return hour, minute, second
+        return None
+
+    match = re.search(r"\b(\d{1,4})\s*([ap]m)\b", value, flags=re.IGNORECASE)
+    if match:
+        digits = match.group(1)
+        ampm = match.group(2).lower()
+        if len(digits) <= 2:
+            hour = int(digits)
+            minute = 0
+        elif len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+        if not (1 <= hour <= 12 and 0 <= minute <= 59):
+            return None
+        if ampm == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour, minute, 0
+
+    match = re.search(r"(?:\bat\s+)?\b(\d{3,4})\b", value, flags=re.IGNORECASE)
+    if match:
+        digits = match.group(1)
+        if len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute, 0
+
+    match = re.search(r"\b(\d{1,2})\s*([ap]m)\b", value, flags=re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        ampm = match.group(2).lower()
+        if not (1 <= hour <= 12):
+            return None
+        if ampm == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour, 0, 0
+
+    return None
+
+
+def _ai_tasks_parse_explicit_local_date(text: str, *, now_local: datetime) -> Optional[datetime]:
+    value = str(text or "").strip().lower()
+    if not value:
+        return None
+    if re.search(r"\btomorrow\b", value, flags=re.IGNORECASE):
+        return now_local + timedelta(days=1)
+    if re.search(r"\btoday\b", value, flags=re.IGNORECASE):
+        return now_local
+
+    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", value)
+    if match:
+        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        try:
+            return now_local.replace(year=year, month=month, day=day)
+        except Exception:
+            return None
+
+    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", value)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        year_raw = match.group(3)
+        year = now_local.year
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        try:
+            return now_local.replace(year=year, month=month, day=day)
+        except Exception:
+            return None
+
+    return None
+
+
+def _ai_tasks_try_parse_one_time_schedule_deterministically(
+    *,
+    args: Dict[str, Any],
+    request_text: str,
+    now_ts: float,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    del args
+    text = str(request_text or "").strip()
+    if not text:
+        return None, ""
+    if _ai_tasks_text_has_recurring_cues(text):
+        return None, ""
+
+    parts = _ai_tasks_parse_compact_local_time_token(text)
+    if not parts:
+        return None, ""
+
+    now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+    base_date = _ai_tasks_parse_explicit_local_date(text, now_local=now_local)
+    if base_date is None:
+        base_date = now_local
+
+    hour, minute, second = parts
+    try:
+        candidate = base_date.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    except Exception:
+        return None, ""
+
+    if re.search(r"\btoday\b", text, flags=re.IGNORECASE):
+        if candidate.timestamp() <= now_ts:
+            return None, "One-time schedule must be in the future."
+    elif base_date.date() == now_local.date() and candidate.timestamp() <= now_ts:
+        candidate = candidate + timedelta(days=1)
+
+    schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(candidate.timestamp()))
+    if not isinstance(schedule, dict):
+        return None, "Could not compute one-time schedule."
+    return schedule, ""
 
 
 def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -2116,6 +2156,16 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
     now_ts: float,
     llm_client: Any,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
+    deterministic_schedule, deterministic_err = _ai_tasks_try_parse_one_time_schedule_deterministically(
+        args=args,
+        request_text=request_text,
+        now_ts=now_ts,
+    )
+    if isinstance(deterministic_schedule, dict):
+        return deterministic_schedule, ""
+    if deterministic_err:
+        return None, deterministic_err
+
     if llm_client is None:
         return None, "LLM schedule parser is unavailable."
 
@@ -2513,30 +2563,18 @@ async def _ai_tasks_kernel_schedule(
             )
         return {"tool": "ai_tasks", "ok": False, "error": err_text}
 
-    explicit_destination_value = _ai_tasks_ui_clean_text(
-        payload.get("destination")
-        or (payload.get("meta") or {}).get("destination_value") if isinstance(payload.get("meta"), dict) else ""
-    )
-    destination_info = _ai_tasks_ui_resolve_destination_selection(
-        dest,
-        resolved_targets,
-        redis_obj=redis_obj,
-        destination_value=explicit_destination_value,
-    )
-    resolved_targets = destination_info.get("targets") if isinstance(destination_info.get("targets"), dict) else (resolved_targets or {})
-    destination_value = _ai_tasks_ui_clean_text(destination_info.get("value"))
-    destination_label = _ai_tasks_ui_clean_text(destination_info.get("label"))
-
     if reminder_intent:
         reminder_body = str(reminder_text or task_prompt).strip()
         if reminder_body.lower().startswith("to "):
             reminder_body = reminder_body[3:].strip()
         if not reminder_body:
             reminder_body = "follow up with the user"
-        if destination_label:
-            task_prompt = f"send a message to {destination_label} reminding the user to {reminder_body}"
-        else:
-            task_prompt = f"send a message to the current destination reminding the user to {reminder_body}"
+        destination_phrase = _ai_tasks_ui_destination_phrase(
+            dest,
+            resolved_targets or {},
+            redis_obj=redis_obj,
+        )
+        task_prompt = f"send a message to {destination_phrase} reminding the user to {reminder_body}"
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()
@@ -2568,8 +2606,6 @@ async def _ai_tasks_kernel_schedule(
             "priority": payload.get("priority"),
             "tags": payload.get("tags"),
             "ttl_sec": payload.get("ttl_sec"),
-            "destination_value": destination_value,
-            "destination_label": destination_label,
         },
         "schedule": schedule_payload,
         "enabled": True,
@@ -2638,23 +2674,19 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
         targets_payload = row.get("targets") if isinstance(row.get("targets"), dict) else {}
         destination_options = _ai_tasks_ui_destination_options_all_platforms(catalog=catalog)
         requires_target = bool(platform_map.get(platform, {}).get("requires_target"))
-        meta_payload = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-        destination_value = _ai_tasks_ui_clean_text(meta_payload.get("destination_value"))
-        destination_label = _ai_tasks_ui_clean_text(meta_payload.get("destination_label"))
-        if not destination_value and targets_payload:
+        if targets_payload:
             destination_value = _ai_tasks_ui_encode_destination_value(platform, targets_payload)
-        known_values = {str(item.get("value") or "") for item in destination_options}
-        if destination_value and destination_value not in known_values:
-            label_text = destination_label or f"{platform}: {_ai_tasks_ui_destination_label(platform, targets_payload)}"
-            destination_options.append(
-                {
-                    "value": destination_value,
-                    "label": f"{label_text} (current)",
-                }
-            )
-        elif not destination_value and requires_target:
+            known_values = {str(item.get("value") or "") for item in destination_options}
+            if destination_value and destination_value not in known_values:
+                destination_options.append(
+                    {
+                        "value": destination_value,
+                        "label": f"{platform}: {_ai_tasks_ui_destination_label(platform, targets_payload)} (current)",
+                    }
+                )
+        elif requires_target:
             destination_value = ""
-        elif not destination_value:
+        else:
             destination_value = _ai_tasks_ui_encode_destination_value(platform, {})
 
         due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
@@ -2853,15 +2885,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             title = _ai_tasks_ui_derive_title("", task_prompt)
 
         reminder_id = str(uuid.uuid4())
-        destination_info = _ai_tasks_ui_resolve_destination_selection(
-            platform,
-            targets,
-            redis_obj=client,
-            catalog=catalog,
-            destination_value=destination_raw,
-        )
-        platform = _ai_tasks_ui_clean_text(destination_info.get("platform")).lower() or platform
-        targets = destination_info.get("targets") if isinstance(destination_info.get("targets"), dict) else targets
         reminder = {
             "id": reminder_id,
             "created_at": float(time.time()),
@@ -2870,10 +2893,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "task_prompt": task_prompt,
             "targets": targets,
             "origin": {},
-            "meta": {
-                "destination_value": _ai_tasks_ui_clean_text(destination_info.get("value")),
-                "destination_label": _ai_tasks_ui_clean_text(destination_info.get("label")),
-            },
+            "meta": {},
             "schedule": schedule_payload,
             "enabled": bool(enabled),
         }
@@ -2958,29 +2978,12 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 targets = current_targets
 
         enabled = _ai_tasks_ui_is_enabled(_value("enabled", current.get("enabled")), True)
-        destination_info = _ai_tasks_ui_resolve_destination_selection(
-            platform,
-            targets,
-            redis_obj=client,
-            catalog=catalog,
-            destination_value=destination_raw,
-        )
-        platform = _ai_tasks_ui_clean_text(destination_info.get("platform")).lower() or platform
-        targets = destination_info.get("targets") if isinstance(destination_info.get("targets"), dict) else targets
-        meta_payload = current.get("meta") if isinstance(current.get("meta"), dict) else {}
-        meta_payload.update(
-            {
-                "destination_value": _ai_tasks_ui_clean_text(destination_info.get("value")),
-                "destination_label": _ai_tasks_ui_clean_text(destination_info.get("label")),
-            }
-        )
         current.update(
             {
                 "platform": platform,
                 "title": title,
                 "task_prompt": task_prompt,
                 "targets": targets,
-                "meta": meta_payload,
                 "schedule": schedule_payload,
                 "enabled": bool(enabled),
             }
