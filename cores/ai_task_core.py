@@ -3,6 +3,7 @@ import calendar
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -28,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 load_dotenv()
 
@@ -48,7 +49,7 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
-SCHEDULER_EXCLUDED_TOOLS = {"send_message", "reminder", "ai_tasks"}
+SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
     def __init__(self, **kwargs):
@@ -1803,6 +1804,171 @@ def _ai_tasks_kernel_clock_parts(raw: Any) -> Tuple[Optional[Tuple[int, int, int
     return (hour, minute, second), ""
 
 
+def _ai_tasks_text_has_recurring_cues(text: str) -> bool:
+    value = str(text or "").strip().lower()
+    if not value:
+        return False
+    recurring_patterns = [
+        r"\bevery\b",
+        r"\bdaily\b",
+        r"\bweekly\b",
+        r"\bmonthly\b",
+        r"\bannually\b",
+        r"\bweekdays?\b",
+        r"\bweekends?\b",
+        r"\beach\s+(day|week|month|year)\b",
+        r"\bon\s+(mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)\b",
+    ]
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in recurring_patterns)
+
+
+def _ai_tasks_parse_compact_local_time_token(text: str) -> Optional[Tuple[int, int, int]]:
+    value = str(text or "").strip().lower()
+    if not value:
+        return None
+
+    match = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\b", value, flags=re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3) or 0)
+        ampm = (match.group(4) or "").lower()
+        if ampm:
+            if not (1 <= hour <= 12):
+                return None
+            if ampm == "am":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+        elif not (0 <= hour <= 23):
+            return None
+        if 0 <= minute <= 59 and 0 <= second <= 59:
+            return hour, minute, second
+        return None
+
+    match = re.search(r"\b(\d{1,4})\s*([ap]m)\b", value, flags=re.IGNORECASE)
+    if match:
+        digits = match.group(1)
+        ampm = match.group(2).lower()
+        if len(digits) <= 2:
+            hour = int(digits)
+            minute = 0
+        elif len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+        if not (1 <= hour <= 12 and 0 <= minute <= 59):
+            return None
+        if ampm == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour, minute, 0
+
+    match = re.search(r"(?:\bat\s+)?\b(\d{3,4})\b", value, flags=re.IGNORECASE)
+    if match:
+        digits = match.group(1)
+        if len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute, 0
+
+    match = re.search(r"\b(\d{1,2})\s*([ap]m)\b", value, flags=re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        ampm = match.group(2).lower()
+        if not (1 <= hour <= 12):
+            return None
+        if ampm == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour, 0, 0
+
+    return None
+
+
+def _ai_tasks_parse_explicit_local_date(text: str, *, now_local: datetime) -> Optional[datetime]:
+    value = str(text or "").strip().lower()
+    if not value:
+        return None
+    if re.search(r"\btomorrow\b", value, flags=re.IGNORECASE):
+        return now_local + timedelta(days=1)
+    if re.search(r"\btoday\b", value, flags=re.IGNORECASE):
+        return now_local
+
+    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", value)
+    if match:
+        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        try:
+            return now_local.replace(year=year, month=month, day=day)
+        except Exception:
+            return None
+
+    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", value)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        year_raw = match.group(3)
+        year = now_local.year
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+        try:
+            return now_local.replace(year=year, month=month, day=day)
+        except Exception:
+            return None
+
+    return None
+
+
+def _ai_tasks_try_parse_one_time_schedule_deterministically(
+    *,
+    args: Dict[str, Any],
+    request_text: str,
+    now_ts: float,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    del args
+    text = str(request_text or "").strip()
+    if not text:
+        return None, ""
+    if _ai_tasks_text_has_recurring_cues(text):
+        return None, ""
+
+    parts = _ai_tasks_parse_compact_local_time_token(text)
+    if not parts:
+        return None, ""
+
+    now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+    base_date = _ai_tasks_parse_explicit_local_date(text, now_local=now_local)
+    if base_date is None:
+        base_date = now_local
+
+    hour, minute, second = parts
+    try:
+        candidate = base_date.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    except Exception:
+        return None, ""
+
+    if re.search(r"\btoday\b", text, flags=re.IGNORECASE):
+        if candidate.timestamp() <= now_ts:
+            return None, "One-time schedule must be in the future."
+    elif base_date.date() == now_local.date() and candidate.timestamp() <= now_ts:
+        candidate = candidate + timedelta(days=1)
+
+    schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(candidate.timestamp()))
+    if not isinstance(schedule, dict):
+        return None, "Could not compute one-time schedule."
+    return schedule, ""
+
+
 def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float) -> Tuple[Optional[Dict[str, Any]], str]:
     if not isinstance(parsed, dict):
         return None, "LLM schedule parser returned invalid JSON."
@@ -1958,6 +2124,16 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
     now_ts: float,
     llm_client: Any,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
+    deterministic_schedule, deterministic_err = _ai_tasks_try_parse_one_time_schedule_deterministically(
+        args=args,
+        request_text=request_text,
+        now_ts=now_ts,
+    )
+    if isinstance(deterministic_schedule, dict):
+        return deterministic_schedule, ""
+    if deterministic_err:
+        return None, deterministic_err
+
     if llm_client is None:
         return None, "LLM schedule parser is unavailable."
 
@@ -2361,11 +2537,7 @@ async def _ai_tasks_kernel_schedule(
             reminder_body = reminder_body[3:].strip()
         if not reminder_body:
             reminder_body = "follow up with the user"
-        destination_ref = _ai_tasks_kernel_destination_reference(dest, resolved_targets, origin_payload)
-        if destination_ref:
-            task_prompt = f"send a message to {destination_ref} reminding the user to {reminder_body}"
-        else:
-            task_prompt = f"send a message to the current destination reminding the user to {reminder_body}"
+        task_prompt = f"send a message to the current destination reminding the user to {reminder_body}"
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()
