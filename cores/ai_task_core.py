@@ -29,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.18"
+__version__ = "1.0.19"
 
 load_dotenv()
 
@@ -49,7 +49,7 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
-SCHEDULER_EXCLUDED_TOOLS = {"send_message", "reminder", "ai_tasks"}
+SCHEDULER_EXCLUDED_TOOLS = {"ai_tasks"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
     def __init__(self, **kwargs):
