@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.8"
+__version__ = "1.0.10"
 
 load_dotenv()
 
@@ -112,6 +112,10 @@ _AI_TASK_TITLE_STOPWORDS = {
     "weekdays",
     "with",
 }
+_AI_TASKS_RECURRING_HINT_RE = re.compile(
+    r"\b(every|daily|weekly|monthly|weekdays?|weekends?|hourly|minutely|secondly)\b",
+    re.IGNORECASE,
+)
 
 
 class _StubObject:
@@ -454,6 +458,9 @@ def _next_cron_occurrence(
 def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
     recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
     recurrence_kind = str(recurrence.get("kind") or "").strip().lower()
+    if recurrence_kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
+        # One-time reminders are removed after execution.
+        return 0.0
     if recurrence_kind == "cron_simple":
         return _next_cron_occurrence(
             now_ts=now_ts,
@@ -937,6 +944,15 @@ def _ai_tasks_ui_schedule_edit_text(schedule: Dict[str, Any]) -> str:
             valid_days.append(day_i)
     valid_days = sorted(valid_days)
 
+    if kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
+        run_at_ts = _ai_tasks_ui_as_float(
+            recurrence.get("run_at_ts"),
+            _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0),
+        )
+        if run_at_ts > 0:
+            return datetime.fromtimestamp(run_at_ts).strftime("%Y-%m-%d %H:%M:%S")
+        return ""
+
     if kind in {"daily_local_time", "weekly_local_time"}:
         if valid_days == [0, 1, 2, 3, 4]:
             return f"weekdays at {time_part}"
@@ -1134,6 +1150,175 @@ def _ai_tasks_build_cron_simple_schedule(
     if cron:
         out["cron"] = str(cron).strip()
     return out
+
+
+def _ai_tasks_build_one_time_schedule(*, run_at_ts: float) -> Optional[Dict[str, Any]]:
+    due_ts = _ai_tasks_ui_as_float(run_at_ts, 0.0)
+    if due_ts <= 0:
+        return None
+    run_local = datetime.fromtimestamp(float(due_ts)).astimezone()
+    return {
+        "next_run_ts": float(due_ts),
+        "interval_sec": 0.0,
+        "anchor_ts": float(due_ts),
+        "recurrence": {
+            "kind": "one_time_local_datetime",
+            "run_at_ts": float(due_ts),
+            "year": int(run_local.year),
+            "month": int(run_local.month),
+            "day": int(run_local.day),
+            "hour": int(run_local.hour),
+            "minute": int(run_local.minute),
+            "second": int(run_local.second),
+        },
+    }
+
+
+def _ai_tasks_parse_one_time_timestamp(raw_value: Any, *, now_ts: float) -> Tuple[Optional[float], str]:
+    if raw_value in (None, ""):
+        return None, ""
+    if isinstance(raw_value, bool):
+        return None, ""
+
+    if isinstance(raw_value, (int, float)):
+        ts = _ai_tasks_ui_as_float(raw_value, 0.0)
+        if ts <= 0:
+            return None, ""
+        if ts <= now_ts:
+            return None, "One-time schedule must be in the future."
+        return float(ts), ""
+
+    text = " ".join(str(raw_value or "").strip().split())
+    if not text:
+        return None, ""
+    lowered = text.lower()
+
+    if _AI_TASKS_RECURRING_HINT_RE.search(lowered):
+        return None, ""
+
+    relative_match = re.search(
+        r"\b(?:in|after)\s+(\d+)\s*(seconds?|minutes?|hours?|days?|weeks?)\b",
+        lowered,
+    )
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = str(relative_match.group(2) or "").lower()
+        scale = 0
+        if unit.startswith("second"):
+            scale = 1
+        elif unit.startswith("minute"):
+            scale = 60
+        elif unit.startswith("hour"):
+            scale = 3600
+        elif unit.startswith("day"):
+            scale = 86400
+        elif unit.startswith("week"):
+            scale = 604800
+        if amount <= 0 or scale <= 0:
+            return None, "One-time delay must be greater than zero."
+        return float(now_ts + (amount * scale)), ""
+
+    if re.fullmatch(r"\d{9,}(?:\.\d+)?", text):
+        ts = _ai_tasks_ui_as_float(text, 0.0)
+        if ts <= now_ts:
+            return None, "One-time schedule must be in the future."
+        return float(ts), ""
+
+    dt: Optional[datetime] = None
+    iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.fromisoformat(iso_text)
+    except Exception:
+        dt = None
+
+    if dt is None:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M %p"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except Exception:
+                dt = None
+
+    if dt is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.fromtimestamp(float(now_ts)).astimezone().tzinfo)
+        ts = float(dt.timestamp())
+        if ts <= now_ts:
+            return None, "One-time schedule must be in the future."
+        return ts, ""
+
+    parts = _ai_tasks_parse_time_of_day(lowered)
+    if parts:
+        hour, minute, second = parts
+        now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
+        explicit_today = "today" in lowered
+        day_offset = 1 if "tomorrow" in lowered else 0
+        candidate = (now_local + timedelta(days=day_offset)).replace(
+            hour=hour,
+            minute=minute,
+            second=second,
+            microsecond=0,
+        )
+        if day_offset == 0 and not explicit_today and candidate.timestamp() <= now_ts:
+            candidate = candidate + timedelta(days=1)
+        ts = float(candidate.timestamp())
+        if ts <= now_ts:
+            if explicit_today:
+                return None, "Today time has already passed."
+            return None, "One-time schedule must be in the future."
+        return ts, ""
+
+    return None, ""
+
+
+def _ai_tasks_parse_one_time_schedule(raw_value: Any, *, now_ts: float) -> Tuple[Optional[Dict[str, Any]], str]:
+    if isinstance(raw_value, dict):
+        source = dict(raw_value)
+        value_keys = (
+            "when_ts",
+            "run_at_ts",
+            "timestamp",
+            "at_ts",
+            "run_at",
+            "when",
+            "at",
+            "time",
+            "datetime",
+            "date_time",
+        )
+        parse_error = ""
+        for key in value_keys:
+            if key not in source:
+                continue
+            val = source.get(key)
+            if val in (None, ""):
+                continue
+            parsed, err = _ai_tasks_parse_one_time_timestamp(val, now_ts=now_ts)
+            if parsed is not None:
+                schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(parsed))
+                if schedule:
+                    return schedule, ""
+            if err:
+                parse_error = str(err)
+
+        if source.get("in_seconds") not in (None, ""):
+            seconds = _ai_tasks_ui_as_float(source.get("in_seconds"), 0.0)
+            if seconds <= 0:
+                return None, "One-time delay must be greater than zero."
+            schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(now_ts + seconds))
+            if schedule:
+                return schedule, ""
+            parse_error = "Could not compute next run for one-time schedule."
+
+        return None, parse_error
+
+    parsed, err = _ai_tasks_parse_one_time_timestamp(raw_value, now_ts=now_ts)
+    if parsed is None:
+        return None, err
+    schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(parsed))
+    if not schedule:
+        return None, "Could not compute next run for one-time schedule."
+    return schedule, ""
 
 
 def _ai_tasks_parse_time_of_day(text: Any) -> Optional[Tuple[int, int, int]]:
@@ -1481,10 +1666,17 @@ def _ai_tasks_parse_schedule_text(raw_value: Any, *, now_ts: float) -> Tuple[Opt
         return parsed, ""
     human_error = str(err or "").strip()
 
+    parsed, err = _ai_tasks_parse_one_time_schedule(raw_value, now_ts=now_ts)
+    if isinstance(parsed, dict):
+        return parsed, ""
+    one_time_error = str(err or "").strip()
+
     if human_error:
         return None, human_error
     if cron_error:
         return None, cron_error
+    if one_time_error:
+        return None, one_time_error
     return None, ""
 
 
@@ -1561,6 +1753,15 @@ def _ai_tasks_ui_recurrence_label(schedule: Dict[str, Any], interval: float) -> 
         if 0 <= day_i <= 6:
             valid_days.append(day_names[day_i])
     valid_days = sorted(set(valid_days), key=day_names.index)
+
+    if kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
+        run_at_ts = _ai_tasks_ui_as_float(
+            recurrence.get("run_at_ts"),
+            _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0),
+        )
+        if run_at_ts > 0:
+            return f"One time ({datetime.fromtimestamp(run_at_ts).strftime('%Y-%m-%d %H:%M:%S')})"
+        return "One time"
 
     if kind == "daily_local_time":
         if valid_days:
@@ -1942,6 +2143,284 @@ def _ai_tasks_kernel_parse_json_object(raw_text: Any) -> Dict[str, Any]:
         return {}
 
 
+def _ai_tasks_kernel_collect_schedule_candidates(args: Dict[str, Any], request_text: str) -> List[Any]:
+    payload = args if isinstance(args, dict) else {}
+    out: List[Any] = []
+    seen: set[str] = set()
+    for candidate in (
+        payload.get("cron"),
+        payload.get("when_ts"),
+        payload.get("in_seconds"),
+        payload.get("when"),
+        payload.get("at"),
+        payload.get("run_at"),
+        payload.get("schedule"),
+        payload.get("request"),
+        request_text,
+    ):
+        if candidate in (None, ""):
+            continue
+        token = " ".join(str(candidate).strip().split())
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(candidate)
+    return out
+
+
+def _ai_tasks_kernel_int_list(raw: Any, *, minimum: int, maximum: int) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    out: List[int] = []
+    for value in raw:
+        try:
+            item = int(value)
+        except Exception:
+            continue
+        if minimum <= item <= maximum and item not in out:
+            out.append(item)
+    return sorted(out)
+
+
+def _ai_tasks_kernel_clock_parts(raw: Any) -> Tuple[Optional[Tuple[int, int, int]], str]:
+    payload = raw if isinstance(raw, dict) else {}
+    try:
+        hour = int(payload.get("hour"))
+        minute = int(payload.get("minute"))
+    except Exception:
+        return None, "LLM schedule parser missing hour/minute."
+    second = _as_int(payload.get("second"), 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+        return None, "LLM schedule parser produced invalid clock values."
+    return (hour, minute, second), ""
+
+
+def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float) -> Tuple[Optional[Dict[str, Any]], str]:
+    if not isinstance(parsed, dict):
+        return None, "LLM schedule parser returned invalid JSON."
+
+    if parsed.get("error") not in (None, ""):
+        return None, str(parsed.get("error")).strip() or "LLM could not infer a schedule."
+
+    kind = str(parsed.get("kind") or parsed.get("schedule_kind") or "").strip().lower()
+    if not kind:
+        return None, "LLM schedule parser did not return a schedule kind."
+
+    if kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
+        one_payload = parsed.get("one_time") if isinstance(parsed.get("one_time"), dict) else parsed
+        run_at_ts = _ai_tasks_ui_as_float(
+            one_payload.get("run_at_ts"),
+            _ai_tasks_ui_as_float(one_payload.get("when_ts"), 0.0),
+        )
+        if run_at_ts <= now_ts:
+            return None, "One-time schedule must be in the future."
+        schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(run_at_ts))
+        if not isinstance(schedule, dict):
+            return None, "Could not compute one-time schedule."
+        return schedule, ""
+
+    if kind in {"daily", "daily_local_time"}:
+        daily_payload = parsed.get("daily") if isinstance(parsed.get("daily"), dict) else parsed
+        parts, err = _ai_tasks_kernel_clock_parts(daily_payload)
+        if not parts:
+            return None, err
+        hour, minute, second = parts
+        next_run = _next_local_time_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            weekdays=None,
+        )
+        if next_run <= 0:
+            return None, "Could not compute next run for daily schedule."
+        cron_text = f"{int(second)} {int(minute)} {int(hour)} * * *"
+        return {
+            "next_run_ts": float(next_run),
+            "interval_sec": 24 * 60 * 60.0,
+            "anchor_ts": float(next_run),
+            "recurrence": {
+                "kind": "daily_local_time",
+                "hour": int(hour),
+                "minute": int(minute),
+                "second": int(second),
+                "cron": cron_text,
+            },
+            "cron": cron_text,
+        }, ""
+
+    if kind in {"weekly", "weekly_local_time"}:
+        weekly_payload = parsed.get("weekly") if isinstance(parsed.get("weekly"), dict) else parsed
+        parts, err = _ai_tasks_kernel_clock_parts(weekly_payload)
+        if not parts:
+            return None, err
+        hour, minute, second = parts
+        weekdays = _ai_tasks_kernel_int_list(weekly_payload.get("weekdays"), minimum=0, maximum=6)
+        if not weekdays:
+            return None, "LLM schedule parser missing weekdays."
+        next_run = _next_local_time_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            weekdays=weekdays,
+        )
+        if next_run <= 0:
+            return None, "Could not compute next run for weekly schedule."
+        day_tokens = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        dow_tokens = [day_tokens[int(d)] for d in weekdays if 0 <= int(d) <= 6]
+        cron_text = f"{int(second)} {int(minute)} {int(hour)} * * {','.join(dow_tokens)}" if dow_tokens else ""
+        recurrence: Dict[str, Any] = {
+            "kind": "weekly_local_time",
+            "hour": int(hour),
+            "minute": int(minute),
+            "second": int(second),
+            "weekdays": weekdays,
+        }
+        schedule: Dict[str, Any] = {
+            "next_run_ts": float(next_run),
+            "interval_sec": 0.0,
+            "anchor_ts": float(next_run),
+            "recurrence": recurrence,
+        }
+        if cron_text:
+            recurrence["cron"] = cron_text
+            schedule["cron"] = cron_text
+        return schedule, ""
+
+    if kind in {"monthly", "monthly_local_time"}:
+        monthly_payload = parsed.get("monthly") if isinstance(parsed.get("monthly"), dict) else parsed
+        parts, err = _ai_tasks_kernel_clock_parts(monthly_payload)
+        if not parts:
+            return None, err
+        hour, minute, second = parts
+        monthdays = _ai_tasks_kernel_int_list(monthly_payload.get("monthdays"), minimum=1, maximum=31)
+        if not monthdays:
+            return None, "LLM schedule parser missing monthdays."
+        next_run = _next_monthly_local_time_occurrence(
+            now_ts=now_ts,
+            hour=hour,
+            minute=minute,
+            second=second,
+            monthdays=monthdays,
+        )
+        if next_run <= 0:
+            return None, "Could not compute next run for monthly schedule."
+        return {
+            "next_run_ts": float(next_run),
+            "interval_sec": 0.0,
+            "anchor_ts": float(next_run),
+            "recurrence": {
+                "kind": "monthly_local_time",
+                "hour": int(hour),
+                "minute": int(minute),
+                "second": int(second),
+                "monthdays": monthdays,
+            },
+        }, ""
+
+    if kind in {"cron", "cron_simple"}:
+        cron_payload = parsed.get("cron") if isinstance(parsed.get("cron"), dict) else parsed
+        hours = _ai_tasks_kernel_int_list(cron_payload.get("hours"), minimum=0, maximum=23)
+        minutes = _ai_tasks_kernel_int_list(cron_payload.get("minutes"), minimum=0, maximum=59)
+        seconds = _ai_tasks_kernel_int_list(cron_payload.get("seconds"), minimum=0, maximum=59)
+        weekdays = _ai_tasks_kernel_int_list(cron_payload.get("weekdays"), minimum=0, maximum=6)
+        if not hours or not minutes or not seconds:
+            return None, "LLM schedule parser missing cron clock fields."
+        cron_text = str(cron_payload.get("cron") or parsed.get("cron_text") or "").strip()
+        schedule = _ai_tasks_build_cron_simple_schedule(
+            now_ts=now_ts,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            weekdays=weekdays,
+            cron=cron_text,
+        )
+        if not isinstance(schedule, dict):
+            return None, "Could not compute next run for cron schedule."
+        return schedule, ""
+
+    return None, f"Unsupported schedule kind: {kind}"
+
+
+async def _ai_tasks_kernel_parse_schedule_with_llm(
+    *,
+    args: Dict[str, Any],
+    request_text: str,
+    now_ts: float,
+    llm_client: Any,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    if llm_client is None:
+        return None, "LLM schedule parser is unavailable."
+
+    candidates = _ai_tasks_kernel_collect_schedule_candidates(args, request_text)
+    if not candidates:
+        return None, "missing schedule details."
+
+    payload = args if isinstance(args, dict) else {}
+    schedule_input = {
+        "request_text": str(request_text or "").strip(),
+        "args": {
+            "cron": payload.get("cron"),
+            "when_ts": payload.get("when_ts"),
+            "in_seconds": payload.get("in_seconds"),
+            "when": payload.get("when"),
+            "at": payload.get("at"),
+            "run_at": payload.get("run_at"),
+            "schedule": payload.get("schedule"),
+        },
+        "candidates": candidates,
+    }
+    try:
+        schedule_input_text = json.dumps(schedule_input, ensure_ascii=False)
+    except Exception:
+        schedule_input_text = str(schedule_input)
+    now_local = datetime.fromtimestamp(float(now_ts)).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    system_prompt = (
+        "You parse scheduling requests for an AI task scheduler.\n"
+        "Return strict JSON only.\n"
+        "Schema:\n"
+        "{\n"
+        '  "kind": "one_time_local_datetime|daily_local_time|weekly_local_time|monthly_local_time|cron_simple",\n'
+        '  "one_time": {"run_at_ts": <unix_seconds_float>},\n'
+        '  "daily": {"hour":0-23,"minute":0-59,"second":0-59},\n'
+        '  "weekly": {"hour":0-23,"minute":0-59,"second":0-59,"weekdays":[0-6]},\n'
+        '  "monthly": {"hour":0-23,"minute":0-59,"second":0-59,"monthdays":[1-31]},\n'
+        '  "cron": {"hours":[0-23],"minutes":[0-59],"seconds":[0-59],"weekdays":[0-6],"cron":"optional"}\n'
+        "}\n"
+        "When ambiguous or impossible, return: {\"error\":\"...\"}.\n"
+        "Use local time.\n"
+        "Interpret compact time like 'at 630' as 06:30 local at the next valid future occurrence.\n"
+        "For one-time reminders, always return kind one_time_local_datetime.\n"
+    )
+    user_prompt = (
+        f"Current unix timestamp: {float(now_ts):.3f}\n"
+        f"Current local time: {now_local}\n"
+        f"Input JSON: {schedule_input_text}\n"
+        "Return only the JSON object."
+    )
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=320,
+            timeout_ms=20_000,
+        )
+        content = str((response.get("message") or {}).get("content") or "").strip()
+        parsed = _ai_tasks_kernel_parse_json_object(content)
+        if not parsed:
+            return None, "LLM schedule parser returned invalid JSON."
+        schedule, err = _ai_tasks_kernel_schedule_from_llm(parsed, now_ts=now_ts)
+        if isinstance(schedule, dict):
+            return schedule, ""
+        return None, str(err or "LLM could not infer a schedule.")
+    except Exception:
+        return None, "LLM schedule parser failed."
+
+
 async def _ai_tasks_kernel_refine_task_prompt(task_prompt: str, request_text: str, llm_client: Any) -> str:
     base = str(task_prompt or "").strip()
     if not base or llm_client is None:
@@ -2163,44 +2642,16 @@ async def _ai_tasks_kernel_schedule(
         return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: missing destination platform"}
 
     now_ts = float(time.time())
-    schedule_candidates: List[Any] = []
-    seen_candidates: set[str] = set()
-    for candidate in (
-        payload.get("cron"),
-        payload.get("when_ts"),
-        payload.get("when"),
-        payload.get("schedule"),
-        payload.get("request"),
-        request_text,
-    ):
-        if candidate in (None, ""):
-            continue
-        token = " ".join(str(candidate).strip().split())
-        if not token or token in seen_candidates:
-            continue
-        seen_candidates.add(token)
-        schedule_candidates.append(candidate)
-
-    schedule_result: Optional[Dict[str, Any]] = None
-    parse_error = ""
-    for candidate in schedule_candidates:
-        parsed, err = _ai_tasks_parse_schedule_text(candidate, now_ts=now_ts)
-        if isinstance(parsed, dict):
-            schedule_result = parsed
-            break
-        if err:
-            parse_error = str(err or "").strip()
+    schedule_result, parse_error = await _ai_tasks_kernel_parse_schedule_with_llm(
+        args=payload,
+        request_text=request_text,
+        now_ts=now_ts,
+        llm_client=llm_client,
+    )
 
     if not isinstance(schedule_result, dict):
-        guidance = (
-            "Use `when`/`cron` in local time, for example `everyday at 6am`, "
-            "`weekdays at 8am`, `on monday and wednesday each week`, "
-            "`on the 10th of every month`, `every hour`, `every second`, "
-            "or `0 0 6 * * *`."
-        )
-        if parse_error:
-            return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {parse_error} {guidance}"}
-        return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: missing schedule details. {guidance}"}
+        detail = str(parse_error or "LLM could not infer a valid schedule.").strip()
+        return {"tool": "ai_tasks", "ok": False, "error": f"Cannot schedule: {detail}"}
 
     next_run = _ai_tasks_ui_as_float(schedule_result.get("next_run_ts"), 0.0)
     recurrence = schedule_result.get("recurrence") if isinstance(schedule_result.get("recurrence"), dict) else {}
@@ -2261,8 +2712,12 @@ async def _ai_tasks_kernel_schedule(
     redis_obj.zadd(REMINDER_DUE_ZSET, {reminder_id: float(next_run)})
 
     next_run_human = datetime.fromtimestamp(float(next_run)).strftime("%Y-%m-%d %H:%M:%S")
-    cadence = _ai_tasks_ui_recurrence_label(schedule_payload, float(interval or 0.0))
-    summary = f"Recurring AI task scheduled {cadence.lower()} (next at {next_run_human})."
+    recurrence_kind = str(recurrence.get("kind") or "").strip().lower()
+    if recurrence_kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
+        summary = f"One-time AI task scheduled for {next_run_human}."
+    else:
+        cadence = _ai_tasks_ui_recurrence_label(schedule_payload, float(interval or 0.0))
+        summary = f"Recurring AI task scheduled {cadence.lower()} (next at {next_run_human})."
     return {
         "tool": "ai_tasks",
         "ok": True,
@@ -2684,9 +3139,10 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "ai_tasks",
-            "description": "schedule recurring AI tasks using natural phrases or cron and route output to a portal target",
+            "description": "schedule one-time or recurring AI tasks with natural phrases/cron and route output to a portal target",
             "usage": (
-                '{"function":"ai_tasks","arguments":{"task_prompt":"<what to do each run>",'
+                '{"function":"ai_tasks","arguments":{"task_prompt":"<what to do>","when":"at 6:30am"}} '
+                'or {"function":"ai_tasks","arguments":{"task_prompt":"<what to do each run>",'
                 '"when":"weekdays at 8am","platform":"discord","targets":{"channel":"#general"}}}'
             ),
         },
