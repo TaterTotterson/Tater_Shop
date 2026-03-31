@@ -29,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.14"
+__version__ = "1.0.15"
 
 load_dotenv()
 
@@ -1543,6 +1543,38 @@ def _ai_tasks_ui_destination_label(platform: str, targets: Dict[str, Any]) -> st
     return _ai_tasks_ui_target_to_text(platform_name, payload) or "Destination"
 
 
+def _ai_tasks_ui_destination_phrase(
+    platform: str,
+    targets: Dict[str, Any],
+    *,
+    redis_obj: Any = None,
+    catalog: Optional[Dict[str, Any]] = None,
+) -> str:
+    platform_name = _ai_tasks_ui_clean_text(platform).lower()
+    clean_targets = _ai_tasks_ui_clean_targets_dict(targets)
+    catalog_payload = catalog if isinstance(catalog, dict) else _ai_tasks_ui_load_destination_catalog(redis_obj)
+    platform_row = _ai_tasks_ui_catalog_platform_map(catalog_payload).get(platform_name, {})
+    platform_label = _ai_tasks_ui_clean_text(platform_row.get("label")) or platform_name or "destination"
+
+    destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else None
+    if isinstance(destinations, list):
+        encoded_current = _ai_tasks_ui_encode_destination_value(platform_name, clean_targets)
+        for row in destinations:
+            if not isinstance(row, dict):
+                continue
+            row_targets = _ai_tasks_ui_clean_targets_dict(row.get("targets"))
+            row_value = _ai_tasks_ui_encode_destination_value(platform_name, row_targets)
+            if encoded_current and row_value == encoded_current:
+                row_label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, row_targets)
+                if row_label:
+                    return f"{platform_label}: {row_label}"
+
+    destination_label = _ai_tasks_ui_destination_label(platform_name, clean_targets)
+    if destination_label:
+        return f"{platform_label}: {destination_label}"
+    return platform_label or "destination"
+
+
 def _ai_tasks_ui_encode_destination_value(platform: str, targets: Dict[str, Any]) -> str:
     platform_name = _ai_tasks_ui_clean_text(platform).lower()
     if not platform_name:
@@ -2537,7 +2569,12 @@ async def _ai_tasks_kernel_schedule(
             reminder_body = reminder_body[3:].strip()
         if not reminder_body:
             reminder_body = "follow up with the user"
-        task_prompt = f"send a message to the current destination reminding the user to {reminder_body}"
+        destination_phrase = _ai_tasks_ui_destination_phrase(
+            dest,
+            resolved_targets or {},
+            redis_obj=redis_obj,
+        )
+        task_prompt = f"send a message to {destination_phrase} reminding the user to {reminder_body}"
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()
