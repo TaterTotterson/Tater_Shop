@@ -5,7 +5,7 @@
       "id": "ai_task",
       "name": "AI Task Scheduler Core",
       "module_key": "ai_task_core",
-      "version": "1.0.14",
+      "version": "1.0.15",
       "min_tater_version": "59",
       "description": "AI Task Scheduler Core integration core for Tater.",
       "settings_category": "AI Task Scheduler Core Settings",
@@ -13,7 +13,7 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "cfe4d68472b55f837066d3e5e9c6c3fa099492e3e497a0d03d71f3b319d49843"
+      "sha256": "d5a78f96d99b20a312aa3064eb9a91ddf79bfb741fd7ff6e3b4048115300395f"
     },
     {
       "id": "awareness",
