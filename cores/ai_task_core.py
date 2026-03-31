@@ -29,7 +29,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.23"
+__version__ = "1.0.24"
 
 load_dotenv()
 
