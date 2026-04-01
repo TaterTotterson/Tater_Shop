@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.29"
+__version__ = "1.0.30"
 
 load_dotenv()
 
@@ -2348,11 +2348,18 @@ def _ai_tasks_kernel_catalog_targets_match(
     if dest == "discord":
         desired_id = str(desired.get("channel_id") or origin_payload.get("channel_id") or "").strip()
         row_id = str(row.get("channel_id") or "").strip()
-        if desired_id and row_id and desired_id == row_id:
-            return True
+        if desired_id and row_id:
+            return desired_id == row_id
         desired_channel = str(desired.get("channel") or origin_payload.get("channel") or "").strip().lstrip("#").lower()
         row_channel = str(row.get("channel") or "").strip().lstrip("#").lower()
-        return bool(desired_channel and row_channel and desired_channel == row_channel)
+        if not (desired_channel and row_channel and desired_channel == row_channel):
+            return False
+        desired_guild = str(desired.get("guild_id") or origin_payload.get("guild_id") or "").strip()
+        row_guild = str(row.get("guild_id") or "").strip()
+        # Name-only matching is safe only when both sides carry a guild id.
+        if not (desired_guild and row_guild):
+            return False
+        return desired_guild == row_guild
 
     if dest == "matrix":
         desired_room = str(desired.get("room_id") or origin_payload.get("room_id") or "").strip()
