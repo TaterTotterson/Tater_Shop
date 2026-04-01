@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.20"
+__version__ = "1.1.22"
 
 load_dotenv()
 
@@ -167,8 +167,6 @@ _UNIFI_HA_CAMERA_SUFFIXES = (
 _UNIFI_WS_PATH_CANDIDATES = (
     "/proxy/protect/integration/v1/ws/updates",
     "/proxy/protect/ws/updates",
-    "/proxy/protect/integration/ws/updates",
-    "/proxy/protect/ws",
 )
 _UNIFI_TRIGGER_CYCLE_MIN_SECONDS = 2.0
 _UNIFI_RATE_LIMIT_BACKOFF_SECONDS = 5.0
@@ -5041,7 +5039,7 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
             if not ws_paths:
                 raise RuntimeError("No UniFi websocket endpoint path configured.")
             if last_good_ws_path and last_good_ws_path in ws_paths:
-                ws_paths = [last_good_ws_path] + [item for item in ws_paths if item != last_good_ws_path]
+                ws_paths = [last_good_ws_path]
 
             timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=None)
             last_error = ""
@@ -5055,7 +5053,6 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                             heartbeat=25,
                             ssl=False,
                         ) as ws:
-                            connected = True
                             _runtime_set(
                                 redis_client,
                                 unifi_ws_connected=True,
