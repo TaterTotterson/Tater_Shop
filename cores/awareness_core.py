@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.33"
+__version__ = "1.0.35"
 
 load_dotenv()
 
@@ -102,6 +102,17 @@ _AREA_PRESETS = [
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_EVENT_FILTER_RUNTIME_KEYS = {
+    "camera": "events_filter_camera",
+    "doorbell": "events_filter_doorbell",
+    "sensor": "events_filter_sensor",
+}
+_EVENT_LIST_VIEW_RUNTIME_KEY = "events_list_view"
+_EVENT_FILTER_DEFAULTS = {
+    "camera": True,
+    "doorbell": True,
+    "sensor": True,
+}
 
 
 def _text(value: Any) -> str:
@@ -1487,10 +1498,108 @@ def _event_snapshot_preview(client: Any, event: Dict[str, Any]) -> Dict[str, Any
     return preview
 
 
+def _event_type_filters(client: Any) -> Dict[str, bool]:
+    runtime = _runtime_get(client)
+    return {
+        key: _bool(runtime.get(runtime_key), _EVENT_FILTER_DEFAULTS.get(key, True))
+        for key, runtime_key in _EVENT_FILTER_RUNTIME_KEYS.items()
+    }
+
+
+def _event_list_view_enabled(client: Any) -> bool:
+    runtime = _runtime_get(client)
+    return _bool(runtime.get(_EVENT_LIST_VIEW_RUNTIME_KEY), False)
+
+
+def _event_type_bucket(event: Dict[str, Any]) -> str:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    event_type = _text(event.get("type")).lower()
+    if event_type == "doorbell":
+        return "doorbell"
+    if event_type.startswith("camera"):
+        return "camera"
+    if "_sensor_" in event_type or _text(data.get("sensor_type")):
+        return "sensor"
+    entity_id = _text(event.get("entity_id")).lower()
+    if entity_id.startswith("camera."):
+        return "camera"
+    if entity_id.startswith(("binary_sensor.", "sensor.", "cover.")):
+        return "sensor"
+    return "other"
+
+
+def _event_allowed_by_filter(filters: Dict[str, bool], event_type: str) -> bool:
+    if event_type not in filters:
+        return True
+    return bool(filters.get(event_type))
+
+
+def _event_filter_form(
+    *,
+    filters: Dict[str, bool],
+    list_view: bool,
+    totals: Dict[str, int],
+    visible_totals: Dict[str, int],
+) -> Dict[str, Any]:
+    labels = [("camera", "Cameras"), ("doorbell", "Doorbells"), ("sensor", "Sensors")]
+    selected_labels = [label for key, label in labels if filters.get(key)]
+    if selected_labels:
+        subtitle = f"Showing: {', '.join(selected_labels)}"
+    else:
+        subtitle = "No event types selected. Enable at least one type to view matching events."
+    subtitle += f" • View: {'List' if list_view else 'Current'}"
+    subtitle += (
+        f" • Visible {visible_totals.get('camera', 0)}/{totals.get('camera', 0)} cameras, "
+        f"{visible_totals.get('doorbell', 0)}/{totals.get('doorbell', 0)} doorbells, "
+        f"{visible_totals.get('sensor', 0)}/{totals.get('sensor', 0)} sensors"
+    )
+    return {
+        "id": "awareness_event_filters",
+        "group": "event",
+        "title": "Event Filters",
+        "subtitle": subtitle,
+        "save_action": "awareness_save_event_filters",
+        "save_label": "Apply Filters",
+        "fields_popup": False,
+        "fields_dropdown": True,
+        "sections_in_dropdown": False,
+        "fields": [
+            {
+                "key": "show_camera_events",
+                "label": "Show Cameras",
+                "type": "checkbox",
+                "value": bool(filters.get("camera", True)),
+            },
+            {
+                "key": "show_doorbell_events",
+                "label": "Show Doorbells",
+                "type": "checkbox",
+                "value": bool(filters.get("doorbell", True)),
+            },
+            {
+                "key": "show_sensor_events",
+                "label": "Show Sensors",
+                "type": "checkbox",
+                "value": bool(filters.get("sensor", True)),
+            },
+            {
+                "key": "show_event_list_view",
+                "label": "List View (compact)",
+                "type": "checkbox",
+                "value": bool(list_view),
+            },
+        ],
+    }
+
+
 def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
+    filters = _event_type_filters(client)
+    list_view = _event_list_view_enabled(client)
     sources = _discover_event_sources(client)
+    totals: Dict[str, int] = {"camera": 0, "doorbell": 0, "sensor": 0}
+    visible_totals: Dict[str, int] = {"camera": 0, "doorbell": 0, "sensor": 0}
     if not sources:
-        return []
+        return [_event_filter_form(filters=filters, list_view=list_view, totals=totals, visible_totals=visible_totals)]
     events = _load_events_for_sources(
         client,
         sources=sources,
@@ -1500,6 +1609,14 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
     )
     items: List[Dict[str, Any]] = []
     for idx, event in enumerate(events):
+        event_bucket = _event_type_bucket(event)
+        is_camera_event = event_bucket in {"camera", "doorbell"}
+        if event_bucket in totals:
+            totals[event_bucket] += 1
+        if not _event_allowed_by_filter(filters, event_bucket):
+            continue
+        if event_bucket in visible_totals:
+            visible_totals[event_bucket] += 1
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         event_time = _event_time_display(event.get("ha_time"))
         source = _text(event.get("source"))
@@ -1516,11 +1633,29 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             subtitle_parts.append(f"Area: {area}")
         if entity_id:
             subtitle_parts.append(f"Entity: {entity_id}")
+        description = _text(event.get("message"))
+        if description and list_view:
+            subtitle_parts.append(f"Summary: {_compact(description, limit=120)}")
         subtitle = " • ".join([part for part in subtitle_parts if part])
 
         fields: List[Dict[str, Any]] = []
         snapshot = _event_snapshot_preview(client, event)
-        if snapshot.get("data_url"):
+        snapshot_id = _text(snapshot.get("snapshot_id"))
+        if list_view and is_camera_event and snapshot.get("data_url"):
+            fields.append(
+                {
+                    "key": f"snapshot_thumb_{idx}",
+                    "label": "Thumbnail",
+                    "type": "image",
+                    "src": _text(snapshot.get("data_url")),
+                    "alt": f"{title} thumbnail",
+                    "hide_label": True,
+                    "display": "thumbnail",
+                    "max_width": 160,
+                    "max_height": 90,
+                }
+            )
+        elif (not list_view) and snapshot.get("data_url"):
             fields.append(
                 {
                     "key": f"snapshot_{idx}",
@@ -1531,19 +1666,23 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                     "hide_label": True,
                 }
             )
-        elif _text(snapshot.get("snapshot_id")):
+        elif snapshot_id:
             fields.append(
                 {
                     "key": f"snapshot_status_{idx}",
                     "label": "Snapshot",
-                    "type": "text",
-                    "value": f"Stored snapshot unavailable ({_text(snapshot.get('snapshot_id'))})",
+                    "type": "text" if not list_view else "textarea",
+                    "value": (
+                        f"Stored snapshot unavailable ({snapshot_id})"
+                        if not list_view
+                        else f"Snapshot stored: {snapshot_id}"
+                    ),
                     "read_only": True,
+                    "hide_label": bool(list_view),
                 }
             )
 
-        description = _text(event.get("message"))
-        if description:
+        if description and not list_view:
             fields.append(
                 {
                     "key": f"description_{idx}",
@@ -1568,7 +1707,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                 "fields": fields,
             }
         )
-    return items
+    return [_event_filter_form(filters=filters, list_view=list_view, totals=totals, visible_totals=visible_totals)] + items
 
 
 async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
@@ -3535,6 +3674,33 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     if action_name == "awareness_refresh_entities":
         _ha_entity_catalog(force_refresh=True)
         return {"ok": True, "message": "Entity catalog refreshed."}
+    if action_name == "awareness_save_event_filters":
+        current_filters = _event_type_filters(client)
+        current_list_view = _event_list_view_enabled(client)
+        show_camera = _bool(
+            _value(values, body, "show_camera_events", current_filters.get("camera", True)),
+            current_filters.get("camera", True),
+        )
+        show_doorbell = _bool(
+            _value(values, body, "show_doorbell_events", current_filters.get("doorbell", True)),
+            current_filters.get("doorbell", True),
+        )
+        show_sensor = _bool(
+            _value(values, body, "show_sensor_events", current_filters.get("sensor", True)),
+            current_filters.get("sensor", True),
+        )
+        show_event_list_view = _bool(
+            _value(values, body, "show_event_list_view", current_list_view),
+            current_list_view,
+        )
+        _runtime_set(
+            client,
+            events_filter_camera=show_camera,
+            events_filter_doorbell=show_doorbell,
+            events_filter_sensor=show_sensor,
+            events_list_view=show_event_list_view,
+        )
+        return {"ok": True, "message": "Event filters updated."}
     if action_name == "awareness_add_rule":
         kind = _text(_value(values, body, "kind")).lower()
         if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:
