@@ -5109,7 +5109,13 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         queue_depth=_queue_depth(redis_client),
         last_error="",
     )
-    logger.info("[awareness] core started (rules=%d enabled=%d)", len(rules), enabled_rules)
+    logger.info(
+        "[awareness] core started v%s (%s) (rules=%d enabled=%d)",
+        __version__,
+        __file__,
+        len(rules),
+        enabled_rules,
+    )
     tasks = [
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
