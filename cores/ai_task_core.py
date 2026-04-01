@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.30"
+__version__ = "1.0.31"
 
 load_dotenv()
 
@@ -1549,12 +1549,75 @@ def _ai_tasks_ui_destination_phrase(
     redis_obj: Any = None,
     catalog: Optional[Dict[str, Any]] = None,
 ) -> str:
+    def _split_label_parts(raw_label: str) -> List[str]:
+        parts: List[str] = []
+        for token in str(raw_label or "").split("•"):
+            text = _ai_tasks_ui_clean_text(token)
+            if text:
+                parts.append(text)
+        return parts
+
+    def _discord_room_token(value: str) -> str:
+        token = _ai_tasks_ui_clean_text(value)
+        if not token:
+            return ""
+        if token.isdigit() or token.startswith("#"):
+            return token
+        return f"#{token}"
+
+    def _discord_destination_phrase(
+        platform_label_value: str,
+        *,
+        clean_target_values: Dict[str, str],
+        matched_target_values: Dict[str, str],
+        matched_label_value: str,
+    ) -> str:
+        room_value = _discord_room_token(
+            clean_target_values.get("channel")
+            or matched_target_values.get("channel")
+        )
+        if not room_value:
+            room_value = _ai_tasks_ui_clean_text(
+                clean_target_values.get("channel_id")
+                or matched_target_values.get("channel_id")
+            )
+        guild_value = _ai_tasks_ui_clean_text(
+            clean_target_values.get("guild_name")
+            or clean_target_values.get("guild")
+            or matched_target_values.get("guild_name")
+            or matched_target_values.get("guild")
+        )
+        guild_id_value = _ai_tasks_ui_clean_text(
+            clean_target_values.get("guild_id")
+            or matched_target_values.get("guild_id")
+        )
+
+        if matched_label_value:
+            label_parts = _split_label_parts(matched_label_value)
+            if label_parts:
+                if not room_value:
+                    room_value = _discord_room_token(label_parts[0])
+                if len(label_parts) > 1 and not guild_value:
+                    guild_value = label_parts[1]
+        if not guild_value:
+            guild_value = guild_id_value
+
+        if room_value and guild_value:
+            return f"{platform_label_value}: room: {room_value} • guild: {guild_value}"
+        if room_value:
+            return f"{platform_label_value}: room: {room_value}"
+        if guild_value:
+            return f"{platform_label_value}: guild: {guild_value}"
+        return ""
+
     platform_name = _ai_tasks_ui_clean_text(platform).lower()
     clean_targets = _ai_tasks_ui_clean_targets_dict(targets)
     catalog_payload = catalog if isinstance(catalog, dict) else _ai_tasks_ui_load_destination_catalog(redis_obj)
     platform_row = _ai_tasks_ui_catalog_platform_map(catalog_payload).get(platform_name, {})
     platform_label = _ai_tasks_ui_clean_text(platform_row.get("label")) or platform_name or "destination"
 
+    matched_label = ""
+    matched_targets: Dict[str, str] = {}
     destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else None
     if isinstance(destinations, list):
         encoded_current = _ai_tasks_ui_encode_destination_value(platform_name, clean_targets)
@@ -1564,9 +1627,22 @@ def _ai_tasks_ui_destination_phrase(
             row_targets = _ai_tasks_ui_clean_targets_dict(row.get("targets"))
             row_value = _ai_tasks_ui_encode_destination_value(platform_name, row_targets)
             if encoded_current and row_value == encoded_current:
-                row_label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, row_targets)
-                if row_label:
-                    return f"{platform_label}: {row_label}"
+                matched_targets = row_targets
+                matched_label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, row_targets)
+                break
+
+    if platform_name == "discord":
+        explicit_discord_phrase = _discord_destination_phrase(
+            platform_label,
+            clean_target_values=clean_targets,
+            matched_target_values=matched_targets,
+            matched_label_value=matched_label,
+        )
+        if explicit_discord_phrase:
+            return explicit_discord_phrase
+
+    if matched_label:
+        return f"{platform_label}: {matched_label}"
 
     destination_label = _ai_tasks_ui_destination_label(platform_name, clean_targets)
     if destination_label:
