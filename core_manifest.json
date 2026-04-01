@@ -19,7 +19,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "1.1.33",
+      "version": "1.1.34",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +27,21 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "c1c1372a13565712ce8ed1844759f4ff331c96b20f94936ea48df478ae68a408"
+      "sha256": "2f3d47c6252ede0d371b48a03ed3becc4601155aaaac0672d519f387cb03f499"
+    },
+    {
+      "id": "connectivity",
+      "name": "Connectivity Core",
+      "module_key": "connectivity_core",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Connectivity Core integration core for Tater.",
+      "settings_category": "Connectivity Core Settings",
+      "required_settings_count": 11,
+      "autostart_key": "connectivity_core_running",
+      "tags": [],
+      "entry": "cores/connectivity_core.py",
+      "sha256": "c47ac4488c1c2dd9c841e2a9c207b54d621f6ba1b84a8cb1ae992f13224a4f43"
     },
     {
       "id": "memory",
