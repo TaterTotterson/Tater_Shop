@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.24"
+__version__ = "1.1.25"
 
 load_dotenv()
 
@@ -760,6 +760,11 @@ def _ha_config() -> Dict[str, str]:
     return {"base": base, "token": token}
 
 
+def _ha_configured() -> bool:
+    settings = redis_client.hgetall("homeassistant_settings") or {}
+    return bool(_text(settings.get("HA_TOKEN")))
+
+
 def _unifi_protect_config() -> Dict[str, str]:
     base = _text(redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").rstrip("/")
     api_key = _text(redis_client.get("tater:unifi_protect:api_key"))
@@ -770,6 +775,10 @@ def _unifi_protect_config() -> Dict[str, str]:
     if not base:
         base = "https://10.4.20.127"
     return {"base": base, "api_key": api_key}
+
+
+def _unifi_protect_configured() -> bool:
+    return bool(_text(redis_client.get("tater:unifi_protect:api_key")))
 
 
 def _unifi_headers(api_key: str, *, json_content: bool = True) -> Dict[str, str]:
@@ -4928,7 +4937,11 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
         if _event_provider(redis_client) != "unifi_protect":
-            _runtime_set(redis_client, unifi_connected=False)
+            _runtime_set(redis_client, unifi_connected=False, last_error="")
+            await asyncio.sleep(float(poll_seconds))
+            continue
+        if not _unifi_protect_configured():
+            _runtime_set(redis_client, unifi_connected=False, last_error="")
             await asyncio.sleep(float(poll_seconds))
             continue
         try:
@@ -5058,7 +5071,10 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
         except Exception as exc:
             _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
-            logger.warning("[awareness] unifi poll loop error: %s", exc)
+            if "api key is not set" in _text(exc).lower():
+                logger.debug("[awareness] unifi poll loop waiting for UniFi config.")
+            else:
+                logger.warning("[awareness] unifi poll loop error: %s", exc)
         await asyncio.sleep(float(poll_seconds))
 
 
@@ -5066,8 +5082,12 @@ async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
         active_provider = _event_provider(redis_client)
-        if active_provider not in {"homeassistant", "unifi_protect"}:
-            _runtime_set(redis_client, ws_connected=False)
+        if active_provider != "homeassistant":
+            _runtime_set(redis_client, ws_connected=False, last_error="")
+            await asyncio.sleep(float(reconnect_seconds))
+            continue
+        if not _ha_configured():
+            _runtime_set(redis_client, ws_connected=False, last_error="")
             await asyncio.sleep(float(reconnect_seconds))
             continue
         try:
@@ -5115,7 +5135,10 @@ async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
                             raise RuntimeError("Home Assistant websocket connection closed")
         except Exception as exc:
             _runtime_set(redis_client, ws_connected=False, last_error=str(exc))
-            logger.warning("[awareness] websocket loop error: %s", exc)
+            if "token is not set" in _text(exc).lower():
+                logger.debug("[awareness] websocket loop waiting for Home Assistant config.")
+            else:
+                logger.warning("[awareness] websocket loop error: %s", exc)
             await asyncio.sleep(float(reconnect_seconds))
     _runtime_set(redis_client, ws_connected=False)
 
