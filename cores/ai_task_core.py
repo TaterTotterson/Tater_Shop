@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.33"
+__version__ = "1.0.34"
 
 load_dotenv()
 
@@ -2169,7 +2169,14 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
         '  "cron": {"hours":[0-23],"minutes":[0-59],"seconds":[0-59],"weekdays":[0-6],"cron":"optional"}\n'
         "}\n"
         "When ambiguous or impossible, return: {\"error\":\"...\"}.\n"
+        "Treat this as a stateless single-turn parse.\n"
+        "Do not use or infer any timing from prior chat history.\n"
+        "The current-turn request_text in the input JSON is authoritative.\n"
+        "If input fields conflict, prioritize request_text for schedule intent.\n"
         "Use local time.\n"
+        "For relative phrases such as 'in 3 min', 'in 2 hours', or 'after 30 seconds', "
+        "anchor strictly to the provided Current unix timestamp.\n"
+        "Never anchor relative offsets to any previously discussed time.\n"
         "Weekday index mapping must be Python weekday indexing: "
         "Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6.\n"
         "For 'weekdays', use [0,1,2,3,4]. For 'weekends', use [5,6].\n"
