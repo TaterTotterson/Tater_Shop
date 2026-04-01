@@ -48,7 +48,7 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
-SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks"}
+SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks", "send_message", "attach_file"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
     def __init__(self, **kwargs):
@@ -526,6 +526,20 @@ def _supports_scheduled_tools(plugin_name: str, plugin: ToolVerba, platform: str
     return _has_platform_handler(plugin, platform)
 
 
+def _build_scheduler_reminder_prompt(destination_phrase: str, reminder_body: str) -> str:
+    destination = str(destination_phrase or "").strip() or "the destination"
+    body = str(reminder_body or "").strip()
+    if body.lower().startswith("to "):
+        body = body[3:].strip()
+    if not body:
+        body = "follow up with the user"
+    return (
+        f"Compose one concise reminder message for {destination}. "
+        f"Remind the user to {body}. "
+        "Return only the final message text to send."
+    )
+
+
 def _normalize_runtime_task_prompt(task_prompt: str) -> str:
     text = str(task_prompt or "").strip()
     if not text:
@@ -534,9 +548,21 @@ def _normalize_runtime_task_prompt(task_prompt: str) -> str:
         from kernel_tools import _ai_tasks_clean_task_prompt
         normalized = str(_ai_tasks_clean_task_prompt(text) or "").strip()
         if normalized:
-            return normalized
+            text = normalized
     except Exception:
-        pass
+        text = text
+
+    # Backward-compat for legacy reminder prompts created before message-only mode.
+    lower = text.lower()
+    prefix = "send a message to "
+    marker = " reminding the user to "
+    if lower.startswith(prefix):
+        pivot = lower.find(marker)
+        if pivot > len(prefix):
+            destination = text[len(prefix):pivot].strip(" ,.-")
+            reminder_body = text[pivot + len(marker):].strip()
+            if destination and reminder_body:
+                return _build_scheduler_reminder_prompt(destination, reminder_body)
     return text
 
 
@@ -592,6 +618,7 @@ async def _render_scheduled_message(
         "Keep replies concise and task-focused.\n"
         "Do not use repo_browser.* tool syntax.\n"
         "Execute the task now; do not create, modify, or cancel schedules.\n"
+        "Do not call send_message or attach_file; the scheduler handles delivery.\n"
         "If a task names multiple Home Assistant entities (for example multiple lights), "
         "run separate tool calls per entity instead of one bundled call.\n"
         "Return only the requested deliverable content.\n"
@@ -2737,16 +2764,12 @@ async def _ai_tasks_kernel_schedule(
 
     if reminder_intent:
         reminder_body = str(reminder_text or task_prompt).strip()
-        if reminder_body.lower().startswith("to "):
-            reminder_body = reminder_body[3:].strip()
-        if not reminder_body:
-            reminder_body = "follow up with the user"
         destination_phrase = _ai_tasks_ui_destination_phrase(
             dest,
             resolved_targets or {},
             redis_obj=redis_obj,
         )
-        task_prompt = f"send a message to {destination_phrase} reminding the user to {reminder_body}"
+        task_prompt = _build_scheduler_reminder_prompt(destination_phrase, reminder_body)
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()
