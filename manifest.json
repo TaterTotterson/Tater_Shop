@@ -45,7 +45,7 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
@@ -60,7 +60,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "d318c6d1e960ca4c6a1dc6ae2d87a7a3684dbf61e7df4d14fc9f50241fbb4566"
+      "sha256": "f20bc9138fe1735a714710b96a6a3cff8285f5e61e16b239ba5fda18865d8d57"
     },
     {
       "id": "comfyui_image_plugin",
