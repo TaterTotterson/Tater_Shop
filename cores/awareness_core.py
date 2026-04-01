@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.36"
+__version__ = "1.0.37"
 
 load_dotenv()
 
@@ -3160,8 +3160,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "label": "Briefs",
                 "source": "items",
                 "item_group": "brief",
-                "selector": True,
-                "selector_label": "Select Brief Job",
+                "selector": False,
                 "empty_message": "No brief jobs configured.",
             },
             {"key": "create", "label": "Create Rule", "source": "add_form"},
