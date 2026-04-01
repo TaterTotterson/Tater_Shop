@@ -31,7 +31,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Generates music using ComfyUI Audio Ace."
@@ -468,14 +468,18 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 say_hint="Ask the user for a music prompt.",
             )
 
-        target_player = self._pick_target_player(context=context)
+        target_player = await self._pick_target_player(context=context)
         if not target_player:
             # Give a helpful hint including what we saw from context
             dev = ((context or {}).get("device_name") or (context or {}).get("device_id") or "").strip()
             area = ((context or {}).get("area_name") or (context or {}).get("area_id") or "").strip()
+            sat = self._extract_satellite_entity_id(context or {})
             hint = ""
-            if dev or area:
-                hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
+            if dev or area or sat:
+                hint = (
+                    f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}, "
+                    f"satellite={sat or 'unknown'}.)"
+                )
             return action_failure(
                 code="missing_media_player",
                 message=(
@@ -544,13 +548,230 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         s = re.sub(r"_+", "_", s).strip("_")
         return s
 
-    def _pick_target_player(self, context: dict | None = None) -> str | None:
+    @staticmethod
+    def _ctx_text(ctx: dict | None, *keys: str) -> str:
+        payload = ctx if isinstance(ctx, dict) else {}
+        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        for key in keys:
+            raw = payload.get(key)
+            if raw in (None, ""):
+                raw = origin.get(key)
+            txt = str(raw or "").strip()
+            if txt:
+                return txt
+        return ""
+
+    @staticmethod
+    def _dedupe_preserve(items: list[str]) -> list[str]:
+        out = []
+        seen = set()
+        for item in items or []:
+            key = str(item or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
+    def _strip_assist_suffixes(self, object_id_slug: str) -> str:
+        base = (object_id_slug or "").strip("_")
+        for suffix in (
+            "_assist_satellite",
+            "_satellite_assist",
+            "_assist",
+            "_satellite",
+        ):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)].strip("_")
+        return base
+
+    def _extract_satellite_entity_id(self, context: dict | None) -> str:
+        ctx = context if isinstance(context, dict) else {}
+        for key in (
+            "assist_satellite_entity_id",
+            "satellite_entity_id",
+            "satellite_id",
+            "source_entity_id",
+            "entity_id",
+            "source",
+            "device_name",  # Some callers pass the entity_id string here.
+        ):
+            val = self._ctx_text(ctx, key)
+            if val.startswith("assist_satellite."):
+                return val
+        return ""
+
+    def _media_player_candidates_from_satellite_entity(self, satellite_entity_id: str) -> list[str]:
+        sat = (satellite_entity_id or "").strip()
+        if not sat.startswith("assist_satellite.") or "." not in sat:
+            return []
+
+        object_id = sat.split(".", 1)[1]
+        obj_slug = self._slugify(object_id)
+        base = self._strip_assist_suffixes(obj_slug)
+
+        candidates = [
+            f"media_player.{obj_slug}",
+            f"media_player.{obj_slug}_media_player",
+            f"media_player.{obj_slug}_speaker",
+        ]
+        if "assist_satellite" in obj_slug:
+            candidates.extend(
+                [
+                    f"media_player.{obj_slug.replace('assist_satellite', 'media_player')}",
+                    f"media_player.{obj_slug.replace('_assist_satellite', '')}",
+                ]
+            )
+        if base:
+            candidates.extend(
+                [
+                    f"media_player.{base}",
+                    f"media_player.{base}_media_player",
+                    f"media_player.{base}_speaker",
+                ]
+            )
+
+        return self._dedupe_preserve(candidates)
+
+    def _media_player_candidates_from_device_name(self, device_name: str) -> list[str]:
+        raw = (device_name or "").strip()
+        if not raw:
+            return []
+        if raw.startswith("assist_satellite."):
+            return self._media_player_candidates_from_satellite_entity(raw)
+
+        slug = self._slugify(raw)
+        base = self._strip_assist_suffixes(slug)
+
+        candidates = [
+            f"media_player.{slug}",
+            f"media_player.{slug}_media_player",
+            f"media_player.{slug}_speaker",
+        ]
+        if "assist_satellite" in slug:
+            candidates.extend(
+                [
+                    f"media_player.{slug.replace('assist_satellite', 'media_player')}",
+                    f"media_player.{slug.replace('_assist_satellite', '')}",
+                ]
+            )
+        if base:
+            candidates.extend(
+                [
+                    f"media_player.{base}",
+                    f"media_player.{base}_media_player",
+                    f"media_player.{base}_speaker",
+                ]
+            )
+        return self._dedupe_preserve(candidates)
+
+    def _entity_exists(self, ha, entity_id: str) -> bool:
+        eid = (entity_id or "").strip()
+        if not eid.startswith("media_player."):
+            return False
+        try:
+            st = ha.get_state(eid)
+            return bool(isinstance(st, dict) and str(st.get("entity_id") or "").startswith("media_player."))
+        except Exception:
+            return False
+
+    def _rank_media_player_entity_id(
+        self,
+        entity_id: str,
+        *,
+        device_name: str = "",
+        satellite_entity_id: str = "",
+        preferred_ids: set[str] | None = None,
+    ) -> int:
+        low = str(entity_id or "").strip().lower()
+        if not low.startswith("media_player."):
+            return -1000
+
+        score = 0
+        preferred = preferred_ids or set()
+        if low in preferred:
+            score += 100
+
+        want_slug = self._slugify(device_name)
+        sat_obj = ""
+        if str(satellite_entity_id or "").startswith("assist_satellite.") and "." in satellite_entity_id:
+            sat_obj = self._slugify(satellite_entity_id.split(".", 1)[1])
+        sat_base = self._strip_assist_suffixes(sat_obj)
+
+        if want_slug and want_slug in low:
+            score += 18
+        if sat_obj and sat_obj in low:
+            score += 24
+        if sat_base and sat_base in low:
+            score += 20
+        if low.endswith("_media_player"):
+            score += 8
+        if low.endswith("_speaker"):
+            score += 5
+        if ".group" in low:
+            score -= 4
+        return score
+
+    async def _media_player_for_device_id(
+        self,
+        ha,
+        *,
+        device_id: str,
+        device_name: str = "",
+        satellite_entity_id: str = "",
+    ) -> str | None:
+        did = (device_id or "").strip()
+        if not did:
+            return None
+
+        entity_reg = await ha.entity_registry_list()
+        raw_candidates: list[str] = []
+        for row in entity_reg or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("device_id") or "").strip() != did:
+                continue
+            if row.get("disabled_by") not in (None, ""):
+                continue
+            ent = str(row.get("entity_id") or "").strip()
+            if ent.startswith("media_player."):
+                raw_candidates.append(ent)
+
+        if not raw_candidates:
+            return None
+
+        preferred = set(
+            self._dedupe_preserve(
+                self._media_player_candidates_from_satellite_entity(satellite_entity_id)
+                + self._media_player_candidates_from_device_name(device_name)
+            )
+        )
+
+        ranked = sorted(
+            set(raw_candidates),
+            key=lambda eid: (
+                -self._rank_media_player_entity_id(
+                    eid,
+                    device_name=device_name,
+                    satellite_entity_id=satellite_entity_id,
+                    preferred_ids=preferred,
+                ),
+                eid,
+            ),
+        )
+
+        for eid in ranked:
+            if self._entity_exists(ha, eid):
+                return eid
+        return ranked[0] if ranked else None
+
+    async def _pick_target_player(self, context: dict | None = None) -> str | None:
         """
         Pick a media_player in this order:
           1) Explicit plugin setting HA_DEFAULT_MEDIA_PLAYER
-          2) If unset, try to find a media_player that matches the speaking device context:
-              - try media_player.<slug(device_name)>
-              - else search all media_player states and match by friendly_name or entity_id containing the slug
+          2) Deterministic registry lookup by speaking device_id (same HA device)
+          3) Deterministic entity-id patterns from assist_satellite/device_name
+          4) Fuzzy fallback scan by friendly_name/entity_id
         """
         sett = self._settings()
         default_mp = (sett.get("HA_DEFAULT_MEDIA_PLAYER") or "").strip()
@@ -558,73 +779,96 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             return default_mp
 
         ctx = context or {}
-        device_name = (ctx.get("device_name") or "").strip()
-        device_id = (ctx.get("device_id") or "").strip()
+        device_name = self._ctx_text(ctx, "device_name")
+        device_id = self._ctx_text(ctx, "device_id")
+        satellite_entity_id = self._extract_satellite_entity_id(ctx)
 
-        # If we have a device_name, try a couple of very common entity_id patterns first.
-        if device_name:
-            slug = self._slugify(device_name)
-            candidates = [
-                f"media_player.{slug}",
-                f"media_player.{slug}_speaker",
-                f"media_player.{slug}_media_player",
-            ]
+        try:
             ha = self._HA()
-            for eid in candidates:
-                try:
-                    st = ha.get_state(eid)
-                    if isinstance(st, dict) and st.get("entity_id", "").startswith("media_player."):
-                        return eid
-                except Exception:
-                    pass
+        except Exception as e:
+            logger.warning("Cannot initialize Home Assistant client for media_player resolution: %s", e)
+            return None
 
-            # Fallback: scan all states and best-match by name/slug
+        # Deterministic path: resolve media_player entities registered to this exact HA device.
+        if device_id:
             try:
-                all_states = ha.list_states()
-                best = self._find_best_media_player(all_states, device_name=device_name)
-                if best:
-                    return best
-            except Exception:
-                logger.exception("Failed scanning HA states for a matching media_player.")
+                by_device = await self._media_player_for_device_id(
+                    ha,
+                    device_id=device_id,
+                    device_name=device_name,
+                    satellite_entity_id=satellite_entity_id,
+                )
+                if by_device:
+                    return by_device
+            except Exception as e:
+                logger.warning("Device-id media_player lookup failed for %s: %s", device_id, e)
 
-        # If we only have device_id, we can’t reliably map it to an entity via REST-only APIs.
-        # (HA device registry is not available through the normal /api/states endpoint.)
-        if device_id and not device_name:
-            logger.info("No device_name in context; cannot infer media_player from device_id via REST-only APIs.")
+        # Deterministic fallback: known Voice PE naming patterns.
+        direct_candidates = self._dedupe_preserve(
+            self._media_player_candidates_from_satellite_entity(satellite_entity_id)
+            + self._media_player_candidates_from_device_name(device_name)
+        )
+        for eid in direct_candidates:
+            if self._entity_exists(ha, eid):
+                return eid
+
+        # Last resort: fuzzy scan by friendly_name / entity_id.
+        try:
+            all_states = ha.list_states()
+            best = self._find_best_media_player(
+                all_states,
+                device_name=device_name,
+                satellite_entity_id=satellite_entity_id,
+                preferred_ids=direct_candidates,
+            )
+            if best:
+                return best
+        except Exception:
+            logger.exception("Failed scanning HA states for a matching media_player.")
 
         return None
 
-    def _find_best_media_player(self, all_states: list[dict], device_name: str) -> str | None:
+    def _find_best_media_player(
+        self,
+        all_states: list[dict],
+        *,
+        device_name: str = "",
+        satellite_entity_id: str = "",
+        preferred_ids: list[str] | None = None,
+    ) -> str | None:
         """
-        Try to find a media_player whose friendly_name matches the device_name.
+        Try to find the most likely media_player by scoring friendly_name/entity_id hints.
         """
-        want = (device_name or "").strip()
-        if not want:
-            return None
-        want_lower = want.lower()
-        want_slug = self._slugify(want)
+        want = (device_name or "").strip().lower()
+        preferred = {str(e or "").strip().lower() for e in (preferred_ids or []) if e}
 
-        exact = []
-        contains = []
-        slug_matches = []
-
+        best_id = None
+        best_score = -1000
         for st in all_states or []:
             eid = st.get("entity_id") or ""
             if not eid.startswith("media_player."):
                 continue
+            low_eid = eid.lower()
             attrs = st.get("attributes") or {}
             fname = (attrs.get("friendly_name") or "").strip()
-            fname_lower = fname.lower()
+            fname_low = fname.lower()
 
-            if fname and fname_lower == want_lower:
-                exact.append(eid)
-            elif fname and want_lower in fname_lower:
-                contains.append(eid)
-            elif want_slug and want_slug in eid:
-                slug_matches.append(eid)
+            score = self._rank_media_player_entity_id(
+                low_eid,
+                device_name=device_name,
+                satellite_entity_id=satellite_entity_id,
+                preferred_ids=preferred,
+            )
+            if want and fname_low == want:
+                score += 28
+            elif want and want in fname_low:
+                score += 14
 
-        # Prefer exact name match, then contains, then entity_id slug match
-        return (exact[0] if exact else (contains[0] if contains else (slug_matches[0] if slug_matches else None)))
+            if score > best_score:
+                best_score = score
+                best_id = eid
+
+        return best_id if best_score > 0 else None
 
     class _HA:
         def __init__(self):
@@ -636,6 +880,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                     "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                     "and add a Long-Lived Access Token."
                 )
+            self.token = token
             self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
         def _req(self, method: str, path: str, json=None, timeout=120):
@@ -656,6 +901,46 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         def play_media(self, entity_id: str, url: str, mimetype="music"):
             data = {"entity_id": entity_id, "media_content_id": url, "media_content_type": mimetype}
             return self._req("POST", "/api/services/media_player/play_media", json=data, timeout=30)
+
+        def ws_url(self) -> str:
+            if self.base.startswith("https://"):
+                return self.base.replace("https://", "wss://", 1) + "/api/websocket"
+            return self.base.replace("http://", "ws://", 1) + "/api/websocket"
+
+        async def ws_call(self, msg_type: str, timeout_s: float = 20.0):
+            try:
+                import aiohttp
+            except Exception as e:
+                raise RuntimeError(f"aiohttp is required for HA websocket calls: {e}")
+
+            ws_url = self.ws_url()
+            timeout = aiohttp.ClientTimeout(total=timeout_s)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                    first = await ws.receive_json()
+                    if (first or {}).get("type") == "auth_required":
+                        await ws.send_json({"type": "auth", "access_token": self.token})
+                        auth = await ws.receive_json()
+                        if (auth or {}).get("type") != "auth_ok":
+                            raise RuntimeError(f"HA websocket auth failed: {auth}")
+                    elif (first or {}).get("type") != "auth_ok":
+                        await ws.send_json({"type": "auth", "access_token": self.token})
+                        auth = await ws.receive_json()
+                        if (auth or {}).get("type") != "auth_ok":
+                            raise RuntimeError(f"Unexpected HA websocket hello/auth flow: first={first}, auth={auth}")
+
+                    await ws.send_json({"id": 1, "type": msg_type})
+                    while True:
+                        msg = await ws.receive_json()
+                        if msg.get("type") != "result" or msg.get("id") != 1:
+                            continue
+                        if not msg.get("success", False):
+                            raise RuntimeError(f"HA websocket call failed: {msg}")
+                        return msg.get("result")
+
+        async def entity_registry_list(self) -> list[dict]:
+            res = await self.ws_call("config/entity_registry/list", timeout_s=30.0)
+            return res if isinstance(res, list) else []
 
 
 verba = ComfyUIAudioAcePlugin()
