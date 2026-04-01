@@ -13,6 +13,7 @@
 |-------------|--------|-------------|
 | `ai_task` | `ai_task_core` | AI Task Scheduler Core integration core for Tater. |
 | `awareness` | `awareness_core` | Awareness Core integration core for Tater. |
+| `connectivity` | `connectivity_core` | Connectivity Core integration core for Tater. |
 | `memory` | `memory_core` | Memory Core integration core for Tater. |
 | `rss` | `rss_core` | RSS Core integration core for Tater. |
 
