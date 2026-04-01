@@ -3,7 +3,6 @@ import calendar
 import json
 import logging
 import os
-import re
 import threading
 import time
 import uuid
@@ -29,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.24"
+__version__ = "1.0.28"
 
 load_dotenv()
 
@@ -1823,6 +1822,36 @@ def _ai_tasks_kernel_int_list(raw: Any, *, minimum: int, maximum: int) -> List[i
     return sorted(out)
 
 
+def _ai_tasks_kernel_token_set(raw_text: Any) -> set[str]:
+    text = str(raw_text or "").strip().lower()
+    if not text:
+        return set()
+    tokens: List[str] = []
+    current: List[str] = []
+    for ch in text:
+        if ch.isalnum():
+            current.append(ch)
+            continue
+        if current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return set(tokens)
+
+
+def _ai_tasks_kernel_normalize_weekdays_from_request(weekdays: List[int], request_text: str) -> List[int]:
+    clean = sorted({int(day) for day in weekdays if 0 <= int(day) <= 6})
+    if not clean:
+        return []
+    tokens = _ai_tasks_kernel_token_set(request_text)
+    if {"weekday", "weekdays"} & tokens and clean == [1, 2, 3, 4, 5]:
+        return [0, 1, 2, 3, 4]
+    if {"weekend", "weekends"} & tokens and clean == [0, 6]:
+        return [5, 6]
+    return clean
+
+
 def _ai_tasks_kernel_clock_parts(raw: Any) -> Tuple[Optional[Tuple[int, int, int]], str]:
     payload = raw if isinstance(raw, dict) else {}
     try:
@@ -1836,172 +1865,12 @@ def _ai_tasks_kernel_clock_parts(raw: Any) -> Tuple[Optional[Tuple[int, int, int
     return (hour, minute, second), ""
 
 
-def _ai_tasks_text_has_recurring_cues(text: str) -> bool:
-    value = str(text or "").strip().lower()
-    if not value:
-        return False
-    recurring_patterns = [
-        r"\bevery\b",
-        r"\bdaily\b",
-        r"\bweekly\b",
-        r"\bmonthly\b",
-        r"\bannually\b",
-        r"\bweekdays?\b",
-        r"\bweekends?\b",
-        r"\beach\s+(day|week|month|year)\b",
-        r"\bon\s+(mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)\b",
-    ]
-    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in recurring_patterns)
-
-
-def _ai_tasks_parse_compact_local_time_token(text: str) -> Optional[Tuple[int, int, int]]:
-    value = str(text or "").strip().lower()
-    if not value:
-        return None
-
-    match = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\b", value, flags=re.IGNORECASE)
-    if match:
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        second = int(match.group(3) or 0)
-        ampm = (match.group(4) or "").lower()
-        if ampm:
-            if not (1 <= hour <= 12):
-                return None
-            if ampm == "am":
-                hour = 0 if hour == 12 else hour
-            else:
-                hour = 12 if hour == 12 else hour + 12
-        elif not (0 <= hour <= 23):
-            return None
-        if 0 <= minute <= 59 and 0 <= second <= 59:
-            return hour, minute, second
-        return None
-
-    match = re.search(r"\b(\d{1,4})\s*([ap]m)\b", value, flags=re.IGNORECASE)
-    if match:
-        digits = match.group(1)
-        ampm = match.group(2).lower()
-        if len(digits) <= 2:
-            hour = int(digits)
-            minute = 0
-        elif len(digits) == 3:
-            hour = int(digits[0])
-            minute = int(digits[1:])
-        else:
-            hour = int(digits[:2])
-            minute = int(digits[2:])
-        if not (1 <= hour <= 12 and 0 <= minute <= 59):
-            return None
-        if ampm == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
-        return hour, minute, 0
-
-    match = re.search(r"(?:\bat\s+)?\b(\d{3,4})\b", value, flags=re.IGNORECASE)
-    if match:
-        digits = match.group(1)
-        if len(digits) == 3:
-            hour = int(digits[0])
-            minute = int(digits[1:])
-        else:
-            hour = int(digits[:2])
-            minute = int(digits[2:])
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            return hour, minute, 0
-
-    match = re.search(r"\b(\d{1,2})\s*([ap]m)\b", value, flags=re.IGNORECASE)
-    if match:
-        hour = int(match.group(1))
-        ampm = match.group(2).lower()
-        if not (1 <= hour <= 12):
-            return None
-        if ampm == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
-        return hour, 0, 0
-
-    return None
-
-
-def _ai_tasks_parse_explicit_local_date(text: str, *, now_local: datetime) -> Optional[datetime]:
-    value = str(text or "").strip().lower()
-    if not value:
-        return None
-    if re.search(r"\btomorrow\b", value, flags=re.IGNORECASE):
-        return now_local + timedelta(days=1)
-    if re.search(r"\btoday\b", value, flags=re.IGNORECASE):
-        return now_local
-
-    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", value)
-    if match:
-        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        try:
-            return now_local.replace(year=year, month=month, day=day)
-        except Exception:
-            return None
-
-    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", value)
-    if match:
-        month = int(match.group(1))
-        day = int(match.group(2))
-        year_raw = match.group(3)
-        year = now_local.year
-        if year_raw:
-            year = int(year_raw)
-            if year < 100:
-                year += 2000
-        try:
-            return now_local.replace(year=year, month=month, day=day)
-        except Exception:
-            return None
-
-    return None
-
-
-def _ai_tasks_try_parse_one_time_schedule_deterministically(
+def _ai_tasks_kernel_schedule_from_llm(
+    parsed: Dict[str, Any],
     *,
-    args: Dict[str, Any],
-    request_text: str,
     now_ts: float,
+    request_text: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    del args
-    text = str(request_text or "").strip()
-    if not text:
-        return None, ""
-    if _ai_tasks_text_has_recurring_cues(text):
-        return None, ""
-
-    parts = _ai_tasks_parse_compact_local_time_token(text)
-    if not parts:
-        return None, ""
-
-    now_local = datetime.fromtimestamp(float(now_ts)).astimezone()
-    base_date = _ai_tasks_parse_explicit_local_date(text, now_local=now_local)
-    if base_date is None:
-        base_date = now_local
-
-    hour, minute, second = parts
-    try:
-        candidate = base_date.replace(hour=hour, minute=minute, second=second, microsecond=0)
-    except Exception:
-        return None, ""
-
-    if re.search(r"\btoday\b", text, flags=re.IGNORECASE):
-        if candidate.timestamp() <= now_ts:
-            return None, "One-time schedule must be in the future."
-    elif base_date.date() == now_local.date() and candidate.timestamp() <= now_ts:
-        candidate = candidate + timedelta(days=1)
-
-    schedule = _ai_tasks_build_one_time_schedule(run_at_ts=float(candidate.timestamp()))
-    if not isinstance(schedule, dict):
-        return None, "Could not compute one-time schedule."
-    return schedule, ""
-
-
-def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float) -> Tuple[Optional[Dict[str, Any]], str]:
     if not isinstance(parsed, dict):
         return None, "LLM schedule parser returned invalid JSON."
 
@@ -2064,6 +1933,7 @@ def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float)
         weekdays = _ai_tasks_kernel_int_list(weekly_payload.get("weekdays"), minimum=0, maximum=6)
         if not weekdays:
             return None, "LLM schedule parser missing weekdays."
+        weekdays = _ai_tasks_kernel_normalize_weekdays_from_request(weekdays, request_text)
         next_run = _next_local_time_occurrence(
             now_ts=now_ts,
             hour=hour,
@@ -2131,6 +2001,7 @@ def _ai_tasks_kernel_schedule_from_llm(parsed: Dict[str, Any], *, now_ts: float)
         minutes = _ai_tasks_kernel_int_list(cron_payload.get("minutes"), minimum=0, maximum=59)
         seconds = _ai_tasks_kernel_int_list(cron_payload.get("seconds"), minimum=0, maximum=59)
         weekdays = _ai_tasks_kernel_int_list(cron_payload.get("weekdays"), minimum=0, maximum=6)
+        weekdays = _ai_tasks_kernel_normalize_weekdays_from_request(weekdays, request_text)
         if not hours or not minutes or not seconds:
             return None, "LLM schedule parser missing cron clock fields."
         cron_text = str(cron_payload.get("cron") or parsed.get("cron_text") or "").strip()
@@ -2156,16 +2027,6 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
     now_ts: float,
     llm_client: Any,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    deterministic_schedule, deterministic_err = _ai_tasks_try_parse_one_time_schedule_deterministically(
-        args=args,
-        request_text=request_text,
-        now_ts=now_ts,
-    )
-    if isinstance(deterministic_schedule, dict):
-        return deterministic_schedule, ""
-    if deterministic_err:
-        return None, deterministic_err
-
     if llm_client is None:
         return None, "LLM schedule parser is unavailable."
 
@@ -2206,6 +2067,9 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
         "}\n"
         "When ambiguous or impossible, return: {\"error\":\"...\"}.\n"
         "Use local time.\n"
+        "Weekday index mapping must be Python weekday indexing: "
+        "Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6.\n"
+        "For 'weekdays', use [0,1,2,3,4]. For 'weekends', use [5,6].\n"
         "Interpret compact time like 'at 630' as 06:30 local at the next valid future occurrence.\n"
         "For one-time reminders, always return kind one_time_local_datetime.\n"
     )
@@ -2229,7 +2093,7 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
         parsed = _ai_tasks_kernel_parse_json_object(content)
         if not parsed:
             return None, "LLM schedule parser returned invalid JSON."
-        schedule, err = _ai_tasks_kernel_schedule_from_llm(parsed, now_ts=now_ts)
+        schedule, err = _ai_tasks_kernel_schedule_from_llm(parsed, now_ts=now_ts, request_text=request_text)
         if isinstance(schedule, dict):
             return schedule, ""
         return None, str(err or "LLM could not infer a schedule.")
@@ -2424,6 +2288,65 @@ def _ai_tasks_kernel_destination_reference(dest: str, targets: Dict[str, Any], o
         or origin_payload.get("chat_id")
         or ""
     ).strip()
+
+
+def _ai_tasks_kernel_origin_from_scope(platform: str, scope: str) -> Dict[str, Any]:
+    normalized_platform = normalize_platform(platform)
+    text = str(scope or "").strip()
+    if not text:
+        return {}
+
+    out: Dict[str, Any] = {}
+    if normalized_platform in ALLOWED_PLATFORMS:
+        out["platform"] = normalized_platform
+
+    if normalized_platform == "discord":
+        if text.startswith("channel:"):
+            channel_id = text.split(":", 1)[1].strip()
+            if channel_id:
+                out["channel_id"] = channel_id
+            return out
+        if text.startswith("dm:"):
+            dm_user = text.split(":", 1)[1].strip()
+            if dm_user:
+                out["chat_type"] = "dm"
+                out["dm_user_id"] = dm_user
+            return out
+        return out
+
+    if normalized_platform == "matrix":
+        if text.startswith("room:"):
+            room_id = text.split(":", 1)[1].strip()
+            if room_id:
+                out["room_id"] = room_id
+        elif text.startswith(("!", "#")):
+            out["room_id"] = text
+        return out
+
+    if normalized_platform == "telegram":
+        if text.startswith("chat:"):
+            chat_id = text.split(":", 1)[1].strip()
+            if chat_id:
+                out["chat_id"] = chat_id
+        elif text:
+            out["chat_id"] = text
+        return out
+
+    if normalized_platform == "irc":
+        if text.startswith("chan:"):
+            channel = text.split(":", 1)[1].strip()
+            if channel:
+                out["channel"] = channel
+        elif text.startswith("#"):
+            out["channel"] = text
+        return out
+
+    if normalized_platform == "webui":
+        if text.startswith(("session:", "user:")):
+            out["scope"] = text
+        return out
+
+    return out
 
 
 def _ai_tasks_kernel_load_platform_fallback_targets(dest: str, redis_obj: Any) -> Dict[str, Any]:
@@ -3063,17 +2986,24 @@ async def run_hydra_kernel_tool(
     redis_client: Any = None,
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
-    del scope
     func = str(tool_id or "").strip().lower()
     if func != "ai_tasks":
         return None
     redis_obj = redis_client if redis_client is not None else globals().get("redis_client")
     if redis_obj is None:
         return {"tool": "ai_tasks", "ok": False, "error": "Scheduler store is unavailable."}
+    origin_payload = dict(origin) if isinstance(origin, dict) else {}
+    scope_origin = _ai_tasks_kernel_origin_from_scope(platform, scope)
+    if isinstance(scope_origin, dict):
+        for key, value in scope_origin.items():
+            if value in (None, ""):
+                continue
+            if origin_payload.get(key) in (None, ""):
+                origin_payload[key] = value
     return await _ai_tasks_kernel_schedule(
         args=args,
         platform=platform,
-        origin=origin,
+        origin=origin_payload,
         redis_obj=redis_obj,
         llm_client=llm_client,
     )
