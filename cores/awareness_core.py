@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.32"
+__version__ = "1.1.33"
 
 load_dotenv()
 
@@ -1378,28 +1378,30 @@ def _friendly_entity_name(entity_id: str, state_obj: Dict[str, Any]) -> str:
 
 
 def _camera_cooldown_key(camera_entity: str) -> str:
-    return f"tater:camera_event:last_ts:{camera_entity}"
+    return f"tater:camera_event:cooldown:v2:{camera_entity}"
 
 
 def _camera_notify_cooldown_key(camera_entity: str) -> str:
-    return f"tater:camera_event:last_notify_ts:{camera_entity}"
+    return f"tater:camera_event:notify_cooldown:v2:{camera_entity}"
 
 
-def _within_cooldown(key: str, cooldown_seconds: int) -> bool:
+def _acquire_cooldown(key: str, cooldown_seconds: int) -> bool:
+    seconds = max(0, int(cooldown_seconds))
+    if seconds <= 0:
+        return True
     try:
-        last = redis_client.get(key)
-        if not last:
-            return False
-        return (int(time.time()) - int(last)) < max(0, int(cooldown_seconds))
+        token = str(int(time.time()))
+        return bool(redis_client.set(key, token, ex=seconds, nx=True))
     except Exception:
-        return False
+        # Fail-open so transient Redis issues do not block alerts entirely.
+        logger.debug("[awareness] failed to acquire cooldown key %s", key, exc_info=True)
+        return True
 
-
-def _mark_cooldown(key: str) -> None:
+def _clear_cooldown(key: str) -> None:
     try:
-        redis_client.set(key, str(int(time.time())))
+        redis_client.delete(key)
     except Exception:
-        logger.debug("[awareness] failed to mark cooldown key %s", key, exc_info=True)
+        logger.debug("[awareness] failed to clear cooldown key %s", key, exc_info=True)
 
 
 def _compact(text: str, limit: int = 220) -> str:
@@ -1769,7 +1771,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     notification_cooldown_seconds = _as_int(
         rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
     )
-    if _within_cooldown(_camera_cooldown_key(camera), cooldown_seconds):
+    if not _acquire_cooldown(_camera_cooldown_key(camera), cooldown_seconds):
         return {"ok": True, "summary": f"Skipped '{rule.get('name')}' due to cooldown.", "skipped": "cooldown"}
     used_fallback = False
     jpeg: bytes = b""
@@ -1818,15 +1820,17 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
         event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
-    _mark_cooldown(_camera_cooldown_key(camera))
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
     api_notification = _bool(rule.get("api_notification"), False)
     notify_requested = bool(device_services or api_notification)
+    notify_cooldown_key = _camera_notify_cooldown_key(camera)
+    notify_cooldown_claimed = False
     if (
         notify_requested
         and notification_cooldown_seconds > 0
-        and _within_cooldown(_camera_notify_cooldown_key(camera), notification_cooldown_seconds)
     ):
+        notify_cooldown_claimed = _acquire_cooldown(notify_cooldown_key, notification_cooldown_seconds)
+    if notify_requested and notification_cooldown_seconds > 0 and not notify_cooldown_claimed:
         notify_result = {
             "ok": True,
             "sent_count": 0,
@@ -1849,8 +1853,10 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 "provider": provider,
             },
         )
-        if notify_result.get("ok") and int(notify_result.get("sent_count") or 0) > 0:
-            _mark_cooldown(_camera_notify_cooldown_key(camera))
+        if notify_cooldown_claimed and not (
+            notify_result.get("ok") and int(notify_result.get("sent_count") or 0) > 0
+        ):
+            _clear_cooldown(notify_cooldown_key)
     return {
         "ok": True,
         "summary": summary,
