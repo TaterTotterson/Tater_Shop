@@ -1,2 +1,0 @@
-"""Tater Shop verba package."""
-
