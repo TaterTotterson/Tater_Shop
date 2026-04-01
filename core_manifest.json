@@ -13,13 +13,13 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "64d04642913f1c9c3780e2079c0a2a79e119b6a000c4e2140febefbaca5378b2"
+      "sha256": "62e5144eedcee217fdd9700acacee5b2ebdfeec47754f5e86440fb9ecd967d22"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "1.0.33",
+      "version": "1.0.35",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "9bbe4c386b43f5b4045da25abbe1101c51f9b12e407c9bbcdbd4ef8ee4a9d4c8"
+      "sha256": "0c962ecc54dabba1b823da2672caf848f9dd813a0f7b78a819f27706e698cd78"
     },
     {
       "id": "memory",
