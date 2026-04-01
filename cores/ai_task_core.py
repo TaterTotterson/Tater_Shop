@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.35"
+__version__ = "1.0.37"
 
 load_dotenv()
 
@@ -2829,8 +2829,10 @@ async def _ai_tasks_kernel_schedule(
     if recurrence_kind in {"one_time", "one_time_local_datetime", "oneshot", "one_shot"}:
         summary = f"One-time AI task scheduled for {next_run_human}."
     else:
-        cadence = _ai_tasks_ui_recurrence_label(schedule_payload, float(interval or 0.0))
-        summary = f"Recurring AI task scheduled {cadence.lower()} (next at {next_run_human})."
+        cadence = _ai_tasks_ui_schedule_edit_text(schedule_payload).strip()
+        if not cadence:
+            cadence = _ai_tasks_ui_recurrence_label(schedule_payload, float(interval or 0.0)).lower()
+        summary = f"Recurring AI task scheduled {cadence} (next at {next_run_human})."
     return {
         "tool": "ai_tasks",
         "ok": True,
