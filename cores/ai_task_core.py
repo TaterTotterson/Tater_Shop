@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.28"
+__version__ = "1.0.29"
 
 load_dotenv()
 
@@ -2189,9 +2189,23 @@ def _ai_tasks_kernel_collect_explicit_targets(args: Dict[str, Any]) -> Dict[str,
     targets = payload.get("targets")
     out: Dict[str, Any] = dict(targets) if isinstance(targets, dict) else {}
 
+    def _generic_platform_token(value: Any) -> bool:
+        text = " ".join(str(value or "").strip().split()).lower()
+        if not text:
+            return True
+        if text.startswith(("#", "!", "@")):
+            return False
+        if text.isdigit():
+            return False
+        platform_tokens = {str(name).strip().lower() for name in ALLOWED_PLATFORMS}
+        platform_tokens.update({"home assistant", "web ui", "web"})
+        return text in platform_tokens
+
     for key in ("channel", "channel_id", "room", "room_id", "device_service", "chat_id"):
         value = payload.get(key)
         if value not in (None, ""):
+            if key in {"channel", "room", "device_service"} and _generic_platform_token(value):
+                continue
             out[key] = value
 
     for alias_key in ("target", "destination", "to"):
@@ -2203,6 +2217,8 @@ def _ai_tasks_kernel_collect_explicit_targets(args: Dict[str, Any]) -> Dict[str,
             continue
         if text.lower() in {"current", "here", "this", "this chat", "this channel", "same chat", "same channel"}:
             continue
+        if _generic_platform_token(text):
+            continue
         if "channel" not in out and "room_id" not in out and "chat_id" not in out and "channel_id" not in out:
             out["channel"] = text
 
@@ -2210,13 +2226,9 @@ def _ai_tasks_kernel_collect_explicit_targets(args: Dict[str, Any]) -> Dict[str,
 
 
 async def _ai_tasks_kernel_coerce_targets(args: Dict[str, Any], request_text: str, llm_client: Any) -> Dict[str, Any]:
-    out = _ai_tasks_kernel_collect_explicit_targets(args)
-    if not out:
-        hint = await _ai_tasks_kernel_extract_target_hint(request_text, llm_client)
-        if hint:
-            out["channel"] = hint
-
-    return out
+    del request_text, llm_client
+    # Routing must be explicit. Do not infer destination hints from free-form text.
+    return _ai_tasks_kernel_collect_explicit_targets(args)
 
 
 def _ai_tasks_kernel_normalize_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:
@@ -2236,20 +2248,163 @@ def _ai_tasks_kernel_normalize_targets(dest: str, targets: Dict[str, Any]) -> Di
     if not ref:
         return {}
     if dest == "discord":
+        normalized: Dict[str, Any] = {}
         if ref.isdigit():
-            return {"channel_id": ref}
-        return {"channel": ref}
+            normalized["channel_id"] = ref
+            channel_name = str(out.get("channel") or "").strip()
+            if channel_name:
+                normalized["channel"] = channel_name
+        else:
+            normalized["channel"] = ref
+        guild_id = str(out.get("guild_id") or "").strip()
+        if guild_id:
+            normalized["guild_id"] = guild_id
+        guild_name = str(out.get("guild_name") or out.get("guild") or "").strip()
+        if guild_name:
+            normalized["guild_name"] = guild_name
+        return normalized
     if dest == "matrix":
-        if not ref.startswith(("!", "#")) and ":" in ref:
-            ref = f"#{ref}"
-        return {"room_id": ref}
+        room_ref = ref
+        if not room_ref.startswith(("!", "#")) and ":" in room_ref:
+            room_ref = f"#{room_ref}"
+        normalized = {"room_id": room_ref}
+        room_alias = str(out.get("room_alias") or "").strip()
+        if room_alias:
+            normalized["room_alias"] = room_alias
+        return normalized
     if dest == "homeassistant":
         return {"device_service": ref}
     if dest == "telegram":
-        return {"chat_id": ref}
+        normalized = {"chat_id": ref}
+        channel_name = str(out.get("channel") or "").strip()
+        if channel_name:
+            normalized["channel"] = channel_name
+        return normalized
     if dest == "irc":
         return {"channel": ref if ref.startswith("#") else f"#{ref}"}
     return {"channel": ref}
+
+
+def _ai_tasks_kernel_origin_targets_for_dest(dest: str, origin: Dict[str, Any]) -> Dict[str, Any]:
+    origin_payload = origin if isinstance(origin, dict) else {}
+    if dest == "discord":
+        out: Dict[str, Any] = {}
+        channel_id = str(origin_payload.get("channel_id") or "").strip()
+        channel_name = str(origin_payload.get("channel") or "").strip()
+        guild_id = str(origin_payload.get("guild_id") or "").strip()
+        guild_name = str(origin_payload.get("guild_name") or origin_payload.get("guild") or "").strip()
+        if channel_id:
+            out["channel_id"] = channel_id
+        elif channel_name:
+            out["channel"] = channel_name
+        if channel_name:
+            out["channel"] = channel_name
+        if guild_id:
+            out["guild_id"] = guild_id
+        if guild_name:
+            out["guild_name"] = guild_name
+        return out
+    if dest == "matrix":
+        room_id = str(origin_payload.get("room_id") or origin_payload.get("channel") or "").strip()
+        if room_id:
+            return {"room_id": room_id}
+        return {}
+    if dest == "telegram":
+        out = {}
+        chat_id = str(origin_payload.get("chat_id") or "").strip()
+        channel_name = str(origin_payload.get("channel") or "").strip()
+        if chat_id:
+            out["chat_id"] = chat_id
+        if channel_name:
+            out["channel"] = channel_name
+        return out
+    if dest == "irc":
+        channel = str(origin_payload.get("channel") or "").strip()
+        if channel:
+            return {"channel": channel if channel.startswith("#") else f"#{channel}"}
+        return {}
+    if dest == "homeassistant":
+        device_service = str(origin_payload.get("device_service") or "").strip()
+        if device_service:
+            return {"device_service": device_service}
+        return {}
+    if dest == "webui":
+        scope = str(origin_payload.get("scope") or "").strip()
+        if scope:
+            return {"scope": scope}
+    return {}
+
+
+def _ai_tasks_kernel_catalog_targets_match(
+    dest: str,
+    row_targets: Dict[str, Any],
+    desired_targets: Dict[str, Any],
+    origin: Dict[str, Any],
+) -> bool:
+    row = row_targets if isinstance(row_targets, dict) else {}
+    desired = desired_targets if isinstance(desired_targets, dict) else {}
+    origin_payload = origin if isinstance(origin, dict) else {}
+
+    if dest == "discord":
+        desired_id = str(desired.get("channel_id") or origin_payload.get("channel_id") or "").strip()
+        row_id = str(row.get("channel_id") or "").strip()
+        if desired_id and row_id and desired_id == row_id:
+            return True
+        desired_channel = str(desired.get("channel") or origin_payload.get("channel") or "").strip().lstrip("#").lower()
+        row_channel = str(row.get("channel") or "").strip().lstrip("#").lower()
+        return bool(desired_channel and row_channel and desired_channel == row_channel)
+
+    if dest == "matrix":
+        desired_room = str(desired.get("room_id") or origin_payload.get("room_id") or "").strip()
+        row_room = str(row.get("room_id") or "").strip()
+        return bool(desired_room and row_room and desired_room == row_room)
+
+    if dest == "telegram":
+        desired_chat = str(desired.get("chat_id") or origin_payload.get("chat_id") or "").strip()
+        row_chat = str(row.get("chat_id") or "").strip()
+        return bool(desired_chat and row_chat and desired_chat == row_chat)
+
+    if dest == "irc":
+        desired_channel = str(desired.get("channel") or origin_payload.get("channel") or "").strip().lower()
+        row_channel = str(row.get("channel") or "").strip().lower()
+        if desired_channel and not desired_channel.startswith("#"):
+            desired_channel = f"#{desired_channel}"
+        if row_channel and not row_channel.startswith("#"):
+            row_channel = f"#{row_channel}"
+        return bool(desired_channel and row_channel and desired_channel == row_channel)
+
+    if dest == "homeassistant":
+        desired_service = str(desired.get("device_service") or "").strip().lower()
+        row_service = str(row.get("device_service") or "").strip().lower()
+        return bool(desired_service and row_service and desired_service == row_service)
+
+    return False
+
+
+def _ai_tasks_kernel_canonicalize_targets_from_catalog(
+    dest: str,
+    targets: Dict[str, Any],
+    origin: Dict[str, Any],
+    redis_obj: Any,
+) -> Dict[str, Any]:
+    clean_targets = dict(targets or {})
+    if not clean_targets:
+        return clean_targets
+    catalog = _ai_tasks_ui_load_destination_catalog(redis_obj)
+    platform_row = _ai_tasks_ui_catalog_platform_map(catalog).get(dest, {})
+    destinations = platform_row.get("destinations") if isinstance(platform_row, dict) else None
+    if not isinstance(destinations, list):
+        return clean_targets
+    for row in destinations:
+        if not isinstance(row, dict):
+            continue
+        row_targets = row.get("targets")
+        if not isinstance(row_targets, dict):
+            continue
+        if _ai_tasks_kernel_catalog_targets_match(dest, row_targets, clean_targets, origin):
+            # Keep the exact catalog target payload so UI labels/options align with room API entries.
+            return dict(row_targets)
+    return clean_targets
 
 
 def _ai_tasks_kernel_destination_reference(dest: str, targets: Dict[str, Any], origin: Dict[str, Any]) -> str:
@@ -2422,12 +2577,11 @@ async def _ai_tasks_kernel_schedule(
     if not task_prompt:
         return {"tool": "ai_tasks", "ok": False, "error": "Cannot queue: LLM task normalization failed."}
 
-    raw_targets = await _ai_tasks_kernel_coerce_targets(payload, request_text, llm_client)
+    explicit_arg_targets = _ai_tasks_kernel_collect_explicit_targets(payload)
     requested_dest = normalize_platform(payload.get("platform"))
     origin_dest = normalize_platform(origin_payload.get("platform"))
     dest = origin_dest or runtime_platform or requested_dest
     if requested_dest and requested_dest in ALLOWED_PLATFORMS and requested_dest != dest:
-        explicit_arg_targets = _ai_tasks_kernel_collect_explicit_targets(payload)
         requested_targets = _ai_tasks_kernel_normalize_targets(requested_dest, explicit_arg_targets)
         # Only allow cross-platform overrides when explicit target routing is provided.
         if requested_targets:
@@ -2457,6 +2611,11 @@ async def _ai_tasks_kernel_schedule(
 
     cron_text = str(schedule_result.get("cron") or recurrence.get("cron") or "").strip()
 
+    raw_targets = await _ai_tasks_kernel_coerce_targets(payload, request_text, llm_client)
+    if not raw_targets:
+        # Default to the room/channel/chat where the request originated.
+        raw_targets = _ai_tasks_kernel_origin_targets_for_dest(dest, origin_payload)
+
     normalized_targets = _ai_tasks_kernel_normalize_targets(dest, raw_targets)
     defaults = load_default_targets(dest, redis_obj)
     fallback_defaults = _ai_tasks_kernel_load_platform_fallback_targets(dest, redis_obj)
@@ -2485,6 +2644,13 @@ async def _ai_tasks_kernel_schedule(
                 "or configure that platform's default target."
             )
         return {"tool": "ai_tasks", "ok": False, "error": err_text}
+
+    resolved_targets = _ai_tasks_kernel_canonicalize_targets_from_catalog(
+        dest,
+        resolved_targets or {},
+        origin_payload,
+        redis_obj,
+    )
 
     if reminder_intent:
         reminder_body = str(reminder_text or task_prompt).strip()
