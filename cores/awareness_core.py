@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.30"
+__version__ = "1.1.31"
 
 load_dotenv()
 
@@ -619,6 +619,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         base.update(
             {
                 "sensor_entity": trigger_entities[0] if trigger_entities else sensor_entity,
+                "camera_entity": _text(raw.get("camera_entity")),
                 "sensor_type": sensor_type,
                 "area": area_value or sensor_type,
                 "trigger_entities": trigger_entities,
@@ -1970,6 +1971,7 @@ async def _execute_entry_sensor_rule(
     sensor_type = _text(rule.get("sensor_type") or "door").lower()
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
+    camera = _text(rule.get("camera_entity"))
     entity_id = _text(event.get("entity_id")) or _text(rule.get("sensor_entity"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
@@ -1980,6 +1982,19 @@ async def _execute_entry_sensor_rule(
     spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
+    snapshot_store: Dict[str, Any] = {}
+    if camera:
+        try:
+            jpeg = b""
+            if provider == "unifi_protect":
+                jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
+            else:
+                ha = _ha_config()
+                jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+            snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+        except Exception as exc:
+            logger.warning("[awareness] entry sensor snapshot failed for %s (%s): %s", camera, provider, exc)
+            snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
     event_payload = {
         "source": _slug(area),
         "title": title,
@@ -1998,6 +2013,16 @@ async def _execute_entry_sensor_rule(
             "provider": provider,
         },
     }
+    if camera:
+        event_payload["data"]["camera_entity"] = camera
+    if snapshot_store.get("stored"):
+        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
     players = _normalize_players(rule.get("players"))
     tts_entity = _text(rule.get("tts_entity") or "tts.piper")
@@ -2283,7 +2308,6 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for idx, event in enumerate(events):
         event_bucket = _event_type_bucket(event)
-        is_camera_event = event_bucket in {"camera", "doorbell"}
         if not _event_allowed_by_filter(filters, event_bucket):
             continue
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -2310,7 +2334,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
         fields: List[Dict[str, Any]] = []
         snapshot = _event_snapshot_preview(client, event)
         snapshot_id = _text(snapshot.get("snapshot_id"))
-        if list_view and is_camera_event and snapshot.get("data_url"):
+        if list_view and snapshot.get("data_url"):
             fields.append(
                 {
                     "key": f"snapshot_thumb_{idx}",
@@ -3505,6 +3529,11 @@ def _entry_sensor_form(
     catalog: Dict[str, List[Tuple[str, str]]],
     rules: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
+    camera_options = _choices_from_pairs(
+        catalog.get("cameras") or [],
+        placeholder="(Optional snapshot camera)",
+        current_value=_text(rule.get("camera_entity")),
+    )
     sensor_options, sensor_dependency = _entry_sensor_dependency_options(
         catalog=catalog,
         current_type=_text(rule.get("sensor_type") or "door"),
@@ -3561,6 +3590,13 @@ def _entry_sensor_form(
                 "options": sensor_options,
                 "dependent_options": sensor_dependency,
                 "value": _text(rule.get("sensor_entity") or rule.get("trigger_entity")),
+            },
+            {
+                "key": "camera_entity",
+                "label": "Snapshot Camera (optional)",
+                "type": "select",
+                "options": camera_options,
+                "value": _text(rule.get("camera_entity")),
             },
             {
                 "key": "area",
@@ -4030,7 +4066,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "type": "select",
                     "options": camera_options,
                     "value": "",
-                    "show_when": show_camera_or_doorbell,
+                    "description": "Optional for entry sensors: capture a snapshot on each sensor event.",
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
                     "key": "area",
