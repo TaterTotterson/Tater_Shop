@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.35"
+__version__ = "1.0.36"
 
 load_dotenv()
 
@@ -1596,10 +1596,8 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
     filters = _event_type_filters(client)
     list_view = _event_list_view_enabled(client)
     sources = _discover_event_sources(client)
-    totals: Dict[str, int] = {"camera": 0, "doorbell": 0, "sensor": 0}
-    visible_totals: Dict[str, int] = {"camera": 0, "doorbell": 0, "sensor": 0}
     if not sources:
-        return [_event_filter_form(filters=filters, list_view=list_view, totals=totals, visible_totals=visible_totals)]
+        return []
     events = _load_events_for_sources(
         client,
         sources=sources,
@@ -1611,12 +1609,8 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
     for idx, event in enumerate(events):
         event_bucket = _event_type_bucket(event)
         is_camera_event = event_bucket in {"camera", "doorbell"}
-        if event_bucket in totals:
-            totals[event_bucket] += 1
         if not _event_allowed_by_filter(filters, event_bucket):
             continue
-        if event_bucket in visible_totals:
-            visible_totals[event_bucket] += 1
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         event_time = _event_time_display(event.get("ha_time"))
         source = _text(event.get("source"))
@@ -1707,7 +1701,7 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
                 "fields": fields,
             }
         )
-    return [_event_filter_form(filters=filters, list_view=list_view, totals=totals, visible_totals=visible_totals)] + items
+    return items
 
 
 async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
@@ -3061,6 +3055,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     media_player_options = _multiselect_choices_from_pairs(
         catalog.get("media_players") or [],
     )
+    event_filters = _event_type_filters(client)
+    event_list_view = _event_list_view_enabled(client)
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_entry = {"source_key": "kind", "equals": "entry_sensor"}
@@ -3090,6 +3086,34 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         "empty_message": "No awareness rules configured yet.",
         "stats_refresh_button": True,
         "stats_refresh_label": "Refresh",
+        "stats_controls_action": "awareness_save_event_filters",
+        "stats_controls_auto_save": True,
+        "stats_controls": [
+            {
+                "key": "show_camera_events",
+                "label": "Cameras",
+                "type": "checkbox",
+                "value": bool(event_filters.get("camera", True)),
+            },
+            {
+                "key": "show_doorbell_events",
+                "label": "Doorbells",
+                "type": "checkbox",
+                "value": bool(event_filters.get("doorbell", True)),
+            },
+            {
+                "key": "show_sensor_events",
+                "label": "Sensors",
+                "type": "checkbox",
+                "value": bool(event_filters.get("sensor", True)),
+            },
+            {
+                "key": "show_event_list_view",
+                "label": "List View",
+                "type": "checkbox",
+                "value": bool(event_list_view),
+            },
+        ],
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Rule Settings",
         "item_fields_popup": True,
