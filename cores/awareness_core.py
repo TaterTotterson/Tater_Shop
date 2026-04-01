@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.31"
+__version__ = "1.1.32"
 
 load_dotenv()
 
@@ -94,6 +94,7 @@ _EXEC_QUEUE_KEY = "awareness:exec_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
 _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
+_AWARENESS_WORKER_COUNT = 10
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
@@ -5182,28 +5183,36 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
     rules = _load_rules(redis_client)
     enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
+    worker_count = max(1, int(_AWARENESS_WORKER_COUNT))
     _runtime_set(
         redis_client,
         started_at=time.time(),
         ws_connected=False,
         unifi_connected=False,
         queue_depth=_queue_depth(redis_client),
+        worker_count=worker_count,
         last_error="",
     )
     logger.info(
-        "[awareness] core started v%s (%s) (rules=%d enabled=%d)",
+        "[awareness] core started v%s (%s) (rules=%d enabled=%d workers=%d)",
         __version__,
         __file__,
         len(rules),
         enabled_rules,
+        worker_count,
     )
     tasks = [
-        asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
-        asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
-        asyncio.create_task(_awareness_ws_loop(stop_event)),
-        asyncio.create_task(_awareness_unifi_poll_loop(stop_event)),
-        asyncio.create_task(_awareness_retention_loop(stop_event)),
+        asyncio.create_task(_awareness_worker_loop(stop_event, llm_client))
+        for _ in range(worker_count)
     ]
+    tasks.extend(
+        [
+            asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
+            asyncio.create_task(_awareness_ws_loop(stop_event)),
+            asyncio.create_task(_awareness_unifi_poll_loop(stop_event)),
+            asyncio.create_task(_awareness_retention_loop(stop_event)),
+        ]
+    )
     try:
         while not (stop_event and stop_event.is_set()):
             await asyncio.sleep(0.5)
