@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 load_dotenv()
 
@@ -115,6 +115,39 @@ _AREA_PRESETS = [
     "bedroom",
     "patio",
 ]
+_UNIFI_SMART_TYPE_ALIASES = {
+    "people": "person",
+    "human": "person",
+    "humans": "person",
+    "persons": "person",
+    "vehicles": "vehicle",
+    "car": "vehicle",
+    "cars": "vehicle",
+    "auto": "vehicle",
+    "autos": "vehicle",
+    "animals": "animal",
+    "pet": "animal",
+    "pets": "animal",
+    "packages": "package",
+    "parcel": "package",
+    "parcels": "package",
+    "delivery": "package",
+    "deliveries": "package",
+    "faces": "face",
+    "licenseplate": "license_plate",
+    "licenseplates": "license_plate",
+    "plate": "license_plate",
+    "plates": "license_plate",
+}
+_UNIFI_SMART_TYPE_LABELS = {
+    "person": "Person",
+    "vehicle": "Vehicle",
+    "animal": "Animal",
+    "package": "Package",
+    "face": "Face",
+    "license_plate": "License Plate",
+}
+_UNIFI_SMART_TYPE_FALLBACK = ("person", "vehicle", "animal", "package")
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
@@ -801,6 +834,173 @@ def _unifi_camera_motion_trigger(camera_id: str) -> str:
 
 def _unifi_camera_doorbell_trigger(camera_id: str) -> str:
     return f"binary_sensor.unifi_{_text(camera_id).lower()}_doorbell"
+
+
+def _unifi_normalize_smart_type(raw_type: Any) -> str:
+    token = _slug(_text(raw_type))
+    if not token:
+        return ""
+    token = token.replace("smart_detect_", "").replace("smart_", "")
+    return _UNIFI_SMART_TYPE_ALIASES.get(token, token)
+
+
+def _unifi_smart_type_label(smart_type: str) -> str:
+    token = _unifi_normalize_smart_type(smart_type)
+    if not token:
+        return "Smart Detect"
+    label = _UNIFI_SMART_TYPE_LABELS.get(token)
+    if label:
+        return label
+    return " ".join(part.capitalize() for part in token.split("_"))
+
+
+def _unifi_smart_type_variants(smart_type: str) -> set[str]:
+    token = _unifi_normalize_smart_type(smart_type)
+    if not token:
+        return set()
+    variants: set[str] = {token, token.replace("_", "")}
+    alias_variants = [key for key, value in _UNIFI_SMART_TYPE_ALIASES.items() if value == token]
+    for alias in alias_variants:
+        alias_token = _slug(alias)
+        if not alias_token:
+            continue
+        variants.add(alias_token)
+        variants.add(alias_token.replace("_", ""))
+    if token.endswith("s"):
+        variants.add(token[:-1])
+    else:
+        variants.add(f"{token}s")
+    return {item for item in variants if item}
+
+
+def _unifi_matches_smart_type_text(raw_text: Any, smart_type: str) -> bool:
+    token = _slug(_text(raw_text))
+    if not token:
+        return False
+    compact = token.replace("_", "")
+    for variant in _unifi_smart_type_variants(smart_type):
+        if variant and (variant in token or variant in compact):
+            return True
+    return False
+
+
+def _unifi_marker_token(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return _text(value)
+    if isinstance(value, dict):
+        for key in ("eventId", "event_id", "id", "timestamp", "time", "at", "ts", "start", "startTime"):
+            marker = _unifi_marker_token(value.get(key))
+            if marker:
+                return f"{key}:{marker}"
+        parts: List[str] = []
+        for key in sorted(value.keys(), key=lambda item: _text(item)):
+            marker = _unifi_marker_token(value.get(key))
+            if not marker:
+                continue
+            parts.append(f"{_text(key)}:{marker}")
+            if len(parts) >= 6:
+                break
+        return "|".join(parts)
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value[:6]:
+            marker = _unifi_marker_token(item)
+            if marker:
+                parts.append(marker)
+        return ",".join(parts)
+    return _text(value)
+
+
+def _unifi_smart_type_values(raw: Any) -> List[str]:
+    if isinstance(raw, (list, tuple, set)):
+        return [_text(item) for item in raw if _text(item)]
+    if isinstance(raw, str):
+        return _normalize_players(raw)
+    return []
+
+
+def _unifi_camera_smart_detect_types(camera_row: Dict[str, Any]) -> List[str]:
+    found: set[str] = set()
+
+    def _add(raw_type: Any) -> None:
+        token = _unifi_normalize_smart_type(raw_type)
+        if token:
+            found.add(token)
+
+    feature_flags = camera_row.get("featureFlags")
+    if isinstance(feature_flags, dict):
+        for raw_type in _unifi_smart_type_values(feature_flags.get("smartDetectTypes")):
+            _add(raw_type)
+
+    for key in ("smartDetectTypes", "smart_detection_types", "smartTypes"):
+        value = camera_row.get(key)
+        if isinstance(value, dict):
+            for raw_type in value.keys():
+                _add(raw_type)
+            continue
+        for raw_type in _unifi_smart_type_values(value):
+            _add(raw_type)
+
+    for key in ("lastSmartDetects", "lastSmartDetectEvents", "lastSmartDetectEventIds", "smartDetects", "smartDetectEvents"):
+        value = camera_row.get(key)
+        if isinstance(value, dict):
+            for raw_type in value.keys():
+                _add(raw_type)
+
+    has_smart_hint = bool(found)
+    if not has_smart_hint and isinstance(feature_flags, dict):
+        has_smart_hint = bool(feature_flags.get("hasSmartDetect"))
+    if not has_smart_hint:
+        has_smart_hint = any("smartdetect" in _text(key).lower() for key in camera_row.keys())
+    if has_smart_hint and not found:
+        found.update(_UNIFI_SMART_TYPE_FALLBACK)
+    return sorted(found)
+
+
+def _unifi_camera_smart_trigger(camera_id: str, smart_type: str) -> str:
+    token = _unifi_normalize_smart_type(smart_type) or "smart_detect"
+    return f"binary_sensor.unifi_{_text(camera_id).lower()}_smart_{token}"
+
+
+def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> str:
+    token = _unifi_normalize_smart_type(smart_type)
+    if not token:
+        return ""
+    for key in ("lastSmartDetects", "lastSmartDetectEvents", "lastSmartDetectEventIds", "smartDetects", "smartDetectEvents"):
+        mapping = camera_row.get(key)
+        if not isinstance(mapping, dict):
+            continue
+        for type_key, marker_value in mapping.items():
+            if not _unifi_matches_smart_type_text(type_key, token):
+                continue
+            marker = _unifi_marker_token(marker_value)
+            if marker:
+                return f"{key}:{_text(type_key)}:{marker}"
+    for key, value in camera_row.items():
+        key_text = _text(key)
+        key_lower = key_text.lower()
+        if "smart" not in key_lower and "detect" not in key_lower:
+            continue
+        if key_lower.endswith("types"):
+            continue
+        if not _unifi_matches_smart_type_text(key_text, token):
+            continue
+        marker = _unifi_marker_token(value)
+        if marker:
+            return f"{key_text}:{marker}"
+    recent_types = {_unifi_normalize_smart_type(item) for item in _unifi_smart_type_values(camera_row.get("lastSmartDetectTypes"))}
+    if token in recent_types:
+        for key in ("lastSmartDetectAt", "lastSmartDetect"):
+            marker = _unifi_marker_token(camera_row.get(key))
+            if marker:
+                return f"{key}:{marker}"
+    return ""
 
 
 def _unifi_sensor_entity(sensor_id: str) -> str:
@@ -2481,6 +2681,10 @@ def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[s
         catalog["cameras"].append((camera_entity, f"{camera_name} ({camera_entity})"))
         motion_trigger = _unifi_camera_motion_trigger(camera_id)
         catalog["triggers"].append((motion_trigger, f"{camera_name} motion ({motion_trigger})"))
+        for smart_type in _unifi_camera_smart_detect_types(row):
+            smart_label = _unifi_smart_type_label(smart_type)
+            smart_trigger = _unifi_camera_smart_trigger(camera_id, smart_type)
+            catalog["triggers"].append((smart_trigger, f"{camera_name} {smart_label} ({smart_trigger})"))
         if _unifi_camera_is_doorbell(row):
             doorbell_trigger = _unifi_camera_doorbell_trigger(camera_id)
             catalog["doorbell_triggers"].append((doorbell_trigger, f"{camera_name} doorbell ({doorbell_trigger})"))
@@ -4284,6 +4488,7 @@ def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
 async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
+    smart_markers: Dict[str, str] = {}
     sensor_states: Dict[str, str] = {}
     while not (stop_event and stop_event.is_set()):
         poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
@@ -4299,6 +4504,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
 
             active_motion_entities: set[str] = set()
             active_doorbell_entities: set[str] = set()
+            active_smart_entities: set[str] = set()
             active_sensor_entities: set[str] = set()
 
             for row in cameras:
@@ -4324,6 +4530,27 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                     _runtime_set(redis_client, last_ws_event_ts=now_ts)
                 if motion_marker:
                     motion_markers[motion_entity] = motion_marker
+
+                for smart_type in _unifi_camera_smart_detect_types(row):
+                    smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
+                    smart_marker = _unifi_camera_smart_marker(row, smart_type)
+                    active_smart_entities.add(smart_entity)
+                    prev_smart = smart_markers.get(smart_entity)
+                    smart_attrs = {
+                        "friendly_name": f"{camera_name} {_unifi_smart_type_label(smart_type)}",
+                        "camera_name": camera_name,
+                        "detection_type": smart_type,
+                    }
+                    if smart_marker and prev_smart is not None and smart_marker != prev_smart:
+                        await _handle_trigger_state_change(
+                            provider="unifi_protect",
+                            entity_id=smart_entity,
+                            new_state={"state": "on", "attributes": smart_attrs},
+                            old_state={"state": "off", "attributes": smart_attrs},
+                        )
+                        _runtime_set(redis_client, last_ws_event_ts=now_ts)
+                    if smart_marker:
+                        smart_markers[smart_entity] = smart_marker
 
                 if _unifi_camera_is_doorbell(row):
                     doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
@@ -4365,6 +4592,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
 
             motion_markers = {k: v for k, v in motion_markers.items() if k in active_motion_entities}
             doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
+            smart_markers = {k: v for k, v in smart_markers.items() if k in active_smart_entities}
             sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
         except Exception as exc:
             _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
