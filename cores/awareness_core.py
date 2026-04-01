@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.8"
+__version__ = "1.1.10"
 
 load_dotenv()
 
@@ -148,6 +148,16 @@ _UNIFI_SMART_TYPE_LABELS = {
     "license_plate": "License Plate",
 }
 _UNIFI_SMART_TYPE_FALLBACK = ("person", "vehicle", "animal", "package")
+_UNIFI_HA_CAMERA_SUFFIXES = (
+    "_person_detected",
+    "_vehicle_detected",
+    "_animal_detected",
+    "_package_detected",
+    "_object_detected",
+    "_motion",
+    "_doorbell",
+    "_ring",
+)
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
@@ -836,6 +846,10 @@ def _unifi_camera_doorbell_trigger(camera_id: str) -> str:
     return f"binary_sensor.unifi_{_text(camera_id).lower()}_doorbell"
 
 
+def _unifi_name_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _text(value).lower())
+
+
 def _unifi_normalize_smart_type(raw_type: Any) -> str:
     token = _slug(_text(raw_type))
     if not token:
@@ -1158,6 +1172,104 @@ def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> s
     return ""
 
 
+def _unifi_camera_name_index() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    try:
+        catalog = _entity_catalog(provider="unifi_protect")
+    except Exception:
+        return out
+    cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
+    for camera_entity, label in cameras:
+        camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
+        if not camera_id:
+            continue
+        label_text = _text(label)
+        camera_name = label_text.rsplit("(", 1)[0].strip() if "(" in label_text else label_text
+        candidates = [
+            camera_name,
+            _entity_object_id(camera_entity).replace("unifi_", "").replace("_", " "),
+            camera_id,
+        ]
+        for candidate in candidates:
+            key = _unifi_name_key(candidate)
+            if key and key not in out:
+                out[key] = camera_id
+    return out
+
+
+def _unifi_camera_id_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -> str:
+    object_id = _entity_object_id(entity_id)
+    attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    friendly = _text(attrs.get("friendly_name"))
+    cleaned = object_id
+    for suffix in _UNIFI_HA_CAMERA_SUFFIXES:
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
+    candidates = [friendly, object_id.replace("_", " "), cleaned.replace("_", " ")]
+    index = _unifi_camera_name_index()
+    if not index:
+        return ""
+    for candidate in candidates:
+        key = _unifi_name_key(candidate)
+        if not key:
+            continue
+        if key in index:
+            return index[key]
+        for known_key, camera_id in index.items():
+            if not known_key:
+                continue
+            if key in known_key or known_key in key:
+                return camera_id
+    return ""
+
+
+def _unifi_detect_type_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -> str:
+    attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    source = " ".join(
+        [
+            _text(entity_id).lower(),
+            _text(attrs.get("friendly_name")).lower(),
+            _text(attrs.get("device_class")).lower(),
+        ]
+    )
+    if "doorbell" in source or "ring" in source:
+        return "doorbell"
+    if "person" in source:
+        return "person"
+    if "animal" in source:
+        return "animal"
+    if "vehicle" in source:
+        return "vehicle"
+    if "package" in source:
+        return "package"
+    if "motion" in source:
+        return "motion"
+    return ""
+
+
+def _unifi_translate_ha_entity_to_trigger(entity_id: str, state_obj: Dict[str, Any]) -> str:
+    entity = _text(entity_id).lower()
+    if not entity.startswith(("binary_sensor.", "sensor.")):
+        return ""
+    detect_type = _unifi_detect_type_from_ha_entity(entity, state_obj)
+    if not detect_type:
+        return ""
+    camera_id = _unifi_camera_id_from_ha_entity(entity, state_obj)
+    if not camera_id:
+        return ""
+    if detect_type == "doorbell":
+        return _unifi_camera_doorbell_trigger(camera_id)
+    if detect_type == "motion":
+        return _unifi_camera_motion_trigger(camera_id)
+    return _unifi_camera_smart_trigger(camera_id, detect_type)
+
+
 def _unifi_sensor_entity(sensor_id: str) -> str:
     return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
 
@@ -1173,6 +1285,171 @@ def _unifi_get_camera(camera_id: str) -> Dict[str, Any]:
         return {}
     row = _unifi_request("GET", f"/proxy/protect/integration/v1/cameras/{token}")
     return row if isinstance(row, dict) else {}
+
+
+def _unifi_list_events(limit: int = 120) -> List[Dict[str, Any]]:
+    safe_limit = _as_int(limit, 120, minimum=10, maximum=500)
+    candidates = [
+        ("/proxy/protect/integration/v1/events", {"limit": safe_limit}),
+        ("/proxy/protect/integration/v1/events", {}),
+        ("/proxy/protect/events", {"limit": safe_limit}),
+        ("/proxy/protect/events", {}),
+    ]
+    last_error = ""
+    for path, params in candidates:
+        try:
+            payload = _unifi_request("GET", path, params=params or None)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if isinstance(payload, dict):
+            for key in ("events", "items", "data", "results"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
+    if last_error:
+        raise RuntimeError(last_error)
+    return []
+
+
+def _unifi_event_source_text(event_row: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for key in ("type", "eventType", "event_type", "category", "subType", "sub_type", "title", "message", "description", "name", "label"):
+        token = _text(event_row.get(key))
+        if token:
+            parts.append(token.lower())
+    metadata = event_row.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("type", "eventType", "event_type", "description", "label"):
+            token = _text(metadata.get(key))
+            if token:
+                parts.append(token.lower())
+    return " ".join(parts)
+
+
+def _unifi_event_camera_id(event_row: Dict[str, Any], *, name_index: Optional[Dict[str, str]] = None) -> str:
+    def _extract_id(value: Any) -> str:
+        if isinstance(value, dict):
+            for inner in ("id", "cameraId", "camera_id", "camera"):
+                token = _extract_id(value.get(inner))
+                if token:
+                    return token
+            return ""
+        token = _text(value)
+        if not token:
+            return ""
+        lowered = token.lower()
+        if lowered.startswith("camera."):
+            return _unifi_camera_id_from_entity(lowered)
+        return lowered
+
+    for key in ("cameraId", "camera_id", "camera", "deviceId", "device_id", "sourceId", "source_id"):
+        token = _extract_id(event_row.get(key))
+        if token:
+            return token
+    metadata = event_row.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("cameraId", "camera_id", "camera", "deviceId", "device_id"):
+            token = _extract_id(metadata.get(key))
+            if token:
+                return token
+    if name_index is None:
+        name_index = _unifi_camera_name_index()
+    for key in ("cameraName", "camera_name", "name", "title"):
+        name_key = _unifi_name_key(event_row.get(key))
+        if not name_key:
+            continue
+        if name_key in name_index:
+            return name_index[name_key]
+        for known_key, camera_id in name_index.items():
+            if name_key in known_key or known_key in name_key:
+                return camera_id
+    return ""
+
+
+def _unifi_event_smart_types(event_row: Dict[str, Any]) -> List[str]:
+    found: set[str] = set()
+
+    def _consume(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                token = _unifi_normalize_smart_type(key)
+                if token:
+                    found.add(token)
+                _consume(inner)
+            return
+        for item in _unifi_smart_type_values(value):
+            token = _unifi_normalize_smart_type(item)
+            if token:
+                found.add(token)
+
+    for key in (
+        "smartDetectTypes",
+        "smart_detect_types",
+        "smartDetectionTypes",
+        "detectionTypes",
+        "detectedTypes",
+        "objectTypes",
+        "types",
+    ):
+        _consume(event_row.get(key))
+    metadata = event_row.get("metadata")
+    if isinstance(metadata, dict):
+        for key in (
+            "smartDetectTypes",
+            "smart_detect_types",
+            "detectionTypes",
+            "detectedTypes",
+            "objectTypes",
+            "types",
+            "detectedObjects",
+        ):
+            _consume(metadata.get(key))
+
+    source_text = _unifi_event_source_text(event_row)
+    for smart_type in set(_UNIFI_SMART_TYPE_LABELS.keys()).union(set(_UNIFI_SMART_TYPE_FALLBACK)):
+        if _unifi_matches_smart_type_text(source_text, smart_type):
+            found.add(smart_type)
+    return sorted(found)
+
+
+def _unifi_event_trigger_entities(
+    event_row: Dict[str, Any],
+    *,
+    camera_id: str,
+) -> List[str]:
+    out: List[str] = []
+    source_text = _unifi_event_source_text(event_row)
+    if any(token in source_text for token in ("doorbell", "ring")):
+        out.append(_unifi_camera_doorbell_trigger(camera_id))
+    if "motion" in source_text:
+        out.append(_unifi_camera_motion_trigger(camera_id))
+    for smart_type in _unifi_event_smart_types(event_row):
+        out.append(_unifi_camera_smart_trigger(camera_id, smart_type))
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for token in out:
+        lowered = _text(token).lower()
+        if not lowered or lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(token)
+    return deduped
+
+
+def _unifi_event_token(event_row: Dict[str, Any], *, camera_id: str) -> str:
+    for key in ("id", "eventId", "event_id", "uuid"):
+        token = _text(event_row.get(key))
+        if token:
+            return f"id:{token.lower()}"
+    base = _unifi_event_source_text(event_row)[:160]
+    for key in ("timestamp", "time", "createdAt", "created_at", "start", "startAt", "start_at", "ts"):
+        token = _unifi_marker_token(event_row.get(key))
+        if token:
+            return f"{camera_id}:{base}:{key}:{token}"
+    return f"{camera_id}:{base}:{_unifi_marker_token(event_row)}"
 
 
 def _unifi_list_sensors() -> List[Dict[str, Any]]:
@@ -4611,18 +4888,40 @@ async def _handle_trigger_state_change(
 async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
     if not isinstance(event_payload, dict):
         return
-    if _event_provider(redis_client) != "homeassistant":
-        return
     entity_id = _text(event_payload.get("entity_id"))
     if not entity_id:
         return
     new_state = event_payload.get("new_state") if isinstance(event_payload.get("new_state"), dict) else {}
     old_state = event_payload.get("old_state") if isinstance(event_payload.get("old_state"), dict) else {}
+    active_provider = _event_provider(redis_client)
+    if active_provider == "homeassistant":
+        await _handle_trigger_state_change(
+            provider="homeassistant",
+            entity_id=entity_id,
+            new_state=new_state,
+            old_state=old_state,
+        )
+        return
+    if active_provider != "unifi_protect":
+        return
+    translated_entity = _unifi_translate_ha_entity_to_trigger(entity_id, new_state)
+    if not translated_entity:
+        return
+    unifi_new = dict(new_state)
+    unifi_old = dict(old_state)
+    new_attrs = unifi_new.get("attributes") if isinstance(unifi_new.get("attributes"), dict) else {}
+    old_attrs = unifi_old.get("attributes") if isinstance(unifi_old.get("attributes"), dict) else {}
+    new_attrs = dict(new_attrs)
+    old_attrs = dict(old_attrs)
+    new_attrs["source_entity_id"] = entity_id
+    old_attrs["source_entity_id"] = entity_id
+    unifi_new["attributes"] = new_attrs
+    unifi_old["attributes"] = old_attrs
     await _handle_trigger_state_change(
-        provider="homeassistant",
-        entity_id=entity_id,
-        new_state=new_state,
-        old_state=old_state,
+        provider="unifi_protect",
+        entity_id=translated_entity,
+        new_state=unifi_new,
+        old_state=unifi_old,
     )
 
 
@@ -4804,8 +5103,10 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
     smart_markers: Dict[str, str] = {}
+    event_markers: Dict[str, float] = {}
     sensor_states: Dict[str, str] = {}
     camera_detail_error_logs: Dict[str, float] = {}
+    event_feed_error_ts = 0.0
     missing_motion_marker_logs: Dict[str, float] = {}
     missing_smart_marker_logs: Dict[str, float] = {}
     while not (stop_event and stop_event.is_set()):
@@ -4822,6 +5123,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             required_camera_ids = _unifi_active_rule_camera_ids()
             required_motion_cameras = _unifi_active_rule_motion_cameras()
             required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
+            camera_name_index = _unifi_camera_name_index() if required_camera_ids else {}
 
             active_motion_entities: set[str] = set()
             active_doorbell_entities: set[str] = set()
@@ -4934,6 +5236,46 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                     if doorbell_marker:
                         doorbell_markers[doorbell_entity] = doorbell_marker
 
+            if required_camera_ids:
+                try:
+                    events = _unifi_list_events(limit=200)
+                    event_feed_error_ts = 0.0
+                except Exception as events_exc:
+                    events = []
+                    if (now_ts - _as_float(event_feed_error_ts, 0.0)) >= 300:
+                        event_feed_error_ts = now_ts
+                        logger.info("[awareness] unifi event feed unavailable: %s", events_exc)
+                for row in events:
+                    if not isinstance(row, dict):
+                        continue
+                    camera_id = _unifi_event_camera_id(row, name_index=camera_name_index)
+                    if not camera_id or camera_id not in required_camera_ids:
+                        continue
+                    event_token = _unifi_event_token(row, camera_id=camera_id)
+                    if not event_token:
+                        continue
+                    if event_token in event_markers:
+                        continue
+                    event_markers[event_token] = now_ts
+                    trigger_entities = _unifi_event_trigger_entities(row, camera_id=camera_id)
+                    if not trigger_entities:
+                        continue
+                    camera_name = _text(row.get("cameraName")) or _text(row.get("camera_name")) or camera_id
+                    source_text = _unifi_event_source_text(row)
+                    for trigger_entity in trigger_entities:
+                        attrs = {
+                            "friendly_name": camera_name,
+                            "event_token": event_token,
+                            "event_source": source_text,
+                        }
+                        await _handle_trigger_state_change(
+                            provider="unifi_protect",
+                            entity_id=trigger_entity,
+                            new_state={"state": "on", "attributes": attrs},
+                            old_state={"state": "off", "attributes": attrs},
+                        )
+                        _runtime_set(redis_client, last_ws_event_ts=now_ts)
+
             for row in sensors:
                 if not isinstance(row, dict):
                     continue
@@ -4959,6 +5301,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             motion_markers = {k: v for k, v in motion_markers.items() if k in active_motion_entities}
             doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
             smart_markers = {k: v for k, v in smart_markers.items() if k in active_smart_entities}
+            event_markers = {k: v for k, v in event_markers.items() if (now_ts - _as_float(v, 0.0)) <= 3600}
             sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
             camera_detail_error_logs = {k: v for k, v in camera_detail_error_logs.items() if k in required_camera_ids}
             missing_motion_marker_logs = {k: v for k, v in missing_motion_marker_logs.items() if k in active_motion_entities}
@@ -4972,7 +5315,8 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
 async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
-        if _event_provider(redis_client) != "homeassistant":
+        active_provider = _event_provider(redis_client)
+        if active_provider not in {"homeassistant", "unifi_protect"}:
             _runtime_set(redis_client, ws_connected=False)
             await asyncio.sleep(float(reconnect_seconds))
             continue
