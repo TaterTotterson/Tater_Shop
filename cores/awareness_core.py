@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.33"
+__version__ = "1.1.34"
 
 load_dotenv()
 
@@ -1498,7 +1498,8 @@ def _vision_describe_sync(
         prompt = (
             "Write one spoken doorbell sentence. Start with 'Someone is at the door'. "
             "If a person is visible, mention count/clothing/package. "
-            "If no person is visible, still start that way and describe the scene."
+            "If no person is visible, still start that way and describe what is visible in the scene. "
+            "Do not list absences (for example, do not say 'no people/animals/vehicles visible')."
         )
     else:
         prompt = (
@@ -1507,16 +1508,25 @@ def _vision_describe_sync(
             "(people, animals, vehicles, packages, or notable movement). "
             "If this appears to be a delivery, name the company when clearly visible "
             "(UPS, FedEx, USPS, Amazon); otherwise say 'delivery driver'. "
-            "Mention counts only when clear and avoid guessing uncertain details."
+            "Mention counts only when clear and avoid guessing uncertain details. "
+            "Always describe what is present in frame and never list what is missing. "
+            "Do not say phrases like 'no people, animals, or vehicles are visible'. "
+            "If the scene is calm, describe the visible setting briefly."
         )
         if _text(query):
             prompt += f" Additional context: {_text(query)}"
         if ignore_vehicles:
-            prompt += " Do not mention vehicles."
+            prompt += " Do not mention vehicles; describe other visible details instead."
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a concise vision assistant."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a concise vision assistant. Describe what is visible. "
+                    "Never list absent objects or use 'no X visible' phrasing."
+                ),
+            },
             {
                 "role": "user",
                 "content": [
