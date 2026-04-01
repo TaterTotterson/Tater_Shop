@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.6"
+__version__ = "1.1.8"
 
 load_dotenv()
 
@@ -1035,6 +1035,51 @@ def _unifi_camera_any_smart_marker(camera_row: Dict[str, Any]) -> str:
     return ""
 
 
+def _unifi_nested_keyword_marker(
+    raw: Any,
+    *,
+    include_any: Tuple[str, ...],
+    must_have_any: Tuple[str, ...],
+    exclude_any: Tuple[str, ...] = (),
+    depth: int = 0,
+) -> str:
+    if raw is None or depth > 8:
+        return ""
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            key_text = _text(key)
+            key_lower = key_text.lower()
+            include_ok = any(token in key_lower for token in include_any) if include_any else True
+            required_ok = any(token in key_lower for token in must_have_any) if must_have_any else True
+            excluded = any(token in key_lower for token in exclude_any)
+            if include_ok and required_ok and not excluded:
+                marker = _unifi_marker_token(value)
+                if marker:
+                    return f"{key_text}:{marker}"
+            nested = _unifi_nested_keyword_marker(
+                value,
+                include_any=include_any,
+                must_have_any=must_have_any,
+                exclude_any=exclude_any,
+                depth=depth + 1,
+            )
+            if nested:
+                return f"{key_text}.{nested}"
+        return ""
+    if isinstance(raw, list):
+        for index, item in enumerate(raw[:16]):
+            nested = _unifi_nested_keyword_marker(
+                item,
+                include_any=include_any,
+                must_have_any=must_have_any,
+                exclude_any=exclude_any,
+                depth=depth + 1,
+            )
+            if nested:
+                return f"[{index}].{nested}"
+    return ""
+
+
 def _unifi_camera_smart_detect_types(camera_row: Dict[str, Any]) -> List[str]:
     found: set[str] = set()
 
@@ -1107,6 +1152,9 @@ def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> s
         generic_marker = _unifi_camera_any_smart_marker(camera_row)
         if generic_marker:
             return f"recent:{token}:{generic_marker}"
+    nested_marker = _unifi_smart_marker_from_container(camera_row, token)
+    if nested_marker:
+        return f"nested:{nested_marker}"
     return ""
 
 
@@ -1117,6 +1165,14 @@ def _unifi_sensor_entity(sensor_id: str) -> str:
 def _unifi_list_cameras() -> List[Dict[str, Any]]:
     rows = _unifi_request("GET", "/proxy/protect/integration/v1/cameras")
     return rows if isinstance(rows, list) else []
+
+
+def _unifi_get_camera(camera_id: str) -> Dict[str, Any]:
+    token = _text(camera_id).lower()
+    if not token:
+        return {}
+    row = _unifi_request("GET", f"/proxy/protect/integration/v1/cameras/{token}")
+    return row if isinstance(row, dict) else {}
 
 
 def _unifi_list_sensors() -> List[Dict[str, Any]]:
@@ -4602,6 +4658,14 @@ def _unifi_camera_motion_marker(camera_row: Dict[str, Any]) -> str:
         marker = _unifi_marker_token(value)
         if marker:
             return f"{key_text}:{marker}"
+    nested_marker = _unifi_nested_keyword_marker(
+        camera_row,
+        include_any=("motion",),
+        must_have_any=("event", "detect", "last", "time", "at", "ts", "id", "trigger"),
+        exclude_any=("enable", "enabled", "setting", "sensitivity", "recording", "zone"),
+    )
+    if nested_marker:
+        return f"nested:{nested_marker}"
     for key in (
         "isMotionDetected",
         "is_motion_detected",
@@ -4645,6 +4709,14 @@ def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
         marker = _unifi_marker_token(value)
         if marker:
             return f"{key_text}:{marker}"
+    nested_marker = _unifi_nested_keyword_marker(
+        camera_row,
+        include_any=("ring", "doorbell"),
+        must_have_any=("event", "last", "time", "at", "ts", "id", "press", "detect"),
+        exclude_any=("enable", "enabled", "setting", "sensitivity"),
+    )
+    if nested_marker:
+        return f"nested:{nested_marker}"
     for key in ("isRinging", "is_ringing", "isDoorbellRinging", "is_doorbell_ringing"):
         if key in camera_row and camera_row.get(key) is not None:
             return f"{key}:{1 if bool(camera_row.get(key)) else 0}"
@@ -4707,11 +4779,33 @@ def _unifi_active_rule_motion_cameras() -> set[str]:
     return out
 
 
+def _unifi_active_rule_camera_ids() -> set[str]:
+    out: set[str] = set()
+    try:
+        rules = _load_rules(redis_client)
+    except Exception:
+        return out
+    for rule in rules.values():
+        if not isinstance(rule, dict):
+            continue
+        if _text(rule.get("kind")).lower() not in {"camera", "doorbell"}:
+            continue
+        if not _bool(rule.get("enabled"), True):
+            continue
+        if _rule_provider(rule) != "unifi_protect":
+            continue
+        camera_id = _text(_unifi_camera_id_from_entity(_text(rule.get("camera_entity")))).lower()
+        if camera_id:
+            out.add(camera_id)
+    return out
+
+
 async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
     smart_markers: Dict[str, str] = {}
     sensor_states: Dict[str, str] = {}
+    camera_detail_error_logs: Dict[str, float] = {}
     missing_motion_marker_logs: Dict[str, float] = {}
     missing_smart_marker_logs: Dict[str, float] = {}
     while not (stop_event and stop_event.is_set()):
@@ -4725,6 +4819,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             sensors = _unifi_list_sensors()
             now_ts = time.time()
             _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts, ws_connected=False)
+            required_camera_ids = _unifi_active_rule_camera_ids()
             required_motion_cameras = _unifi_active_rule_motion_cameras()
             required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
 
@@ -4740,10 +4835,28 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                 if not camera_id:
                     continue
                 camera_name = _text(row.get("name")) or camera_id
+                event_row = row
+                if camera_id in required_camera_ids:
+                    try:
+                        detail_row = _unifi_get_camera(camera_id)
+                        if detail_row:
+                            event_row = dict(row)
+                            event_row.update(detail_row)
+                            camera_name = _text(event_row.get("name")) or camera_name
+                    except Exception as detail_exc:
+                        last_log_ts = _as_float(camera_detail_error_logs.get(camera_id), 0.0)
+                        if (now_ts - last_log_ts) >= 300:
+                            camera_detail_error_logs[camera_id] = now_ts
+                            logger.info(
+                                "[awareness] unifi camera detail unavailable for %s (%s): %s",
+                                camera_name,
+                                camera_id,
+                                detail_exc,
+                            )
                 attrs = {"friendly_name": camera_name}
 
                 motion_entity = _unifi_camera_motion_trigger(camera_id)
-                motion_marker = _unifi_camera_motion_marker(row)
+                motion_marker = _unifi_camera_motion_marker(event_row)
                 active_motion_entities.add(motion_entity)
                 prev_motion = motion_markers.get(motion_entity)
                 if motion_marker and prev_motion is not None and motion_marker != prev_motion:
@@ -4773,11 +4886,11 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                             )
 
                 required_smart_types = required_smart_types_by_camera.get(camera_id, set())
-                smart_types = set(_unifi_camera_smart_detect_types(row))
+                smart_types = set(_unifi_camera_smart_detect_types(event_row))
                 smart_types.update(required_smart_types)
                 for smart_type in sorted(smart_types):
                     smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
-                    smart_marker = _unifi_camera_smart_marker(row, smart_type)
+                    smart_marker = _unifi_camera_smart_marker(event_row, smart_type)
                     active_smart_entities.add(smart_entity)
                     prev_smart = smart_markers.get(smart_entity)
                     smart_attrs = {
@@ -4805,9 +4918,9 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                                 smart_type,
                             )
 
-                if _unifi_camera_is_doorbell(row):
+                if _unifi_camera_is_doorbell(event_row):
                     doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
-                    doorbell_marker = _unifi_camera_doorbell_marker(row)
+                    doorbell_marker = _unifi_camera_doorbell_marker(event_row)
                     active_doorbell_entities.add(doorbell_entity)
                     prev_doorbell = doorbell_markers.get(doorbell_entity)
                     if doorbell_marker and prev_doorbell is not None and doorbell_marker != prev_doorbell:
@@ -4847,6 +4960,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
             smart_markers = {k: v for k, v in smart_markers.items() if k in active_smart_entities}
             sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
+            camera_detail_error_logs = {k: v for k, v in camera_detail_error_logs.items() if k in required_camera_ids}
             missing_motion_marker_logs = {k: v for k, v in missing_motion_marker_logs.items() if k in active_motion_entities}
             missing_smart_marker_logs = {k: v for k, v in missing_smart_marker_logs.items() if k in active_smart_entities}
         except Exception as exc:
