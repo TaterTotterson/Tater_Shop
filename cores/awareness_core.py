@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.4"
+__version__ = "1.1.6"
 
 load_dotenv()
 
@@ -4571,24 +4571,83 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
 
 
 def _unifi_camera_motion_marker(camera_row: Dict[str, Any]) -> str:
-    for key in ("lastMotion", "lastMotionAt", "lastSmartDetect", "lastSmartDetectAt"):
-        value = camera_row.get(key)
-        if value not in (None, ""):
-            return f"{key}:{value}"
-    motion_flag = camera_row.get("isMotionDetected")
-    if motion_flag is not None:
-        return f"isMotionDetected:{1 if bool(motion_flag) else 0}"
+    for key in (
+        "lastMotionEventId",
+        "last_motion_event_id",
+        "lastMotionEvent",
+        "last_motion_event",
+        "lastMotionAt",
+        "last_motion_at",
+        "lastMotionTs",
+        "last_motion_ts",
+        "lastMotion",
+        "last_motion",
+        "lastSmartDetect",
+        "last_smart_detect",
+        "lastSmartDetectAt",
+        "last_smart_detect_at",
+    ):
+        marker = _unifi_marker_token(camera_row.get(key))
+        if marker:
+            return f"{key}:{marker}"
+    for key, value in camera_row.items():
+        key_text = _text(key)
+        key_lower = key_text.lower()
+        if "motion" not in key_lower:
+            continue
+        if any(token in key_lower for token in ("enable", "enabled", "setting", "sensitivity", "recording", "zone")):
+            continue
+        if not any(token in key_lower for token in ("event", "detect", "last", "time", "at", "ts", "id", "trigger")):
+            continue
+        marker = _unifi_marker_token(value)
+        if marker:
+            return f"{key_text}:{marker}"
+    for key in (
+        "isMotionDetected",
+        "is_motion_detected",
+        "motionDetected",
+        "motion_detected",
+        "isPirMotionDetected",
+        "is_pir_motion_detected",
+    ):
+        if key in camera_row and camera_row.get(key) is not None:
+            return f"{key}:{1 if bool(camera_row.get(key)) else 0}"
     return ""
 
 
 def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
-    for key in ("lastRing", "lastRingAt", "lastDoorbellRing", "lastDoorbellPress"):
-        value = camera_row.get(key)
-        if value not in (None, ""):
-            return f"{key}:{value}"
-    ringing = camera_row.get("isRinging")
-    if ringing is not None:
-        return f"isRinging:{1 if bool(ringing) else 0}"
+    for key in (
+        "lastRingEventId",
+        "last_ring_event_id",
+        "lastRingEvent",
+        "last_ring_event",
+        "lastRingAt",
+        "last_ring_at",
+        "lastRing",
+        "last_ring",
+        "lastDoorbellRing",
+        "last_doorbell_ring",
+        "lastDoorbellPress",
+        "last_doorbell_press",
+    ):
+        marker = _unifi_marker_token(camera_row.get(key))
+        if marker:
+            return f"{key}:{marker}"
+    for key, value in camera_row.items():
+        key_text = _text(key)
+        key_lower = key_text.lower()
+        if "ring" not in key_lower and "doorbell" not in key_lower:
+            continue
+        if any(token in key_lower for token in ("enable", "enabled", "setting", "sensitivity")):
+            continue
+        if not any(token in key_lower for token in ("event", "last", "time", "at", "ts", "id", "press")):
+            continue
+        marker = _unifi_marker_token(value)
+        if marker:
+            return f"{key_text}:{marker}"
+    for key in ("isRinging", "is_ringing", "isDoorbellRinging", "is_doorbell_ringing"):
+        if key in camera_row and camera_row.get(key) is not None:
+            return f"{key}:{1 if bool(camera_row.get(key)) else 0}"
     return ""
 
 
@@ -4623,11 +4682,37 @@ def _unifi_active_rule_smart_types_by_camera() -> Dict[str, set[str]]:
     return out
 
 
+def _unifi_active_rule_motion_cameras() -> set[str]:
+    out: set[str] = set()
+    try:
+        rules = _load_rules(redis_client)
+    except Exception:
+        return out
+    for rule in rules.values():
+        if not isinstance(rule, dict):
+            continue
+        if _text(rule.get("kind")).lower() != "camera":
+            continue
+        if not _bool(rule.get("enabled"), True):
+            continue
+        if _rule_provider(rule) != "unifi_protect":
+            continue
+        camera_id = _text(_unifi_camera_id_from_entity(_text(rule.get("camera_entity")))).lower()
+        if not camera_id:
+            continue
+        motion_entity = _unifi_camera_motion_trigger(camera_id).lower()
+        trigger_entities = _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity"))
+        if any(_text(item).lower() == motion_entity for item in trigger_entities):
+            out.add(camera_id)
+    return out
+
+
 async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
     smart_markers: Dict[str, str] = {}
     sensor_states: Dict[str, str] = {}
+    missing_motion_marker_logs: Dict[str, float] = {}
     missing_smart_marker_logs: Dict[str, float] = {}
     while not (stop_event and stop_event.is_set()):
         poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
@@ -4640,6 +4725,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             sensors = _unifi_list_sensors()
             now_ts = time.time()
             _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts, ws_connected=False)
+            required_motion_cameras = _unifi_active_rule_motion_cameras()
             required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
 
             active_motion_entities: set[str] = set()
@@ -4661,6 +4747,11 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                 active_motion_entities.add(motion_entity)
                 prev_motion = motion_markers.get(motion_entity)
                 if motion_marker and prev_motion is not None and motion_marker != prev_motion:
+                    logger.info(
+                        "[awareness] unifi motion marker changed for %s (%s)",
+                        camera_name,
+                        motion_entity,
+                    )
                     await _handle_trigger_state_change(
                         provider="unifi_protect",
                         entity_id=motion_entity,
@@ -4670,6 +4761,16 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
                     _runtime_set(redis_client, last_ws_event_ts=now_ts)
                 if motion_marker:
                     motion_markers[motion_entity] = motion_marker
+                else:
+                    motion_markers.setdefault(motion_entity, "")
+                    if camera_id in required_motion_cameras:
+                        last_log_ts = _as_float(missing_motion_marker_logs.get(motion_entity), 0.0)
+                        if (now_ts - last_log_ts) >= 300:
+                            missing_motion_marker_logs[motion_entity] = now_ts
+                            logger.info(
+                                "[awareness] unifi motion marker unavailable for %s; awaiting camera motion fields.",
+                                camera_name,
+                            )
 
                 required_smart_types = required_smart_types_by_camera.get(camera_id, set())
                 smart_types = set(_unifi_camera_smart_detect_types(row))
@@ -4746,6 +4847,7 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
             doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
             smart_markers = {k: v for k, v in smart_markers.items() if k in active_smart_entities}
             sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
+            missing_motion_marker_logs = {k: v for k, v in missing_motion_marker_logs.items() if k in active_motion_entities}
             missing_smart_marker_logs = {k: v for k, v in missing_smart_marker_logs.items() if k in active_smart_entities}
         except Exception as exc:
             _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
