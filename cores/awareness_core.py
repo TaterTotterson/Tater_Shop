@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.22"
+__version__ = "1.1.23"
 
 load_dotenv()
 
@@ -289,15 +289,19 @@ def _unifi_ws_enabled(client: Any = None) -> bool:
 
 def _unifi_ws_paths(client: Any = None) -> List[str]:
     custom = _text(_settings(client).get("unifi_ws_path"))
+    blocked = {"/proxy/protect/ws", "/proxy/protect/integration/ws"}
     out: List[str] = []
     if custom:
         path = custom if custom.startswith("/") else f"/{custom}"
-        out.append(path)
+        if path not in blocked:
+            out.append(path)
     for candidate in _UNIFI_WS_PATH_CANDIDATES:
         token = _text(candidate)
         if not token:
             continue
         token = token if token.startswith("/") else f"/{token}"
+        if token in blocked:
+            continue
         if token not in out:
             out.append(token)
     return out
@@ -5046,6 +5050,7 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for ws_path in ws_paths:
                     ws_url = f"{conf['base']}{ws_path}"
+                    connected_on_path = False
                     try:
                         async with session.ws_connect(
                             ws_url,
@@ -5053,6 +5058,7 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                             heartbeat=25,
                             ssl=False,
                         ) as ws:
+                            connected_on_path = True
                             _runtime_set(
                                 redis_client,
                                 unifi_ws_connected=True,
@@ -5115,6 +5121,10 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                             break
                     except Exception as ws_exc:
                         last_error = str(ws_exc)
+                        # If a previously-live socket drops, reconnect same path on next loop
+                        # instead of rotating endpoints (prevents connect spam thrash).
+                        if connected_on_path:
+                            break
                         continue
             if stop_event and stop_event.is_set():
                 break
@@ -5215,6 +5225,7 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
     rules = _load_rules(redis_client)
     enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
+    active_provider = _event_provider(redis_client)
     _runtime_set(
         redis_client,
         started_at=time.time(),
@@ -5231,6 +5242,8 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         len(rules),
         enabled_rules,
     )
+    if active_provider != "homeassistant":
+        logger.info("[awareness] Home Assistant websocket idle (event provider=%s)", active_provider)
     tasks = [
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
