@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from helpers import redis_client
 from notify import dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 load_dotenv()
 
@@ -104,6 +104,8 @@ _SETTINGS_KEY = "connectivity_core_settings"
 _RUNTIME_KEY = "connectivity_core:runtime"
 _ROUTES_KEY = "connectivity_core:routes"
 _SNAPSHOT_KEY = "connectivity_core:last_snapshot"
+_TRAFFIC_HISTORY_KEY = "connectivity_core:traffic_history"
+_TRAFFIC_HISTORY_MAX = 180
 _EVENTS_PREFIX = "tater:connectivity:events:"
 _EVENT_SOURCE = "network"
 _DEFAULT_PLATFORMS = ["discord", "irc", "matrix", "telegram", "homeassistant", "webui", "macos"]
@@ -349,6 +351,56 @@ def _load_snapshot(client: Any) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _save_traffic_sample(
+    client: Any,
+    *,
+    rx_bytes: Any,
+    tx_bytes: Any,
+    sample_ts: Optional[float] = None,
+) -> None:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return
+    payload = {
+        "ts": float(sample_ts if sample_ts is not None else time.time()),
+        "rx_bytes": _as_int(rx_bytes, 0, minimum=0),
+        "tx_bytes": _as_int(tx_bytes, 0, minimum=0),
+    }
+    try:
+        redis_obj.lpush(_TRAFFIC_HISTORY_KEY, json.dumps(payload))
+        redis_obj.ltrim(_TRAFFIC_HISTORY_KEY, 0, max(10, int(_TRAFFIC_HISTORY_MAX)) - 1)
+    except Exception:
+        logger.debug("[connectivity] failed to append traffic history sample", exc_info=True)
+
+
+def _load_traffic_history(client: Any, *, limit: int = 48) -> List[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return []
+    end_idx = max(1, _as_int(limit, 48, minimum=1, maximum=500)) - 1
+    try:
+        rows = redis_obj.lrange(_TRAFFIC_HISTORY_KEY, 0, end_idx) or []
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in reversed(rows):
+        try:
+            payload = json.loads(row)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        out.append(
+            {
+                "ts": _as_float(payload.get("ts"), 0.0),
+                "rx_bytes": _as_int(payload.get("rx_bytes"), 0, minimum=0),
+                "tx_bytes": _as_int(payload.get("tx_bytes"), 0, minimum=0),
+            }
+        )
+    return out
 
 
 def _clean_targets_dict(raw: Any) -> Dict[str, str]:
@@ -711,43 +763,30 @@ def _as_bool_token(value: Any) -> Optional[bool]:
         return True
     if token in _FALSE_TOKENS:
         return False
-    if token in {"up", "online", "connected", "ok", "healthy"}:
+    if token in {"up", "online", "connected", "ok", "healthy", "active", "ready", "available"}:
         return True
-    if token in {"down", "offline", "disconnected", "unhealthy", "failed"}:
+    if token in {"down", "offline", "disconnected", "unhealthy", "failed", "inactive", "unavailable", "error"}:
         return False
     return None
 
 
-def _site_wan_up(site: Dict[str, Any]) -> Optional[bool]:
-    keys = [
-        "internetUp",
-        "isInternetConnected",
-        "wanUp",
-        "isWanConnected",
-        "uplinkConnected",
-        "internetStatus",
-        "wanStatus",
-    ]
-    for key in keys:
-        if key in site:
-            parsed = _as_bool_token(site.get(key))
-            if parsed is not None:
-                return parsed
-    for container_key in ("wan", "uplink", "internet", "health"):
-        nested = site.get(container_key)
-        if not isinstance(nested, dict):
+def _path_lookup(payload: Any, path: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    current: Any = payload
+    for token in _text(path).split("."):
+        if not token:
             continue
-        for key in keys:
-            if key in nested:
-                parsed = _as_bool_token(nested.get(key))
-                if parsed is not None:
-                    return parsed
-    return None
+        if isinstance(current, dict):
+            current = current.get(token)
+        else:
+            return None
+    return current
 
 
 def _coalesce_int(row: Dict[str, Any], keys: List[str]) -> int:
     for key in keys:
-        value = row.get(key)
+        value = _path_lookup(row, key) if "." in key else row.get(key)
         try:
             parsed = int(float(value))
             if parsed >= 0:
@@ -755,6 +794,181 @@ def _coalesce_int(row: Dict[str, Any], keys: List[str]) -> int:
         except Exception:
             continue
     return 0
+
+
+def _collect_wan_states(node: Any, *, in_scope: bool = False, depth: int = 0, out: Optional[List[bool]] = None) -> List[bool]:
+    states = out if isinstance(out, list) else []
+    if depth > 8:
+        return states
+
+    if isinstance(node, dict):
+        for raw_key, value in node.items():
+            key = _text(raw_key).lower()
+            key_is_wan_scope = any(token in key for token in ("wan", "internet", "uplink", "isp"))
+            parse_here = key_is_wan_scope or (in_scope and key in {"status", "state", "connected", "healthy", "isconnected"})
+
+            if parse_here:
+                parsed = _as_bool_token(value)
+                if parsed is not None:
+                    states.append(parsed)
+
+            child_scope = in_scope or key_is_wan_scope
+            if isinstance(value, (dict, list)):
+                _collect_wan_states(value, in_scope=child_scope, depth=depth + 1, out=states)
+        return states
+
+    if isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                _collect_wan_states(item, in_scope=in_scope, depth=depth + 1, out=states)
+            elif in_scope:
+                parsed = _as_bool_token(item)
+                if parsed is not None:
+                    states.append(parsed)
+        return states
+
+    if in_scope:
+        parsed = _as_bool_token(node)
+        if parsed is not None:
+            states.append(parsed)
+    return states
+
+
+def _site_wan_summary(site: Dict[str, Any], devices: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    states: List[bool] = []
+    _collect_wan_states(site if isinstance(site, dict) else {}, in_scope=True, out=states)
+
+    if isinstance(devices, list):
+        for row in devices:
+            if isinstance(row, dict):
+                _collect_wan_states(row, in_scope=False, out=states)
+
+    total = len(states)
+    up_count = sum(1 for state in states if state is True)
+    down_count = sum(1 for state in states if state is False)
+    if total <= 0:
+        return {
+            "up": None,
+            "links_total": 0,
+            "links_up": 0,
+            "links_down": 0,
+            "text": "unknown",
+        }
+
+    if up_count > 0 and down_count == 0:
+        overall = True
+        text = "up" if total == 1 else f"{up_count}/{total} up"
+    elif down_count > 0 and up_count == 0:
+        overall = False
+        text = "down" if total == 1 else f"0/{total} up"
+    else:
+        overall = True
+        text = f"{up_count}/{total} up (degraded)"
+
+    return {
+        "up": overall,
+        "links_total": total,
+        "links_up": up_count,
+        "links_down": down_count,
+        "text": text,
+    }
+
+
+_TRAFFIC_RX_KEYS = [
+    "rxBytes",
+    "rx_bytes",
+    "bytesReceived",
+    "downloadBytes",
+    "receivedBytes",
+    "totalRxBytes",
+    "traffic.rxBytes",
+    "traffic.rx_bytes",
+    "stats.rxBytes",
+    "statistics.rxBytes",
+    "usage.rxBytes",
+]
+_TRAFFIC_TX_KEYS = [
+    "txBytes",
+    "tx_bytes",
+    "bytesSent",
+    "uploadBytes",
+    "sentBytes",
+    "totalTxBytes",
+    "traffic.txBytes",
+    "traffic.tx_bytes",
+    "stats.txBytes",
+    "statistics.txBytes",
+    "usage.txBytes",
+]
+_TRAFFIC_EXCLUDE_KEY_PARTS = {
+    "rate",
+    "speed",
+    "kbps",
+    "mbps",
+    "gbps",
+    "bps",
+    "packet",
+    "error",
+    "drop",
+    "loss",
+    "latency",
+    "delay",
+    "retry",
+}
+
+
+def _scan_numeric_by_key_tokens(
+    node: Any,
+    *,
+    include_parts: Tuple[str, ...],
+    depth: int = 0,
+    max_depth: int = 7,
+) -> int:
+    if depth > max_depth:
+        return 0
+    total = 0
+
+    if isinstance(node, dict):
+        for raw_key, value in node.items():
+            key = _text(raw_key).lower()
+            include = any(part in key for part in include_parts)
+            excluded = any(part in key for part in _TRAFFIC_EXCLUDE_KEY_PARTS)
+            if include and not excluded:
+                try:
+                    parsed = int(float(value))
+                    if parsed >= 0:
+                        total += parsed
+                except Exception:
+                    pass
+            if isinstance(value, (dict, list)):
+                total += _scan_numeric_by_key_tokens(
+                    value,
+                    include_parts=include_parts,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                )
+        return total
+
+    if isinstance(node, list):
+        for item in node:
+            total += _scan_numeric_by_key_tokens(
+                item,
+                include_parts=include_parts,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+    return total
+
+
+def _traffic_bytes_from_row(row: Dict[str, Any]) -> Tuple[int, int]:
+    rx = _coalesce_int(row, _TRAFFIC_RX_KEYS)
+    tx = _coalesce_int(row, _TRAFFIC_TX_KEYS)
+
+    if rx <= 0:
+        rx = _scan_numeric_by_key_tokens(row, include_parts=("rx", "download", "received"))
+    if tx <= 0:
+        tx = _scan_numeric_by_key_tokens(row, include_parts=("tx", "upload", "sent"))
+    return max(0, int(rx)), max(0, int(tx))
 
 
 def _build_snapshot(site: Dict[str, Any], clients: List[Dict[str, Any]], devices: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -786,13 +1000,16 @@ def _build_snapshot(site: Dict[str, Any], clients: List[Dict[str, Any]], devices
             "ip": _text(row.get("ipAddress") or row.get("ip")),
             "mac": _text(row.get("macAddress") or row.get("mac")),
         }
-        rx_total += _coalesce_int(row, ["rxBytes", "bytesReceived", "downloadBytes", "rx_bytes"])
-        tx_total += _coalesce_int(row, ["txBytes", "bytesSent", "uploadBytes", "tx_bytes"])
+        row_rx, row_tx = _traffic_bytes_from_row(row)
+        rx_total += row_rx
+        tx_total += row_tx
 
     devices_by_id: Dict[str, Dict[str, Any]] = {}
     device_online = 0
     device_offline = 0
     device_unknown = 0
+    device_rx_total = 0
+    device_tx_total = 0
 
     for row in device_rows:
         did = _device_id(row)
@@ -813,9 +1030,25 @@ def _build_snapshot(site: Dict[str, Any], clients: List[Dict[str, Any]], devices
             "mac": _text(row.get("macAddress") or row.get("mac")),
             "model": _text(row.get("model") or row.get("type")),
         }
+        row_rx, row_tx = _traffic_bytes_from_row(row)
+        device_rx_total += row_rx
+        device_tx_total += row_tx
+
+    if rx_total <= 0 and device_rx_total > 0:
+        rx_total = device_rx_total
+    if tx_total <= 0 and device_tx_total > 0:
+        tx_total = device_tx_total
+
+    if rx_total <= 0 or tx_total <= 0:
+        site_rx, site_tx = _traffic_bytes_from_row(site if isinstance(site, dict) else {})
+        if rx_total <= 0 and site_rx > 0:
+            rx_total = site_rx
+        if tx_total <= 0 and site_tx > 0:
+            tx_total = site_tx
 
     site_name = _text(site.get("name") or site.get("internalReference") or site.get("id") or "Unknown Site")
-    wan_up = _site_wan_up(site)
+    wan_summary = _site_wan_summary(site, device_rows)
+    wan_up = wan_summary.get("up")
 
     return {
         "polled_at": _now_iso(),
@@ -823,6 +1056,10 @@ def _build_snapshot(site: Dict[str, Any], clients: List[Dict[str, Any]], devices
             "id": _text(site.get("id")),
             "name": site_name,
             "wan_up": wan_up,
+            "wan_links_up": _as_int(wan_summary.get("links_up"), 0, minimum=0),
+            "wan_links_down": _as_int(wan_summary.get("links_down"), 0, minimum=0),
+            "wan_links_total": _as_int(wan_summary.get("links_total"), 0, minimum=0),
+            "wan_text": _text(wan_summary.get("text")) or "unknown",
         },
         "counts": {
             "clients_total": len(clients_by_id),
@@ -1081,6 +1318,9 @@ def _stats_from_snapshot(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {
             "site_name": "n/a",
             "wan": "unknown",
+            "wan_links_up": 0,
+            "wan_links_down": 0,
+            "wan_links_total": 0,
             "counts": {
                 "clients_total": 0,
                 "clients_wired": 0,
@@ -1097,14 +1337,19 @@ def _stats_from_snapshot(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         }
     site = snapshot.get("site") if isinstance(snapshot.get("site"), dict) else {}
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
-    wan_up = site.get("wan_up")
-    if isinstance(wan_up, bool):
-        wan_text = "up" if wan_up else "down"
-    else:
-        wan_text = "unknown"
+    wan_text = _text(site.get("wan_text"))
+    if not wan_text:
+        wan_up = site.get("wan_up")
+        if isinstance(wan_up, bool):
+            wan_text = "up" if wan_up else "down"
+        else:
+            wan_text = "unknown"
     return {
         "site_name": _text(site.get("name")) or "n/a",
         "wan": wan_text,
+        "wan_links_up": _as_int(site.get("wan_links_up"), 0, minimum=0),
+        "wan_links_down": _as_int(site.get("wan_links_down"), 0, minimum=0),
+        "wan_links_total": _as_int(site.get("wan_links_total"), 0, minimum=0),
         "counts": {
             "clients_total": _as_int(counts.get("clients_total"), 0, minimum=0),
             "clients_wired": _as_int(counts.get("clients_wired"), 0, minimum=0),
@@ -1131,6 +1376,81 @@ def _bytes_label(value: int) -> str:
     if idx == 0:
         return f"{int(amount)} {units[idx]}"
     return f"{amount:.1f} {units[idx]}"
+
+
+def _traffic_rate_points(history: List[Dict[str, Any]], key: str, *, max_points: int = 24) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    metric = "tx_bytes" if _text(key).lower().startswith("tx") else "rx_bytes"
+
+    if len(history) < 2:
+        return points
+
+    for idx in range(1, len(history)):
+        prev = history[idx - 1] if isinstance(history[idx - 1], dict) else {}
+        curr = history[idx] if isinstance(history[idx], dict) else {}
+        prev_ts = _as_float(prev.get("ts"), 0.0)
+        curr_ts = _as_float(curr.get("ts"), 0.0)
+        prev_value = _as_int(prev.get(metric), 0, minimum=0)
+        curr_value = _as_int(curr.get(metric), 0, minimum=0)
+        delta_time = curr_ts - prev_ts
+        delta_bytes = curr_value - prev_value
+        if delta_time <= 0:
+            continue
+        if delta_bytes < 0:
+            # Counter reset or provider restart.
+            delta_bytes = curr_value
+        rate_bps = max(0.0, float(delta_bytes) / float(delta_time))
+        label = datetime.fromtimestamp(curr_ts).strftime("%H:%M:%S") if curr_ts > 0 else str(idx)
+        points.append({"label": label, "value": int(round(rate_bps))})
+
+    if not points:
+        return points
+    return points[-max(4, _as_int(max_points, 24, minimum=4, maximum=96)) :]
+
+
+def _traffic_overview_form(snapshot: Optional[Dict[str, Any]], history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    stats_payload = _stats_from_snapshot(snapshot)
+    counts = stats_payload.get("counts") if isinstance(stats_payload.get("counts"), dict) else {}
+    rx_points = _traffic_rate_points(history, "rx_bytes")
+    tx_points = _traffic_rate_points(history, "tx_bytes")
+    last_sample_text = "n/a"
+    if history:
+        last_ts = _as_float((history[-1] if isinstance(history[-1], dict) else {}).get("ts"), 0.0)
+        if last_ts > 0:
+            last_sample_text = datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "id": "__connectivity_overview__",
+        "group": "overview",
+        "title": "Network Overview",
+        "subtitle": f"WAN: {_text(stats_payload.get('wan')) or 'unknown'} • Last sample: {last_sample_text}",
+        "fields": [
+            {
+                "key": "traffic_rx_chart",
+                "label": "RX Trend (bytes/sec)",
+                "type": "bar_chart",
+                "points": rx_points,
+            },
+            {
+                "key": "traffic_tx_chart",
+                "label": "TX Trend (bytes/sec)",
+                "type": "bar_chart",
+                "points": tx_points,
+            },
+            {
+                "key": "traffic_totals",
+                "label": "Traffic Totals",
+                "type": "textarea",
+                "value": (
+                    f"RX total: {_bytes_label(_as_int(counts.get('traffic_rx_bytes'), 0, minimum=0))}\n"
+                    f"TX total: {_bytes_label(_as_int(counts.get('traffic_tx_bytes'), 0, minimum=0))}\n"
+                    f"WAN links: {_as_int(stats_payload.get('wan_links_up'), 0, minimum=0)}/"
+                    f"{_as_int(stats_payload.get('wan_links_total'), 0, minimum=0)} up"
+                ),
+                "read_only": True,
+            },
+        ],
+    }
 
 
 def _build_route_from_values(*, values: Dict[str, Any], payload: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1253,6 +1573,9 @@ def _connectivity_manager_ui(client: Any) -> Dict[str, Any]:
     default_dest_options = _destination_options_for_platform(default_platform, catalog=catalog)
 
     settings = _settings(client)
+    snapshot = _load_snapshot(client)
+    history = _load_traffic_history(client, limit=72)
+    overview_form = _traffic_overview_form(snapshot, history)
     route_forms = _route_forms(client)
     event_forms = _event_forms(client)
 
@@ -1274,8 +1597,16 @@ def _connectivity_manager_ui(client: Any) -> Dict[str, Any]:
         "item_fields_dropdown_label": "Route Settings",
         "item_fields_popup": True,
         "item_fields_popup_label": "Route Settings",
-        "default_tab": "events",
+        "default_tab": "overview",
         "manager_tabs": [
+            {
+                "key": "overview",
+                "label": "Overview",
+                "source": "items",
+                "item_group": "overview",
+                "selector": False,
+                "empty_message": "No connectivity overview data yet.",
+            },
             {
                 "key": "events",
                 "label": "Events",
@@ -1322,7 +1653,7 @@ def _connectivity_manager_ui(client: Any) -> Dict[str, Any]:
                 },
             ],
         },
-        "item_forms": event_forms + route_forms,
+        "item_forms": [overview_form] + event_forms + route_forms,
     }
 
 
@@ -1353,6 +1684,15 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         "stats": [
             {"label": "Site", "value": _text(stats_payload.get("site_name")) or "n/a"},
             {"label": "WAN", "value": _text(stats_payload.get("wan")) or "unknown"},
+            {
+                "label": "WAN Links Up",
+                "value": (
+                    f"{_as_int(stats_payload.get('wan_links_up'), 0, minimum=0)}/"
+                    f"{_as_int(stats_payload.get('wan_links_total'), 0, minimum=0)}"
+                    if _as_int(stats_payload.get("wan_links_total"), 0, minimum=0) > 0
+                    else "n/a"
+                ),
+            },
             {"label": "Clients Total", "value": _as_int(counts.get("clients_total"), 0, minimum=0)},
             {"label": "Clients Wired", "value": _as_int(counts.get("clients_wired"), 0, minimum=0)},
             {"label": "Clients Wireless", "value": _as_int(counts.get("clients_wireless"), 0, minimum=0)},
@@ -1447,6 +1787,13 @@ async def _connectivity_poll_loop(stop_event: Optional[object]) -> None:
             current_snapshot = await asyncio.to_thread(_fetch_network_snapshot_sync)
             now_ts = time.time()
             _save_snapshot(redis_client, current_snapshot)
+            current_counts = current_snapshot.get("counts") if isinstance(current_snapshot.get("counts"), dict) else {}
+            _save_traffic_sample(
+                redis_client,
+                rx_bytes=current_counts.get("traffic_rx_bytes"),
+                tx_bytes=current_counts.get("traffic_tx_bytes"),
+                sample_ts=now_ts,
+            )
             _runtime_set(
                 redis_client,
                 api_connected=True,

@@ -33,7 +33,7 @@
       "id": "connectivity",
       "name": "Connectivity Core",
       "module_key": "connectivity_core",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Connectivity Core integration core for Tater.",
       "settings_category": "Connectivity Core Settings",
@@ -41,7 +41,7 @@
       "autostart_key": "connectivity_core_running",
       "tags": [],
       "entry": "cores/connectivity_core.py",
-      "sha256": "c47ac4488c1c2dd9c841e2a9c207b54d621f6ba1b84a8cb1ae992f13224a4f43"
+      "sha256": "74eafb6c359714c55e862ecab1cb03c0f17a04c7c56123ab1706e8da1a357e3d"
     },
     {
       "id": "memory",
