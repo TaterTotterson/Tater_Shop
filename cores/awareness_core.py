@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.38"
+__version__ = "1.1.0"
 
 load_dotenv()
 
@@ -33,6 +33,19 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 5,
             "description": "Seconds between Home Assistant websocket reconnect attempts.",
+        },
+        "event_provider": {
+            "label": "Event Provider",
+            "type": "select",
+            "options": ["homeassistant", "unifi_protect"],
+            "default": "homeassistant",
+            "description": "Select which provider powers camera/doorbell/sensor event rules.",
+        },
+        "unifi_poll_seconds": {
+            "label": "UniFi Poll Interval (sec)",
+            "type": "number",
+            "default": 3,
+            "description": "Seconds between UniFi Protect polling checks while UniFi provider is active.",
         },
         "events_retention": {
             "label": "Events Retention",
@@ -57,7 +70,7 @@ CORE_SETTINGS = {
             "label": "Entity Catalog Cache (sec)",
             "type": "number",
             "default": 30,
-            "description": "How long to cache Home Assistant entity discovery for UI dropdowns.",
+            "description": "How long to cache provider entity discovery for UI dropdowns.",
         },
         "brief_scheduler_tick_sec": {
             "label": "Brief Scheduler Tick (sec)",
@@ -82,6 +95,7 @@ _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
+_SUPPORTED_EVENT_PROVIDERS = {"homeassistant", "unifi_protect"}
 _AREA_PRESETS = [
     "camera",
     "doorbell",
@@ -101,7 +115,10 @@ _AREA_PRESETS = [
 ]
 
 _ENTITY_CACHE_LOCK = threading.Lock()
-_ENTITY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
+    "homeassistant": {"ts": 0.0, "data": {}},
+    "unifi_protect": {"ts": 0.0, "data": {}},
+}
 _EVENT_FILTER_RUNTIME_KEYS = {
     "camera": "events_filter_camera",
     "doorbell": "events_filter_doorbell",
@@ -194,6 +211,33 @@ def _settings(client: Any) -> Dict[str, str]:
 
 def _setting_int(client: Any, key: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
     return _as_int(_settings(client).get(key), default, minimum=minimum, maximum=maximum)
+
+
+def _normalize_event_provider(value: Any) -> str:
+    token = _text(value).lower()
+    if token in {"unifi", "protect"}:
+        token = "unifi_protect"
+    if token not in _SUPPORTED_EVENT_PROVIDERS:
+        return "homeassistant"
+    return token
+
+
+def _event_provider(client: Any = None) -> str:
+    return _normalize_event_provider(_settings(client).get("event_provider") or "homeassistant")
+
+
+def _rule_provider(rule: Dict[str, Any], *, fallback: str = "homeassistant") -> str:
+    kind = _text((rule or {}).get("kind")).lower()
+    if kind == "brief":
+        return "homeassistant"
+    return _normalize_event_provider((rule or {}).get("provider") or fallback)
+
+
+def _provider_label(provider: str) -> str:
+    token = _normalize_event_provider(provider)
+    if token == "unifi_protect":
+        return "UniFi Protect"
+    return "Home Assistant"
 
 
 def _events_retention_seconds(client: Any) -> Optional[int]:
@@ -450,6 +494,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     base: Dict[str, Any] = {
         "id": rule_id,
         "kind": kind,
+        "provider": "homeassistant" if kind == "brief" else _normalize_event_provider(raw.get("provider") or "homeassistant"),
         "name": _text(raw.get("name")) or f"{kind.title()} rule",
         "enabled": _bool(raw.get("enabled"), True),
         "created_at": _as_float(raw.get("created_at"), now_ts),
@@ -670,6 +715,102 @@ def _ha_config() -> Dict[str, str]:
     return {"base": base, "token": token}
 
 
+def _unifi_protect_config() -> Dict[str, str]:
+    base = _text(redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").rstrip("/")
+    api_key = _text(redis_client.get("tater:unifi_protect:api_key"))
+    if not api_key:
+        raise ValueError(
+            "UniFi Protect API key is not set. Open WebUI -> Settings -> Integrations -> UniFi Protect and add API key."
+        )
+    if not base:
+        base = "https://10.4.20.127"
+    return {"base": base, "api_key": api_key}
+
+
+def _unifi_headers(api_key: str, *, json_content: bool = True) -> Dict[str, str]:
+    headers = {"X-API-KEY": api_key, "Accept": "application/json"}
+    if json_content:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _unifi_request(
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    stream: bool = False,
+) -> Any:
+    conf = _unifi_protect_config()
+    url_path = path if str(path).startswith("/") else f"/{path}"
+    url = f"{conf['base']}{url_path}"
+    req_headers = _unifi_headers(conf["api_key"], json_content=not stream)
+    if headers:
+        req_headers.update(headers)
+    resp = requests.request(
+        method,
+        url,
+        headers=req_headers,
+        params=params,
+        json=json_body,
+        timeout=20,
+        verify=False,
+        stream=stream,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"UniFi Protect HTTP {resp.status_code}: {resp.text[:200]}")
+    if stream:
+        return resp.content, resp.headers
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _unifi_camera_id_from_entity(camera_entity: str) -> str:
+    object_id = _entity_object_id(camera_entity)
+    if object_id.startswith("unifi_"):
+        return object_id[len("unifi_") :]
+    return object_id
+
+
+def _unifi_sensor_id_from_entity(sensor_entity: str) -> str:
+    object_id = _entity_object_id(sensor_entity)
+    if object_id.startswith("unifi_sensor_"):
+        return object_id[len("unifi_sensor_") :]
+    if object_id.startswith("unifi_"):
+        return object_id[len("unifi_") :]
+    return object_id
+
+
+def _unifi_camera_entity(camera_id: str) -> str:
+    return f"camera.unifi_{_text(camera_id).lower()}"
+
+
+def _unifi_camera_motion_trigger(camera_id: str) -> str:
+    return f"binary_sensor.unifi_{_text(camera_id).lower()}_motion"
+
+
+def _unifi_camera_doorbell_trigger(camera_id: str) -> str:
+    return f"binary_sensor.unifi_{_text(camera_id).lower()}_doorbell"
+
+
+def _unifi_sensor_entity(sensor_id: str) -> str:
+    return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
+
+
+def _unifi_list_cameras() -> List[Dict[str, Any]]:
+    rows = _unifi_request("GET", "/proxy/protect/integration/v1/cameras")
+    return rows if isinstance(rows, list) else []
+
+
+def _unifi_list_sensors() -> List[Dict[str, Any]]:
+    rows = _unifi_request("GET", "/proxy/protect/integration/v1/sensors")
+    return rows if isinstance(rows, list) else []
+
+
 def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:
     headers = {"Authorization": f"Bearer {token}"}
     if json_content:
@@ -811,6 +952,37 @@ def _camera_snapshot_sync(ha_base: str, token: str, camera_entity: str) -> bytes
 
 async def _camera_snapshot(ha_base: str, token: str, camera_entity: str) -> bytes:
     return await asyncio.to_thread(_camera_snapshot_sync, ha_base, token, camera_entity)
+
+
+def _unifi_camera_snapshot_sync(camera_id: str) -> bytes:
+    camera_token = _text(camera_id).lower()
+    if not camera_token:
+        raise ValueError("UniFi camera id is required.")
+    candidates = [
+        f"/proxy/protect/integration/v1/cameras/{camera_token}/snapshot",
+        f"/proxy/protect/integration/v1/cameras/{camera_token}/snapshot.jpg",
+        f"/proxy/protect/integration/v1/cameras/{camera_token}/snapshot?format=jpeg",
+        f"/proxy/protect/integration/v1/cameras/{camera_token}/snapshot?force=true",
+        f"/proxy/protect/integration/v1/cameras/{camera_token}/snapshot?force=true&format=jpeg",
+    ]
+    last_error: Optional[Exception] = None
+    for path in candidates:
+        try:
+            content, _headers = _unifi_request(
+                "GET",
+                path,
+                headers={"Accept": "image/jpeg,image/png,image/*,*/*"},
+                stream=True,
+            )
+            if isinstance(content, (bytes, bytearray)) and len(content) > 1000:
+                return bytes(content)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"UniFi snapshot unavailable for {camera_token}: {last_error}")
+
+
+async def _unifi_camera_snapshot(camera_id: str) -> bytes:
+    return await asyncio.to_thread(_unifi_camera_snapshot_sync, camera_id)
 
 
 def _vision_describe_sync(
@@ -1096,9 +1268,9 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     del llm_client
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "camera"
+    provider = _rule_provider(rule)
     if not camera:
         raise ValueError("Camera rule is missing camera_entity.")
-    ha = _ha_config()
     vision = get_shared_vision_settings(
         default_api_base="http://127.0.0.1:1234",
         default_model="qwen2.5-vl-7b-instruct",
@@ -1112,7 +1284,11 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     used_fallback = False
     jpeg: bytes = b""
     try:
-        jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+        if provider == "unifi_protect":
+            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
+        else:
+            ha = _ha_config()
+            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
         summary = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -1142,6 +1318,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 "area": area,
                 "reason": reason,
                 "trigger_entity": _text(event.get("entity_id")),
+                "provider": provider,
             },
         }
         if snapshot_store.get("stored"):
@@ -1183,6 +1360,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 "rule_id": rule.get("id"),
                 "camera": camera,
                 "area": area,
+                "provider": provider,
             },
         )
         if notify_result.get("ok") and int(notify_result.get("sent_count") or 0) > 0:
@@ -1192,6 +1370,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         "summary": summary,
         "camera": camera,
         "area": area,
+        "provider": provider,
         "vision_fallback_used": used_fallback,
         "notification": notify_result,
     }
@@ -1201,9 +1380,9 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     del llm_client
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "front door"
+    provider = _rule_provider(rule)
     if not camera:
         raise ValueError("Doorbell rule is missing camera_entity.")
-    ha = _ha_config()
     vision = get_shared_vision_settings(
         default_api_base="http://127.0.0.1:1234",
         default_model="qwen2.5-vl-7b-instruct",
@@ -1212,7 +1391,11 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     tts_entity = _text(rule.get("tts_entity") or "tts.piper")
     jpeg: bytes = b""
     try:
-        jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+        if provider == "unifi_protect":
+            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
+        else:
+            ha = _ha_config()
+            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
         spoken_line = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -1228,6 +1411,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         spoken_line = "Someone is at the door."
     snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
     if players:
+        ha = _ha_config()
         await _tts_speak(
             ha_base=ha["base"],
             token=ha["token"],
@@ -1249,6 +1433,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             "tts_entity": tts_entity,
             "reason": reason,
             "trigger_entity": _text(event.get("entity_id")),
+            "provider": provider,
         },
     }
     if snapshot_store.get("stored"):
@@ -1276,6 +1461,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
                 "rule_id": rule.get("id"),
                 "camera": camera,
                 "area": area,
+                "provider": provider,
             },
         )
     return {
@@ -1283,6 +1469,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         "summary": spoken_line,
         "camera": camera,
         "area": area,
+        "provider": provider,
         "players": players,
         "notification": notify_result,
     }
@@ -1295,6 +1482,7 @@ async def _execute_entry_sensor_rule(
     event: Dict[str, Any],
 ) -> Dict[str, Any]:
     del llm_client
+    provider = _rule_provider(rule)
     sensor_type = _text(rule.get("sensor_type") or "door").lower()
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
@@ -1323,6 +1511,7 @@ async def _execute_entry_sensor_rule(
             "trigger_entity": entity_id,
             "new_state": _text((new_state or {}).get("state")),
             "old_state": _text((old_state or {}).get("state")),
+            "provider": provider,
         },
     }
     _append_event(redis_client, source=area, payload=event_payload)
@@ -1368,6 +1557,7 @@ async def _execute_entry_sensor_rule(
                 "entity_id": entity_id,
                 "sensor_type": sensor_type,
                 "area": area,
+                "provider": provider,
             },
         )
     return {
@@ -1376,6 +1566,7 @@ async def _execute_entry_sensor_rule(
         "sensor_type": sensor_type,
         "entity_id": entity_id,
         "area": area,
+        "provider": provider,
         "players": players,
         "tts": tts_result,
         "notification": notify_result,
@@ -2041,15 +2232,8 @@ async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, even
     raise ValueError(f"Unsupported rule kind: {kind}")
 
 
-def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
-    cache_ttl = _setting_int(redis_client, "entity_catalog_ttl_sec", 30, minimum=5, maximum=600)
-    now_ts = time.time()
-    with _ENTITY_CACHE_LOCK:
-        if not force_refresh and (_ENTITY_CACHE.get("ts") or 0.0) + cache_ttl > now_ts:
-            data = _ENTITY_CACHE.get("data")
-            if isinstance(data, dict) and data:
-                return data
-    catalog: Dict[str, List[Tuple[str, str]]] = {
+def _empty_entity_catalog() -> Dict[str, List[Tuple[str, str]]]:
+    return {
         "cameras": [],
         "triggers": [],
         "doorbell_triggers": [],
@@ -2066,6 +2250,61 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         "entry_sensors_window": [],
         "entry_sensors_garage": [],
     }
+
+
+def _cached_catalog(provider: str, *, force_refresh: bool = False) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+    cache_ttl = _setting_int(redis_client, "entity_catalog_ttl_sec", 30, minimum=5, maximum=600)
+    now_ts = time.time()
+    key = _normalize_event_provider(provider)
+    with _ENTITY_CACHE_LOCK:
+        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
+        _ENTITY_CACHE[key] = bucket
+        if force_refresh:
+            return None
+        if (_as_float(bucket.get("ts"), 0.0) + cache_ttl) <= now_ts:
+            return None
+        data = bucket.get("data")
+        if isinstance(data, dict) and data:
+            return data
+    return None
+
+
+def _set_cached_catalog(provider: str, catalog: Dict[str, List[Tuple[str, str]]]) -> None:
+    key = _normalize_event_provider(provider)
+    with _ENTITY_CACHE_LOCK:
+        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
+        bucket["ts"] = time.time()
+        bucket["data"] = catalog
+        _ENTITY_CACHE[key] = bucket
+
+
+def _finalize_catalog(catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, List[Tuple[str, str]]]:
+    for key in list(catalog.keys()):
+        deduped: List[Tuple[str, str]] = []
+        seen: set[str] = set()
+        for value, label in catalog[key]:
+            token = _text(value)
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            deduped.append((token, _text(label) or token))
+        catalog[key] = sorted(deduped, key=lambda row: row[1].lower())
+    if not catalog["doorbell_triggers"]:
+        catalog["doorbell_triggers"] = list(catalog["triggers"])
+    if not catalog["weather_temp"]:
+        catalog["weather_temp"] = list(catalog["weather_sensors"])
+    if not catalog["weather_wind"]:
+        catalog["weather_wind"] = list(catalog["weather_sensors"])
+    if not catalog["weather_rain"]:
+        catalog["weather_rain"] = list(catalog["weather_sensors"])
+    return catalog
+
+
+def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
+    cached = _cached_catalog("homeassistant", force_refresh=force_refresh)
+    if cached is not None:
+        return cached
+    catalog = _empty_entity_catalog()
     try:
         ha = _ha_config()
         resp = requests.get(
@@ -2076,9 +2315,8 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         resp.raise_for_status()
         states = resp.json() or []
     except Exception:
-        with _ENTITY_CACHE_LOCK:
-            _ENTITY_CACHE["ts"] = now_ts
-            _ENTITY_CACHE["data"] = catalog
+        catalog = _finalize_catalog(catalog)
+        _set_cached_catalog("homeassistant", catalog)
         return catalog
 
     def _label(entry: Dict[str, Any]) -> str:
@@ -2185,21 +2423,91 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
     except Exception:
         logger.debug("[awareness] notify service discovery failed", exc_info=True)
 
-    for key in list(catalog.keys()):
-        catalog[key] = sorted(catalog[key], key=lambda row: row[1].lower())
-    if not catalog["doorbell_triggers"]:
-        catalog["doorbell_triggers"] = list(catalog["triggers"])
-    if not catalog["weather_temp"]:
-        catalog["weather_temp"] = list(catalog["weather_sensors"])
-    if not catalog["weather_wind"]:
-        catalog["weather_wind"] = list(catalog["weather_sensors"])
-    if not catalog["weather_rain"]:
-        catalog["weather_rain"] = list(catalog["weather_sensors"])
-
-    with _ENTITY_CACHE_LOCK:
-        _ENTITY_CACHE["ts"] = now_ts
-        _ENTITY_CACHE["data"] = catalog
+    catalog = _finalize_catalog(catalog)
+    _set_cached_catalog("homeassistant", catalog)
     return catalog
+
+
+def _unifi_camera_is_doorbell(camera_row: Dict[str, Any]) -> bool:
+    name = _text(camera_row.get("name")).lower()
+    model = _text(camera_row.get("modelKey")).lower()
+    hint = f"{name} {model}"
+    return "doorbell" in hint or "g4db" in hint or "g5db" in hint
+
+
+def _unifi_sensor_type(sensor_row: Dict[str, Any]) -> str:
+    name = _text(sensor_row.get("name")).lower()
+    mount_type = _text(sensor_row.get("mountType")).lower()
+    hint = f"{name} {mount_type}"
+    if "garage" in hint:
+        return "garage"
+    if "window" in hint:
+        return "window"
+    return "door"
+
+
+def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
+    cached = _cached_catalog("unifi_protect", force_refresh=force_refresh)
+    if cached is not None:
+        return cached
+    catalog = _empty_entity_catalog()
+    # Keep weather/tts/notify/input_text sourced from Home Assistant so briefs and notifications still work.
+    ha_support = _ha_entity_catalog(force_refresh=force_refresh)
+    for key in ("media_players", "tts", "input_text", "notify_services", "weather_sensors", "weather_temp", "weather_wind", "weather_rain"):
+        catalog[key] = list(ha_support.get(key) or [])
+    try:
+        cameras = _unifi_list_cameras()
+    except Exception:
+        cameras = []
+    try:
+        sensors = _unifi_list_sensors()
+    except Exception:
+        sensors = []
+
+    for row in cameras:
+        if not isinstance(row, dict):
+            continue
+        camera_id = _text(row.get("id")).lower()
+        if not camera_id:
+            continue
+        camera_name = _text(row.get("name")) or camera_id
+        camera_entity = _unifi_camera_entity(camera_id)
+        catalog["cameras"].append((camera_entity, f"{camera_name} ({camera_entity})"))
+        motion_trigger = _unifi_camera_motion_trigger(camera_id)
+        catalog["triggers"].append((motion_trigger, f"{camera_name} motion ({motion_trigger})"))
+        if _unifi_camera_is_doorbell(row):
+            doorbell_trigger = _unifi_camera_doorbell_trigger(camera_id)
+            catalog["doorbell_triggers"].append((doorbell_trigger, f"{camera_name} doorbell ({doorbell_trigger})"))
+
+    for row in sensors:
+        if not isinstance(row, dict):
+            continue
+        sensor_id = _text(row.get("id")).lower()
+        if not sensor_id:
+            continue
+        sensor_name = _text(row.get("name")) or sensor_id
+        sensor_entity = _unifi_sensor_entity(sensor_id)
+        catalog["entry_sensors"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
+        sensor_type = _unifi_sensor_type(row)
+        if sensor_type == "window":
+            catalog["entry_sensors_window"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
+        elif sensor_type == "garage":
+            catalog["entry_sensors_garage"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
+        else:
+            catalog["entry_sensors_door"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
+        # Sensors can be used as direct trigger entities in entry sensor rules.
+        catalog["triggers"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
+
+    catalog = _finalize_catalog(catalog)
+    _set_cached_catalog("unifi_protect", catalog)
+    return catalog
+
+
+def _entity_catalog(force_refresh: bool = False, *, provider: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
+    active_provider = _normalize_event_provider(provider or _event_provider(redis_client))
+    if active_provider == "unifi_protect":
+        return _unifi_entity_catalog(force_refresh=force_refresh)
+    return _ha_entity_catalog(force_refresh=force_refresh)
 
 
 def _choices_from_pairs(
@@ -2255,7 +2563,8 @@ def _rule_subtitle(rule: Dict[str, Any]) -> str:
     last_run = _fmt_ts(rule.get("last_run_ts"))
     if kind == "brief":
         return f"{enabled} - {kind} - next: {_fmt_ts(rule.get('next_run_ts'))} - last: {last_run}"
-    return f"{enabled} - {kind} - last: {last_run}"
+    provider = _provider_label(_rule_provider(rule))
+    return f"{enabled} - {kind} - {provider} - last: {last_run}"
 
 
 def _to_area_label(area_value: str) -> str:
@@ -3031,8 +3340,17 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
 
 
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
-    rules = _load_rules(client)
-    catalog = _ha_entity_catalog()
+    all_rules = _load_rules(client)
+    active_provider = _event_provider(client)
+    rules: Dict[str, Dict[str, Any]] = {}
+    for rule_id, rule in all_rules.items():
+        kind = _text((rule or {}).get("kind")).lower()
+        if kind == "brief":
+            rules[rule_id] = rule
+            continue
+        if _rule_provider(rule) == active_provider:
+            rules[rule_id] = rule
+    catalog = _entity_catalog(provider=active_provider)
     event_forms = _event_items_for_ui(client)
     forms: List[Dict[str, Any]] = []
     for rule in sorted(
@@ -3115,7 +3433,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     ]
     return {
         "kind": "settings_manager",
-        "title": "Awareness Rule Manager",
+        "title": f"Awareness Rule Manager ({_provider_label(active_provider)} Events)",
         "empty_message": "No awareness rules configured yet.",
         "stats_refresh_button": True,
         "stats_refresh_label": "Refresh",
@@ -3529,9 +3847,18 @@ def _build_rule_from_values(
 ) -> Dict[str, Any]:
     now_ts = time.time()
     previous = existing if isinstance(existing, dict) else {}
+    active_provider = _event_provider(redis_client)
+    provider_value = (
+        "homeassistant"
+        if kind == "brief"
+        else _normalize_event_provider(
+            _value(values, payload, "provider", previous.get("provider") or active_provider)
+        )
+    )
     base: Dict[str, Any] = {
         "id": _text(previous.get("id")) or str(uuid.uuid4()),
         "kind": kind,
+        "provider": provider_value,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
         "name": _text(_value(values, payload, "name", previous.get("name"))) or f"{kind.title()} rule",
         "created_at": _as_float(previous.get("created_at"), now_ts),
@@ -3726,8 +4053,9 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     values = _payload_values(body)
     action_name = _text(action).lower()
     if action_name == "awareness_refresh_entities":
-        _ha_entity_catalog(force_refresh=True)
-        return {"ok": True, "message": "Entity catalog refreshed."}
+        provider = _event_provider(client)
+        _entity_catalog(force_refresh=True, provider=provider)
+        return {"ok": True, "message": f"Entity catalog refreshed for {_provider_label(provider)}."}
     if action_name == "awareness_save_event_filters":
         current_filters = _event_type_filters(client)
         current_list_view = _event_list_view_enabled(client)
@@ -3809,6 +4137,9 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             continue
         if not _bool(rule.get("enabled"), True) and reason != "manual":
             continue
+        if _text(rule.get("kind")) != "brief" and reason != "manual":
+            if _rule_provider(rule) != _event_provider(redis_client):
+                continue
         try:
             result = await _execute_rule(rule, llm_client, reason, event_payload)
             now_ts = time.time()
@@ -3868,18 +4199,20 @@ async def _awareness_brief_scheduler_loop(stop_event: Optional[object]) -> None:
         await asyncio.sleep(float(tick))
 
 
-async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
-    if not isinstance(event_payload, dict):
-        return
-    entity_id = _text(event_payload.get("entity_id"))
-    if not entity_id:
-        return
-    new_state = event_payload.get("new_state") if isinstance(event_payload.get("new_state"), dict) else {}
-    old_state = event_payload.get("old_state") if isinstance(event_payload.get("old_state"), dict) else {}
+async def _handle_trigger_state_change(
+    *,
+    provider: str,
+    entity_id: str,
+    new_state: Dict[str, Any],
+    old_state: Dict[str, Any],
+) -> None:
+    provider_token = _normalize_event_provider(provider)
     rules = _load_rules(redis_client)
     for rule in rules.values():
         kind = _text(rule.get("kind"))
         if kind not in {"camera", "doorbell", "entry_sensor"}:
+            continue
+        if _rule_provider(rule) != provider_token:
             continue
         if not _bool(rule.get("enabled"), True):
             continue
@@ -3890,7 +4223,7 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
             logger.exception("[awareness] trigger match failed for rule %s", rule.get("id"))
             continue
         dedupe_key = (
-            f"awareness:dedupe:{_text(rule.get('id'))}:{entity_id}:{_text(new_state.get('state')).lower()}"
+            f"awareness:dedupe:{provider_token}:{_text(rule.get('id'))}:{entity_id}:{_text(new_state.get('state')).lower()}"
         )
         if redis_client.set(dedupe_key, "1", ex=2, nx=True) is None:
             continue
@@ -3902,9 +4235,144 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
         )
 
 
+async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
+    if not isinstance(event_payload, dict):
+        return
+    if _event_provider(redis_client) != "homeassistant":
+        return
+    entity_id = _text(event_payload.get("entity_id"))
+    if not entity_id:
+        return
+    new_state = event_payload.get("new_state") if isinstance(event_payload.get("new_state"), dict) else {}
+    old_state = event_payload.get("old_state") if isinstance(event_payload.get("old_state"), dict) else {}
+    await _handle_trigger_state_change(
+        provider="homeassistant",
+        entity_id=entity_id,
+        new_state=new_state,
+        old_state=old_state,
+    )
+
+
+def _unifi_camera_motion_marker(camera_row: Dict[str, Any]) -> str:
+    for key in ("lastMotion", "lastMotionAt", "lastSmartDetect", "lastSmartDetectAt"):
+        value = camera_row.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    motion_flag = camera_row.get("isMotionDetected")
+    if motion_flag is not None:
+        return f"isMotionDetected:{1 if bool(motion_flag) else 0}"
+    return ""
+
+
+def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
+    for key in ("lastRing", "lastRingAt", "lastDoorbellRing", "lastDoorbellPress"):
+        value = camera_row.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    ringing = camera_row.get("isRinging")
+    if ringing is not None:
+        return f"isRinging:{1 if bool(ringing) else 0}"
+    return ""
+
+
+async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
+    motion_markers: Dict[str, str] = {}
+    doorbell_markers: Dict[str, str] = {}
+    sensor_states: Dict[str, str] = {}
+    while not (stop_event and stop_event.is_set()):
+        poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
+        if _event_provider(redis_client) != "unifi_protect":
+            _runtime_set(redis_client, unifi_connected=False)
+            await asyncio.sleep(float(poll_seconds))
+            continue
+        try:
+            cameras = _unifi_list_cameras()
+            sensors = _unifi_list_sensors()
+            now_ts = time.time()
+            _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts, ws_connected=False)
+
+            active_motion_entities: set[str] = set()
+            active_doorbell_entities: set[str] = set()
+            active_sensor_entities: set[str] = set()
+
+            for row in cameras:
+                if not isinstance(row, dict):
+                    continue
+                camera_id = _text(row.get("id")).lower()
+                if not camera_id:
+                    continue
+                camera_name = _text(row.get("name")) or camera_id
+                attrs = {"friendly_name": camera_name}
+
+                motion_entity = _unifi_camera_motion_trigger(camera_id)
+                motion_marker = _unifi_camera_motion_marker(row)
+                active_motion_entities.add(motion_entity)
+                prev_motion = motion_markers.get(motion_entity)
+                if motion_marker and prev_motion is not None and motion_marker != prev_motion:
+                    await _handle_trigger_state_change(
+                        provider="unifi_protect",
+                        entity_id=motion_entity,
+                        new_state={"state": "on", "attributes": attrs},
+                        old_state={"state": "off", "attributes": attrs},
+                    )
+                    _runtime_set(redis_client, last_ws_event_ts=now_ts)
+                if motion_marker:
+                    motion_markers[motion_entity] = motion_marker
+
+                if _unifi_camera_is_doorbell(row):
+                    doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
+                    doorbell_marker = _unifi_camera_doorbell_marker(row)
+                    active_doorbell_entities.add(doorbell_entity)
+                    prev_doorbell = doorbell_markers.get(doorbell_entity)
+                    if doorbell_marker and prev_doorbell is not None and doorbell_marker != prev_doorbell:
+                        await _handle_trigger_state_change(
+                            provider="unifi_protect",
+                            entity_id=doorbell_entity,
+                            new_state={"state": "on", "attributes": attrs},
+                            old_state={"state": "off", "attributes": attrs},
+                        )
+                        _runtime_set(redis_client, last_ws_event_ts=now_ts)
+                    if doorbell_marker:
+                        doorbell_markers[doorbell_entity] = doorbell_marker
+
+            for row in sensors:
+                if not isinstance(row, dict):
+                    continue
+                sensor_id = _text(row.get("id")).lower()
+                if not sensor_id:
+                    continue
+                sensor_name = _text(row.get("name")) or sensor_id
+                sensor_entity = _unifi_sensor_entity(sensor_id)
+                active_sensor_entities.add(sensor_entity)
+                state = "on" if bool(row.get("isOpened")) else "off"
+                previous_state = sensor_states.get(sensor_entity)
+                attrs = {"friendly_name": sensor_name}
+                if previous_state is not None and previous_state != state:
+                    await _handle_trigger_state_change(
+                        provider="unifi_protect",
+                        entity_id=sensor_entity,
+                        new_state={"state": state, "attributes": attrs},
+                        old_state={"state": previous_state, "attributes": attrs},
+                    )
+                    _runtime_set(redis_client, last_ws_event_ts=now_ts)
+                sensor_states[sensor_entity] = state
+
+            motion_markers = {k: v for k, v in motion_markers.items() if k in active_motion_entities}
+            doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
+            sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
+        except Exception as exc:
+            _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
+            logger.warning("[awareness] unifi poll loop error: %s", exc)
+        await asyncio.sleep(float(poll_seconds))
+
+
 async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
+        if _event_provider(redis_client) != "homeassistant":
+            _runtime_set(redis_client, ws_connected=False)
+            await asyncio.sleep(float(reconnect_seconds))
+            continue
         try:
             ha = _ha_config()
             ws_url = _ha_ws_url(ha["base"])
@@ -3970,6 +4438,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         redis_client,
         started_at=time.time(),
         ws_connected=False,
+        unifi_connected=False,
         queue_depth=_queue_depth(redis_client),
         last_error="",
     )
@@ -3978,6 +4447,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
         asyncio.create_task(_awareness_ws_loop(stop_event)),
+        asyncio.create_task(_awareness_unifi_poll_loop(stop_event)),
         asyncio.create_task(_awareness_retention_loop(stop_event)),
     ]
     try:
