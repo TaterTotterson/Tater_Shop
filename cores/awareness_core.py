@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.26"
+__version__ = "1.1.30"
 
 load_dotenv()
 
@@ -563,7 +563,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
                 "trigger_attribute": _text(raw.get("trigger_attribute")),
                 "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
-                "query": _text(raw.get("query") or "brief camera alert"),
+                "query": _text(raw.get("query")),
                 "cooldown_seconds": _as_int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
                 "notification_cooldown_seconds": _as_int(
                     raw.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
@@ -1499,10 +1499,14 @@ def _vision_describe_sync(
     else:
         prompt = (
             "Write one short sentence describing this camera snapshot. "
-            "Mention visible people and packages. "
-            "If nothing notable is happening output exactly: 'Nothing notable.' "
-            f"User hint: {query or 'brief camera alert'}"
+            "Keep it general and focus on the most important visible activity or subjects "
+            "(people, animals, vehicles, packages, or notable movement). "
+            "If this appears to be a delivery, name the company when clearly visible "
+            "(UPS, FedEx, USPS, Amazon); otherwise say 'delivery driver'. "
+            "Mention counts only when clear and avoid guessing uncertain details."
         )
+        if _text(query):
+            prompt += f" Additional context: {_text(query)}"
         if ignore_vehicles:
             prompt += " Do not mention vehicles."
     payload = {
@@ -1748,15 +1752,6 @@ def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
     return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
 
 
-def _is_nothing_notable_summary(value: Any) -> bool:
-    token = _text(value).lower()
-    if not token:
-        return False
-    token = re.sub(r"\s+", " ", token)
-    token = token.rstrip(".!? ")
-    return token == "nothing notable"
-
-
 async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
     del llm_client
     camera = _text(rule.get("camera_entity"))
@@ -1787,7 +1782,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
             api_base=_text(vision.get("api_base")),
             model=_text(vision.get("model")),
             api_key=_text(vision.get("api_key")),
-            query=_text(rule.get("query") or "brief camera alert"),
+            query=_text(rule.get("query")),
             ignore_vehicles=_bool(rule.get("ignore_vehicles"), False),
             mode="camera",
         )
@@ -1796,40 +1791,36 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         summary = "Motion event detected, but camera analysis was unavailable."
         used_fallback = True
     summary = _compact(summary) or "Motion event detected."
-    nothing_notable = _is_nothing_notable_summary(summary)
-    if not nothing_notable:
-        snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
-        event_payload = {
-            "source": _slug(area),
-            "title": f"{area.title()} motion",
-            "type": "camera_motion",
-            "message": summary,
-            "entity_id": camera,
-            "ha_time": _now_iso(),
-            "level": "info",
-            "data": {
-                "area": area,
-                "reason": reason,
-                "trigger_entity": _text(event.get("entity_id")),
-                "provider": provider,
-            },
-        }
-        if snapshot_store.get("stored"):
-            event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-            event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-            event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-            event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-        elif snapshot_store.get("reason"):
-            event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-            event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-        _append_event(redis_client, source=area, payload=event_payload)
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+    event_payload = {
+        "source": _slug(area),
+        "title": f"{area.title()} motion",
+        "type": "camera_motion",
+        "message": summary,
+        "entity_id": camera,
+        "ha_time": _now_iso(),
+        "level": "info",
+        "data": {
+            "area": area,
+            "reason": reason,
+            "trigger_entity": _text(event.get("entity_id")),
+            "provider": provider,
+        },
+    }
+    if snapshot_store.get("stored"):
+        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    _append_event(redis_client, source=area, payload=event_payload)
     _mark_cooldown(_camera_cooldown_key(camera))
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
     api_notification = _bool(rule.get("api_notification"), False)
     notify_requested = bool(device_services or api_notification)
-    if nothing_notable:
-        notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "nothing_notable"}
-    elif (
+    if (
         notify_requested
         and notification_cooldown_seconds > 0
         and _within_cooldown(_camera_notify_cooldown_key(camera), notification_cooldown_seconds)
