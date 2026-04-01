@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.25"
+__version__ = "1.1.26"
 
 load_dotenv()
 
@@ -5082,7 +5082,7 @@ async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
         active_provider = _event_provider(redis_client)
-        if active_provider != "homeassistant":
+        if active_provider not in {"homeassistant", "unifi_protect"}:
             _runtime_set(redis_client, ws_connected=False, last_error="")
             await asyncio.sleep(float(reconnect_seconds))
             continue
