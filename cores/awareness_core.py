@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 load_dotenv()
 
@@ -1093,6 +1093,12 @@ def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> s
             continue
         if key_lower.endswith("types"):
             continue
+        # HA's UniFi integration exposes fields like last_person_detect_event,
+        # last_vehicle_detect_event, etc. Use the key itself as a type hint.
+        if _unifi_matches_smart_type_text(key_text, token):
+            direct_marker = _unifi_marker_token(value)
+            if direct_marker:
+                return f"{key_text}:{direct_marker}"
         marker = _unifi_smart_marker_from_container(value, token)
         if marker:
             return f"{key_text}:{marker}"
