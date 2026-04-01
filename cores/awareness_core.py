@@ -6,12 +6,14 @@ import re
 import threading
 import time
 import uuid
+import warnings
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import aiohttp
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
 
 from helpers import get_llm_client_from_env, redis_client
@@ -749,16 +751,20 @@ def _unifi_request(
     req_headers = _unifi_headers(conf["api_key"], json_content=not stream)
     if headers:
         req_headers.update(headers)
-    resp = requests.request(
-        method,
-        url,
-        headers=req_headers,
-        params=params,
-        json=json_body,
-        timeout=20,
-        verify=False,
-        stream=stream,
-    )
+    # UniFi Protect currently uses unverified TLS in this integration path.
+    # Suppress urllib3's repetitive warning spam for this known request flow.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", InsecureRequestWarning)
+        resp = requests.request(
+            method,
+            url,
+            headers=req_headers,
+            params=params,
+            json=json_body,
+            timeout=20,
+            verify=False,
+            stream=stream,
+        )
     if resp.status_code >= 400:
         raise RuntimeError(f"UniFi Protect HTTP {resp.status_code}: {resp.text[:200]}")
     if stream:
