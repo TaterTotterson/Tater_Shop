@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.19"
+__version__ = "1.1.20"
 
 load_dotenv()
 
@@ -170,6 +170,8 @@ _UNIFI_WS_PATH_CANDIDATES = (
     "/proxy/protect/integration/ws/updates",
     "/proxy/protect/ws",
 )
+_UNIFI_TRIGGER_CYCLE_MIN_SECONDS = 2.0
+_UNIFI_RATE_LIMIT_BACKOFF_SECONDS = 5.0
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
@@ -816,6 +818,11 @@ def _unifi_protect_configured() -> bool:
 def _is_missing_integration_config_error(exc: Exception) -> bool:
     text = _text(exc).lower()
     return "token is not set" in text or "api key is not set" in text
+
+
+def _is_unifi_rate_limited_error(exc: Exception) -> bool:
+    text = _text(exc).lower()
+    return "http 429" in text or "too many requests" in text
 
 
 def _unifi_headers(api_key: str, *, json_content: bool = True) -> Dict[str, str]:
@@ -5016,6 +5023,7 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
     sensor_states: Dict[str, str] = {}
     last_warn_text = ""
     last_warn_ts = 0.0
+    last_good_ws_path = ""
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
         if _event_provider(redis_client) != "unifi_protect" or not _unifi_ws_enabled(redis_client):
@@ -5032,9 +5040,10 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
             ws_paths = _unifi_ws_paths(redis_client)
             if not ws_paths:
                 raise RuntimeError("No UniFi websocket endpoint path configured.")
+            if last_good_ws_path and last_good_ws_path in ws_paths:
+                ws_paths = [last_good_ws_path] + [item for item in ws_paths if item != last_good_ws_path]
 
             timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=None)
-            connected = False
             last_error = ""
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for ws_path in ws_paths:
@@ -5054,25 +5063,43 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                                 unifi_ws_path=ws_path,
                                 last_error="",
                             )
+                            last_good_ws_path = ws_path
                             logger.info("[awareness] UniFi websocket connected: %s", ws_url)
-                            # Prime marker caches after connect without waiting for a first WS packet.
-                            try:
-                                await _awareness_unifi_trigger_cycle(
-                                    motion_markers,
-                                    doorbell_markers,
-                                    smart_camera_markers,
-                                    sensor_states,
-                                )
-                            except Exception as cycle_exc:
-                                _runtime_set(redis_client, unifi_connected=False, last_error=str(cycle_exc))
-                                if not _is_missing_integration_config_error(cycle_exc):
-                                    now_ts = time.time()
-                                    err_text = _text(cycle_exc)
-                                    if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
-                                        logger.warning("[awareness] unifi trigger cycle error: %s", cycle_exc)
-                                        last_warn_text = err_text
-                                        last_warn_ts = now_ts
+                            cycle_backoff_until = 0.0
                             last_cycle_ts = 0.0
+
+                            async def _run_trigger_cycle(now_ts: float) -> None:
+                                nonlocal cycle_backoff_until
+                                nonlocal last_cycle_ts
+                                nonlocal last_warn_text
+                                nonlocal last_warn_ts
+                                if now_ts < cycle_backoff_until:
+                                    return
+                                if last_cycle_ts > 0.0 and (now_ts - last_cycle_ts) < _UNIFI_TRIGGER_CYCLE_MIN_SECONDS:
+                                    return
+                                try:
+                                    await _awareness_unifi_trigger_cycle(
+                                        motion_markers,
+                                        doorbell_markers,
+                                        smart_camera_markers,
+                                        sensor_states,
+                                    )
+                                    last_cycle_ts = time.time()
+                                    _runtime_set(redis_client, last_error="")
+                                except Exception as cycle_exc:
+                                    _runtime_set(redis_client, unifi_connected=False, last_error=str(cycle_exc))
+                                    if _is_unifi_rate_limited_error(cycle_exc):
+                                        cycle_backoff_until = time.time() + _UNIFI_RATE_LIMIT_BACKOFF_SECONDS
+                                    if not _is_missing_integration_config_error(cycle_exc):
+                                        warn_text = _text(cycle_exc)
+                                        warn_ts = time.time()
+                                        if warn_text != last_warn_text or (warn_ts - last_warn_ts) >= 60:
+                                            logger.warning("[awareness] unifi trigger cycle error: %s", cycle_exc)
+                                            last_warn_text = warn_text
+                                            last_warn_ts = warn_ts
+
+                            # Prime marker caches after connect without waiting for a first WS packet.
+                            await _run_trigger_cycle(time.time())
                             while not (stop_event and stop_event.is_set()):
                                 try:
                                     msg = await ws.receive(timeout=1.0)
@@ -5080,24 +5107,8 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                                     continue
                                 if msg.type in {aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY}:
                                     now_ts = time.time()
-                                    _runtime_set(redis_client, unifi_ws_last_message_ts=now_ts)
-                                    if (now_ts - last_cycle_ts) >= 0.5:
-                                        try:
-                                            await _awareness_unifi_trigger_cycle(
-                                                motion_markers,
-                                                doorbell_markers,
-                                                smart_camera_markers,
-                                                sensor_states,
-                                            )
-                                        except Exception as cycle_exc:
-                                            _runtime_set(redis_client, unifi_connected=False, last_error=str(cycle_exc))
-                                            if not _is_missing_integration_config_error(cycle_exc):
-                                                err_text = _text(cycle_exc)
-                                                if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
-                                                    logger.warning("[awareness] unifi trigger cycle error: %s", cycle_exc)
-                                                    last_warn_text = err_text
-                                                    last_warn_ts = now_ts
-                                        last_cycle_ts = now_ts
+                                    _runtime_set(redis_client, unifi_ws_last_message_ts=now_ts, last_error="")
+                                    await _run_trigger_cycle(now_ts)
                                 elif msg.type in {
                                     aiohttp.WSMsgType.ERROR,
                                     aiohttp.WSMsgType.CLOSED,
@@ -5108,8 +5119,14 @@ async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
                     except Exception as ws_exc:
                         last_error = str(ws_exc)
                         continue
-            if not connected:
-                raise RuntimeError(last_error or "UniFi websocket endpoint unavailable.")
+            if stop_event and stop_event.is_set():
+                break
+            if not last_error:
+                if last_good_ws_path:
+                    last_error = "UniFi websocket disconnected"
+                else:
+                    last_error = "UniFi websocket endpoint unavailable."
+            raise RuntimeError(last_error)
         except Exception as exc:
             _runtime_set(redis_client, unifi_ws_connected=False, unifi_connected=False, last_error=str(exc))
             now_ts = time.time()
