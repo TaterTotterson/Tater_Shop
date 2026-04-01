@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.17"
+__version__ = "1.1.19"
 
 load_dotenv()
 
@@ -42,12 +42,6 @@ CORE_SETTINGS = {
             "options": ["homeassistant", "unifi_protect"],
             "default": "homeassistant",
             "description": "Select which provider powers camera/doorbell/sensor event rules.",
-        },
-        "unifi_poll_seconds": {
-            "label": "UniFi Poll Interval (sec)",
-            "type": "number",
-            "default": 3,
-            "description": "Seconds between UniFi Protect polling checks while UniFi provider is active.",
         },
         "unifi_ws_enabled": {
             "label": "UniFi Websocket Updates",
@@ -798,6 +792,11 @@ def _ha_config() -> Dict[str, str]:
     return {"base": base, "token": token}
 
 
+def _ha_configured() -> bool:
+    settings = redis_client.hgetall("homeassistant_settings") or {}
+    return bool(_text(settings.get("HA_TOKEN")))
+
+
 def _unifi_protect_config() -> Dict[str, str]:
     base = _text(redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").rstrip("/")
     api_key = _text(redis_client.get("tater:unifi_protect:api_key"))
@@ -808,6 +807,15 @@ def _unifi_protect_config() -> Dict[str, str]:
     if not base:
         base = "https://10.4.20.127"
     return {"base": base, "api_key": api_key}
+
+
+def _unifi_protect_configured() -> bool:
+    return bool(_text(redis_client.get("tater:unifi_protect:api_key")))
+
+
+def _is_missing_integration_config_error(exc: Exception) -> bool:
+    text = _text(exc).lower()
+    return "token is not set" in text or "api key is not set" in text
 
 
 def _unifi_headers(api_key: str, *, json_content: bool = True) -> Dict[str, str]:
@@ -4865,176 +4873,157 @@ def _unifi_active_rule_smart_types_by_camera() -> Dict[str, set[str]]:
     return out
 
 
-async def _awareness_unifi_poll_loop(
-    stop_event: Optional[object],
-    wake_event: Optional[asyncio.Event] = None,
+async def _awareness_unifi_trigger_cycle(
+    motion_markers: Dict[str, str],
+    doorbell_markers: Dict[str, str],
+    smart_camera_markers: Dict[str, str],
+    sensor_states: Dict[str, str],
 ) -> None:
+    cameras = _unifi_list_cameras()
+    sensors = _unifi_list_sensors()
+    now_ts = time.time()
+    _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts)
+    required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
+
+    active_motion_entities: set[str] = set()
+    active_doorbell_entities: set[str] = set()
+    active_smart_cameras: set[str] = set()
+    active_sensor_entities: set[str] = set()
+
+    for row in cameras:
+        if not isinstance(row, dict):
+            continue
+        camera_id = _text(row.get("id")).lower()
+        if not camera_id:
+            continue
+        camera_name = _text(row.get("name")) or camera_id
+        attrs = {"friendly_name": camera_name}
+
+        motion_entity = _unifi_camera_motion_trigger(camera_id)
+        motion_marker = _unifi_camera_motion_marker(row)
+        active_motion_entities.add(motion_entity)
+        prev_motion = motion_markers.get(motion_entity)
+        if motion_marker and prev_motion is not None and motion_marker != prev_motion:
+            logger.info(
+                "[awareness] unifi motion marker changed for %s (%s)",
+                camera_name,
+                motion_entity,
+            )
+            await _handle_trigger_state_change(
+                provider="unifi_protect",
+                entity_id=motion_entity,
+                new_state={"state": "on", "attributes": attrs},
+                old_state={"state": "off", "attributes": attrs},
+            )
+            _runtime_set(redis_client, last_ws_event_ts=now_ts)
+        if motion_marker:
+            motion_markers[motion_entity] = motion_marker
+        else:
+            motion_markers.setdefault(motion_entity, "")
+
+        required_smart_types = set(required_smart_types_by_camera.get(camera_id) or set())
+        discovered_smart_types = set(_unifi_camera_smart_detect_types(row))
+        all_smart_types = set(discovered_smart_types)
+        all_smart_types.update(required_smart_types)
+        active_smart_cameras.add(camera_id)
+
+        any_smart_marker = _unifi_camera_any_smart_marker(row)
+        prev_any_smart = smart_camera_markers.get(camera_id)
+        if any_smart_marker and prev_any_smart is not None and any_smart_marker != prev_any_smart:
+            trigger_types = set(required_smart_types)
+            if trigger_types:
+                recent_types = _unifi_camera_recent_smart_types(row)
+                overlap = trigger_types.intersection(recent_types)
+                if overlap:
+                    trigger_types = overlap
+            if not trigger_types:
+                trigger_types = set(all_smart_types)
+            if not trigger_types:
+                trigger_types = set(_UNIFI_SMART_TYPE_FALLBACK)
+            for smart_type in sorted(trigger_types):
+                smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
+                smart_attrs = {
+                    "friendly_name": f"{camera_name} {_unifi_smart_type_label(smart_type)}",
+                    "camera_name": camera_name,
+                    "detection_type": smart_type,
+                }
+                await _handle_trigger_state_change(
+                    provider="unifi_protect",
+                    entity_id=smart_entity,
+                    new_state={"state": "on", "attributes": smart_attrs},
+                    old_state={"state": "off", "attributes": smart_attrs},
+                )
+            _runtime_set(redis_client, last_ws_event_ts=now_ts)
+        if any_smart_marker:
+            smart_camera_markers[camera_id] = any_smart_marker
+
+        if _unifi_camera_is_doorbell(row):
+            doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
+            doorbell_marker = _unifi_camera_doorbell_marker(row)
+            active_doorbell_entities.add(doorbell_entity)
+            prev_doorbell = doorbell_markers.get(doorbell_entity)
+            if doorbell_marker and prev_doorbell is not None and doorbell_marker != prev_doorbell:
+                await _handle_trigger_state_change(
+                    provider="unifi_protect",
+                    entity_id=doorbell_entity,
+                    new_state={"state": "on", "attributes": attrs},
+                    old_state={"state": "off", "attributes": attrs},
+                )
+                _runtime_set(redis_client, last_ws_event_ts=now_ts)
+            if doorbell_marker:
+                doorbell_markers[doorbell_entity] = doorbell_marker
+
+    for row in sensors:
+        if not isinstance(row, dict):
+            continue
+        sensor_id = _text(row.get("id")).lower()
+        if not sensor_id:
+            continue
+        sensor_name = _text(row.get("name")) or sensor_id
+        sensor_entity = _unifi_sensor_entity(sensor_id)
+        active_sensor_entities.add(sensor_entity)
+        state = "on" if bool(row.get("isOpened")) else "off"
+        previous_state = sensor_states.get(sensor_entity)
+        attrs = {"friendly_name": sensor_name}
+        if previous_state is not None and previous_state != state:
+            await _handle_trigger_state_change(
+                provider="unifi_protect",
+                entity_id=sensor_entity,
+                new_state={"state": state, "attributes": attrs},
+                old_state={"state": previous_state, "attributes": attrs},
+            )
+            _runtime_set(redis_client, last_ws_event_ts=now_ts)
+        sensor_states[sensor_entity] = state
+
+    filtered_motion_markers = {k: v for k, v in motion_markers.items() if k in active_motion_entities}
+    filtered_doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
+    filtered_smart_camera_markers = {k: v for k, v in smart_camera_markers.items() if k in active_smart_cameras}
+    filtered_sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
+    motion_markers.clear()
+    motion_markers.update(filtered_motion_markers)
+    doorbell_markers.clear()
+    doorbell_markers.update(filtered_doorbell_markers)
+    smart_camera_markers.clear()
+    smart_camera_markers.update(filtered_smart_camera_markers)
+    sensor_states.clear()
+    sensor_states.update(filtered_sensor_states)
+
+
+async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
     smart_camera_markers: Dict[str, str] = {}
     sensor_states: Dict[str, str] = {}
-    while not (stop_event and stop_event.is_set()):
-        poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
-        if _event_provider(redis_client) != "unifi_protect":
-            _runtime_set(redis_client, unifi_connected=False)
-            if wake_event is not None:
-                wake_event.clear()
-            await asyncio.sleep(float(poll_seconds))
-            continue
-        ws_driven = wake_event is not None and _unifi_ws_enabled(redis_client)
-        if ws_driven:
-            if not wake_event.is_set():
-                try:
-                    await asyncio.wait_for(wake_event.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-                continue
-            wake_event.clear()
-        try:
-            cameras = _unifi_list_cameras()
-            sensors = _unifi_list_sensors()
-            now_ts = time.time()
-            _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts)
-            required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
-
-            active_motion_entities: set[str] = set()
-            active_doorbell_entities: set[str] = set()
-            active_smart_entities: set[str] = set()
-            active_smart_cameras: set[str] = set()
-            active_sensor_entities: set[str] = set()
-
-            for row in cameras:
-                if not isinstance(row, dict):
-                    continue
-                camera_id = _text(row.get("id")).lower()
-                if not camera_id:
-                    continue
-                camera_name = _text(row.get("name")) or camera_id
-                attrs = {"friendly_name": camera_name}
-
-                motion_entity = _unifi_camera_motion_trigger(camera_id)
-                motion_marker = _unifi_camera_motion_marker(row)
-                active_motion_entities.add(motion_entity)
-                prev_motion = motion_markers.get(motion_entity)
-                if motion_marker and prev_motion is not None and motion_marker != prev_motion:
-                    logger.info(
-                        "[awareness] unifi motion marker changed for %s (%s)",
-                        camera_name,
-                        motion_entity,
-                    )
-                    await _handle_trigger_state_change(
-                        provider="unifi_protect",
-                        entity_id=motion_entity,
-                        new_state={"state": "on", "attributes": attrs},
-                        old_state={"state": "off", "attributes": attrs},
-                    )
-                    _runtime_set(redis_client, last_ws_event_ts=now_ts)
-                if motion_marker:
-                    motion_markers[motion_entity] = motion_marker
-                else:
-                    motion_markers.setdefault(motion_entity, "")
-
-                required_smart_types = set(required_smart_types_by_camera.get(camera_id) or set())
-                discovered_smart_types = set(_unifi_camera_smart_detect_types(row))
-                all_smart_types = set(discovered_smart_types)
-                all_smart_types.update(required_smart_types)
-                for smart_type in sorted(all_smart_types):
-                    active_smart_entities.add(_unifi_camera_smart_trigger(camera_id, smart_type))
-                active_smart_cameras.add(camera_id)
-
-                any_smart_marker = _unifi_camera_any_smart_marker(row)
-                prev_any_smart = smart_camera_markers.get(camera_id)
-                if any_smart_marker and prev_any_smart is not None and any_smart_marker != prev_any_smart:
-                    trigger_types = set(required_smart_types)
-                    if trigger_types:
-                        recent_types = _unifi_camera_recent_smart_types(row)
-                        overlap = trigger_types.intersection(recent_types)
-                        if overlap:
-                            trigger_types = overlap
-                    if not trigger_types:
-                        trigger_types = set(all_smart_types)
-                    if not trigger_types:
-                        trigger_types = set(_UNIFI_SMART_TYPE_FALLBACK)
-                    for smart_type in sorted(trigger_types):
-                        smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
-                        active_smart_entities.add(smart_entity)
-                        smart_attrs = {
-                            "friendly_name": f"{camera_name} {_unifi_smart_type_label(smart_type)}",
-                            "camera_name": camera_name,
-                            "detection_type": smart_type,
-                        }
-                        await _handle_trigger_state_change(
-                            provider="unifi_protect",
-                            entity_id=smart_entity,
-                            new_state={"state": "on", "attributes": smart_attrs},
-                            old_state={"state": "off", "attributes": smart_attrs},
-                        )
-                    _runtime_set(redis_client, last_ws_event_ts=now_ts)
-                if any_smart_marker:
-                    smart_camera_markers[camera_id] = any_smart_marker
-
-                if _unifi_camera_is_doorbell(row):
-                    doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
-                    doorbell_marker = _unifi_camera_doorbell_marker(row)
-                    active_doorbell_entities.add(doorbell_entity)
-                    prev_doorbell = doorbell_markers.get(doorbell_entity)
-                    if doorbell_marker and prev_doorbell is not None and doorbell_marker != prev_doorbell:
-                        await _handle_trigger_state_change(
-                            provider="unifi_protect",
-                            entity_id=doorbell_entity,
-                            new_state={"state": "on", "attributes": attrs},
-                            old_state={"state": "off", "attributes": attrs},
-                        )
-                        _runtime_set(redis_client, last_ws_event_ts=now_ts)
-                    if doorbell_marker:
-                        doorbell_markers[doorbell_entity] = doorbell_marker
-
-            for row in sensors:
-                if not isinstance(row, dict):
-                    continue
-                sensor_id = _text(row.get("id")).lower()
-                if not sensor_id:
-                    continue
-                sensor_name = _text(row.get("name")) or sensor_id
-                sensor_entity = _unifi_sensor_entity(sensor_id)
-                active_sensor_entities.add(sensor_entity)
-                state = "on" if bool(row.get("isOpened")) else "off"
-                previous_state = sensor_states.get(sensor_entity)
-                attrs = {"friendly_name": sensor_name}
-                if previous_state is not None and previous_state != state:
-                    await _handle_trigger_state_change(
-                        provider="unifi_protect",
-                        entity_id=sensor_entity,
-                        new_state={"state": state, "attributes": attrs},
-                        old_state={"state": previous_state, "attributes": attrs},
-                    )
-                    _runtime_set(redis_client, last_ws_event_ts=now_ts)
-                sensor_states[sensor_entity] = state
-
-            motion_markers = {k: v for k, v in motion_markers.items() if k in active_motion_entities}
-            doorbell_markers = {k: v for k, v in doorbell_markers.items() if k in active_doorbell_entities}
-            smart_camera_markers = {k: v for k, v in smart_camera_markers.items() if k in active_smart_cameras}
-            sensor_states = {k: v for k, v in sensor_states.items() if k in active_sensor_entities}
-        except Exception as exc:
-            _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
-            logger.warning("[awareness] unifi poll loop error: %s", exc)
-        if not ws_driven:
-            await asyncio.sleep(float(poll_seconds))
-            continue
-
-
-async def _awareness_unifi_ws_loop(
-    stop_event: Optional[object],
-    wake_event: Optional[asyncio.Event] = None,
-) -> None:
     last_warn_text = ""
     last_warn_ts = 0.0
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
         if _event_provider(redis_client) != "unifi_protect" or not _unifi_ws_enabled(redis_client):
-            _runtime_set(redis_client, unifi_ws_connected=False)
-            if wake_event is not None:
-                wake_event.clear()
+            _runtime_set(redis_client, unifi_ws_connected=False, unifi_connected=False, last_error="")
+            await asyncio.sleep(float(reconnect_seconds))
+            continue
+        if not _unifi_protect_configured():
+            _runtime_set(redis_client, unifi_ws_connected=False, unifi_connected=False, last_error="")
             await asyncio.sleep(float(reconnect_seconds))
             continue
         try:
@@ -5063,11 +5052,27 @@ async def _awareness_unifi_ws_loop(
                                 unifi_ws_connected=True,
                                 unifi_ws_url=ws_url,
                                 unifi_ws_path=ws_path,
+                                last_error="",
                             )
                             logger.info("[awareness] UniFi websocket connected: %s", ws_url)
-                            if wake_event is not None:
-                                wake_event.set()
-                            last_wake_ts = 0.0
+                            # Prime marker caches after connect without waiting for a first WS packet.
+                            try:
+                                await _awareness_unifi_trigger_cycle(
+                                    motion_markers,
+                                    doorbell_markers,
+                                    smart_camera_markers,
+                                    sensor_states,
+                                )
+                            except Exception as cycle_exc:
+                                _runtime_set(redis_client, unifi_connected=False, last_error=str(cycle_exc))
+                                if not _is_missing_integration_config_error(cycle_exc):
+                                    now_ts = time.time()
+                                    err_text = _text(cycle_exc)
+                                    if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
+                                        logger.warning("[awareness] unifi trigger cycle error: %s", cycle_exc)
+                                        last_warn_text = err_text
+                                        last_warn_ts = now_ts
+                            last_cycle_ts = 0.0
                             while not (stop_event and stop_event.is_set()):
                                 try:
                                     msg = await ws.receive(timeout=1.0)
@@ -5076,9 +5081,23 @@ async def _awareness_unifi_ws_loop(
                                 if msg.type in {aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY}:
                                     now_ts = time.time()
                                     _runtime_set(redis_client, unifi_ws_last_message_ts=now_ts)
-                                    if wake_event is not None and (now_ts - last_wake_ts) >= 1.0:
-                                        wake_event.set()
-                                        last_wake_ts = now_ts
+                                    if (now_ts - last_cycle_ts) >= 0.5:
+                                        try:
+                                            await _awareness_unifi_trigger_cycle(
+                                                motion_markers,
+                                                doorbell_markers,
+                                                smart_camera_markers,
+                                                sensor_states,
+                                            )
+                                        except Exception as cycle_exc:
+                                            _runtime_set(redis_client, unifi_connected=False, last_error=str(cycle_exc))
+                                            if not _is_missing_integration_config_error(cycle_exc):
+                                                err_text = _text(cycle_exc)
+                                                if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
+                                                    logger.warning("[awareness] unifi trigger cycle error: %s", cycle_exc)
+                                                    last_warn_text = err_text
+                                                    last_warn_ts = now_ts
+                                        last_cycle_ts = now_ts
                                 elif msg.type in {
                                     aiohttp.WSMsgType.ERROR,
                                     aiohttp.WSMsgType.CLOSED,
@@ -5092,23 +5111,30 @@ async def _awareness_unifi_ws_loop(
             if not connected:
                 raise RuntimeError(last_error or "UniFi websocket endpoint unavailable.")
         except Exception as exc:
-            _runtime_set(redis_client, unifi_ws_connected=False, last_error=str(exc))
+            _runtime_set(redis_client, unifi_ws_connected=False, unifi_connected=False, last_error=str(exc))
             now_ts = time.time()
             err_text = _text(exc)
+            if _is_missing_integration_config_error(exc):
+                await asyncio.sleep(float(reconnect_seconds))
+                continue
             if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
                 logger.warning("[awareness] unifi websocket loop error: %s", exc)
                 last_warn_text = err_text
                 last_warn_ts = now_ts
             await asyncio.sleep(float(reconnect_seconds))
-    _runtime_set(redis_client, unifi_ws_connected=False)
+    _runtime_set(redis_client, unifi_ws_connected=False, unifi_connected=False)
 
 
 async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
         active_provider = _event_provider(redis_client)
-        if active_provider not in {"homeassistant", "unifi_protect"}:
-            _runtime_set(redis_client, ws_connected=False)
+        if active_provider != "homeassistant":
+            _runtime_set(redis_client, ws_connected=False, last_error="")
+            await asyncio.sleep(float(reconnect_seconds))
+            continue
+        if not _ha_configured():
+            _runtime_set(redis_client, ws_connected=False, last_error="")
             await asyncio.sleep(float(reconnect_seconds))
             continue
         try:
@@ -5156,7 +5182,10 @@ async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
                             raise RuntimeError("Home Assistant websocket connection closed")
         except Exception as exc:
             _runtime_set(redis_client, ws_connected=False, last_error=str(exc))
-            logger.warning("[awareness] websocket loop error: %s", exc)
+            if _is_missing_integration_config_error(exc):
+                logger.debug("[awareness] websocket loop waiting for Home Assistant config.")
+            else:
+                logger.warning("[awareness] websocket loop error: %s", exc)
             await asyncio.sleep(float(reconnect_seconds))
     _runtime_set(redis_client, ws_connected=False)
 
@@ -5172,7 +5201,6 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
     rules = _load_rules(redis_client)
     enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
-    unifi_wake_event = asyncio.Event()
     _runtime_set(
         redis_client,
         started_at=time.time(),
@@ -5193,8 +5221,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
         asyncio.create_task(_awareness_ws_loop(stop_event)),
-        asyncio.create_task(_awareness_unifi_poll_loop(stop_event, wake_event=unifi_wake_event)),
-        asyncio.create_task(_awareness_unifi_ws_loop(stop_event, wake_event=unifi_wake_event)),
+        asyncio.create_task(_awareness_unifi_ws_loop(stop_event)),
         asyncio.create_task(_awareness_retention_loop(stop_event)),
     ]
     try:

@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.34"
+__version__ = "1.0.35"
 
 load_dotenv()
 
@@ -56,6 +56,14 @@ class _StubObject:
             setattr(self, key, value)
 
 
+class _StubTypingContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _StubChannel:
     def __init__(self, channel_id: str, name: str | None = None):
         self.id = int(channel_id) if str(channel_id).isdigit() else 0
@@ -63,6 +71,12 @@ class _StubChannel:
 
     async def send(self, *args, **kwargs):
         return None
+
+    async def trigger_typing(self):
+        return None
+
+    def typing(self):
+        return _StubTypingContext()
 
 
 class _StubAuthor:
