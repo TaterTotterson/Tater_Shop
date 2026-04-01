@@ -28,7 +28,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.32"
+__version__ = "1.0.33"
 
 load_dotenv()
 
@@ -527,14 +527,14 @@ def _supports_scheduled_tools(plugin_name: str, plugin: ToolVerba, platform: str
 
 
 def _build_scheduler_reminder_prompt(destination_phrase: str, reminder_body: str) -> str:
-    destination = str(destination_phrase or "").strip() or "the destination"
+    del destination_phrase
     body = str(reminder_body or "").strip()
     if body.lower().startswith("to "):
         body = body[3:].strip()
     if not body:
         body = "follow up with the user"
     return (
-        f"Compose one concise reminder message for {destination}. "
+        "Compose one concise reminder message. "
         f"Remind the user to {body}. "
         "Return only the final message text to send."
     )
@@ -2764,12 +2764,7 @@ async def _ai_tasks_kernel_schedule(
 
     if reminder_intent:
         reminder_body = str(reminder_text or task_prompt).strip()
-        destination_phrase = _ai_tasks_ui_destination_phrase(
-            dest,
-            resolved_targets or {},
-            redis_obj=redis_obj,
-        )
-        task_prompt = _build_scheduler_reminder_prompt(destination_phrase, reminder_body)
+        task_prompt = _build_scheduler_reminder_prompt("", reminder_body)
 
     title_seed = reminder_text if (reminder_intent and reminder_text) else task_prompt
     title = str(payload.get("title") or "").strip()

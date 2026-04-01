@@ -5,7 +5,7 @@
       "id": "ai_task",
       "name": "AI Task Scheduler Core",
       "module_key": "ai_task_core",
-      "version": "1.0.32",
+      "version": "1.0.33",
       "min_tater_version": "59",
       "description": "AI Task Scheduler Core integration core for Tater.",
       "settings_category": "AI Task Scheduler Core Settings",
@@ -13,21 +13,21 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "23ee7900122250fb603d9c00a6921a6197d53e199f4492d09d48937c163db18f"
+      "sha256": "4379e4c55922b9dc9c19d8fb80f8711b270f6111628c203757979896ef84b9bd"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "1.0.38",
+      "version": "1.1.0",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
-      "required_settings_count": 6,
+      "required_settings_count": 8,
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "5c215a5652f94a476a99f13f2e4683a91e0ba85ed224c6b2899dbdf63a2b7b47"
+      "sha256": "caec62ad227be1db6e1cf01dea17bb9c201f2c5bd4c8fd68bdbadacc50cd0e0c"
     },
     {
       "id": "memory",
