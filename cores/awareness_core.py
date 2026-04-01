@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.0.37"
+__version__ = "1.0.38"
 
 load_dotenv()
 
@@ -1702,6 +1702,39 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             }
         )
     return items
+
+
+def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
+    counts = {
+        "total": 0,
+        "camera": 0,
+        "doorbell": 0,
+        "sensor": 0,
+        "other": 0,
+    }
+    sources = _discover_event_sources(client)
+    if not sources:
+        return {"counts": counts, "source_count": 0, "last_event": "n/a"}
+    events = _load_events_for_sources(
+        client,
+        sources=sources,
+        start=datetime(1970, 1, 1),
+        end=datetime.now() + timedelta(days=1),
+        limit_per_source=0,
+    )
+    for event in events:
+        counts["total"] += 1
+        bucket = _event_type_bucket(event)
+        if bucket in {"camera", "doorbell", "sensor"}:
+            counts[bucket] += 1
+        else:
+            counts["other"] += 1
+    last_event = _event_time_display(events[0].get("ha_time")) if events else "n/a"
+    return {
+        "counts": counts,
+        "source_count": len(sources),
+        "last_event": last_event,
+    }
 
 
 async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
@@ -3450,27 +3483,25 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
 
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
-    rules = _load_rules(client)
-    runtime = _runtime_get(client)
-    camera_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "camera")
-    doorbell_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "doorbell")
-    entry_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "entry_sensor")
-    brief_count = sum(1 for row in rules.values() if _text(row.get("kind")) == "brief")
-    enabled_count = sum(1 for row in rules.values() if _bool(row.get("enabled"), True))
-    ws_status = "Connected" if _bool(runtime.get("ws_connected"), False) else "Disconnected"
+    event_stats = _event_stats_for_ui(client)
+    counts = event_stats.get("counts") if isinstance(event_stats.get("counts"), dict) else {}
+    total_count = _as_int(counts.get("total"), 0, minimum=0)
+    camera_count = _as_int(counts.get("camera"), 0, minimum=0)
+    doorbell_count = _as_int(counts.get("doorbell"), 0, minimum=0)
+    sensor_count = _as_int(counts.get("sensor"), 0, minimum=0)
+    other_count = _as_int(counts.get("other"), 0, minimum=0)
+    source_count = _as_int(event_stats.get("source_count"), 0, minimum=0)
+    last_event = _text(event_stats.get("last_event")) or "n/a"
     return {
-        "summary": "Home Assistant awareness automation with camera, doorbell, and entry sensor triggers plus scheduled briefs.",
+        "summary": "Awareness event feed overview across camera, doorbell, and sensor activity.",
         "stats": [
-            {"label": "Rules", "value": len(rules)},
-            {"label": "Enabled", "value": enabled_count},
-            {"label": "Cameras", "value": camera_count},
-            {"label": "Doorbells", "value": doorbell_count},
-            {"label": "Entry Sensors", "value": entry_count},
-            {"label": "Briefs", "value": brief_count},
-            {"label": "Queue", "value": _queue_depth(client)},
-            {"label": "HA WS", "value": ws_status},
-            {"label": "Last Event", "value": _fmt_ts(runtime.get("last_ws_event_ts"))},
-            {"label": "Last Run", "value": _fmt_ts(runtime.get("last_run_ts"))},
+            {"label": "Total Events", "value": total_count},
+            {"label": "Camera Events", "value": camera_count},
+            {"label": "Doorbell Events", "value": doorbell_count},
+            {"label": "Sensor Events", "value": sensor_count},
+            {"label": "Other Events", "value": other_count},
+            {"label": "Event Sources", "value": source_count},
+            {"label": "Last Event", "value": last_event},
         ],
         "items": [],
         "empty_message": "No awareness rules configured yet.",
