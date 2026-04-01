@@ -30,20 +30,6 @@
       "sha256": "2f3d47c6252ede0d371b48a03ed3becc4601155aaaac0672d519f387cb03f499"
     },
     {
-      "id": "connectivity",
-      "name": "Connectivity Core",
-      "module_key": "connectivity_core",
-      "version": "1.0.1",
-      "min_tater_version": "59",
-      "description": "Connectivity Core integration core for Tater.",
-      "settings_category": "Connectivity Core Settings",
-      "required_settings_count": 11,
-      "autostart_key": "connectivity_core_running",
-      "tags": [],
-      "entry": "cores/connectivity_core.py",
-      "sha256": "74eafb6c359714c55e862ecab1cb03c0f17a04c7c56123ab1706e8da1a357e3d"
-    },
-    {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
