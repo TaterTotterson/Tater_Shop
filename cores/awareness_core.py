@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.12"
+__version__ = "1.1.13"
 
 load_dotenv()
 
@@ -1228,18 +1228,21 @@ def _unifi_camera_id_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -
 
 
 def _unifi_detect_type_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -> str:
+    entity = _text(entity_id).lower()
+    object_id = _entity_object_id(entity)
     attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
     if not isinstance(attrs, dict):
         attrs = {}
+    device_class = _text(attrs.get("device_class")).lower()
     source = " ".join(
         [
-            _text(entity_id).lower(),
+            entity,
             _text(attrs.get("friendly_name")).lower(),
-            _text(attrs.get("device_class")).lower(),
+            device_class,
+            _text(attrs.get("event_type")).lower(),
+            _text(attrs.get("event_types")).lower(),
         ]
     )
-    if "doorbell" in source or "ring" in source:
-        return "doorbell"
     if "person" in source:
         return "person"
     if "animal" in source:
@@ -1250,6 +1253,15 @@ def _unifi_detect_type_from_ha_entity(entity_id: str, state_obj: Dict[str, Any])
         return "package"
     if "motion" in source:
         return "motion"
+    if any(token in source for token in ("ring", "chime", "button", "pressed")):
+        return "doorbell"
+    if "doorbell" in source:
+        if any(token in source for token in ("detect", "smart", "motion", "person", "animal", "vehicle", "package")):
+            return ""
+        if object_id.endswith("_doorbell") or object_id == "doorbell":
+            return "doorbell"
+        if device_class == "doorbell":
+            return "doorbell"
     return ""
 
 
@@ -4819,16 +4831,28 @@ def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
     for key in (
         "lastRingEventId",
         "last_ring_event_id",
+        "lastRingEventIds",
+        "last_ring_event_ids",
         "lastRingEvent",
         "last_ring_event",
         "lastRingAt",
         "last_ring_at",
+        "lastRingTs",
+        "last_ring_ts",
         "lastRing",
         "last_ring",
         "lastDoorbellRing",
         "last_doorbell_ring",
+        "lastDoorbellRingAt",
+        "last_doorbell_ring_at",
+        "lastDoorbellRingEventId",
+        "last_doorbell_ring_event_id",
         "lastDoorbellPress",
         "last_doorbell_press",
+        "lastDoorbellPressAt",
+        "last_doorbell_press_at",
+        "lastDoorbellPressEventId",
+        "last_doorbell_press_event_id",
     ):
         marker = _unifi_marker_token(camera_row.get(key))
         if marker:
@@ -4836,7 +4860,7 @@ def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
     for key, value in camera_row.items():
         key_text = _text(key)
         key_lower = key_text.lower()
-        if "ring" not in key_lower and "doorbell" not in key_lower:
+        if not any(token in key_lower for token in ("ring", "press", "button", "chime")):
             continue
         if any(token in key_lower for token in ("enable", "enabled", "setting", "sensitivity")):
             continue
@@ -4847,8 +4871,8 @@ def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
             return f"{key_text}:{marker}"
     nested_marker = _unifi_nested_keyword_marker(
         camera_row,
-        include_any=("ring", "doorbell"),
-        must_have_any=("event", "last", "time", "at", "ts", "id", "press", "detect"),
+        include_any=("ring", "press", "button", "chime"),
+        must_have_any=("event", "last", "time", "at", "ts", "id", "press", "ring", "button"),
         exclude_any=("enable", "enabled", "setting", "sensitivity"),
     )
     if nested_marker:
