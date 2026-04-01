@@ -34,7 +34,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
     version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
-    description = "Generates music using ComfyUI Audio Ace."
+    description = "Creates original songs and music tracks using ComfyUI Audio Ace."
     verba_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
