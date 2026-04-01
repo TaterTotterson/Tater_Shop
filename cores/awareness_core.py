@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.14"
+__version__ = "1.1.17"
 
 load_dotenv()
 
@@ -48,6 +48,18 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 3,
             "description": "Seconds between UniFi Protect polling checks while UniFi provider is active.",
+        },
+        "unifi_ws_enabled": {
+            "label": "UniFi Websocket Updates",
+            "type": "checkbox",
+            "default": True,
+            "description": "Use UniFi Protect websocket updates to trigger near-real-time refresh checks.",
+        },
+        "unifi_ws_path": {
+            "label": "UniFi WS Path (optional)",
+            "type": "text",
+            "default": "",
+            "description": "Optional websocket path override if your UniFi integration uses a custom endpoint.",
         },
         "events_retention": {
             "label": "Events Retention",
@@ -157,6 +169,12 @@ _UNIFI_HA_CAMERA_SUFFIXES = (
     "_motion",
     "_doorbell",
     "_ring",
+)
+_UNIFI_WS_PATH_CANDIDATES = (
+    "/proxy/protect/integration/v1/ws/updates",
+    "/proxy/protect/ws/updates",
+    "/proxy/protect/integration/ws/updates",
+    "/proxy/protect/ws",
 )
 
 _ENTITY_CACHE_LOCK = threading.Lock()
@@ -269,6 +287,26 @@ def _normalize_event_provider(value: Any) -> str:
 
 def _event_provider(client: Any = None) -> str:
     return _normalize_event_provider(_settings(client).get("event_provider") or "homeassistant")
+
+
+def _unifi_ws_enabled(client: Any = None) -> bool:
+    return _bool(_settings(client).get("unifi_ws_enabled"), True)
+
+
+def _unifi_ws_paths(client: Any = None) -> List[str]:
+    custom = _text(_settings(client).get("unifi_ws_path"))
+    out: List[str] = []
+    if custom:
+        path = custom if custom.startswith("/") else f"/{custom}"
+        out.append(path)
+    for candidate in _UNIFI_WS_PATH_CANDIDATES:
+        token = _text(candidate)
+        if not token:
+            continue
+        token = token if token.startswith("/") else f"/{token}"
+        if token not in out:
+            out.append(token)
+    return out
 
 
 def _rule_provider(rule: Dict[str, Any], *, fallback: str = "homeassistant") -> str:
@@ -939,64 +977,6 @@ def _unifi_smart_type_values(raw: Any) -> List[str]:
     return []
 
 
-def _unifi_event_matches_smart_type(event_obj: Dict[str, Any], smart_type: str) -> bool:
-    keys = (
-        "type",
-        "types",
-        "smartDetectType",
-        "smartDetectTypes",
-        "detectionType",
-        "detectionTypes",
-        "eventType",
-        "eventTypes",
-        "objectType",
-        "objectTypes",
-        "class",
-        "classes",
-        "label",
-        "labels",
-    )
-    for key in keys:
-        raw_value = event_obj.get(key)
-        if isinstance(raw_value, (list, tuple, set)):
-            if any(_unifi_matches_smart_type_text(item, smart_type) for item in raw_value):
-                return True
-            continue
-        if _unifi_matches_smart_type_text(raw_value, smart_type):
-            return True
-    return False
-
-
-def _unifi_smart_marker_from_container(raw: Any, smart_type: str, *, depth: int = 0) -> str:
-    if depth > 6 or raw is None:
-        return ""
-    token = _unifi_normalize_smart_type(smart_type)
-    if not token:
-        return ""
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            if _unifi_matches_smart_type_text(key, token):
-                marker = _unifi_marker_token(value)
-                if marker:
-                    return f"{_text(key)}:{marker}"
-        if _unifi_event_matches_smart_type(raw, token):
-            marker = _unifi_marker_token(raw)
-            if marker:
-                return marker
-        for value in raw.values():
-            if isinstance(value, (dict, list)):
-                marker = _unifi_smart_marker_from_container(value, token, depth=depth + 1)
-                if marker:
-                    return marker
-        return ""
-    if isinstance(raw, list):
-        for item in raw[:12]:
-            marker = _unifi_smart_marker_from_container(item, token, depth=depth + 1)
-            if marker:
-                return marker
-    return ""
-
-
 def _unifi_camera_recent_smart_types(camera_row: Dict[str, Any]) -> set[str]:
     out: set[str] = set()
     for key in (
@@ -1135,41 +1115,6 @@ def _unifi_camera_smart_detect_types(camera_row: Dict[str, Any]) -> List[str]:
 def _unifi_camera_smart_trigger(camera_id: str, smart_type: str) -> str:
     token = _unifi_normalize_smart_type(smart_type) or "smart_detect"
     return f"binary_sensor.unifi_{_text(camera_id).lower()}_smart_{token}"
-
-
-def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> str:
-    token = _unifi_normalize_smart_type(smart_type)
-    if not token:
-        return ""
-    for key in ("lastSmartDetects", "lastSmartDetectEvents", "lastSmartDetectEventIds", "smartDetects", "smartDetectEvents"):
-        marker = _unifi_smart_marker_from_container(camera_row.get(key), token)
-        if marker:
-            return f"{key}:{marker}"
-    for key, value in camera_row.items():
-        key_text = _text(key)
-        key_lower = key_text.lower()
-        if "smart" not in key_lower and "detect" not in key_lower:
-            continue
-        if key_lower.endswith("types"):
-            continue
-        # HA's UniFi integration exposes fields like last_person_detect_event,
-        # last_vehicle_detect_event, etc. Use the key itself as a type hint.
-        if _unifi_matches_smart_type_text(key_text, token):
-            direct_marker = _unifi_marker_token(value)
-            if direct_marker:
-                return f"{key_text}:{direct_marker}"
-        marker = _unifi_smart_marker_from_container(value, token)
-        if marker:
-            return f"{key_text}:{marker}"
-    recent_types = _unifi_camera_recent_smart_types(camera_row)
-    if token in recent_types:
-        generic_marker = _unifi_camera_any_smart_marker(camera_row)
-        if generic_marker:
-            return f"recent:{token}:{generic_marker}"
-    nested_marker = _unifi_smart_marker_from_container(camera_row, token)
-    if nested_marker:
-        return f"nested:{nested_marker}"
-    return ""
 
 
 def _unifi_camera_name_index() -> Dict[str, str]:
@@ -4920,7 +4865,10 @@ def _unifi_active_rule_smart_types_by_camera() -> Dict[str, set[str]]:
     return out
 
 
-async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
+async def _awareness_unifi_poll_loop(
+    stop_event: Optional[object],
+    wake_event: Optional[asyncio.Event] = None,
+) -> None:
     motion_markers: Dict[str, str] = {}
     doorbell_markers: Dict[str, str] = {}
     smart_camera_markers: Dict[str, str] = {}
@@ -4929,13 +4877,24 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
         poll_seconds = _setting_int(redis_client, "unifi_poll_seconds", 3, minimum=1, maximum=60)
         if _event_provider(redis_client) != "unifi_protect":
             _runtime_set(redis_client, unifi_connected=False)
+            if wake_event is not None:
+                wake_event.clear()
             await asyncio.sleep(float(poll_seconds))
             continue
+        ws_driven = wake_event is not None and _unifi_ws_enabled(redis_client)
+        if ws_driven:
+            if not wake_event.is_set():
+                try:
+                    await asyncio.wait_for(wake_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            wake_event.clear()
         try:
             cameras = _unifi_list_cameras()
             sensors = _unifi_list_sensors()
             now_ts = time.time()
-            _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts, ws_connected=False)
+            _runtime_set(redis_client, unifi_connected=True, unifi_last_poll_ts=now_ts)
             required_smart_types_by_camera = _unifi_active_rule_smart_types_by_camera()
 
             active_motion_entities: set[str] = set()
@@ -5059,7 +5018,89 @@ async def _awareness_unifi_poll_loop(stop_event: Optional[object]) -> None:
         except Exception as exc:
             _runtime_set(redis_client, unifi_connected=False, last_error=str(exc))
             logger.warning("[awareness] unifi poll loop error: %s", exc)
-        await asyncio.sleep(float(poll_seconds))
+        if not ws_driven:
+            await asyncio.sleep(float(poll_seconds))
+            continue
+
+
+async def _awareness_unifi_ws_loop(
+    stop_event: Optional[object],
+    wake_event: Optional[asyncio.Event] = None,
+) -> None:
+    last_warn_text = ""
+    last_warn_ts = 0.0
+    while not (stop_event and stop_event.is_set()):
+        reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
+        if _event_provider(redis_client) != "unifi_protect" or not _unifi_ws_enabled(redis_client):
+            _runtime_set(redis_client, unifi_ws_connected=False)
+            if wake_event is not None:
+                wake_event.clear()
+            await asyncio.sleep(float(reconnect_seconds))
+            continue
+        try:
+            conf = _unifi_protect_config()
+            headers = _unifi_headers(conf["api_key"], json_content=False)
+            ws_paths = _unifi_ws_paths(redis_client)
+            if not ws_paths:
+                raise RuntimeError("No UniFi websocket endpoint path configured.")
+
+            timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=None)
+            connected = False
+            last_error = ""
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for ws_path in ws_paths:
+                    ws_url = f"{conf['base']}{ws_path}"
+                    try:
+                        async with session.ws_connect(
+                            ws_url,
+                            headers=headers,
+                            heartbeat=25,
+                            ssl=False,
+                        ) as ws:
+                            connected = True
+                            _runtime_set(
+                                redis_client,
+                                unifi_ws_connected=True,
+                                unifi_ws_url=ws_url,
+                                unifi_ws_path=ws_path,
+                            )
+                            logger.info("[awareness] UniFi websocket connected: %s", ws_url)
+                            if wake_event is not None:
+                                wake_event.set()
+                            last_wake_ts = 0.0
+                            while not (stop_event and stop_event.is_set()):
+                                try:
+                                    msg = await ws.receive(timeout=1.0)
+                                except asyncio.TimeoutError:
+                                    continue
+                                if msg.type in {aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY}:
+                                    now_ts = time.time()
+                                    _runtime_set(redis_client, unifi_ws_last_message_ts=now_ts)
+                                    if wake_event is not None and (now_ts - last_wake_ts) >= 1.0:
+                                        wake_event.set()
+                                        last_wake_ts = now_ts
+                                elif msg.type in {
+                                    aiohttp.WSMsgType.ERROR,
+                                    aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                }:
+                                    raise RuntimeError("UniFi websocket connection closed")
+                            break
+                    except Exception as ws_exc:
+                        last_error = str(ws_exc)
+                        continue
+            if not connected:
+                raise RuntimeError(last_error or "UniFi websocket endpoint unavailable.")
+        except Exception as exc:
+            _runtime_set(redis_client, unifi_ws_connected=False, last_error=str(exc))
+            now_ts = time.time()
+            err_text = _text(exc)
+            if err_text != last_warn_text or (now_ts - last_warn_ts) >= 60:
+                logger.warning("[awareness] unifi websocket loop error: %s", exc)
+                last_warn_text = err_text
+                last_warn_ts = now_ts
+            await asyncio.sleep(float(reconnect_seconds))
+    _runtime_set(redis_client, unifi_ws_connected=False)
 
 
 async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
@@ -5131,11 +5172,13 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
     rules = _load_rules(redis_client)
     enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
+    unifi_wake_event = asyncio.Event()
     _runtime_set(
         redis_client,
         started_at=time.time(),
         ws_connected=False,
         unifi_connected=False,
+        unifi_ws_connected=False,
         queue_depth=_queue_depth(redis_client),
         last_error="",
     )
@@ -5150,7 +5193,8 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         asyncio.create_task(_awareness_worker_loop(stop_event, llm_client)),
         asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
         asyncio.create_task(_awareness_ws_loop(stop_event)),
-        asyncio.create_task(_awareness_unifi_poll_loop(stop_event)),
+        asyncio.create_task(_awareness_unifi_poll_loop(stop_event, wake_event=unifi_wake_event)),
+        asyncio.create_task(_awareness_unifi_ws_loop(stop_event, wake_event=unifi_wake_event)),
         asyncio.create_task(_awareness_retention_loop(stop_event)),
     ]
     try:
@@ -5160,7 +5204,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        _runtime_set(redis_client, ws_connected=False)
+        _runtime_set(redis_client, ws_connected=False, unifi_ws_connected=False)
         logger.info("[awareness] core stopped")
 
 
