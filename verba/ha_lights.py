@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -54,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.2'
+    version = '2.0.3'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -76,14 +77,26 @@ class HALightsPlugin(ToolVerba):
     entity_domains: List[str] = ['light']
     interpret_actions: List[str] = ['get_state', 'turn_on', 'turn_off', 'set_brightness', 'set_color']
     service_map: Dict[str, Optional[str]] = {'get_state': None, 'turn_on': 'turn_on', 'turn_off': 'turn_off', 'set_brightness': 'turn_on', 'set_color': 'turn_on'}
-    required_action_params: Dict[str, List[str]] = {'set_brightness': ['brightness_pct'], 'set_color': ['color_name']}
+    required_action_params: Dict[str, List[str]] = {'set_brightness': ['brightness_pct']}
     optional_action_params: Dict[str, List[str]] = {
-        'turn_on': ['brightness_pct', 'color_name'],
+        'turn_on': ['brightness_pct', 'color_name', 'rgb_color'],
+        'set_color': ['color_name', 'rgb_color'],
     }
     param_payload_keys: Dict[str, str] = {}
-    summary_attribute_keys: List[str] = ['brightness', 'color_mode', 'color_name', 'rgb_color']
-    interpret_focus: str = '- Use set_brightness when user asks for percent brightness.\n- Use set_color when user asks for named color (for example blue, red, warm white).'
-    interpret_examples: List[str] = ['turn off office lights -> action=turn_off, target=office lights, read_target=none', 'set kitchen lights to 30 percent -> action=set_brightness, target=kitchen lights, params.brightness_pct=30, read_target=none', 'set living room lights to blue -> action=set_color, target=living room lights, params.color_name=blue, read_target=none']
+    summary_attribute_keys: List[str] = ['brightness', 'color_mode', 'color_name', 'rgb_color', 'xy_color', 'hs_color', 'color_temp_kelvin']
+    interpret_focus: str = (
+        "- Use set_brightness when user asks for percent brightness.\n"
+        "- Use set_color when user asks for any color.\n"
+        "- Preserve named colors as color_name (examples: crimson, chartreuse, warm white, deep sky blue).\n"
+        "- For explicit rgb(...) or hex colors, set params.rgb_color as [r,g,b].\n"
+    )
+    interpret_examples: List[str] = [
+        'turn off office lights -> action=turn_off, target=office lights, read_target=none',
+        'set kitchen lights to 30 percent -> action=set_brightness, target=kitchen lights, params.brightness_pct=30, read_target=none',
+        'set living room lights to blue -> action=set_color, target=living room lights, params.color_name=blue, read_target=none',
+        'set bedroom lights to rgb(255, 120, 0) -> action=set_color, target=bedroom lights, params.rgb_color=[255,120,0], read_target=none',
+        'set patio lights to #33ccff -> action=set_color, target=patio lights, params.rgb_color=[51,204,255], read_target=none',
+    ]
 
     domain_read_only: bool = False
     include_binary_sensor: bool = False
@@ -217,6 +230,68 @@ class HALightsPlugin(ToolVerba):
         except Exception:
             return None
 
+    def _normalize_rgb_triplet(self, value: Any) -> Optional[List[int]]:
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            out: List[int] = []
+            for item in value:
+                num = self._normalize_int(item)
+                if num is None:
+                    return None
+                out.append(max(0, min(255, int(num))))
+            return out
+        return None
+
+    def _normalize_hex_color(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
+        if not text:
+            return ""
+        if text.startswith("hex "):
+            text = text[4:].strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) == 3 and all(ch in "0123456789abcdef" for ch in text):
+            text = "".join(ch * 2 for ch in text)
+        if len(text) == 6 and all(ch in "0123456789abcdef" for ch in text):
+            return text
+        return ""
+
+    def _hex_to_rgb(self, hex_color: str) -> Optional[List[int]]:
+        token = self._normalize_hex_color(hex_color)
+        if not token:
+            return None
+        try:
+            return [int(token[0:2], 16), int(token[2:4], 16), int(token[4:6], 16)]
+        except Exception:
+            return None
+
+    def _extract_rgb_from_text(self, text: str) -> Optional[List[int]]:
+        source = self._coerce_text(text)
+        if not source:
+            return None
+        patterns = [
+            r"\brgb\s*\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*\)",
+            r"\brgb\s*[:=]?\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, source, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                values = [max(0, min(255, int(match.group(i)))) for i in (1, 2, 3)]
+                return values
+            except Exception:
+                continue
+        return None
+
+    def _extract_hex_from_text(self, text: str) -> str:
+        source = self._coerce_text(text)
+        if not source:
+            return ""
+        match = re.search(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b", source)
+        if not match:
+            return ""
+        return self._normalize_hex_color(match.group(1))
+
     def _is_temperature_row(self, row: dict) -> bool:
         if not isinstance(row, dict):
             return False
@@ -288,6 +363,8 @@ class HALightsPlugin(ToolVerba):
             '    "temperature": <number or null>,\n'
             '    "brightness_pct": <int 0-100 or null>,\n'
             '    "color_name": "<string or empty>",\n'
+            '    "rgb_color": [<int 0-255>, <int 0-255>, <int 0-255>] or null,\n'
+            '    "hex_color": "#RRGGBB" or "#RGB" or empty,\n'
             '    "percentage": <int 0-100 or null>,\n'
             '    "command": "<string or empty>",\n'
             '    "hvac_mode": "<string or empty>"\n'
@@ -303,7 +380,7 @@ class HALightsPlugin(ToolVerba):
             f"{examples_blob if examples_blob else '- none'}\n"
         )
 
-    def _normalize_interpret_result(self, payload: dict) -> dict:
+    def _normalize_interpret_result(self, payload: dict, query_text: str = "") -> dict:
         if not isinstance(payload, dict):
             return {}
 
@@ -329,6 +406,35 @@ class HALightsPlugin(ToolVerba):
         params["percentage"] = percentage
 
         params["color_name"] = self._coerce_text(params_in.get("color_name"))
+        params["rgb_color"] = self._normalize_rgb_triplet(params_in.get("rgb_color"))
+        params["hex_color"] = self._normalize_hex_color(params_in.get("hex_color"))
+
+        if params["rgb_color"] is None and params["hex_color"]:
+            params["rgb_color"] = self._hex_to_rgb(params["hex_color"])
+
+        if params["rgb_color"] is None:
+            rgb_from_color_name = self._extract_rgb_from_text(params["color_name"])
+            if rgb_from_color_name is not None:
+                params["rgb_color"] = rgb_from_color_name
+                params["color_name"] = ""
+            else:
+                hex_from_color_name = self._extract_hex_from_text(params["color_name"])
+                if hex_from_color_name:
+                    params["rgb_color"] = self._hex_to_rgb(hex_from_color_name)
+                    params["hex_color"] = hex_from_color_name
+                    params["color_name"] = ""
+
+        query_hint = self._coerce_text(query_text)
+        if params["rgb_color"] is None and query_hint:
+            rgb_from_query = self._extract_rgb_from_text(query_hint)
+            if rgb_from_query is not None:
+                params["rgb_color"] = rgb_from_query
+            else:
+                hex_from_query = self._extract_hex_from_text(query_hint)
+                if hex_from_query:
+                    params["rgb_color"] = self._hex_to_rgb(hex_from_query)
+                    params["hex_color"] = hex_from_query
+
         params["command"] = self._coerce_text(params_in.get("command"))
         params["hvac_mode"] = self._coerce_text(params_in.get("hvac_mode")).lower()
 
@@ -347,7 +453,7 @@ class HALightsPlugin(ToolVerba):
             max_tokens=260,
             temperature=0.0,
         )
-        return self._normalize_interpret_result(payload)
+        return self._normalize_interpret_result(payload, query_text=query)
 
     async def _choose_entity(self, *, query: str, intent: dict, catalog: List[dict], llm_client) -> str:
         if not catalog:
@@ -420,6 +526,13 @@ class HALightsPlugin(ToolVerba):
                 continue
             payload_key = self.param_payload_keys.get(key, key)
             payload[payload_key] = value
+
+        if action == "set_color":
+            color_name = self._coerce_text(payload.get("color_name"))
+            rgb_color = payload.get("rgb_color")
+            has_rgb = isinstance(rgb_color, list) and len(rgb_color) == 3
+            if not color_name and not has_rgb:
+                return None, {}, "Action 'set_color' requires color_name or rgb_color."
 
         return service, payload, None
 
