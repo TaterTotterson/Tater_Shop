@@ -391,7 +391,7 @@
     {
       "id": "ha_lights",
       "name": "Home Assistant Lights",
-      "version": "2.1.1",
+      "version": "2.1.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant lights.",
       "portals": [
@@ -412,7 +412,7 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "5cbc323415264f35cdcf424831f51392641c55a004da043b2c80f68e8981c1d6"
+      "sha256": "5bb82d1a9f1825c7816cff8166831041c330c59d5f1956daefa29a6a4e46d801"
     },
     {
       "id": "ha_locks",
