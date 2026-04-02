@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "2.0.6"
+__version__ = "2.0.7"
 
 load_dotenv()
 
@@ -2851,6 +2851,16 @@ def _set_cached_catalog(provider: str, catalog: Dict[str, List[Tuple[str, str]]]
         _ENTITY_CACHE[key] = bucket
 
 
+def _stale_cached_catalog(provider: str) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+    key = _normalize_event_provider(provider)
+    with _ENTITY_CACHE_LOCK:
+        bucket = _ENTITY_CACHE.get(key) or {}
+        data = bucket.get("data")
+        if isinstance(data, dict) and data:
+            return data
+    return None
+
+
 def _finalize_catalog(catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, List[Tuple[str, str]]]:
     for key in list(catalog.keys()):
         deduped: List[Tuple[str, str]] = []
@@ -2888,6 +2898,9 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         resp.raise_for_status()
         states = resp.json() or []
     except Exception:
+        stale = _stale_cached_catalog("homeassistant")
+        if stale is not None:
+            return stale
         catalog = _finalize_catalog(catalog)
         _set_cached_catalog("homeassistant", catalog)
         return catalog
@@ -3026,6 +3039,10 @@ def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[s
     catalog = _empty_entity_catalog()
     # Keep weather/tts/notify/input_text sourced from Home Assistant so briefs and notifications still work.
     ha_support = _ha_entity_catalog(force_refresh=force_refresh)
+    if not any(ha_support.get(key) for key in ("media_players", "tts", "notify_services", "input_text")):
+        stale_ha_support = _stale_cached_catalog("homeassistant")
+        if stale_ha_support is not None:
+            ha_support = stale_ha_support
     for key in ("media_players", "tts", "input_text", "notify_services", "weather_sensors", "weather_temp", "weather_wind", "weather_rain"):
         catalog[key] = list(ha_support.get(key) or [])
     try:
