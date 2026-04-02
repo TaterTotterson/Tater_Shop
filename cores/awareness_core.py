@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.38"
+__version__ = "2.0.0"
 
 load_dotenv()
 
@@ -616,9 +616,9 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "area": _text(raw.get("area")) or "front door",
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
-                "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
-                "trigger_attribute": _text(raw.get("trigger_attribute")),
-                "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
+                "trigger_to_state": "on",
+                "trigger_attribute": "",
+                "trigger_attribute_value": "",
                 "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Doorbell"),
@@ -1557,16 +1557,21 @@ def _vision_describe_sync(
         if _text(query):
             prompt += f" Additional context: {_text(query)}"
         if ignore_vehicles:
-            prompt += " Do not mention vehicles; describe other visible details instead."
+            prompt += (
+                " HARD RULE: do not mention or imply vehicles in any way "
+                "(car, truck, van, SUV, bike, motorcycle, bus, parked/driving traffic). "
+                "Describe only non-vehicle details that are visible in frame."
+            )
+    system_prompt = (
+        "You are a concise vision assistant. Describe what is visible. "
+        "Never list absent objects or use 'no X visible' phrasing."
+    )
     payload = {
         "model": model,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a concise vision assistant. Describe what is visible. "
-                    "Never list absent objects or use 'no X visible' phrasing."
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -3493,6 +3498,12 @@ def _doorbell_form(
                 "options": area_options,
                 "value": _text(rule.get("area")),
             },
+            {
+                "key": "notifications",
+                "label": "Send Notifications",
+                "type": "checkbox",
+                "value": _bool(rule.get("notifications"), True),
+            },
         ],
         "sections": [
             {
@@ -3506,24 +3517,6 @@ def _doorbell_form(
                         "options": trigger_options,
                         "dependent_options": trigger_dependency,
                         "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
-                    },
-                    {
-                        "key": "trigger_to_state",
-                        "label": "To State (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_to_state") or "on"),
-                    },
-                    {
-                        "key": "trigger_attribute",
-                        "label": "Attribute Key (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_attribute")),
-                    },
-                    {
-                        "key": "trigger_attribute_value",
-                        "label": "Attribute Value (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_attribute_value")),
                     },
                 ],
             },
@@ -3557,12 +3550,6 @@ def _doorbell_form(
                         "type": "select",
                         "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                         "value": _text(rule.get("priority") or "normal"),
-                    },
-                    {
-                        "key": "notifications",
-                        "label": "Send Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("notifications"), True),
                     },
                     {
                         "key": "api_notification",
@@ -3664,6 +3651,12 @@ def _entry_sensor_form(
                 "options": area_options,
                 "value": _text(rule.get("area")),
             },
+            {
+                "key": "notifications",
+                "label": "Send Notifications (open only)",
+                "type": "checkbox",
+                "value": _bool(rule.get("notifications"), False),
+            },
         ],
         "sections": [
             {
@@ -3689,12 +3682,6 @@ def _entry_sensor_form(
             {
                 "label": "Notifications",
                 "fields": [
-                    {
-                        "key": "notifications",
-                        "label": "Send Notifications (open only)",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("notifications"), False),
-                    },
                     {
                         "key": "title",
                         "label": "Notification Title",
@@ -4178,27 +4165,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_doorbell,
                 },
                 {
-                    "key": "trigger_to_state",
-                    "label": "To State (optional)",
-                    "type": "text",
-                    "value": "on",
-                    "show_when": show_doorbell,
-                },
-                {
-                    "key": "trigger_attribute",
-                    "label": "Attribute Key (optional)",
-                    "type": "text",
-                    "value": "",
-                    "show_when": show_doorbell,
-                },
-                {
-                    "key": "trigger_attribute_value",
-                    "label": "Attribute Value (optional)",
-                    "type": "text",
-                    "value": "",
-                    "show_when": show_doorbell,
-                },
-                {
                     "key": "cooldown_seconds",
                     "label": "Cooldown (sec)",
                     "type": "number",
@@ -4220,6 +4186,13 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera,
                 },
                 {
+                    "key": "notifications",
+                    "label": "Send Notifications",
+                    "type": "checkbox",
+                    "value": False,
+                    "show_when": show_doorbell_or_entry,
+                },
+                {
                     "key": "title",
                     "label": "Notification Title",
                     "type": "text",
@@ -4233,13 +4206,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                     "value": "high",
                     "show_when": show_camera_or_doorbell_or_entry,
-                },
-                {
-                    "key": "notifications",
-                    "label": "Send Notifications",
-                    "type": "checkbox",
-                    "value": False,
-                    "show_when": show_doorbell_or_entry,
                 },
                 {
                     "key": "api_notification",
@@ -4472,7 +4438,7 @@ def _build_rule_from_values(
     else:
         title_default = "Camera Event"
     priority_default = "normal" if kind in {"doorbell", "entry_sensor"} else "high"
-    trigger_to_state_default = "on" if kind in {"camera", "doorbell"} else ""
+    trigger_to_state_default = "on" if kind == "camera" else ""
     notifications_default = False if kind == "entry_sensor" else True
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
     device_services_value = _value(
@@ -4589,6 +4555,10 @@ def _build_rule_from_values(
             "quote_history": _normalize_quote_history(previous.get("quote_history") or previous.get("last_quotes"), limit=5),
         }
     )
+    if kind == "doorbell":
+        base["trigger_to_state"] = "on"
+        base["trigger_attribute"] = ""
+        base["trigger_attribute_value"] = ""
     if kind == "camera":
         if not base["camera_entity"]:
             raise ValueError("Camera entity is required for camera rules.")
