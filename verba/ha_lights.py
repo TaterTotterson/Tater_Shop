@@ -55,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.1.1'
+    version = '2.1.2'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -346,7 +346,12 @@ class HALightsPlugin(ToolVerba):
             "Rules:\n"
             "- Resolve the user-requested color intent, including mixed phrases (example: bluish purple).\n"
             "- color_name is for user-facing confirmation and can be a coined blend (example: blurple).\n"
+            "- If the user requested a plain canonical color name, keep it (example: purple -> purple).\n"
+            "- Do not echo vague descriptor phrases (for example: bluish green, greenish blue, reddish purple).\n"
+            "- Convert vague descriptors to a proper named hue when possible (examples: bluish purple -> violet, bluish green -> teal).\n"
+            "- If no standard hue name fits well, create a short creative blend name.\n"
             "- Always return at least one of rgb_color or xy_color.\n"
+            "- color_name must be 1-3 words and should not contain words ending in 'ish'.\n"
             "- Do not include prose.\n"
         )
         payload = await self._llm_json(
