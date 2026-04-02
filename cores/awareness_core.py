@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.37"
+__version__ = "1.1.38"
 
 load_dotenv()
 
@@ -567,10 +567,10 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "area": _text(raw.get("area")) or "camera",
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
-                "trigger_to_state": _text(raw.get("trigger_to_state") or "on"),
-                "trigger_attribute": _text(raw.get("trigger_attribute")),
-                "trigger_attribute_value": _text(raw.get("trigger_attribute_value")),
-                "query": _text(raw.get("query")),
+                "trigger_to_state": "on",
+                "trigger_attribute": "",
+                "trigger_attribute_value": "",
+                "query": "",
                 "cooldown_seconds": _as_int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
                 "notification_cooldown_seconds": _as_int(
                     raw.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
@@ -3376,30 +3376,11 @@ def _camera_form(
                         "dependent_options": trigger_dependency,
                         "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
                     },
-                    {
-                        "key": "trigger_to_state",
-                        "label": "To State (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_to_state") or "on"),
-                    },
-                    {
-                        "key": "trigger_attribute",
-                        "label": "Attribute Key (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_attribute")),
-                    },
-                    {
-                        "key": "trigger_attribute_value",
-                        "label": "Attribute Value (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("trigger_attribute_value")),
-                    },
                 ],
             },
             {
                 "label": "Detection",
                 "fields": [
-                    {"key": "query", "label": "Vision Hint", "type": "text", "value": _text(rule.get("query"))},
                     {
                         "key": "cooldown_seconds",
                         "label": "Cooldown (sec)",
@@ -4201,28 +4182,21 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "label": "To State (optional)",
                     "type": "text",
                     "value": "on",
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_doorbell,
                 },
                 {
                     "key": "trigger_attribute",
                     "label": "Attribute Key (optional)",
                     "type": "text",
                     "value": "",
-                    "show_when": show_camera_or_doorbell,
+                    "show_when": show_doorbell,
                 },
                 {
                     "key": "trigger_attribute_value",
                     "label": "Attribute Value (optional)",
                     "type": "text",
                     "value": "",
-                    "show_when": show_camera_or_doorbell,
-                },
-                {
-                    "key": "query",
-                    "label": "Vision Hint",
-                    "type": "text",
-                    "value": "",
-                    "show_when": show_camera,
+                    "show_when": show_doorbell,
                 },
                 {
                     "key": "cooldown_seconds",
