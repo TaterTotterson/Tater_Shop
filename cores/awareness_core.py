@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 
 load_dotenv()
 
@@ -186,6 +186,7 @@ _UNIFI_SENSOR_EDGE_LOCK = threading.Lock()
 _UNIFI_SENSOR_LAST_EDGE: Dict[str, Tuple[str, float]] = {}
 _UNIFI_SENSOR_DUPLICATE_SUPPRESS_SEC = 1.5
 _UNIFI_SENSOR_REVERSE_OPEN_SUPPRESS_SEC = 0.35
+_UNIFI_SENSOR_OPEN_CONFIRM_WINDOW_SEC = 8.0
 
 
 def _text(value: Any) -> str:
@@ -5039,6 +5040,44 @@ def _unifi_sensor_state_hint(item: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _unifi_sensor_live_state(sensor_id: str) -> Optional[str]:
+    token = _text(sensor_id)
+    if not token:
+        return None
+    path = f"/proxy/protect/integration/v1/sensors/{quote(token, safe='')}"
+    try:
+        row = _unifi_request("GET", path)
+    except Exception:
+        return None
+    if not isinstance(row, dict):
+        return None
+    return _unifi_sensor_state_hint(row)
+
+
+async def _unifi_accept_sensor_edge(*, sensor_id: str, sensor_entity: str, next_state: str) -> bool:
+    state = _text(next_state).lower()
+    if state != "on":
+        return True
+    now_ts = time.time()
+    prev_state = ""
+    prev_ts = 0.0
+    with _UNIFI_SENSOR_EDGE_LOCK:
+        prev = _UNIFI_SENSOR_LAST_EDGE.get(sensor_entity)
+        if prev:
+            prev_state, prev_ts = prev
+    elapsed = max(0.0, now_ts - _as_float(prev_ts, 0.0))
+    if prev_state != "off" or elapsed > _UNIFI_SENSOR_OPEN_CONFIRM_WINDOW_SEC:
+        return True
+    live_state = await asyncio.to_thread(_unifi_sensor_live_state, sensor_id)
+    if live_state == "off":
+        logger.info(
+            "[awareness] suppressed UniFi sensor open edge while sensor still reports closed: %s",
+            sensor_entity,
+        )
+        return False
+    return True
+
+
 def _unifi_should_emit_sensor_edge(sensor_entity: str, next_state: str) -> bool:
     state = _text(next_state).lower()
     if state not in {"on", "off"}:
@@ -5219,7 +5258,18 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
         )
     if sensor_edge_state and sensor_id:
         sensor_entity = _unifi_sensor_entity(sensor_id)
-        if _unifi_should_emit_sensor_edge(sensor_entity, sensor_edge_state):
+        if not await _unifi_accept_sensor_edge(
+            sensor_id=sensor_id,
+            sensor_entity=sensor_entity,
+            next_state=sensor_edge_state,
+        ):
+            logger.debug(
+                "[awareness] dropped UniFi sensor edge entity=%s state=%s token=%s",
+                sensor_entity,
+                sensor_edge_state,
+                event_token,
+            )
+        elif _unifi_should_emit_sensor_edge(sensor_entity, sensor_edge_state):
             attrs = {"friendly_name": sensor_name}
             prior = "off" if sensor_edge_state == "on" else "on"
             await _handle_trigger_state_change(
