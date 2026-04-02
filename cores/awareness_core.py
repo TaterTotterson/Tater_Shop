@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.35"
+__version__ = "1.1.36"
 
 load_dotenv()
 
@@ -5035,6 +5035,40 @@ def _unifi_event_smart_types(item: Dict[str, Any], event_token: str) -> set[str]
     return {token for token in (_unifi_normalize_smart_type(x) for x in found) if token}
 
 
+def _catalog_label_name(label: Any, fallback: str) -> str:
+    text = _text(label)
+    if not text:
+        return fallback
+    if "(" in text and text.endswith(")"):
+        prefix = text.rsplit("(", 1)[0].strip()
+        if prefix:
+            return prefix
+    return text
+
+
+def _unifi_name_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
+    camera_names: Dict[str, str] = {}
+    sensor_names: Dict[str, str] = {}
+    try:
+        catalog = _entity_catalog(provider="unifi_protect")
+    except Exception:
+        return camera_names, sensor_names
+
+    for entity, label in catalog.get("cameras") or []:
+        camera_id = _text(_unifi_camera_id_from_entity(entity)).lower()
+        if not camera_id:
+            continue
+        camera_names[camera_id] = _catalog_label_name(label, camera_id)
+
+    for entity, label in catalog.get("entry_sensors") or []:
+        sensor_id = _text(_unifi_sensor_id_from_entity(entity)).lower()
+        if not sensor_id:
+            continue
+        sensor_names[sensor_id] = _catalog_label_name(label, sensor_id)
+
+    return camera_names, sensor_names
+
+
 async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     event_token = _unifi_event_type_token(item)
     if not event_token:
@@ -5063,17 +5097,29 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
         "device_id",
     )
 
-    if not camera_id and "camera" in event_token:
+    is_ring_event = ("ring" in event_token or "doorbell" in event_token)
+    is_sensor_event = ("sensor" in event_token)
+    is_smart_event = ("smartdetect" in event_token)
+
+    if not camera_id and (is_ring_event or is_smart_event or ("camera" in event_token and not is_sensor_event)):
         camera_id = device_id
-    if not sensor_id and "sensor" in event_token:
+    if not sensor_id and is_sensor_event:
         sensor_id = device_id
 
     camera_id = _text(camera_id).lower()
     sensor_id = _text(sensor_id).lower()
 
-    if ("ring" in event_token or "doorbell" in event_token) and camera_id:
+    camera_names, sensor_names = _unifi_name_maps()
+    camera_name = camera_names.get(camera_id) if camera_id else ""
+    sensor_name = sensor_names.get(sensor_id) if sensor_id else ""
+    if not camera_name:
+        camera_name = name_hint or camera_id
+    if not sensor_name:
+        sensor_name = name_hint or sensor_id
+
+    if is_ring_event and camera_id:
         doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
-        attrs = {"friendly_name": name_hint or camera_id}
+        attrs = {"friendly_name": camera_name}
         await _handle_trigger_state_change(
             provider="unifi_protect",
             entity_id=doorbell_entity,
@@ -5084,7 +5130,7 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
 
     if "cameramotion" in event_token and camera_id:
         motion_entity = _unifi_camera_motion_trigger(camera_id)
-        attrs = {"friendly_name": name_hint or camera_id}
+        attrs = {"friendly_name": camera_name}
         await _handle_trigger_state_change(
             provider="unifi_protect",
             entity_id=motion_entity,
@@ -5093,15 +5139,15 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
         )
         handled = True
 
-    if "camerasmartdetect" in event_token and camera_id:
+    if ("camerasmartdetect" in event_token or (is_smart_event and not is_sensor_event)) and camera_id:
         smart_types = _unifi_event_smart_types(item, event_token)
         if not smart_types:
             smart_types = set(_unifi_active_rule_smart_types_by_camera().get(camera_id) or set())
         for smart_type in sorted(smart_types):
             smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
             attrs = {
-                "friendly_name": f"{name_hint or camera_id} {_unifi_smart_type_label(smart_type)}",
-                "camera_name": name_hint or camera_id,
+                "friendly_name": f"{camera_name} {_unifi_smart_type_label(smart_type)}",
+                "camera_name": camera_name,
                 "detection_type": smart_type,
             }
             await _handle_trigger_state_change(
@@ -5114,7 +5160,7 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
 
     if "sensoropen" in event_token and sensor_id:
         sensor_entity = _unifi_sensor_entity(sensor_id)
-        attrs = {"friendly_name": name_hint or sensor_id}
+        attrs = {"friendly_name": sensor_name}
         await _handle_trigger_state_change(
             provider="unifi_protect",
             entity_id=sensor_entity,
@@ -5124,7 +5170,7 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
         handled = True
     elif "sensorclosed" in event_token and sensor_id:
         sensor_entity = _unifi_sensor_entity(sensor_id)
-        attrs = {"friendly_name": name_hint or sensor_id}
+        attrs = {"friendly_name": sensor_name}
         await _handle_trigger_state_change(
             provider="unifi_protect",
             entity_id=sensor_entity,
@@ -5143,6 +5189,12 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
             unifi_last_event_type=event_token,
             last_ws_event_ts=now_ts,
             last_error="",
+        )
+    else:
+        logger.debug(
+            "[awareness] unifi ws event not mapped type=%s keys=%s",
+            event_token,
+            ",".join(sorted([_text(k) for k in item.keys()])[:16]),
         )
     return handled
 
