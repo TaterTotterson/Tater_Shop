@@ -54,7 +54,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.1'
+    version = '2.0.2'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -77,7 +77,9 @@ class HALightsPlugin(ToolVerba):
     interpret_actions: List[str] = ['get_state', 'turn_on', 'turn_off', 'set_brightness', 'set_color']
     service_map: Dict[str, Optional[str]] = {'get_state': None, 'turn_on': 'turn_on', 'turn_off': 'turn_off', 'set_brightness': 'turn_on', 'set_color': 'turn_on'}
     required_action_params: Dict[str, List[str]] = {'set_brightness': ['brightness_pct'], 'set_color': ['color_name']}
-    optional_action_params: Dict[str, List[str]] = {}
+    optional_action_params: Dict[str, List[str]] = {
+        'turn_on': ['brightness_pct', 'color_name'],
+    }
     param_payload_keys: Dict[str, str] = {}
     summary_attribute_keys: List[str] = ['brightness', 'color_mode', 'color_name', 'rgb_color']
     interpret_focus: str = '- Use set_brightness when user asks for percent brightness.\n- Use set_color when user asks for named color (for example blue, red, warm white).'
