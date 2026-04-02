@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 load_dotenv()
 
@@ -185,7 +185,7 @@ _EVENT_FILTER_DEFAULTS = {
 _UNIFI_SENSOR_EDGE_LOCK = threading.Lock()
 _UNIFI_SENSOR_LAST_EDGE: Dict[str, Tuple[str, float]] = {}
 _UNIFI_SENSOR_DUPLICATE_SUPPRESS_SEC = 1.5
-_UNIFI_SENSOR_REVERSE_OPEN_SUPPRESS_SEC = 1.0
+_UNIFI_SENSOR_REVERSE_OPEN_SUPPRESS_SEC = 0.35
 
 
 def _text(value: Any) -> str:
@@ -5210,8 +5210,15 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     elif "sensorclosed" in event_token:
         sensor_edge_state = "off"
     hint_state = _unifi_sensor_state_hint(item)
-    if hint_state in {"on", "off"}:
+    if not sensor_edge_state and hint_state in {"on", "off"}:
         sensor_edge_state = hint_state
+    elif sensor_edge_state and hint_state and hint_state != sensor_edge_state:
+        logger.debug(
+            "[awareness] UniFi sensor token/hint mismatch token=%s token_state=%s hint_state=%s",
+            event_token,
+            sensor_edge_state,
+            hint_state,
+        )
     if sensor_edge_state and sensor_id:
         sensor_entity = _unifi_sensor_entity(sensor_id)
         if _unifi_should_emit_sensor_edge(sensor_entity, sensor_edge_state):
