@@ -1,6 +1,5 @@
 import json
 import logging
-import colorsys
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -56,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.8'
+    version = '2.1.0'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -80,8 +79,8 @@ class HALightsPlugin(ToolVerba):
     service_map: Dict[str, Optional[str]] = {'get_state': None, 'turn_on': 'turn_on', 'turn_off': 'turn_off', 'set_brightness': 'turn_on', 'set_color': 'turn_on'}
     required_action_params: Dict[str, List[str]] = {'set_brightness': ['brightness_pct']}
     optional_action_params: Dict[str, List[str]] = {
-        'turn_on': ['brightness_pct', 'color_name', 'rgb_color'],
-        'set_color': ['color_name', 'rgb_color'],
+        'turn_on': ['brightness_pct', 'color_name', 'rgb_color', 'xy_color'],
+        'set_color': ['color_name', 'rgb_color', 'xy_color'],
     }
     param_payload_keys: Dict[str, str] = {}
     summary_attribute_keys: List[str] = ['brightness', 'color_name', 'rgb_color', 'color_mode']
@@ -300,106 +299,93 @@ class HALightsPlugin(ToolVerba):
         text = " ".join(text.split())
         return text
 
-    def _color_phrase_to_rgb(self, phrase: Any) -> Optional[List[int]]:
-        text = self._coerce_text(phrase).lower()
+    def _normalize_display_color_label(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
         if not text:
-            return None
-        text = " ".join(text.split())
-
-        base_map: Dict[str, List[int]] = {
-            "warm white": [255, 214, 170],
-            "soft white": [255, 241, 224],
-            "cool white": [210, 230, 255],
-            "daylight": [255, 255, 251],
-            "red": [255, 32, 32],
-            "orange": [255, 128, 0],
-            "amber": [255, 140, 0],
-            "yellow": [255, 220, 0],
-            "green": [0, 220, 70],
-            "cyan": [0, 210, 255],
-            "blue": [40, 110, 255],
-            "purple": [170, 40, 255],
-            "magenta": [230, 0, 255],
-            "pink": [255, 64, 170],
-            "white": [255, 255, 255],
-        }
-
-        chosen_key = ""
-        for key in sorted(base_map.keys(), key=len, reverse=True):
-            if key in text:
-                chosen_key = key
-                break
-        if not chosen_key:
-            return None
-
-        rgb = [int(v) for v in base_map[chosen_key]]
-        r, g, b = [max(0.0, min(1.0, channel / 255.0)) for channel in rgb]
-        h, s, v = colorsys.rgb_to_hsv(r, g, b)
-
-        if re.search(r"\b(bright|vivid|saturated|neon|rich)\b", text):
-            s = max(s, 0.9)
-            v = max(v, 0.85)
-        if re.search(r"\b(deep|dark)\b", text):
-            s = max(s, 0.75)
-            v = max(0.25, v * 0.6)
-        if re.search(r"\b(light|pastel|pale|soft)\b", text):
-            s = min(s, 0.45)
-            v = min(1.0, max(v, 0.9))
-
-        rr, gg, bb = colorsys.hsv_to_rgb(h, s, v)
-        out = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255))]
-        return [max(0, min(255, v_)) for v_ in out]
-
-    async def _state_color_label_llm(self, *, state_payload: dict, llm_client) -> str:
-        if llm_client is None:
             return ""
-
-        st = state_payload if isinstance(state_payload, dict) else {}
-        attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
-        if not isinstance(attrs, dict):
-            attrs = {}
-
-        color_input = {
-            "color_name": attrs.get("color_name"),
-            "rgb_color": attrs.get("rgb_color"),
-            "hs_color": attrs.get("hs_color"),
-            "xy_color": attrs.get("xy_color"),
-            "color_mode": attrs.get("color_mode"),
-            "color_temp_kelvin": attrs.get("color_temp_kelvin"),
-            "brightness": attrs.get("brightness"),
-        }
-        if not any(value not in (None, "", []) for value in color_input.values()):
-            return ""
-
-        system = (
-            "Name the perceived smart-light color from Home Assistant state data.\n"
-            "Return STRICT JSON only: {\"color_label\":\"<short lowercase color label or empty>\"}.\n"
-            "Rules:\n"
-            "- Use natural names when possible (examples: indigo, violet, warm white, teal).\n"
-            "- If needed, you may coin a short blended name (example: blurple).\n"
-            "- Keep output 1-3 words.\n"
-            "- Do not include numeric rgb/xy/hs codes.\n"
-        )
-        payload = await self._llm_json(
-            llm_client=llm_client,
-            system=system,
-            user_payload={"state": color_input},
-            max_tokens=80,
-            temperature=0.0,
-        )
-        label = self._coerce_text(payload.get("color_label")).lower()
-        if not label:
-            return ""
-        label = label.replace("_", " ").replace("/", " ")
-        label = " ".join(label.split())
-        cleaned = "".join(ch for ch in label if ch.isalpha() or ch in {" ", "-"})
+        text = text.replace("_", " ").replace("/", " ")
+        cleaned = "".join(ch for ch in text if ch.isalpha() or ch in {" ", "-"})
         cleaned = " ".join(cleaned.split())
         if not cleaned:
             return ""
         words = cleaned.split()
-        if len(words) > 3:
-            cleaned = " ".join(words[:3])
+        if len(words) > 4:
+            cleaned = " ".join(words[:4])
         return cleaned
+
+    def _normalize_xy_pair(self, value: Any) -> Optional[List[float]]:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            out: List[float] = []
+            for item in value:
+                n = self._normalize_number(item)
+                if n is None:
+                    return None
+                out.append(max(0.0, min(1.0, float(n))))
+            return [round(out[0], 6), round(out[1], 6)]
+        return None
+
+    async def _resolve_color_spec_llm(self, *, query: str, params: dict, llm_client) -> dict:
+        if llm_client is None:
+            return {}
+
+        source_color_name = self._normalize_color_name((params or {}).get("color_name"))
+        source_rgb = self._normalize_rgb_triplet((params or {}).get("rgb_color"))
+        source_xy = self._normalize_xy_pair((params or {}).get("xy_color"))
+        source_hex = self._normalize_hex_color((params or {}).get("hex_color"))
+        if source_rgb is None and source_hex:
+            source_rgb = self._hex_to_rgb(source_hex)
+
+        system = (
+            "Resolve a requested smart-light color for Home Assistant.\n"
+            "Return STRICT JSON only:\n"
+            "{\n"
+            '  "color_name": "<short lowercase display name; may coin a blended name>",\n'
+            '  "rgb_color": [<int 0-255>, <int 0-255>, <int 0-255>] or null,\n'
+            '  "xy_color": [<float 0-1>, <float 0-1>] or null\n'
+            "}\n"
+            "Rules:\n"
+            "- Resolve the user-requested color intent, including mixed phrases (example: bluish purple).\n"
+            "- color_name is for user-facing confirmation and can be a coined blend (example: blurple).\n"
+            "- Always return at least one of rgb_color or xy_color.\n"
+            "- Do not include prose.\n"
+        )
+        payload = await self._llm_json(
+            llm_client=llm_client,
+            system=system,
+            user_payload={
+                "query": self._coerce_text(query),
+                "source": {
+                    "color_name": source_color_name,
+                    "rgb_color": source_rgb,
+                    "xy_color": source_xy,
+                    "hex_color": source_hex,
+                },
+            },
+            max_tokens=140,
+            temperature=0.0,
+        )
+        if not isinstance(payload, dict):
+            return {}
+
+        color_name = self._normalize_display_color_label(payload.get("color_name"))
+        rgb_color = self._normalize_rgb_triplet(payload.get("rgb_color"))
+        xy_color = self._normalize_xy_pair(payload.get("xy_color"))
+
+        if rgb_color is None:
+            rgb_color = source_rgb
+        if xy_color is None:
+            xy_color = source_xy
+        if not color_name:
+            color_name = self._normalize_display_color_label(source_color_name)
+
+        if rgb_color is None and xy_color is None:
+            return {}
+
+        return {
+            "color_name": color_name,
+            "rgb_color": rgb_color,
+            "xy_color": xy_color,
+        }
 
     def _is_temperature_row(self, row: dict) -> bool:
         if not isinstance(row, dict):
@@ -473,6 +459,7 @@ class HALightsPlugin(ToolVerba):
             '    "brightness_pct": <int 0-100 or null>,\n'
             '    "color_name": "<string or empty>",\n'
             '    "rgb_color": [<int 0-255>, <int 0-255>, <int 0-255>] or null,\n'
+            '    "xy_color": [<float 0-1>, <float 0-1>] or null,\n'
             '    "hex_color": "#RRGGBB" or "#RGB" or empty,\n'
             '    "percentage": <int 0-100 or null>,\n'
             '    "command": "<string or empty>",\n'
@@ -489,7 +476,7 @@ class HALightsPlugin(ToolVerba):
             f"{examples_blob if examples_blob else '- none'}\n"
         )
 
-    def _normalize_interpret_result(self, payload: dict, query_text: str = "") -> dict:
+    def _normalize_interpret_result(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             return {}
 
@@ -516,6 +503,7 @@ class HALightsPlugin(ToolVerba):
 
         params["color_name"] = self._normalize_color_name(params_in.get("color_name"))
         params["rgb_color"] = self._normalize_rgb_triplet(params_in.get("rgb_color"))
+        params["xy_color"] = self._normalize_xy_pair(params_in.get("xy_color"))
         params["hex_color"] = self._normalize_hex_color(params_in.get("hex_color"))
 
         if params["rgb_color"] is None and params["hex_color"]:
@@ -532,23 +520,6 @@ class HALightsPlugin(ToolVerba):
                     params["rgb_color"] = self._hex_to_rgb(hex_from_color_name)
                     params["hex_color"] = hex_from_color_name
                     params["color_name"] = ""
-
-        query_hint = self._coerce_text(query_text)
-        if params["rgb_color"] is None and query_hint:
-            rgb_from_query = self._extract_rgb_from_text(query_hint)
-            if rgb_from_query is not None:
-                params["rgb_color"] = rgb_from_query
-            else:
-                hex_from_query = self._extract_hex_from_text(query_hint)
-                if hex_from_query:
-                    params["rgb_color"] = self._hex_to_rgb(hex_from_query)
-                    params["hex_color"] = hex_from_query
-
-        if params["rgb_color"] is None:
-            phrase_source = params["color_name"] or query_hint
-            mapped_rgb = self._color_phrase_to_rgb(phrase_source)
-            if mapped_rgb is not None:
-                params["rgb_color"] = mapped_rgb
 
         params["command"] = self._coerce_text(params_in.get("command"))
         params["hvac_mode"] = self._coerce_text(params_in.get("hvac_mode")).lower()
@@ -568,7 +539,7 @@ class HALightsPlugin(ToolVerba):
             max_tokens=260,
             temperature=0.0,
         )
-        return self._normalize_interpret_result(payload, query_text=query)
+        return self._normalize_interpret_result(payload)
 
     async def _choose_entity(self, *, query: str, intent: dict, catalog: List[dict], llm_client) -> str:
         if not catalog:
@@ -645,14 +616,19 @@ class HALightsPlugin(ToolVerba):
         if action == "set_color":
             color_name = self._coerce_text(payload.get("color_name"))
             rgb_color = payload.get("rgb_color")
+            xy_color = payload.get("xy_color")
             has_rgb = isinstance(rgb_color, list) and len(rgb_color) == 3
-            if not color_name and not has_rgb:
-                return None, {}, "Action 'set_color' requires color_name or rgb_color."
+            has_xy = isinstance(xy_color, list) and len(xy_color) == 2
+            if not color_name and not has_rgb and not has_xy:
+                return None, {}, "Action 'set_color' requires color_name, rgb_color, or xy_color."
 
         if action in {"set_color", "turn_on"}:
-            # Prefer explicit RGB payloads over ambiguous color names when both are present.
+            # Prefer explicit machine color values over ambiguous color names when both are present.
             rgb_color = payload.get("rgb_color")
-            if isinstance(rgb_color, list) and len(rgb_color) == 3:
+            xy_color = payload.get("xy_color")
+            has_rgb = isinstance(rgb_color, list) and len(rgb_color) == 3
+            has_xy = isinstance(xy_color, list) and len(xy_color) == 2
+            if has_rgb or has_xy:
                 payload.pop("color_name", None)
 
         return service, payload, None
@@ -849,6 +825,28 @@ class HALightsPlugin(ToolVerba):
 
         read_target = self._coerce_text(intent.get("read_target")).lower() or "state"
         params = intent.get("params") if isinstance(intent.get("params"), dict) else {}
+        wants_color_resolution = (
+            action == "set_color"
+            or bool(self._coerce_text(params.get("color_name")))
+            or self._normalize_rgb_triplet(params.get("rgb_color")) is not None
+            or self._normalize_xy_pair(params.get("xy_color")) is not None
+            or bool(self._normalize_hex_color(params.get("hex_color")))
+        )
+        if wants_color_resolution:
+            resolved_color = await self._resolve_color_spec_llm(query=query, params=params, llm_client=llm_client)
+            if not resolved_color and action == "set_color":
+                return action_failure(
+                    code="color_resolution_failed",
+                    message="Could not resolve a concrete light color (rgb/xy) from this request.",
+                    needs=["Rephrase the desired color (for example: violet, blurple, rgb(120,80,255), or #7f5cff)."],
+                    say_hint="Ask for a clearer color target because color resolution failed.",
+                )
+            if resolved_color:
+                params["color_name"] = self._normalize_display_color_label(resolved_color.get("color_name"))
+                params["rgb_color"] = self._normalize_rgb_triplet(resolved_color.get("rgb_color"))
+                params["xy_color"] = self._normalize_xy_pair(resolved_color.get("xy_color"))
+
+        requested_color_label = self._normalize_display_color_label(params.get("color_name"))
 
         service, service_payload, payload_error = self._build_service_payload(action=action, params=params)
         if payload_error:
@@ -863,7 +861,8 @@ class HALightsPlugin(ToolVerba):
             try:
                 state = client.get_state(entity_id)
                 state_dict = state if isinstance(state, dict) else {}
-                color_label = await self._state_color_label_llm(state_payload=state_dict, llm_client=llm_client)
+                attrs = state_dict.get("attributes") if isinstance(state_dict.get("attributes"), dict) else {}
+                color_label = self._normalize_display_color_label(attrs.get("color_name")) if isinstance(attrs, dict) else ""
                 summary = self._state_summary(
                     entity_id=entity_id,
                     state_payload=state_dict,
@@ -910,11 +909,16 @@ class HALightsPlugin(ToolVerba):
 
         display_name = self._coerce_text(selected.get("name")) or entity_id
         summary = f"Completed light update for {display_name}."
+        if requested_color_label:
+            summary = f"Completed light update for {display_name}; color {requested_color_label}."
         state_after: Dict[str, Any] = {}
         try:
             raw_state = client.get_state(entity_id)
             if isinstance(raw_state, dict):
-                color_label = await self._state_color_label_llm(state_payload=raw_state, llm_client=llm_client)
+                color_label = requested_color_label
+                if not color_label:
+                    attrs = raw_state.get("attributes") if isinstance(raw_state.get("attributes"), dict) else {}
+                    color_label = self._normalize_display_color_label(attrs.get("color_name")) if isinstance(attrs, dict) else ""
                 state_after = self._sanitize_state_for_hydra(
                     entity_id=entity_id,
                     state_payload=raw_state,
