@@ -1,5 +1,6 @@
 import json
 import logging
+import colorsys
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -55,7 +56,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.3'
+    version = '2.0.4'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -83,7 +84,7 @@ class HALightsPlugin(ToolVerba):
         'set_color': ['color_name', 'rgb_color'],
     }
     param_payload_keys: Dict[str, str] = {}
-    summary_attribute_keys: List[str] = ['brightness', 'color_mode', 'color_name', 'rgb_color', 'xy_color', 'hs_color', 'color_temp_kelvin']
+    summary_attribute_keys: List[str] = ['brightness', 'color_name', 'rgb_color', 'color_mode']
     interpret_focus: str = (
         "- Use set_brightness when user asks for percent brightness.\n"
         "- Use set_color when user asks for any color.\n"
@@ -292,6 +293,157 @@ class HALightsPlugin(ToolVerba):
             return ""
         return self._normalize_hex_color(match.group(1))
 
+    def _normalize_color_name(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
+        if not text:
+            return ""
+        text = " ".join(text.split())
+
+        if "warm white" in text:
+            return "warm white"
+        if "cool white" in text:
+            return "cool white"
+        if "soft white" in text:
+            return "soft white"
+        if "daylight white" in text or text == "daylight":
+            return "daylight"
+
+        alias_map = {
+            "fuchsia": "magenta",
+            "violet": "purple",
+            "indigo": "purple",
+            "hot pink": "pink",
+            "sky blue": "blue",
+            "deep sky blue": "blue",
+            "turquoise": "cyan",
+            "aqua": "cyan",
+            "lime": "green",
+            "chartreuse": "green",
+            "gold": "yellow",
+            "amber": "orange",
+            "crimson": "red",
+            "maroon": "red",
+            "lavender": "purple",
+        }
+        for phrase, canonical in sorted(alias_map.items(), key=lambda kv: len(kv[0]), reverse=True):
+            if phrase in text:
+                return canonical
+
+        base_names = (
+            "red",
+            "orange",
+            "yellow",
+            "green",
+            "cyan",
+            "blue",
+            "purple",
+            "magenta",
+            "pink",
+            "white",
+        )
+        for name in base_names:
+            if re.search(rf"\b{name}\b", text):
+                return name
+        return text
+
+    def _color_phrase_to_rgb(self, phrase: Any) -> Optional[List[int]]:
+        text = self._coerce_text(phrase).lower()
+        if not text:
+            return None
+        text = " ".join(text.split())
+
+        base_map: Dict[str, List[int]] = {
+            "warm white": [255, 214, 170],
+            "soft white": [255, 241, 224],
+            "cool white": [210, 230, 255],
+            "daylight": [255, 255, 251],
+            "red": [255, 32, 32],
+            "orange": [255, 128, 0],
+            "amber": [255, 140, 0],
+            "yellow": [255, 220, 0],
+            "green": [0, 220, 70],
+            "cyan": [0, 210, 255],
+            "blue": [40, 110, 255],
+            "purple": [170, 40, 255],
+            "magenta": [230, 0, 255],
+            "pink": [255, 64, 170],
+            "white": [255, 255, 255],
+        }
+
+        chosen_key = ""
+        for key in sorted(base_map.keys(), key=len, reverse=True):
+            if key in text:
+                chosen_key = key
+                break
+        if not chosen_key:
+            return None
+
+        rgb = [int(v) for v in base_map[chosen_key]]
+        r, g, b = [max(0.0, min(1.0, channel / 255.0)) for channel in rgb]
+        h, s, v = colorsys.rgb_to_hsv(r, g, b)
+
+        if re.search(r"\b(bright|vivid|saturated|neon|rich)\b", text):
+            s = max(s, 0.9)
+            v = max(v, 0.85)
+        if re.search(r"\b(deep|dark)\b", text):
+            s = max(s, 0.75)
+            v = max(0.25, v * 0.6)
+        if re.search(r"\b(light|pastel|pale|soft)\b", text):
+            s = min(s, 0.45)
+            v = min(1.0, max(v, 0.9))
+
+        rr, gg, bb = colorsys.hsv_to_rgb(h, s, v)
+        out = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255))]
+        return [max(0, min(255, v_)) for v_ in out]
+
+    def _state_color_label(self, attrs: Dict[str, Any]) -> str:
+        color_name = self._normalize_color_name(attrs.get("color_name"))
+        if color_name:
+            return color_name
+
+        rgb = self._normalize_rgb_triplet(attrs.get("rgb_color"))
+        if rgb is None:
+            hs = attrs.get("hs_color")
+            if isinstance(hs, (list, tuple)) and len(hs) == 2:
+                h = self._normalize_number(hs[0])
+                s = self._normalize_number(hs[1])
+                if h is not None and s is not None:
+                    hue = max(0.0, min(360.0, h)) / 360.0
+                    sat = max(0.0, min(100.0, s)) / 100.0
+                    rr, gg, bb = colorsys.hsv_to_rgb(hue, sat, 1.0)
+                    rgb = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255))]
+
+        if isinstance(rgb, list) and len(rgb) == 3:
+            r, g, b = [max(0.0, min(1.0, float(v_) / 255.0)) for v_ in rgb]
+            h, s, v = colorsys.rgb_to_hsv(r, g, b)
+            hue = h * 360.0
+            if v < 0.12:
+                return "off-black"
+            if s < 0.10:
+                return "white" if v > 0.75 else "soft white"
+            if hue < 15 or hue >= 345:
+                return "red"
+            if hue < 45:
+                return "orange"
+            if hue < 70:
+                return "yellow"
+            if hue < 160:
+                return "green"
+            if hue < 200:
+                return "cyan"
+            if hue < 250:
+                return "blue"
+            if hue < 290:
+                return "indigo"
+            if hue < 330:
+                return "purple"
+            return "pink"
+
+        color_mode = self._coerce_text(attrs.get("color_mode")).lower()
+        if "color_temp" in color_mode:
+            return "warm white"
+        return ""
+
     def _is_temperature_row(self, row: dict) -> bool:
         if not isinstance(row, dict):
             return False
@@ -405,7 +557,7 @@ class HALightsPlugin(ToolVerba):
             percentage = max(0, min(100, percentage))
         params["percentage"] = percentage
 
-        params["color_name"] = self._coerce_text(params_in.get("color_name"))
+        params["color_name"] = self._normalize_color_name(params_in.get("color_name"))
         params["rgb_color"] = self._normalize_rgb_triplet(params_in.get("rgb_color"))
         params["hex_color"] = self._normalize_hex_color(params_in.get("hex_color"))
 
@@ -434,6 +586,12 @@ class HALightsPlugin(ToolVerba):
                 if hex_from_query:
                     params["rgb_color"] = self._hex_to_rgb(hex_from_query)
                     params["hex_color"] = hex_from_query
+
+        if params["rgb_color"] is None:
+            phrase_source = params["color_name"] or query_hint
+            mapped_rgb = self._color_phrase_to_rgb(phrase_source)
+            if mapped_rgb is not None:
+                params["rgb_color"] = mapped_rgb
 
         params["command"] = self._coerce_text(params_in.get("command"))
         params["hvac_mode"] = self._coerce_text(params_in.get("hvac_mode")).lower()
@@ -534,6 +692,12 @@ class HALightsPlugin(ToolVerba):
             if not color_name and not has_rgb:
                 return None, {}, "Action 'set_color' requires color_name or rgb_color."
 
+        if action in {"set_color", "turn_on"}:
+            # Prefer explicit RGB payloads over ambiguous color names when both are present.
+            rgb_color = payload.get("rgb_color")
+            if isinstance(rgb_color, list) and len(rgb_color) == 3:
+                payload.pop("color_name", None)
+
         return service, payload, None
 
     def _state_summary(self, *, entity_id: str, state_payload: dict, read_target: str) -> str:
@@ -560,20 +724,15 @@ class HALightsPlugin(ToolVerba):
             return f"{name} is {state}{(' ' + unit) if unit else ''}."
 
         extras: List[str] = []
-        for key in self.summary_attribute_keys or []:
-            value = attrs.get(key)
-            if value in (None, "", []):
-                continue
-            if key == "brightness":
-                try:
-                    raw_brightness = int(value)
-                    raw_brightness = max(0, min(255, raw_brightness))
-                    pct = int(round((raw_brightness / 255.0) * 100.0))
-                    extras.append(f"brightness {raw_brightness} (~{pct}%)")
-                    continue
-                except Exception:
-                    pass
-            extras.append(f"{key.replace('_', ' ')} {value}")
+        brightness_raw = self._normalize_int(attrs.get("brightness"))
+        if brightness_raw is not None:
+            brightness_raw = max(0, min(255, int(brightness_raw)))
+            pct = int(round((brightness_raw / 255.0) * 100.0))
+            extras.append(f"brightness {brightness_raw} (~{pct}%)")
+
+        color_label = self._state_color_label(attrs)
+        if color_label:
+            extras.append(f"color {color_label}")
 
         if extras:
             return f"{name} is {state}; " + ", ".join(extras) + "."
