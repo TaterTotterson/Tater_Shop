@@ -56,7 +56,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.4'
+    version = '2.0.8'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -298,52 +298,6 @@ class HALightsPlugin(ToolVerba):
         if not text:
             return ""
         text = " ".join(text.split())
-
-        if "warm white" in text:
-            return "warm white"
-        if "cool white" in text:
-            return "cool white"
-        if "soft white" in text:
-            return "soft white"
-        if "daylight white" in text or text == "daylight":
-            return "daylight"
-
-        alias_map = {
-            "fuchsia": "magenta",
-            "violet": "purple",
-            "indigo": "purple",
-            "hot pink": "pink",
-            "sky blue": "blue",
-            "deep sky blue": "blue",
-            "turquoise": "cyan",
-            "aqua": "cyan",
-            "lime": "green",
-            "chartreuse": "green",
-            "gold": "yellow",
-            "amber": "orange",
-            "crimson": "red",
-            "maroon": "red",
-            "lavender": "purple",
-        }
-        for phrase, canonical in sorted(alias_map.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if phrase in text:
-                return canonical
-
-        base_names = (
-            "red",
-            "orange",
-            "yellow",
-            "green",
-            "cyan",
-            "blue",
-            "purple",
-            "magenta",
-            "pink",
-            "white",
-        )
-        for name in base_names:
-            if re.search(rf"\b{name}\b", text):
-                return name
         return text
 
     def _color_phrase_to_rgb(self, phrase: Any) -> Optional[List[int]]:
@@ -396,53 +350,56 @@ class HALightsPlugin(ToolVerba):
         out = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255))]
         return [max(0, min(255, v_)) for v_ in out]
 
-    def _state_color_label(self, attrs: Dict[str, Any]) -> str:
-        color_name = self._normalize_color_name(attrs.get("color_name"))
-        if color_name:
-            return color_name
+    async def _state_color_label_llm(self, *, state_payload: dict, llm_client) -> str:
+        if llm_client is None:
+            return ""
 
-        rgb = self._normalize_rgb_triplet(attrs.get("rgb_color"))
-        if rgb is None:
-            hs = attrs.get("hs_color")
-            if isinstance(hs, (list, tuple)) and len(hs) == 2:
-                h = self._normalize_number(hs[0])
-                s = self._normalize_number(hs[1])
-                if h is not None and s is not None:
-                    hue = max(0.0, min(360.0, h)) / 360.0
-                    sat = max(0.0, min(100.0, s)) / 100.0
-                    rr, gg, bb = colorsys.hsv_to_rgb(hue, sat, 1.0)
-                    rgb = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255))]
+        st = state_payload if isinstance(state_payload, dict) else {}
+        attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
+        if not isinstance(attrs, dict):
+            attrs = {}
 
-        if isinstance(rgb, list) and len(rgb) == 3:
-            r, g, b = [max(0.0, min(1.0, float(v_) / 255.0)) for v_ in rgb]
-            h, s, v = colorsys.rgb_to_hsv(r, g, b)
-            hue = h * 360.0
-            if v < 0.12:
-                return "off-black"
-            if s < 0.10:
-                return "white" if v > 0.75 else "soft white"
-            if hue < 15 or hue >= 345:
-                return "red"
-            if hue < 45:
-                return "orange"
-            if hue < 70:
-                return "yellow"
-            if hue < 160:
-                return "green"
-            if hue < 200:
-                return "cyan"
-            if hue < 250:
-                return "blue"
-            if hue < 290:
-                return "indigo"
-            if hue < 330:
-                return "purple"
-            return "pink"
+        color_input = {
+            "color_name": attrs.get("color_name"),
+            "rgb_color": attrs.get("rgb_color"),
+            "hs_color": attrs.get("hs_color"),
+            "xy_color": attrs.get("xy_color"),
+            "color_mode": attrs.get("color_mode"),
+            "color_temp_kelvin": attrs.get("color_temp_kelvin"),
+            "brightness": attrs.get("brightness"),
+        }
+        if not any(value not in (None, "", []) for value in color_input.values()):
+            return ""
 
-        color_mode = self._coerce_text(attrs.get("color_mode")).lower()
-        if "color_temp" in color_mode:
-            return "warm white"
-        return ""
+        system = (
+            "Name the perceived smart-light color from Home Assistant state data.\n"
+            "Return STRICT JSON only: {\"color_label\":\"<short lowercase color label or empty>\"}.\n"
+            "Rules:\n"
+            "- Use natural names when possible (examples: indigo, violet, warm white, teal).\n"
+            "- If needed, you may coin a short blended name (example: blurple).\n"
+            "- Keep output 1-3 words.\n"
+            "- Do not include numeric rgb/xy/hs codes.\n"
+        )
+        payload = await self._llm_json(
+            llm_client=llm_client,
+            system=system,
+            user_payload={"state": color_input},
+            max_tokens=80,
+            temperature=0.0,
+        )
+        label = self._coerce_text(payload.get("color_label")).lower()
+        if not label:
+            return ""
+        label = label.replace("_", " ").replace("/", " ")
+        label = " ".join(label.split())
+        cleaned = "".join(ch for ch in label if ch.isalpha() or ch in {" ", "-"})
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            return ""
+        words = cleaned.split()
+        if len(words) > 3:
+            cleaned = " ".join(words[:3])
+        return cleaned
 
     def _is_temperature_row(self, row: dict) -> bool:
         if not isinstance(row, dict):
@@ -700,7 +657,14 @@ class HALightsPlugin(ToolVerba):
 
         return service, payload, None
 
-    def _state_summary(self, *, entity_id: str, state_payload: dict, read_target: str) -> str:
+    def _state_summary(
+        self,
+        *,
+        entity_id: str,
+        state_payload: dict,
+        read_target: str,
+        color_label: str = "",
+    ) -> str:
         st = state_payload if isinstance(state_payload, dict) else {}
         attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
         if not isinstance(attrs, dict):
@@ -728,15 +692,51 @@ class HALightsPlugin(ToolVerba):
         if brightness_raw is not None:
             brightness_raw = max(0, min(255, int(brightness_raw)))
             pct = int(round((brightness_raw / 255.0) * 100.0))
-            extras.append(f"brightness {brightness_raw} (~{pct}%)")
+            extras.append(f"brightness {pct}%")
 
-        color_label = self._state_color_label(attrs)
-        if color_label:
-            extras.append(f"color {color_label}")
+        llm_label = self._coerce_text(color_label).lower()
+        if llm_label:
+            extras.append(f"color {llm_label}")
 
         if extras:
             return f"{name} is {state}; " + ", ".join(extras) + "."
         return f"{name} is {state}."
+
+    def _sanitize_state_for_hydra(
+        self,
+        *,
+        entity_id: str,
+        state_payload: dict,
+        color_label: str = "",
+    ) -> dict:
+        st = state_payload if isinstance(state_payload, dict) else {}
+        attrs = st.get("attributes") if isinstance(st.get("attributes"), dict) else {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+
+        safe_attrs: Dict[str, Any] = {}
+        friendly = self._coerce_text(attrs.get("friendly_name"))
+        if friendly:
+            safe_attrs["friendly_name"] = friendly
+
+        brightness_raw = self._normalize_int(attrs.get("brightness"))
+        if brightness_raw is not None:
+            brightness_raw = max(0, min(255, int(brightness_raw)))
+            safe_attrs["brightness_pct"] = int(round((brightness_raw / 255.0) * 100.0))
+
+        llm_label = self._coerce_text(color_label).lower()
+        if llm_label:
+            safe_attrs["color"] = llm_label
+
+        color_mode = self._coerce_text(attrs.get("color_mode"))
+        if color_mode:
+            safe_attrs["color_mode"] = color_mode
+
+        return {
+            "entity_id": self._coerce_text(st.get("entity_id")) or entity_id,
+            "state": self._coerce_text(st.get("state")) or "unknown",
+            "attributes": safe_attrs,
+        }
 
     def _ensure_llm_available(self, llm_client) -> Optional[dict]:
         if llm_client is not None:
@@ -863,7 +863,13 @@ class HALightsPlugin(ToolVerba):
             try:
                 state = client.get_state(entity_id)
                 state_dict = state if isinstance(state, dict) else {}
-                summary = self._state_summary(entity_id=entity_id, state_payload=state_dict, read_target=read_target)
+                color_label = await self._state_color_label_llm(state_payload=state_dict, llm_client=llm_client)
+                summary = self._state_summary(
+                    entity_id=entity_id,
+                    state_payload=state_dict,
+                    read_target=read_target,
+                    color_label=color_label,
+                )
                 return action_success(
                     facts={
                         "action": "get_state",
@@ -902,17 +908,20 @@ class HALightsPlugin(ToolVerba):
                 say_hint="Explain service call failed and ask whether to retry.",
             )
 
-        summary = ""
-        state_after: Any = {}
+        display_name = self._coerce_text(selected.get("name")) or entity_id
+        summary = f"Completed light update for {display_name}."
+        state_after: Dict[str, Any] = {}
         try:
-            state_after = client.get_state(entity_id)
-            summary = self._state_summary(
-                entity_id=entity_id,
-                state_payload=state_after if isinstance(state_after, dict) else {},
-                read_target=read_target,
-            )
+            raw_state = client.get_state(entity_id)
+            if isinstance(raw_state, dict):
+                color_label = await self._state_color_label_llm(state_payload=raw_state, llm_client=llm_client)
+                state_after = self._sanitize_state_for_hydra(
+                    entity_id=entity_id,
+                    state_payload=raw_state,
+                    color_label=color_label,
+                )
         except Exception:
-            summary = f"Sent {service.replace('_', ' ')} to {entity_id}."
+            pass
 
         return action_success(
             facts={
@@ -925,12 +934,11 @@ class HALightsPlugin(ToolVerba):
                 "entity_id": entity_id,
                 "service": service,
                 "domain": selected.get("domain"),
-                "payload": payload,
-                "intent": intent,
+                "result": "completed",
                 "state_after": state_after,
             },
             summary_for_user=summary,
-            say_hint="Confirm what was executed and include resulting state when available.",
+            say_hint="Reply briefly that the light command is complete. Do not include rgb/xy/hs/internal attribute dumps.",
         )
 
     async def handle_homeassistant(self, args, llm_client):
