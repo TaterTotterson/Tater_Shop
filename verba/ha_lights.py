@@ -55,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.1.0'
+    version = '2.1.1'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -622,16 +622,53 @@ class HALightsPlugin(ToolVerba):
             if not color_name and not has_rgb and not has_xy:
                 return None, {}, "Action 'set_color' requires color_name, rgb_color, or xy_color."
 
-        if action in {"set_color", "turn_on"}:
-            # Prefer explicit machine color values over ambiguous color names when both are present.
-            rgb_color = payload.get("rgb_color")
-            xy_color = payload.get("xy_color")
-            has_rgb = isinstance(rgb_color, list) and len(rgb_color) == 3
-            has_xy = isinstance(xy_color, list) and len(xy_color) == 2
-            if has_rgb or has_xy:
-                payload.pop("color_name", None)
-
         return service, payload, None
+
+    def _build_service_payload_attempts(self, *, action: str, params: dict, payload: dict) -> List[dict]:
+        base = dict(payload or {})
+        if action not in {"set_color", "turn_on"}:
+            return [base]
+
+        rgb_color = self._normalize_rgb_triplet(base.get("rgb_color"))
+        if rgb_color is None:
+            rgb_color = self._normalize_rgb_triplet((params or {}).get("rgb_color"))
+
+        xy_color = self._normalize_xy_pair(base.get("xy_color"))
+        if xy_color is None:
+            xy_color = self._normalize_xy_pair((params or {}).get("xy_color"))
+
+        color_name = self._normalize_color_name(base.get("color_name"))
+        if not color_name:
+            color_name = self._normalize_color_name((params or {}).get("color_name"))
+
+        core = {k: v for k, v in base.items() if k not in {"rgb_color", "xy_color", "color_name"}}
+        attempts: List[dict] = []
+
+        if isinstance(rgb_color, list) and len(rgb_color) == 3:
+            p = dict(core)
+            p["rgb_color"] = rgb_color
+            attempts.append(p)
+        if isinstance(xy_color, list) and len(xy_color) == 2:
+            p = dict(core)
+            p["xy_color"] = xy_color
+            attempts.append(p)
+        if color_name:
+            p = dict(core)
+            p["color_name"] = color_name
+            attempts.append(p)
+
+        if not attempts:
+            return [base]
+
+        unique: List[dict] = []
+        seen: set[str] = set()
+        for item in attempts:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
 
     def _state_summary(
         self,
@@ -896,12 +933,22 @@ class HALightsPlugin(ToolVerba):
         if isinstance(service_payload, dict):
             payload.update(service_payload)
 
-        try:
-            client.call_service(self._coerce_text(selected.get("domain")), service, payload)
-        except Exception as exc:
+        domain = self._coerce_text(selected.get("domain"))
+        call_error: Optional[Exception] = None
+        attempts = self._build_service_payload_attempts(action=action, params=params, payload=payload)
+        for candidate in attempts:
+            try:
+                client.call_service(domain, service, candidate)
+                payload = candidate
+                call_error = None
+                break
+            except Exception as exc:
+                call_error = exc
+
+        if call_error is not None:
             return action_failure(
                 code="service_call_failed",
-                message=f"Home Assistant {selected.get('domain')}.{service} failed for {entity_id}: {exc}",
+                message=f"Home Assistant {domain}.{service} failed for {entity_id}: {call_error}",
                 diagnosis=self._ha_diagnosis(),
                 needs=["Retry or choose a different entity target."],
                 say_hint="Explain service call failed and ask whether to retry.",
