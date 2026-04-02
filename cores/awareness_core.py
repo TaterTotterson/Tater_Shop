@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 load_dotenv()
 
@@ -5210,9 +5210,7 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     elif "sensorclosed" in event_token:
         sensor_edge_state = "off"
     hint_state = _unifi_sensor_state_hint(item)
-    if not sensor_edge_state and hint_state in {"on", "off"}:
-        sensor_edge_state = hint_state
-    elif sensor_edge_state and hint_state and hint_state != sensor_edge_state:
+    if sensor_edge_state and hint_state and hint_state != sensor_edge_state:
         logger.debug(
             "[awareness] UniFi sensor token/hint mismatch token=%s token_state=%s hint_state=%s",
             event_token,
