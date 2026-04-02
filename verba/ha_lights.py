@@ -54,7 +54,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.0.0'
+    version = '2.0.1'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -446,8 +446,19 @@ class HALightsPlugin(ToolVerba):
 
         extras: List[str] = []
         for key in self.summary_attribute_keys or []:
-            if attrs.get(key) not in (None, "", []):
-                extras.append(f"{key.replace('_', ' ')} {attrs.get(key)}")
+            value = attrs.get(key)
+            if value in (None, "", []):
+                continue
+            if key == "brightness":
+                try:
+                    raw_brightness = int(value)
+                    raw_brightness = max(0, min(255, raw_brightness))
+                    pct = int(round((raw_brightness / 255.0) * 100.0))
+                    extras.append(f"brightness {raw_brightness} (~{pct}%)")
+                    continue
+                except Exception:
+                    pass
+            extras.append(f"{key.replace('_', ' ')} {value}")
 
         if extras:
             return f"{name} is {state}; " + ", ".join(extras) + "."
