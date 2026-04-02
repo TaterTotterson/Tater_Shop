@@ -20,7 +20,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "1.1.36"
+__version__ = "1.1.37"
 
 load_dotenv()
 
@@ -587,12 +587,32 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         return base
 
     if kind == "doorbell":
+        camera_entity = _text(raw.get("camera_entity"))
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
         if not trigger_entities:
             trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
+        provider_token = _normalize_event_provider(raw.get("provider") or base.get("provider") or "homeassistant")
+        if provider_token == "unifi_protect" and camera_entity:
+            camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
+            if camera_id:
+                expected_trigger = _unifi_camera_doorbell_trigger(camera_id)
+                expected_lower = expected_trigger.lower()
+                current_lower = [_text(item).lower() for item in trigger_entities]
+                if not trigger_entities:
+                    trigger_entities = [expected_trigger]
+                elif expected_lower not in current_lower:
+                    # Legacy UniFi doorbell rules could end up bound to motion/smart triggers.
+                    # If the current triggers are camera-scoped UniFi triggers, normalize to the doorbell press trigger.
+                    camera_prefix = f"binary_sensor.unifi_{camera_id}_"
+                    if current_lower and all(token.startswith(camera_prefix) for token in current_lower):
+                        trigger_entities = [expected_trigger]
+                    else:
+                        trigger_entities = [expected_trigger] + [
+                            item for item in trigger_entities if _text(item).lower() != expected_lower
+                        ]
         base.update(
             {
-                "camera_entity": _text(raw.get("camera_entity")),
+                "camera_entity": camera_entity,
                 "area": _text(raw.get("area")) or "front door",
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
@@ -3194,6 +3214,26 @@ def _trigger_dependency_for_camera(
     trigger_pairs = catalog.get("doorbell_triggers") if doorbell else catalog.get("triggers")
     trigger_pairs = trigger_pairs if isinstance(trigger_pairs, list) else []
     cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
+    if doorbell:
+        # Ensure every camera exposes a derived doorbell trigger option even when
+        # backend catalog heuristics fail to classify a camera as a doorbell.
+        existing = {_text(pair[0]).lower() for pair in trigger_pairs}
+        for camera_entity, camera_label in cameras:
+            camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
+            if not camera_id:
+                continue
+            derived = _unifi_camera_doorbell_trigger(camera_id)
+            if derived.lower() in existing:
+                continue
+            label_name = _catalog_label_name(camera_label, camera_entity)
+            trigger_pairs.append((derived, f"{label_name} doorbell button press ({derived})"))
+            existing.add(derived.lower())
+        doorbell_only = [
+            pair for pair in trigger_pairs
+            if _text(pair[0]).lower().endswith("_doorbell")
+        ]
+        if doorbell_only:
+            trigger_pairs = doorbell_only
     current_trigger_values = _normalize_trigger_entities(current_triggers)
 
     default_options = _multiselect_choices_from_pairs(
