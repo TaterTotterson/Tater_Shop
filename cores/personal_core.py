@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.27"
+__version__ = "1.0.29"
 
 load_dotenv()
 
@@ -2915,6 +2915,15 @@ def _notification_candidates_from_updates(
                     "id": row_id,
                     "title": "Personal update: delivery",
                     "message": message,
+                    "rewrite_context": {
+                        "carrier": carrier,
+                        "tracking_id": tracking,
+                        "order_number": order_number,
+                        "item_description": item_description,
+                        "status": _slug(row.get("status"), default="update"),
+                        "eta_at": eta,
+                        "merchant": merchant,
+                    },
                 }
             )
 
@@ -2938,6 +2947,12 @@ def _notification_candidates_from_updates(
                     "id": row_id,
                     "title": "Personal update: spending",
                     "message": message,
+                    "rewrite_context": {
+                        "merchant": merchant,
+                        "amount": round(amount, 2),
+                        "currency": _text(row.get("currency")) or "USD",
+                        "observed_at": observed,
+                    },
                 }
             )
 
@@ -2961,6 +2976,12 @@ def _notification_candidates_from_updates(
                     "id": row_id,
                     "title": "Personal update: upcoming plan",
                     "message": message,
+                    "rewrite_context": {
+                        "title": title,
+                        "starts_at": starts,
+                        "location": location,
+                        "event_kind": _text(row.get("kind")) or "event",
+                    },
                 }
             )
 
@@ -2987,6 +3008,104 @@ def _normalize_notification_copy_text(value: Any, *, max_chars: int) -> str:
     return text
 
 
+def _parse_notification_rewrite_text(*, text: str, fallback_title: str, fallback_message: str) -> Dict[str, str]:
+    raw = _text(text)
+    if not raw:
+        return {"title": fallback_title, "message": fallback_message}
+
+    blob = extract_json(raw) or ""
+    if blob:
+        try:
+            parsed = json.loads(blob)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            title_text = _normalize_notification_copy_text(parsed.get("title"), max_chars=72) or fallback_title
+            message_text = _normalize_notification_copy_text(parsed.get("message"), max_chars=320) or fallback_message
+            return {"title": title_text, "message": message_text}
+
+    # Accept plain-text rewrite output too (for providers that ignore strict-JSON instruction).
+    lines = [_normalize_notification_copy_text(line, max_chars=320) for line in raw.splitlines() if _text(line)]
+    explicit_title = ""
+    explicit_message = ""
+    for line in lines:
+        lower = line.lower()
+        if lower.startswith("title:"):
+            explicit_title = _normalize_notification_copy_text(line.split(":", 1)[1], max_chars=72)
+        elif lower.startswith("message:"):
+            explicit_message = _normalize_notification_copy_text(line.split(":", 1)[1], max_chars=320)
+
+    if not explicit_title and len(lines) >= 2 and len(lines[0]) <= 60:
+        explicit_title = _normalize_notification_copy_text(lines[0], max_chars=72)
+    if not explicit_message:
+        if explicit_title and len(lines) >= 2:
+            explicit_message = _normalize_notification_copy_text(" ".join(lines[1:]), max_chars=320)
+        else:
+            explicit_message = _normalize_notification_copy_text(raw, max_chars=320)
+
+    return {
+        "title": explicit_title or fallback_title,
+        "message": explicit_message or fallback_message,
+    }
+
+
+def _notification_rewrite_prompt_for_kind(*, kind: str, is_test: bool) -> str:
+    kind_token = _slug(kind, default="update")
+    mode_text = "test preview" if bool(is_test) else "live notification"
+
+    base_rules = [
+        "Return strict JSON only with keys title and message.",
+        "Keep facts exactly as provided.",
+        "No hallucinations or extra claims.",
+        "Keep title <= 60 chars.",
+        "Keep message <= 220 chars and concise.",
+        "Friendly tone, no emojis, no markdown.",
+    ]
+
+    if kind_token == "deliveries":
+        task = (
+            "You write personal assistant delivery alerts.\n"
+            f"Context: this is a {mode_text} for a newly detected delivery update."
+        )
+        extra = [
+            "Make it clear this is a new delivery/update.",
+            "Use item_description, merchant, carrier, and tracking/order refs when available.",
+            "If only partial data exists, still sound useful and natural.",
+        ]
+    elif kind_token == "spending":
+        task = (
+            "You write personal assistant spending alerts.\n"
+            f"Context: this is a {mode_text} for a newly detected purchase/spend signal."
+        )
+        extra = [
+            "Make it clear a new purchase/spend event was detected.",
+            "Use merchant and amount when available.",
+            "Keep wording short and practical.",
+        ]
+    elif kind_token == "plans":
+        task = (
+            "You write personal assistant upcoming-plan alerts.\n"
+            f"Context: this is a {mode_text} for a newly detected upcoming plan/event."
+        )
+        extra = [
+            "Make it clear this is an upcoming plan/event reminder.",
+            "Use event title, time, and location when available.",
+            "Keep phrasing natural and timely.",
+        ]
+    else:
+        task = (
+            "You rewrite personal assistant notification copy.\n"
+            f"Context: this is a {mode_text}."
+        )
+        extra = [
+            "Use available context details when present.",
+            "Avoid repetitive boilerplate wording.",
+        ]
+
+    lines = [task, "Rules:"] + [f"- {line}" for line in base_rules + extra]
+    return "\n".join(lines)
+
+
 async def _rewrite_notification_copy_async(
     *,
     llm_client: Any,
@@ -2994,6 +3113,7 @@ async def _rewrite_notification_copy_async(
     title: str,
     message: str,
     is_test: bool,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     fallback = {
         "title": _normalize_notification_copy_text(title, max_chars=72) or "Personal update",
@@ -3002,20 +3122,12 @@ async def _rewrite_notification_copy_async(
     if llm_client is None:
         return fallback
 
-    prompt = (
-        "You rewrite personal assistant notification copy.\n"
-        "Return strict JSON only with keys title and message.\n"
-        "Rules:\n"
-        "- Keep facts exactly as provided.\n"
-        "- No hallucinations, no extra claims.\n"
-        "- Keep title <= 60 chars.\n"
-        "- Keep message <= 220 chars, one concise sentence.\n"
-        "- Friendly tone, natural wording variation, no emojis.\n"
-        "- No markdown."
-    )
+    prompt = _notification_rewrite_prompt_for_kind(kind=kind, is_test=is_test)
     payload = {
         "kind": _slug(kind, default="update"),
         "mode": "test" if bool(is_test) else "live",
+        "variation_hint": str(int(time.time() * 1000) % 997),
+        "event_context": context if isinstance(context, dict) else {},
         "current_title": fallback["title"],
         "current_message": fallback["message"],
     }
@@ -3034,22 +3146,11 @@ async def _rewrite_notification_copy_async(
         return fallback
 
     text = _text(((response or {}).get("message") or {}).get("content"))
-    if not text:
-        return fallback
-    blob = extract_json(text) or text
-    try:
-        parsed = json.loads(blob)
-    except Exception:
-        return fallback
-    if not isinstance(parsed, dict):
-        return fallback
-
-    title_text = _normalize_notification_copy_text(parsed.get("title"), max_chars=72) or fallback["title"]
-    message_text = _normalize_notification_copy_text(parsed.get("message"), max_chars=320) or fallback["message"]
-    return {
-        "title": title_text,
-        "message": message_text,
-    }
+    return _parse_notification_rewrite_text(
+        text=text,
+        fallback_title=fallback["title"],
+        fallback_message=fallback["message"],
+    )
 
 
 def _notification_copy_for_send(
@@ -3064,7 +3165,15 @@ def _notification_copy_for_send(
         "title": _normalize_notification_copy_text(title, max_chars=72) or "Personal update",
         "message": _normalize_notification_copy_text(message, max_chars=320),
     }
+    rewrite_context = row.get("rewrite_context") if isinstance(row.get("rewrite_context"), dict) else {}
     if not fallback["message"]:
+        return fallback
+    if llm_client is None:
+        logger.info(
+            "[personal_core] notification rewrite fallback kind=%s test=%s reason=llm_unavailable",
+            _slug(row.get("kind"), default="update"),
+            "1" if bool(is_test) else "0",
+        )
         return fallback
     rewritten = _run_async_blocking(
         _rewrite_notification_copy_async(
@@ -3073,12 +3182,19 @@ def _notification_copy_for_send(
             title=fallback["title"],
             message=fallback["message"],
             is_test=is_test,
+            context=rewrite_context,
         )
     )
     if not isinstance(rewritten, dict):
         return fallback
     out_title = _normalize_notification_copy_text(rewritten.get("title"), max_chars=72) or fallback["title"]
     out_message = _normalize_notification_copy_text(rewritten.get("message"), max_chars=320) or fallback["message"]
+    if out_title == fallback["title"] and out_message == fallback["message"]:
+        logger.info(
+            "[personal_core] notification rewrite fallback kind=%s test=%s reason=no_change",
+            _slug(row.get("kind"), default="update"),
+            "1" if bool(is_test) else "0",
+        )
     return {"title": out_title, "message": out_message}
 
 
@@ -3390,6 +3506,15 @@ def _notification_test_messages_from_saved_items(settings: Optional[Dict[str, An
                 "kind": "deliveries",
                 "title": "Test: delivery notification",
                 "message": f"It looks like your delivery{merchant_text}{item_text} via {carrier}{ref_text} is now {status_text}.{eta_text}",
+                "rewrite_context": {
+                    "carrier": carrier,
+                    "tracking_id": tracking,
+                    "order_number": order_number,
+                    "item_description": item_description,
+                    "status": _slug(delivery.get("status"), default="update"),
+                    "eta_at": eta,
+                    "merchant": merchant,
+                },
             }
         )
 
@@ -3404,6 +3529,12 @@ def _notification_test_messages_from_saved_items(settings: Optional[Dict[str, An
                 "kind": "spending",
                 "title": "Test: spending notification",
                 "message": f"I noticed a new purchase: {merchant} for ${amount:.2f}{when_text}.",
+                "rewrite_context": {
+                    "merchant": merchant,
+                    "amount": round(amount, 2),
+                    "currency": _text(spending.get("currency")) or "USD",
+                    "observed_at": observed,
+                },
             }
         )
 
@@ -3418,6 +3549,12 @@ def _notification_test_messages_from_saved_items(settings: Optional[Dict[str, An
                 "kind": "plans",
                 "title": "Test: plan notification",
                 "message": f"I see you have a plan coming up: {title} at {starts}{location_text}.",
+                "rewrite_context": {
+                    "title": title,
+                    "starts_at": starts,
+                    "location": location,
+                    "event_kind": _text(plan.get("kind")) or "event",
+                },
             }
         )
 
