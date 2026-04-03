@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.17"
+__version__ = "1.0.19"
 
 load_dotenv()
 
@@ -532,8 +532,10 @@ def _load_settings() -> Dict[str, Any]:
         "notify_on_spending": _as_bool(raw.get("notify_on_spending"), True),
         "notify_on_plans": _as_bool(raw.get("notify_on_plans"), True),
         "notification_platform": _slug(raw.get("notification_platform"), default="webui"),
+        "notification_destinations": _normalize_destination_values(
+            raw.get("notification_destinations") or raw.get("notification_destination")
+        ),
         "notification_destination": _text(raw.get("notification_destination")),
-        "notification_target_text": _text(raw.get("notification_target_text")),
         "notification_max_per_cycle": _as_int(raw.get("notification_max_per_cycle"), 3, minimum=1, maximum=25),
         "notification_ha_api_notification": _as_bool(raw.get("notification_ha_api_notification"), True),
         "notification_ha_device_services": _text(raw.get("notification_ha_device_services")),
@@ -556,6 +558,37 @@ def _personal_prompt_enabled_for_platform(*, platform: Any, settings: Optional[D
     if normalized == "matrix" or normalized.startswith("matrix_"):
         return _as_bool(cfg.get("prompt_include_matrix"), False)
     return True
+
+
+def _normalize_destination_values(raw: Any) -> List[str]:
+    values: List[Any]
+    if isinstance(raw, list):
+        values = list(raw)
+    else:
+        text = _text(raw)
+        if not text:
+            values = []
+        elif text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                values = parsed
+            else:
+                values = [text]
+        else:
+            values = [text]
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in values:
+        token = _text(item)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
 
 
 def _clean_targets_dict(raw: Any) -> Dict[str, str]:
@@ -652,7 +685,7 @@ def _destination_options_for_platform(
     platform: str,
     *,
     catalog: Dict[str, Any],
-    current_targets: Optional[Dict[str, Any]] = None,
+    current_targets: Optional[Any] = None,
 ) -> List[Dict[str, str]]:
     platform_name = _slug(platform, default="")
     row = _catalog_platform_row(catalog, platform_name)
@@ -681,11 +714,22 @@ def _destination_options_for_platform(
             out.append({"value": value, "label": label})
             seen.add(value)
 
-    current_clean = _clean_targets_dict(current_targets)
-    if current_clean:
+    current_rows: List[Dict[str, str]] = []
+    if isinstance(current_targets, list):
+        for row in current_targets:
+            clean = _clean_targets_dict(row)
+            if clean:
+                current_rows.append(clean)
+    elif isinstance(current_targets, dict):
+        clean = _clean_targets_dict(current_targets)
+        if clean:
+            current_rows.append(clean)
+
+    for current_clean in current_rows:
         current_value = _encode_destination_value(platform_name, current_clean)
         if current_value and current_value not in seen:
             out.append({"value": current_value, "label": "Current target"})
+            seen.add(current_value)
 
     return out
 
@@ -845,16 +889,36 @@ def _multiselect_choices_from_pairs(
     return out
 
 
-def _notification_targets_from_settings(settings: Dict[str, Any], *, catalog: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, str]]:
+def _notification_routes_from_settings(
+    settings: Dict[str, Any],
+    *,
+    catalog: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[Dict[str, str]]]:
     platform = _slug(settings.get("notification_platform"), default="webui")
-    selected_platform, selected_targets = _decode_destination_value(settings.get("notification_destination"))
-    targets = {}
-    if selected_platform == platform:
-        targets.update(selected_targets)
+    selected_values = _normalize_destination_values(settings.get("notification_destinations"))
+    if not selected_values:
+        legacy_value = _text(settings.get("notification_destination"))
+        if legacy_value:
+            selected_values = [legacy_value]
 
-    manual_targets = _target_from_text(platform, settings.get("notification_target_text"))
-    targets.update(manual_targets)
-    return platform, _clean_targets_dict(targets)
+    routes: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_value in selected_values:
+        selected_platform, selected_targets = _decode_destination_value(raw_value)
+        if selected_platform and selected_platform != platform:
+            continue
+        if not selected_platform:
+            continue
+        clean_targets = _clean_targets_dict(selected_targets)
+        encoded = _encode_destination_value(platform, clean_targets)
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        routes.append(clean_targets)
+
+    if not routes and not _platform_requires_target(platform, catalog=catalog):
+        routes = [{}]
+    return platform, routes
 
 def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -2687,7 +2751,7 @@ async def _dispatch_personal_notification_async(
     platform: str,
     title: str,
     message: str,
-    targets: Dict[str, Any],
+    target_routes: List[Dict[str, Any]],
     account_id: str,
     settings: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -2702,9 +2766,13 @@ async def _dispatch_personal_notification_async(
     }
 
     platform_name = _slug(platform, default="webui")
+    routes = [dict(row) for row in (target_routes or []) if isinstance(row, dict)]
+    if not routes and not _platform_requires_target(platform_name):
+        routes = [{}]
+
     if platform_name == "homeassistant":
         api_notification = _as_bool(settings.get("notification_ha_api_notification"), True)
-        services = _normalize_notify_services(settings.get("notification_ha_device_services"))
+        global_services = _normalize_notify_services(settings.get("notification_ha_device_services"))
         sent_count = 0
         errors: List[str] = []
 
@@ -2728,44 +2796,65 @@ async def _dispatch_personal_notification_async(
             else:
                 errors.append(result_text or "homeassistant notifier returned empty result")
 
-        if api_notification:
-            api_targets = dict(targets)
-            api_targets["persistent"] = False
-            api_targets["api_notification"] = True
-            await _dispatch_ha_route(api_targets)
+        if not routes:
+            routes = [{}]
 
-        for service in services:
-            svc_targets = dict(targets)
-            svc_targets["persistent"] = False
-            svc_targets["api_notification"] = False
-            svc_targets["device_service"] = service
-            await _dispatch_ha_route(svc_targets)
+        for route in routes:
+            base_targets = dict(route)
+            route_api_enabled = _as_bool(base_targets.get("api_notification"), api_notification)
+            route_device_service = _normalize_notify_service(base_targets.get("device_service"))
+            route_services = list(global_services)
+            if route_device_service and route_device_service not in route_services and not route_services:
+                route_services.append(route_device_service)
 
-        if (not api_notification) and (not services):
-            default_targets = dict(targets)
-            default_targets["persistent"] = False
-            await _dispatch_ha_route(default_targets)
+            if route_api_enabled:
+                api_targets = dict(base_targets)
+                api_targets.pop("device_service", None)
+                api_targets["persistent"] = False
+                api_targets["api_notification"] = True
+                await _dispatch_ha_route(api_targets)
+
+            for service in route_services:
+                svc_targets = dict(base_targets)
+                svc_targets["persistent"] = False
+                svc_targets["api_notification"] = False
+                svc_targets["device_service"] = service
+                await _dispatch_ha_route(svc_targets)
+
+            if (not route_api_enabled) and (not route_services):
+                default_targets = dict(base_targets)
+                default_targets["persistent"] = False
+                await _dispatch_ha_route(default_targets)
 
         if sent_count > 0:
             return {"ok": True, "sent_count": sent_count, "errors": errors}
         return {"ok": False, "sent_count": 0, "errors": errors}
 
-    try:
-        result = await dispatch_notification(
-            platform=platform_name,
-            title=title,
-            content=message,
-            targets=targets,
-            origin=origin,
-            meta=meta,
-        )
-    except Exception as exc:
-        return {"ok": False, "sent_count": 0, "errors": [str(exc)]}
+    sent_count = 0
+    errors: List[str] = []
+    for route in routes:
+        try:
+            result = await dispatch_notification(
+                platform=platform_name,
+                title=title,
+                content=message,
+                targets=route,
+                origin=origin,
+                meta=meta,
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
 
-    result_text = _text(result)
-    if result_text.lower().startswith("queued notification"):
-        return {"ok": True, "sent_count": 1, "errors": []}
-    return {"ok": False, "sent_count": 0, "errors": [result_text or "notification not queued"]}
+        result_text = _text(result)
+        if result_text.lower().startswith("queued notification"):
+            sent_count += 1
+        else:
+            errors.append(result_text or "notification not queued")
+
+    if sent_count > 0:
+        return {"ok": True, "sent_count": sent_count, "errors": errors}
+    return {"ok": False, "sent_count": 0, "errors": errors}
 
 
 def _send_new_update_notifications(
@@ -2778,7 +2867,7 @@ def _send_new_update_notifications(
         return {"sent_count": 0, "attempted_count": 0, "error_count": 0, "errors": [], "skipped": "disabled"}
 
     catalog = _load_destination_catalog()
-    platform, targets = _notification_targets_from_settings(settings, catalog=catalog)
+    platform, target_routes = _notification_routes_from_settings(settings, catalog=catalog)
     platform_name = _slug(platform, default="webui")
     supported_platforms = {_slug(item, default="") for item in core_notifier_platforms()}
     if platform_name not in supported_platforms:
@@ -2790,12 +2879,24 @@ def _send_new_update_notifications(
             "skipped": "unsupported_platform",
         }
 
-    if _platform_requires_target(platform_name, catalog=catalog) and not targets:
+    if _platform_requires_target(platform_name, catalog=catalog):
+        has_any_target = any(bool(_clean_targets_dict(row)) for row in target_routes if isinstance(row, dict))
+        if not has_any_target:
+            return {
+                "sent_count": 0,
+                "attempted_count": 0,
+                "error_count": 1,
+                "errors": [f"Notification platform '{platform_name}' requires at least one destination target."],
+                "skipped": "missing_target",
+            }
+    if not target_routes and not _platform_requires_target(platform_name, catalog=catalog):
+        target_routes = [{}]
+    if not target_routes:
         return {
             "sent_count": 0,
             "attempted_count": 0,
             "error_count": 1,
-            "errors": [f"Notification platform '{platform_name}' requires a destination target."],
+            "errors": [f"No valid notification destinations for platform '{platform_name}'."],
             "skipped": "missing_target",
         }
 
@@ -2809,7 +2910,7 @@ def _send_new_update_notifications(
     errors: List[str] = []
 
     for row in candidates:
-        if sent_count >= max_per_cycle:
+        if attempted_count >= max_per_cycle:
             break
         kind = _slug(row.get("kind"), default="update")
         row_id = _text(row.get("id"))
@@ -2825,7 +2926,7 @@ def _send_new_update_notifications(
                 platform=platform_name,
                 title=_text(row.get("title")) or "Personal update",
                 message=_text(row.get("message")),
-                targets=targets,
+                target_routes=target_routes,
                 account_id=account_id,
                 settings=settings,
             )
@@ -4662,19 +4763,51 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
     if notification_platform and notification_platform not in platform_values:
         platform_options.append({"value": notification_platform, "label": notification_platform})
 
-    selected_dest_platform, selected_dest_targets = _decode_destination_value(settings.get("notification_destination"))
-    current_destination_targets = selected_dest_targets if selected_dest_platform == notification_platform else {}
+    raw_destination_values = _normalize_destination_values(settings.get("notification_destinations"))
+    if not raw_destination_values:
+        legacy_destination = _text(settings.get("notification_destination"))
+        if legacy_destination:
+            raw_destination_values = [legacy_destination]
+
+    selected_destinations_by_platform: Dict[str, List[Dict[str, str]]] = {}
+    for raw_value in raw_destination_values:
+        selected_dest_platform, selected_dest_targets = _decode_destination_value(raw_value)
+        if not selected_dest_platform:
+            continue
+        selected_destinations_by_platform.setdefault(selected_dest_platform, []).append(_clean_targets_dict(selected_dest_targets))
+    current_destination_targets = selected_destinations_by_platform.get(notification_platform, [])
+
+    notification_destination_options_by_platform: Dict[str, List[Dict[str, str]]] = {}
+    for platform_row in platform_options:
+        platform_token = _slug(platform_row.get("value"), default="")
+        if not platform_token:
+            continue
+        platform_current_targets = selected_destinations_by_platform.get(platform_token, [])
+        notification_destination_options_by_platform[platform_token] = _destination_options_for_platform(
+            platform_token,
+            catalog=destination_catalog,
+            current_targets=platform_current_targets,
+        )
     notification_destination_options = _destination_options_for_platform(
         notification_platform,
         catalog=destination_catalog,
         current_targets=current_destination_targets,
     )
-    notification_destination_value = _text(settings.get("notification_destination"))
-    if not notification_destination_value and current_destination_targets:
-        notification_destination_value = _encode_destination_value(notification_platform, current_destination_targets)
+    notification_destination_values: List[str] = []
+    notification_destination_seen: set[str] = set()
+    for row in current_destination_targets:
+        encoded = _encode_destination_value(notification_platform, row)
+        if not encoded or encoded in notification_destination_seen:
+            continue
+        notification_destination_seen.add(encoded)
+        notification_destination_values.append(encoded)
+
     destination_values = {str(row.get("value") or "") for row in notification_destination_options}
-    if notification_destination_value and notification_destination_value not in destination_values:
-        notification_destination_options.append({"value": notification_destination_value, "label": "Current target"})
+    for value in notification_destination_values:
+        if value in destination_values:
+            continue
+        notification_destination_options.append({"value": value, "label": "Current target"})
+        destination_values.add(value)
 
     ha_service_pairs = _ha_notify_service_pairs()
     ha_service_options = _multiselect_choices_from_pairs(
@@ -4686,11 +4819,15 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         f"Enabled: {'on' if _as_bool(settings.get('notifications_enabled'), False) else 'off'}",
         f"Portal: {notification_platform or 'n/a'}",
     ]
-    if current_destination_targets:
-        route_preview_lines.append(f"Destination from room catalog: {json.dumps(current_destination_targets, ensure_ascii=False)}")
-    manual_target_preview = _text(settings.get("notification_target_text"))
-    if manual_target_preview:
-        route_preview_lines.append(f"Manual target override: {manual_target_preview}")
+    if notification_destination_values:
+        options_map = {
+            _text(row.get("value")): _text(row.get("label"))
+            for row in notification_destination_options
+            if _text(row.get("value"))
+        }
+        route_preview_lines.append("Selected destinations:")
+        for value in notification_destination_values[:8]:
+            route_preview_lines.append(f"- {options_map.get(value) or value}")
     route_preview_lines.append(
         "Category toggles: "
         + f"deliveries={'on' if _as_bool(settings.get('notify_on_deliveries'), True) else 'off'}, "
@@ -4926,19 +5063,17 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                             "value": notification_platform or "webui",
                         },
                         {
-                            "key": "notification_destination",
-                            "label": "Room / Destination",
-                            "type": "select",
-                            "description": "Choose from notifier room/channel discovery.",
+                            "key": "notification_destinations",
+                            "label": "Rooms / Destinations",
+                            "type": "multiselect",
+                            "description": "Pick one or more destinations from room/channel discovery.",
                             "options": notification_destination_options,
-                            "value": notification_destination_value,
-                        },
-                        {
-                            "key": "notification_target_text",
-                            "label": "Manual Target Override",
-                            "type": "text",
-                            "value": _text(settings.get("notification_target_text")),
-                            "description": "Optional fallback (channel/room/chat/device service).",
+                            "dependent_options": {
+                                "source_key": "notification_platform",
+                                "options_by_source": notification_destination_options_by_platform,
+                                "default_options": notification_destination_options,
+                            },
+                            "value": notification_destination_values,
                         },
                     ],
                 },
@@ -5248,8 +5383,7 @@ def _save_notification_controls(
     notify_on_spending: Any,
     notify_on_plans: Any,
     notification_platform: Any,
-    notification_destination: Any,
-    notification_target_text: Any,
+    notification_destinations: Any,
     notification_max_per_cycle: Any,
     notification_ha_api_notification: Any,
     notification_ha_device_services: Any,
@@ -5263,12 +5397,21 @@ def _save_notification_controls(
     if not platform:
         platform = "webui"
 
-    destination_value = _text(notification_destination)
-    destination_platform, _destination_targets = _decode_destination_value(destination_value)
-    if destination_value and destination_platform and destination_platform != platform:
-        destination_value = ""
+    selected_values = _normalize_destination_values(notification_destinations)
+    clean_destination_values: List[str] = []
+    seen_destinations: set[str] = set()
+    for raw_value in selected_values:
+        destination_platform, destination_targets = _decode_destination_value(raw_value)
+        if destination_platform and destination_platform != platform:
+            continue
+        if not destination_platform:
+            continue
+        normalized_value = _encode_destination_value(platform, destination_targets)
+        if not normalized_value or normalized_value in seen_destinations:
+            continue
+        seen_destinations.add(normalized_value)
+        clean_destination_values.append(normalized_value)
 
-    manual_target = _text(notification_target_text)
     max_per_cycle = _as_int(
         notification_max_per_cycle,
         _as_int(current.get("notification_max_per_cycle"), 3, minimum=1, maximum=25),
@@ -5289,13 +5432,17 @@ def _save_notification_controls(
             "notify_on_spending": "1" if spending_enabled else "0",
             "notify_on_plans": "1" if plans_enabled else "0",
             "notification_platform": platform,
-            "notification_destination": destination_value,
-            "notification_target_text": manual_target,
+            "notification_destinations": json.dumps(clean_destination_values, ensure_ascii=False),
+            "notification_destination": clean_destination_values[0] if clean_destination_values else "",
             "notification_max_per_cycle": str(max_per_cycle),
             "notification_ha_api_notification": "1" if ha_api_notification else "0",
             "notification_ha_device_services": json.dumps(ha_services, ensure_ascii=False),
         },
     )
+    try:
+        redis_client.hdel(_PERSONAL_SETTINGS_KEY, "notification_target_text")
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -5304,8 +5451,7 @@ def _save_notification_controls(
         "notify_on_spending": spending_enabled,
         "notify_on_plans": plans_enabled,
         "notification_platform": platform,
-        "notification_destination": destination_value,
-        "notification_target_text": manual_target,
+        "notification_destinations": clean_destination_values,
         "notification_max_per_cycle": max_per_cycle,
         "notification_ha_api_notification": ha_api_notification,
         "notification_ha_device_services": ha_services,
@@ -5357,8 +5503,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             notify_on_spending=_value("notify_on_spending"),
             notify_on_plans=_value("notify_on_plans"),
             notification_platform=_value("notification_platform"),
-            notification_destination=_value("notification_destination"),
-            notification_target_text=_value("notification_target_text"),
+            notification_destinations=_value("notification_destinations"),
             notification_max_per_cycle=_value("notification_max_per_cycle"),
             notification_ha_api_notification=_value("notification_ha_api_notification"),
             notification_ha_device_services=_value("notification_ha_device_services"),
