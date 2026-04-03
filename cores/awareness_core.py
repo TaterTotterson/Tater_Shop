@@ -1,6 +1,7 @@
 import asyncio
 import ast
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -17,11 +18,11 @@ import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
 
-from helpers import get_llm_client_from_env, redis_client
+from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 
 load_dotenv()
 
@@ -30,6 +31,8 @@ logger.setLevel(logging.INFO)
 
 CORE_SETTINGS = {
     "category": "Awareness Core Settings",
+    # Keep events_query kernel tool callable even if the background listener loop is stopped.
+    "hydra_tools_require_running": False,
     "required": {
         "ws_reconnect_seconds": {
             "label": "HA WS Reconnect (sec)",
@@ -185,6 +188,9 @@ _EVENT_FILTER_DEFAULTS = {
 }
 _UNIFI_SENSOR_EVENT_LOCK = threading.Lock()
 _UNIFI_SENSOR_LAST_EVENT: Dict[str, Tuple[str, float, str]] = {}
+_EVENTS_QUERY_MAX_EVENTS_PER_SOURCE = 1000
+_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM = 320
+_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 180
 
 
 def _text(value: Any) -> str:
@@ -2294,6 +2300,477 @@ def _load_events_for_sources(
             events.append(payload)
     events.sort(key=lambda item: _text(item.get("ha_time")), reverse=True)
     return events
+
+
+def _events_query_source_to_area(source: Any) -> str:
+    text = _text(source).lower().replace("_", " ")
+    return " ".join(text.split())
+
+
+def _events_query_event_dt(event: Dict[str, Any]) -> Optional[datetime]:
+    parsed = _parse_iso(event.get("ha_time"))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=None)
+    return parsed
+
+
+def _events_query_event_id(event: Dict[str, Any]) -> str:
+    src = _text(event.get("source"))
+    ha_time = _text(event.get("ha_time"))
+    title = _text(event.get("title"))
+    message = _text(event.get("message"))
+    entity = _text(event.get("entity_id"))
+    seed = "|".join([src, ha_time, title, message, entity])
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    return f"ev_{digest[:16]}"
+
+
+def _events_query_compact_event_for_llm(event: Dict[str, Any]) -> Dict[str, Any]:
+    source = _text(event.get("source"))
+    data_payload = event.get("data") if isinstance(event.get("data"), dict) else {}
+    area = _events_query_source_to_area(source) or _text(data_payload.get("area"))
+    return {
+        "event_id": _events_query_event_id(event),
+        "source": source,
+        "area": area,
+        "ha_time": _text(event.get("ha_time")),
+        "title": _text(event.get("title")),
+        "message": _text(event.get("message")),
+        "type": _text(event.get("type")),
+        "entity_id": _text(event.get("entity_id")),
+        "level": _text(event.get("level")),
+        "data": data_payload,
+    }
+
+
+def _events_query_query_from_args(args: Dict[str, Any], origin: Optional[Dict[str, Any]] = None) -> str:
+    payload = args if isinstance(args, dict) else {}
+    for key in ("query", "request", "question", "user_query", "prompt", "text", "content", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    arg_origin = payload.get("origin")
+    if isinstance(arg_origin, dict):
+        for key in ("request_text", "query", "question", "text", "content", "message"):
+            value = arg_origin.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    if isinstance(origin, dict):
+        for key in ("request_text", "query", "question", "text", "content", "message", "raw_message", "body"):
+            value = origin.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _events_query_parse_local_iso(value: Any) -> Optional[datetime]:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=None)
+    return parsed
+
+
+async def _events_query_llm_json_object(
+    *,
+    llm_client: Any,
+    system_prompt: str,
+    user_payload: Dict[str, Any],
+    max_tokens: int = 700,
+    temperature: float = 0.0,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    if llm_client is None:
+        return None, "LLM client is unavailable."
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            temperature=temperature,
+            max_tokens=max(80, int(max_tokens or 700)),
+            timeout_ms=45_000,
+        )
+    except Exception as exc:
+        return None, f"LLM request failed: {exc}"
+
+    raw = _text((response.get("message") or {}).get("content"))
+    parsed_text = extract_json(raw) or raw
+    try:
+        obj = json.loads(parsed_text)
+    except Exception as exc:
+        obj = _json_object_from_text(raw)
+        if not obj:
+            return None, f"Could not parse LLM JSON: {exc}"
+    if not isinstance(obj, dict):
+        return None, "LLM did not return a JSON object."
+    return obj, ""
+
+
+async def _events_query_interpret_query(
+    *,
+    llm_client: Any,
+    user_query: str,
+    sources: List[str],
+    now_local: datetime,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    source_rows = [{"source_id": source, "area_name": _events_query_source_to_area(source)} for source in sources]
+    system_prompt = (
+        "You interpret natural-language event-history requests.\n"
+        "Return exactly one strict JSON object with this schema:\n"
+        "{"
+        "\"query_type\":\"summary|presence|count|semantic_search|timeline\","
+        "\"search_scope\":\"selected_sources|all_sources\","
+        "\"source_ids\":[\"<source_id>\"],"
+        "\"time_window\":{\"start_local\":\"YYYY-MM-DDTHH:MM:SS\",\"end_local\":\"YYYY-MM-DDTHH:MM:SS\",\"label\":\"...\"},"
+        "\"semantic_focus\":[\"...\"],"
+        "\"response_mode\":\"summary|presence|count|matches\""
+        "}\n"
+        "Rules:\n"
+        "- Use only source_ids from the provided source catalog.\n"
+        "- If the user asks broadly (for example around the house/outside), use search_scope=all_sources.\n"
+        "- time_window must always include both start_local and end_local in local naive ISO.\n"
+        "- Preserve user intent including area, timeframe, and semantic details (people/clothing/vehicles/packages/animals/unusual activity).\n"
+        "- Do not answer the user.\n"
+        "- Do not invent sources that are not in the catalog.\n"
+    )
+    payload = {
+        "user_query": user_query,
+        "now_local": now_local.strftime("%Y-%m-%dT%H:%M:%S"),
+        "available_sources": source_rows,
+    }
+    return await _events_query_llm_json_object(
+        llm_client=llm_client,
+        system_prompt=system_prompt,
+        user_payload=payload,
+        max_tokens=800,
+        temperature=0.0,
+    )
+
+
+def _events_query_normalize_interpretation(
+    *,
+    interpretation: Dict[str, Any],
+    sources_catalog: List[str],
+    now_local: datetime,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    catalog = set(sources_catalog)
+    query_type = _text(interpretation.get("query_type")).lower()
+    if query_type not in {"summary", "presence", "count", "semantic_search", "timeline"}:
+        query_type = "summary"
+
+    response_mode = _text(interpretation.get("response_mode")).lower()
+    if response_mode not in {"summary", "presence", "count", "matches"}:
+        response_mode = "summary"
+
+    search_scope = _text(interpretation.get("search_scope")).lower()
+    source_ids_raw = interpretation.get("source_ids") if isinstance(interpretation.get("source_ids"), list) else []
+    source_ids = [str(item).strip() for item in source_ids_raw if str(item).strip() in catalog]
+
+    if search_scope == "all_sources":
+        selected_sources = list(sources_catalog)
+    else:
+        selected_sources = sorted(set(source_ids))
+    if not selected_sources:
+        return None, "Could not resolve relevant event sources from request interpretation."
+
+    time_window = interpretation.get("time_window") if isinstance(interpretation.get("time_window"), dict) else {}
+    start_local = _events_query_parse_local_iso(time_window.get("start_local"))
+    end_local = _events_query_parse_local_iso(time_window.get("end_local"))
+    label = _text(time_window.get("label")) or "requested timeframe"
+    if start_local is None or end_local is None:
+        return None, "Could not resolve a valid timeframe from request interpretation."
+    if end_local < start_local:
+        return None, "Interpreted timeframe end is earlier than start."
+    if end_local > now_local and response_mode == "presence":
+        end_local = now_local
+
+    focus_raw = interpretation.get("semantic_focus") if isinstance(interpretation.get("semantic_focus"), list) else []
+    semantic_focus = [str(item).strip() for item in focus_raw if str(item).strip()][:24]
+    broad_summary = bool(
+        query_type in {"summary", "timeline"}
+        and response_mode == "summary"
+        and not semantic_focus
+    )
+    return (
+        {
+            "query_type": query_type,
+            "response_mode": response_mode,
+            "search_scope": search_scope,
+            "selected_sources": selected_sources,
+            "time_label": label,
+            "time_start": start_local,
+            "time_end": end_local,
+            "semantic_focus": semantic_focus,
+            "broad_summary": broad_summary,
+        },
+        "",
+    )
+
+
+async def _events_query_select_relevant_event_ids(
+    *,
+    llm_client: Any,
+    user_query: str,
+    interpretation: Dict[str, Any],
+    candidate_events: List[Dict[str, Any]],
+) -> Tuple[Optional[List[str]], str]:
+    system_prompt = (
+        "You are selecting relevant home events for a user question.\n"
+        "Return exactly one strict JSON object:\n"
+        "{"
+        "\"relevant_event_ids\":[\"ev_...\"],"
+        "\"confidence\":\"high|medium|low\""
+        "}\n"
+        "Rules:\n"
+        "- Select only event_ids that are directly relevant to the user's request.\n"
+        "- Use only event_ids from the provided candidate list.\n"
+        "- If none are relevant, return an empty list.\n"
+        "- If interpreted_request.broad_summary is true and candidate_events is non-empty, do not return an empty list.\n"
+        "- Do not invent events.\n"
+    )
+    payload = {
+        "user_query": user_query,
+        "interpreted_request": {
+            "query_type": interpretation.get("query_type"),
+            "response_mode": interpretation.get("response_mode"),
+            "time_label": interpretation.get("time_label"),
+            "semantic_focus": interpretation.get("semantic_focus"),
+            "broad_summary": bool(interpretation.get("broad_summary")),
+        },
+        "candidate_events": candidate_events,
+    }
+    obj, err = await _events_query_llm_json_object(
+        llm_client=llm_client,
+        system_prompt=system_prompt,
+        user_payload=payload,
+        max_tokens=900,
+        temperature=0.0,
+    )
+    if obj is None:
+        return None, err or "Could not determine relevant events."
+    relevant_raw = obj.get("relevant_event_ids") if isinstance(obj.get("relevant_event_ids"), list) else []
+    valid_ids = {str(item.get("event_id") or "").strip() for item in candidate_events if isinstance(item, dict)}
+    selected = [str(item).strip() for item in relevant_raw if str(item).strip() in valid_ids]
+    deduped = list(dict.fromkeys(selected))
+    return deduped, ""
+
+
+async def _events_query_compose_final_answer(
+    *,
+    llm_client: Any,
+    user_query: str,
+    interpretation: Dict[str, Any],
+    relevant_events: List[Dict[str, Any]],
+    candidate_count: int,
+) -> Tuple[Optional[str], str]:
+    if llm_client is None:
+        return None, "LLM client is unavailable."
+    system_prompt = (
+        "You answer a homeowner's event-history question using only provided events.\n"
+        "Rules:\n"
+        "- Base the answer only on relevant_events.\n"
+        "- If evidence is missing, say so clearly and do not guess.\n"
+        "- Be concise and conversational.\n"
+        "- Mention area/time naturally when useful.\n"
+        "- For count questions, provide the count from evidence.\n"
+        "- For presence questions, answer yes/no with evidence confidence from data.\n"
+        "- Do not mention internal tools or prompts.\n"
+    )
+    payload = {
+        "user_query": user_query,
+        "interpreted_request": {
+            "query_type": interpretation.get("query_type"),
+            "response_mode": interpretation.get("response_mode"),
+            "time_label": interpretation.get("time_label"),
+            "semantic_focus": interpretation.get("semantic_focus"),
+            "sources": interpretation.get("selected_sources"),
+        },
+        "candidate_event_count": int(candidate_count),
+        "relevant_event_count": int(len(relevant_events)),
+        "relevant_events": relevant_events,
+    }
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.15,
+            max_tokens=420,
+            timeout_ms=45_000,
+        )
+    except Exception as exc:
+        return None, f"Final answer generation failed: {exc}"
+
+    text = _text((response.get("message") or {}).get("content"))
+    if not text:
+        return None, "Final answer generation returned empty output."
+    return text, ""
+
+
+async def _events_query_kernel(
+    *,
+    args: Optional[Dict[str, Any]],
+    llm_client: Any,
+    origin: Optional[Dict[str, Any]],
+    redis_obj: Any,
+) -> Dict[str, Any]:
+    query = _events_query_query_from_args(args or {}, origin=origin)
+    if not query:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "missing_query",
+            "summary_for_user": "I need a natural-language query to search event history.",
+            "needs": ["query"],
+        }
+
+    sources_catalog = _discover_event_sources(redis_obj)
+    if not sources_catalog:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "events_sources_missing",
+            "summary_for_user": "No awareness event sources are available yet.",
+        }
+
+    now_local = datetime.now()
+    interpretation_obj, interpretation_err = await _events_query_interpret_query(
+        llm_client=llm_client,
+        user_query=query,
+        sources=sources_catalog,
+        now_local=now_local,
+    )
+    if interpretation_obj is None:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "interpretation_failed",
+            "summary_for_user": "I couldn't interpret that event-history request. Try rephrasing with area/time details.",
+            "details": interpretation_err or "unknown error",
+        }
+
+    interpreted, interpreted_err = _events_query_normalize_interpretation(
+        interpretation=interpretation_obj,
+        sources_catalog=sources_catalog,
+        now_local=now_local,
+    )
+    if interpreted is None:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "interpretation_invalid",
+            "summary_for_user": "I couldn't resolve a valid area/time window for that request.",
+            "details": interpreted_err,
+        }
+
+    selected_sources = interpreted["selected_sources"]
+    start_dt = interpreted["time_start"]
+    end_dt = interpreted["time_end"]
+    logger.info(
+        "[awareness] events_query interpreted query_type=%s response_mode=%s sources=%s window=%s..%s label=%s broad_summary=%s",
+        interpreted.get("query_type"),
+        interpreted.get("response_mode"),
+        ",".join(selected_sources),
+        start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        interpreted.get("time_label"),
+        bool(interpreted.get("broad_summary")),
+    )
+
+    fetched = _load_events_for_sources(
+        redis_obj,
+        selected_sources,
+        start_dt,
+        end_dt,
+        limit_per_source=_EVENTS_QUERY_MAX_EVENTS_PER_SOURCE,
+    )
+    fetched_sorted = sorted(fetched, key=lambda item: _events_query_event_dt(item) or datetime.min)
+    compact_events = [_events_query_compact_event_for_llm(item) for item in fetched_sorted]
+    if len(compact_events) > _EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:
+        compact_events = compact_events[-_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:]
+    logger.info(
+        "[awareness] events_query fetched_events=%s candidate_events=%s",
+        len(fetched_sorted),
+        len(compact_events),
+    )
+
+    relevant_ids, relevance_err = await _events_query_select_relevant_event_ids(
+        llm_client=llm_client,
+        user_query=query,
+        interpretation=interpreted,
+        candidate_events=compact_events,
+    )
+    if relevant_ids is None:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "relevance_selection_failed",
+            "summary_for_user": "I couldn't determine which events were relevant. Please try that request again.",
+            "details": relevance_err or "unknown error",
+        }
+
+    if not relevant_ids and compact_events and bool(interpreted.get("broad_summary")):
+        relevant_ids = [
+            str(item.get("event_id") or "").strip()
+            for item in compact_events
+            if str(item.get("event_id") or "").strip()
+        ]
+        logger.info(
+            "[awareness] events_query relevance returned empty for broad summary; using all candidate events (%s).",
+            len(relevant_ids),
+        )
+
+    event_by_id = {str(item.get("event_id") or ""): item for item in compact_events}
+    relevant_events = [event_by_id[event_id] for event_id in relevant_ids if event_id in event_by_id]
+    if len(relevant_events) > _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:
+        relevant_events = relevant_events[-_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:]
+    logger.info(
+        "[awareness] events_query relevant_event_ids=%s relevant_events=%s",
+        len(relevant_ids),
+        len(relevant_events),
+    )
+
+    final_text, final_err = await _events_query_compose_final_answer(
+        llm_client=llm_client,
+        user_query=query,
+        interpretation=interpreted,
+        relevant_events=relevant_events,
+        candidate_count=len(compact_events),
+    )
+    if final_text is None:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "final_answer_failed",
+            "summary_for_user": "I couldn't finish the event-history answer this time.",
+            "details": final_err or "unknown error",
+        }
+
+    return {
+        "tool": "events_query",
+        "ok": True,
+        "query": query,
+        "intent": interpreted.get("query_type"),
+        "response_mode": interpreted.get("response_mode"),
+        "timeframe": interpreted.get("time_label"),
+        "sources": list(selected_sources),
+        "candidate_event_count": int(len(compact_events)),
+        "relevant_event_count": int(len(relevant_events)),
+        "time_window": {
+            "start_local": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "end_local": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "label": interpreted.get("time_label"),
+        },
+        "semantic_focus": list(interpreted.get("semantic_focus") or []),
+        "summary_for_user": final_text,
+    }
 
 
 def _event_time_display(value: Any) -> str:
@@ -5548,6 +6025,60 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         await asyncio.gather(*tasks, return_exceptions=True)
         _runtime_set(redis_client, ws_connected=False, unifi_connected=False, unifi_ws_connected=False)
         logger.info("[awareness] core stopped")
+
+
+def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
+    normalized_platform = _text(platform).lower()
+    del normalized_platform
+    return [
+        {
+            "id": "events_query",
+            "description": "natural-language semantic search over Awareness event history, including timeframe and area reasoning",
+            "usage": '{"function":"events_query","arguments":{"query":"what happened in the front yard today?"}}',
+        },
+    ]
+
+
+async def run_hydra_kernel_tool(
+    *,
+    tool_id: str,
+    args: Optional[Dict[str, Any]] = None,
+    platform: str = "",
+    scope: str = "",
+    origin: Optional[Dict[str, Any]] = None,
+    llm_client: Any = None,
+    redis_client: Any = None,
+    **_kwargs,
+) -> Optional[Dict[str, Any]]:
+    del platform, scope
+    func = _text(tool_id).lower()
+    if func not in {"events_query", "event_query", "events_search", "awareness_events_query"}:
+        return None
+
+    payload = dict(args) if isinstance(args, dict) else {}
+    payload_origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else origin
+    redis_obj = redis_client if redis_client is not None else globals().get("redis_client")
+    if redis_obj is None:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": "events store unavailable",
+            "summary_for_user": "Awareness event storage is unavailable right now.",
+        }
+    try:
+        return await _events_query_kernel(
+            args=payload,
+            llm_client=llm_client,
+            origin=payload_origin,
+            redis_obj=redis_obj,
+        )
+    except Exception as exc:
+        return {
+            "tool": "events_query",
+            "ok": False,
+            "error": f"events_query failed: {exc}",
+            "summary_for_user": "I couldn't search awareness events right now.",
+        }
 
 
 def run(stop_event=None):

@@ -203,28 +203,6 @@
       "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
     },
     {
-      "id": "events_query",
-      "name": "Events Query",
-      "version": "2.0.0",
-      "min_tater_version": "59",
-      "description": "Natural-language semantic event-history search.",
-      "portals": [
-        "webui",
-        "macos",
-        "homeassistant",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc"
-      ],
-      "notifier": false,
-      "settings_category": "Events Query",
-      "tags": [],
-      "entry": "verba/events_query.py",
-      "sha256": "1f79f226c57d197db32f2cdc1dab0884e83011dee68fff23b3a092886876c359"
-    },
-    {
       "id": "find_my_phone",
       "name": "Find My Phone",
       "version": "1.0.5",
