@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 load_dotenv()
 
@@ -625,6 +625,26 @@ def _imap_uid_search(imap: Any, *, last_uid: int, scan_days: int) -> Tuple[List[
     raise RuntimeError(f"IMAP search failed ({attempt_text})")
 
 
+def _extract_raw_message_bytes(fetch_data: Any) -> bytes:
+    if isinstance(fetch_data, (bytes, bytearray)):
+        data = bytes(fetch_data)
+        return data if data else b""
+    if not isinstance(fetch_data, list):
+        return b""
+    for item in fetch_data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            payload = item[1]
+            if isinstance(payload, (bytes, bytearray)):
+                data = bytes(payload)
+                if data:
+                    return data
+        elif isinstance(item, (bytes, bytearray)):
+            data = bytes(item)
+            if data and (b"From:" in data or b"Subject:" in data or b"Date:" in data):
+                return data
+    return b""
+
+
 def _normalize_email_row(msg: Any, *, account_id: str, uid: int) -> Optional[Dict[str, Any]]:
     if msg is None:
         return None
@@ -855,29 +875,65 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
         )
         rows: List[Dict[str, Any]] = []
         max_uid_seen = last_uid
+        fetch_attempted = len(target_uids)
+        fetch_status_ok = 0
+        fetch_non_ok = 0
+        raw_bytes_count = 0
+        raw_missing_count = 0
+        parsed_count = 0
+        parse_error_count = 0
+        dropped_empty_count = 0
         for uid in target_uids:
-            fetch_status, fetch_data = imap.uid("fetch", str(uid), "(RFC822)")
-            if _text(fetch_status).upper() != "OK":
+            raw_bytes = b""
+            uid_fetch_ok = False
+            for fetch_query in ("(BODY.PEEK[])", "(RFC822)"):
+                fetch_status, fetch_data = imap.uid("fetch", str(uid), fetch_query)
+                if _text(fetch_status).upper() != "OK":
+                    continue
+                uid_fetch_ok = True
+                fetch_status_ok += 1
+                raw_bytes = _extract_raw_message_bytes(fetch_data)
+                if raw_bytes:
+                    break
+            if not uid_fetch_ok:
+                fetch_non_ok += 1
                 continue
-            raw_bytes = None
-            if isinstance(fetch_data, list):
-                for item in fetch_data:
-                    if isinstance(item, tuple) and len(item) >= 2:
-                        raw_bytes = item[1]
-                        break
+            if uid > max_uid_seen:
+                max_uid_seen = uid
             if not raw_bytes:
+                raw_missing_count += 1
                 continue
+            raw_bytes_count += 1
             try:
                 msg = email.message_from_bytes(raw_bytes)
             except Exception:
+                parse_error_count += 1
                 continue
+            parsed_count += 1
             normalized = _normalize_email_row(msg, account_id=account_id, uid=uid)
             if normalized:
                 rows.append(normalized)
-            if uid > max_uid_seen:
-                max_uid_seen = uid
+            else:
+                dropped_empty_count += 1
 
         rows.sort(key=lambda row: int(row.get("uid") or 0))
+        logger.info(
+            "[personal_core] account=%s provider=%s email=%s fetch summary: uid_candidates=%s selected=%s attempted=%s ok=%s non_ok=%s raw=%s raw_missing=%s parsed=%s parse_errors=%s normalized=%s dropped_empty=%s",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            len(uid_numbers),
+            len(target_uids),
+            fetch_attempted,
+            fetch_status_ok,
+            fetch_non_ok,
+            raw_bytes_count,
+            raw_missing_count,
+            parsed_count,
+            parse_error_count,
+            len(rows),
+            dropped_empty_count,
+        )
 
         try:
             imap.close()
@@ -893,6 +949,17 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             "account_id": account_id,
             "emails": rows,
             "max_uid_seen": max_uid_seen,
+            "uid_candidates": len(uid_numbers),
+            "uids_selected": len(target_uids),
+            "fetch_attempted": fetch_attempted,
+            "fetch_status_ok": fetch_status_ok,
+            "fetch_non_ok": fetch_non_ok,
+            "raw_bytes_count": raw_bytes_count,
+            "raw_missing_count": raw_missing_count,
+            "parsed_count": parsed_count,
+            "parse_error_count": parse_error_count,
+            "normalized_count": len(rows),
+            "dropped_empty_count": dropped_empty_count,
         }
     except imaplib.IMAP4.error as exc:
         error_text = f"IMAP auth/connect error: {exc}"
@@ -2125,6 +2192,13 @@ def _run_account_cycle(llm_client: Any, account: Dict[str, Any], settings: Dict[
     scan_ok = bool(fetch_result.get("ok"))
     fetch_error = _text(fetch_result.get("error"))
     fetched_rows = list(fetch_result.get("emails") or [])
+    uid_candidates = _as_int(fetch_result.get("uid_candidates"), 0, minimum=0)
+    selected_count = _as_int(fetch_result.get("uids_selected"), 0, minimum=0)
+    fetched_count = _as_int(fetch_result.get("raw_bytes_count"), len(fetched_rows), minimum=0)
+    normalized_count = _as_int(fetch_result.get("normalized_count"), len(fetched_rows), minimum=0)
+    parse_error_count = _as_int(fetch_result.get("parse_error_count"), 0, minimum=0)
+    raw_missing_count = _as_int(fetch_result.get("raw_missing_count"), 0, minimum=0)
+    fetch_non_ok = _as_int(fetch_result.get("fetch_non_ok"), 0, minimum=0)
     max_uid_seen = _as_int(fetch_result.get("max_uid_seen"), _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0), minimum=0)
 
     persisted = _persist_normalized_emails(
@@ -2179,7 +2253,13 @@ def _run_account_cycle(llm_client: Any, account: Dict[str, Any], settings: Dict[
         "account_id": account_id,
         "ok": scan_ok,
         "error": fetch_error,
-        "fetched_count": len(fetched_rows),
+        "uid_candidates": uid_candidates,
+        "selected_count": selected_count,
+        "fetched_count": fetched_count,
+        "normalized_count": normalized_count,
+        "parse_error_count": parse_error_count,
+        "raw_missing_count": raw_missing_count,
+        "fetch_non_ok_count": fetch_non_ok,
         "inserted_count": len(inserted_rows),
         "stored_count": _as_int(persisted.get("total_stored"), 0, minimum=0),
         "updated_spending": len(updates.get("spending_habits") or []),
@@ -2203,7 +2283,13 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
             "account_count": 0,
             "ok_count": 0,
             "error_count": 0,
+            "uid_candidates": 0,
+            "selected_count": 0,
             "fetched_count": 0,
+            "normalized_count": 0,
+            "parse_error_count": 0,
+            "raw_missing_count": 0,
+            "fetch_non_ok_count": 0,
             "inserted_count": 0,
             "updated_spending": 0,
             "updated_notes": 0,
@@ -2222,7 +2308,13 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
     account_rows: List[Dict[str, Any]] = []
     ok_count = 0
     error_count = 0
+    uid_candidates = 0
+    selected_count = 0
     fetched_count = 0
+    normalized_count = 0
+    parse_error_count = 0
+    raw_missing_count = 0
+    fetch_non_ok_count = 0
     inserted_count = 0
     updated_spending = 0
     updated_notes = 0
@@ -2246,7 +2338,13 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
             error_text = _text(row.get("error"))
             if error_text:
                 errors.append(f"{_text(row.get('account_id'))}: {error_text}")
+        uid_candidates += _as_int(row.get("uid_candidates"), 0, minimum=0)
+        selected_count += _as_int(row.get("selected_count"), 0, minimum=0)
         fetched_count += _as_int(row.get("fetched_count"), 0, minimum=0)
+        normalized_count += _as_int(row.get("normalized_count"), 0, minimum=0)
+        parse_error_count += _as_int(row.get("parse_error_count"), 0, minimum=0)
+        raw_missing_count += _as_int(row.get("raw_missing_count"), 0, minimum=0)
+        fetch_non_ok_count += _as_int(row.get("fetch_non_ok_count"), 0, minimum=0)
         inserted_count += _as_int(row.get("inserted_count"), 0, minimum=0)
         updated_spending += _as_int(row.get("updated_spending"), 0, minimum=0)
         updated_notes += _as_int(row.get("updated_notes"), 0, minimum=0)
@@ -2263,7 +2361,13 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
         "account_count": len(accounts),
         "ok_count": ok_count,
         "error_count": error_count,
+        "uid_candidates": uid_candidates,
+        "selected_count": selected_count,
         "fetched_count": fetched_count,
+        "normalized_count": normalized_count,
+        "parse_error_count": parse_error_count,
+        "raw_missing_count": raw_missing_count,
+        "fetch_non_ok_count": fetch_non_ok_count,
         "inserted_count": inserted_count,
         "updated_spending": updated_spending,
         "updated_notes": updated_notes,
@@ -2286,7 +2390,13 @@ def _save_cycle_stats(stats: Dict[str, Any], *, cycle_start: float) -> None:
         "account_count": str(_as_int(stats.get("account_count"), 0, minimum=0)),
         "ok_count": str(_as_int(stats.get("ok_count"), 0, minimum=0)),
         "error_count": str(_as_int(stats.get("error_count"), 0, minimum=0)),
+        "uid_candidates": str(_as_int(stats.get("uid_candidates"), 0, minimum=0)),
+        "selected_count": str(_as_int(stats.get("selected_count"), 0, minimum=0)),
         "fetched_count": str(_as_int(stats.get("fetched_count"), 0, minimum=0)),
+        "normalized_count": str(_as_int(stats.get("normalized_count"), 0, minimum=0)),
+        "parse_error_count": str(_as_int(stats.get("parse_error_count"), 0, minimum=0)),
+        "raw_missing_count": str(_as_int(stats.get("raw_missing_count"), 0, minimum=0)),
+        "fetch_non_ok_count": str(_as_int(stats.get("fetch_non_ok_count"), 0, minimum=0)),
         "inserted_count": str(_as_int(stats.get("inserted_count"), 0, minimum=0)),
         "updated_spending": str(_as_int(stats.get("updated_spending"), 0, minimum=0)),
         "updated_notes": str(_as_int(stats.get("updated_notes"), 0, minimum=0)),
@@ -2324,7 +2434,13 @@ def _load_cycle_stats() -> Dict[str, Any]:
         "account_count": _as_int(raw.get("account_count"), 0, minimum=0),
         "ok_count": _as_int(raw.get("ok_count"), 0, minimum=0),
         "error_count": _as_int(raw.get("error_count"), 0, minimum=0),
+        "uid_candidates": _as_int(raw.get("uid_candidates"), 0, minimum=0),
+        "selected_count": _as_int(raw.get("selected_count"), 0, minimum=0),
         "fetched_count": _as_int(raw.get("fetched_count"), 0, minimum=0),
+        "normalized_count": _as_int(raw.get("normalized_count"), 0, minimum=0),
+        "parse_error_count": _as_int(raw.get("parse_error_count"), 0, minimum=0),
+        "raw_missing_count": _as_int(raw.get("raw_missing_count"), 0, minimum=0),
+        "fetch_non_ok_count": _as_int(raw.get("fetch_non_ok_count"), 0, minimum=0),
         "inserted_count": _as_int(raw.get("inserted_count"), 0, minimum=0),
         "updated_spending": _as_int(raw.get("updated_spending"), 0, minimum=0),
         "updated_notes": _as_int(raw.get("updated_notes"), 0, minimum=0),
@@ -2380,11 +2496,17 @@ def run(stop_event: Optional[object] = None) -> None:
             stats = _run_cycle(llm_client, settings)
             _save_cycle_stats(stats, cycle_start=cycle_start)
             logger.info(
-                "[personal_core] cycle: accounts=%s ok=%s errors=%s fetched=%s new_emails=%s events=%s deliveries=%s actions=%s",
+                "[personal_core] cycle: accounts=%s ok=%s errors=%s uid_candidates=%s selected=%s fetched=%s normalized=%s parse_errors=%s raw_missing=%s fetch_non_ok=%s new_emails=%s events=%s deliveries=%s actions=%s",
                 _as_int(stats.get("account_count"), 0, minimum=0),
                 _as_int(stats.get("ok_count"), 0, minimum=0),
                 _as_int(stats.get("error_count"), 0, minimum=0),
+                _as_int(stats.get("uid_candidates"), 0, minimum=0),
+                _as_int(stats.get("selected_count"), 0, minimum=0),
                 _as_int(stats.get("fetched_count"), 0, minimum=0),
+                _as_int(stats.get("normalized_count"), 0, minimum=0),
+                _as_int(stats.get("parse_error_count"), 0, minimum=0),
+                _as_int(stats.get("raw_missing_count"), 0, minimum=0),
+                _as_int(stats.get("fetch_non_ok_count"), 0, minimum=0),
                 _as_int(stats.get("inserted_count"), 0, minimum=0),
                 _as_int(stats.get("updated_events"), 0, minimum=0),
                 _as_int(stats.get("updated_deliveries"), 0, minimum=0),
