@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.6"
+__version__ = "1.0.11"
 
 load_dotenv()
 
@@ -163,6 +163,43 @@ CORE_SETTINGS = {
             "default": 1800,
             "description": "Maximum characters for injected personal context text.",
         },
+        "prompt_include_discord": {
+            "label": "Inject Into Discord",
+            "type": "checkbox",
+            "default": False,
+            "description": "Allow Personal Core prompt context on Discord conversations.",
+        },
+        "prompt_include_irc": {
+            "label": "Inject Into IRC",
+            "type": "checkbox",
+            "default": False,
+            "description": "Allow Personal Core prompt context on IRC conversations.",
+        },
+        "prompt_include_telegram": {
+            "label": "Inject Into Telegram",
+            "type": "checkbox",
+            "default": False,
+            "description": "Allow Personal Core prompt context on Telegram conversations.",
+        },
+        "prompt_include_matrix": {
+            "label": "Inject Into Matrix",
+            "type": "checkbox",
+            "default": False,
+            "description": "Allow Personal Core prompt context on Matrix conversations.",
+        },
+        "prompt_preview_platform": {
+            "label": "Prompt Preview Platform",
+            "type": "select",
+            "default": "discord",
+            "options": [
+                {"value": "discord", "label": "Discord"},
+                {"value": "irc", "label": "IRC"},
+                {"value": "telegram", "label": "Telegram"},
+                {"value": "matrix", "label": "Matrix"},
+                {"value": "webui", "label": "WebUI"},
+            ],
+            "description": "Which platform to simulate in the prompt preview panel.",
+        },
     },
 }
 
@@ -202,6 +239,8 @@ _MONTH_WORDS_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"\b(20[0-9]{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12][0-9]|3[01])\b")
 _TRACKING_TOKEN_RE = re.compile(r"\b([A-Z0-9]{10,24})\b")
+_PROMPT_PREVIEW_PLATFORMS = ("discord", "irc", "telegram", "matrix", "webui")
+_PROMPT_PREVIEW_PLATFORM_SET = set(_PROMPT_PREVIEW_PLATFORMS)
 
 
 def _text(value: Any) -> str:
@@ -496,8 +535,38 @@ def _load_settings() -> Dict[str, Any]:
         "prompt_upcoming_days": _as_int(raw.get("prompt_upcoming_days"), 45, minimum=1, maximum=365),
         "prompt_upcoming_limit": _as_int(raw.get("prompt_upcoming_limit"), 8, minimum=1, maximum=50),
         "prompt_summary_max_chars": _as_int(raw.get("prompt_summary_max_chars"), 1800, minimum=256, maximum=12000),
+        "prompt_include_discord": _as_bool(raw.get("prompt_include_discord"), False),
+        "prompt_include_irc": _as_bool(raw.get("prompt_include_irc"), False),
+        "prompt_include_telegram": _as_bool(raw.get("prompt_include_telegram"), False),
+        "prompt_include_matrix": _as_bool(raw.get("prompt_include_matrix"), False),
+        "prompt_preview_platform": _slug(raw.get("prompt_preview_platform"), default="discord"),
     }
+    settings["prompt_preview_platform"] = _personal_prompt_preview_platform(settings.get("prompt_preview_platform"))
     return settings
+
+
+def _personal_prompt_preview_platform(value: Any) -> str:
+    normalized = _slug(value, default="discord")
+    if normalized in _PROMPT_PREVIEW_PLATFORM_SET:
+        return normalized
+    return "discord"
+
+
+def _personal_prompt_enabled_for_platform(*, platform: Any, settings: Optional[Dict[str, Any]] = None) -> bool:
+    normalized = _slug(platform, default="")
+    if not normalized:
+        return True
+    cfg = settings if isinstance(settings, dict) else _load_settings()
+
+    if normalized == "discord" or normalized.startswith("discord_"):
+        return _as_bool(cfg.get("prompt_include_discord"), False)
+    if normalized == "irc" or normalized.startswith("irc_"):
+        return _as_bool(cfg.get("prompt_include_irc"), False)
+    if normalized == "telegram" or normalized.startswith("telegram_"):
+        return _as_bool(cfg.get("prompt_include_telegram"), False)
+    if normalized == "matrix" or normalized.startswith("matrix_"):
+        return _as_bool(cfg.get("prompt_include_matrix"), False)
+    return True
 
 
 def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2677,18 +2746,199 @@ def _aggregate_profiles() -> Dict[str, Any]:
     }
 
 
+def _history_query_day_bounds(date_value: Any) -> Tuple[float, float]:
+    raw = _text(date_value).strip()
+    if not raw:
+        return 0.0, 0.0
+    token = raw.replace("/", "-")
+    if "T" in token:
+        token = token.split("T", 1)[0]
+    if " " in token:
+        token = token.split(" ", 1)[0]
+    try:
+        dt = datetime.fromisoformat(token)
+    except Exception:
+        return 0.0, 0.0
+    start_dt = datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=timezone.utc)
+    start_ts = start_dt.timestamp()
+    end_ts = start_ts + 86399.0
+    return start_ts, end_ts
+
+
+def _history_query_date_iso(date_value: Any) -> str:
+    start_ts, _end_ts = _history_query_day_bounds(date_value)
+    if start_ts <= 0:
+        return ""
+    return datetime.fromtimestamp(start_ts, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _history_query_matches(query_text: str, haystack: str) -> bool:
+    query_token = _text(query_text).strip().lower()
+    if not query_token:
+        return True
+    corpus = _text(haystack).lower()
+    if query_token in corpus:
+        return True
+    terms = [part for part in re.split(r"[^a-z0-9]+", query_token) if len(part) >= 2]
+    if not terms:
+        return False
+    return all(term in corpus for term in terms)
+
+
+def _email_tool_plan_defaults(
+    *,
+    args: Dict[str, Any],
+    default_days: int,
+    default_limit: int,
+) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    query_text = _text(payload.get("query") or payload.get("text"))
+    return {
+        "intent": "search",
+        "mode": "search",
+        "query_terms": query_text,
+        "days": _as_int(payload.get("days"), default_days, minimum=0, maximum=3650),
+        "limit": _as_int(payload.get("limit"), default_limit, minimum=1, maximum=50),
+        "account_id": _text(payload.get("account_id")),
+        "date_from": _history_query_date_iso(payload.get("date_from")),
+        "date_to": _history_query_date_iso(payload.get("date_to")),
+    }
+
+
+def _merge_email_tool_plan(parsed: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(fallback)
+    if not isinstance(parsed, dict):
+        return out
+
+    mode = _slug(parsed.get("mode"), default="")
+    if mode in {"search", "latest"}:
+        out["mode"] = mode
+
+    intent = _slug(parsed.get("intent"), default="")
+    if intent in {"search", "summary", "summarize", "latest"}:
+        out["intent"] = intent
+        if intent == "latest":
+            out["mode"] = "latest"
+
+    query_terms = _text(parsed.get("query_terms") or parsed.get("query"))
+    if query_terms:
+        out["query_terms"] = query_terms
+
+    if parsed.get("days") is not None:
+        out["days"] = _as_int(parsed.get("days"), out.get("days"), minimum=0, maximum=3650)
+    if parsed.get("limit") is not None:
+        out["limit"] = _as_int(parsed.get("limit"), out.get("limit"), minimum=1, maximum=50)
+
+    account_id = _text(parsed.get("account_id"))
+    if account_id:
+        out["account_id"] = account_id
+
+    date_from = _history_query_date_iso(parsed.get("date_from"))
+    date_to = _history_query_date_iso(parsed.get("date_to"))
+    if date_from:
+        out["date_from"] = date_from
+    if date_to:
+        out["date_to"] = date_to
+    return out
+
+
+async def _plan_email_tool_query_async(
+    *,
+    args: Dict[str, Any],
+    llm_client: Any,
+    tool_name: str,
+    default_days: int,
+    default_limit: int,
+) -> Dict[str, Any]:
+    fallback = _email_tool_plan_defaults(args=args, default_days=default_days, default_limit=default_limit)
+    if llm_client is None:
+        return fallback
+
+    planner_prompt = (
+        "You convert natural-language email requests into structured filters for a cached email tool.\n"
+        "Return strict JSON only with this schema:\n"
+        "{\n"
+        "  \"intent\":\"search|summary|latest\",\n"
+        "  \"mode\":\"search|latest\",\n"
+        "  \"query_terms\":\"\",\n"
+        "  \"days\":90,\n"
+        "  \"limit\":8,\n"
+        "  \"date_from\":\"YYYY-MM-DD or empty\",\n"
+        "  \"date_to\":\"YYYY-MM-DD or empty\",\n"
+        "  \"account_id\":\"\"\n"
+        "}\n"
+        "Rules:\n"
+        "- Use mode=latest when user asks for newest/latest/most recent email.\n"
+        "- Use date_from/date_to when user asks for a specific day or date range.\n"
+        "- query_terms should contain only topical terms to match email text.\n"
+        "- Keep days in [0,3650] and limit in [1,50].\n"
+        "- Never include prose outside JSON."
+    )
+    planner_payload = {
+        "tool": tool_name,
+        "today_utc": datetime.utcnow().strftime("%Y-%m-%d"),
+        "request": {
+            "query": _text(args.get("query") or args.get("text")),
+            "days": args.get("days"),
+            "limit": args.get("limit"),
+            "account_id": args.get("account_id"),
+            "date_from": args.get("date_from"),
+            "date_to": args.get("date_to"),
+        },
+        "defaults": {
+            "days": fallback.get("days"),
+            "limit": fallback.get("limit"),
+        },
+    }
+
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": planner_prompt},
+                {"role": "user", "content": json.dumps(planner_payload, ensure_ascii=False)},
+            ],
+            max_tokens=280,
+            temperature=0.0,
+        )
+    except Exception as exc:
+        logger.warning("[personal_core] NL planner failed for tool=%s: %s", tool_name, exc)
+        return fallback
+
+    text = _text(((response or {}).get("message") or {}).get("content"))
+    if not text:
+        return fallback
+    blob = extract_json(text) or text
+    try:
+        parsed = json.loads(blob)
+    except Exception:
+        logger.warning("[personal_core] NL planner returned invalid JSON for tool=%s", tool_name)
+        return fallback
+    if not isinstance(parsed, dict):
+        return fallback
+    return _merge_email_tool_plan(parsed, fallback)
+
+
 def _history_search(
     *,
     query: str,
     limit: int,
     days: int,
     account_id: str = "",
+    mode: str = "search",
+    date_from: str = "",
+    date_to: str = "",
 ) -> List[Dict[str, Any]]:
     query_text = _text(query).lower()
     account_filter = _text(account_id)
+    mode_token = _slug(mode, default="search")
     cutoff = 0.0
     if int(days) > 0:
         cutoff = time.time() - (max(1, int(days)) * 86400)
+
+    date_from_start, _date_from_end = _history_query_day_bounds(date_from)
+    _date_to_start, date_to_end = _history_query_day_bounds(date_to)
+    if date_from_start > 0 and date_to_end > 0 and date_to_end < date_from_start:
+        date_from_start, date_to_end = date_to_end, date_from_start + 86399.0
 
     accounts = [account_filter] if account_filter else _all_account_ids()
     hits: List[Dict[str, Any]] = []
@@ -2698,21 +2948,29 @@ def _history_search(
             ts = _as_float(row.get("date_ts"), 0.0, minimum=0.0)
             if cutoff > 0 and ts < cutoff:
                 continue
+            if date_from_start > 0 and ts < date_from_start:
+                continue
+            if date_to_end > 0 and ts > date_to_end:
+                continue
+
+            date_iso = _text(row.get("date_iso")) or _iso_from_ts(ts)
             haystack = " ".join(
                 [
+                    date_iso,
                     _text(row.get("subject")),
                     _text(row.get("from")),
                     _text(row.get("snippet")),
                     _text(row.get("body")),
                 ]
             ).lower()
-            if query_text and query_text not in haystack:
+            if mode_token != "latest" and not _history_query_matches(query_text, haystack):
                 continue
+
             hits.append(
                 {
                     "id": _text(row.get("id")),
                     "account_id": aid,
-                    "date_iso": _text(row.get("date_iso")) or _iso_from_ts(ts),
+                    "date_iso": date_iso,
                     "date_ts": ts,
                     "from": _text(row.get("from")),
                     "subject": _text(row.get("subject")),
@@ -2724,30 +2982,55 @@ def _history_search(
     return hits[: max(1, int(limit))]
 
 
-def _tool_personal_email_search(args: Dict[str, Any]) -> Dict[str, Any]:
+async def _tool_personal_email_search_async(args: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     payload = args if isinstance(args, dict) else {}
     query = _text(payload.get("query") or payload.get("text"))
-    limit = _as_int(payload.get("limit"), 8, minimum=1, maximum=40)
-    days = _as_int(payload.get("days"), 90, minimum=0, maximum=3650)
-    account_id = _text(payload.get("account_id"))
 
-    hits = _history_search(query=query, limit=limit, days=days, account_id=account_id)
+    plan = await _plan_email_tool_query_async(
+        args=payload,
+        llm_client=llm_client,
+        tool_name="personal_email_search",
+        default_days=90,
+        default_limit=8,
+    )
+
+    hits = _history_search(
+        query=_text(plan.get("query_terms")),
+        limit=_as_int(plan.get("limit"), 8, minimum=1, maximum=50),
+        days=_as_int(plan.get("days"), 90, minimum=0, maximum=3650),
+        account_id=_text(plan.get("account_id")),
+        mode=_text(plan.get("mode")),
+        date_from=_text(plan.get("date_from")),
+        date_to=_text(plan.get("date_to")),
+    )
     summary_for_user = "No matching emails found."
     if hits:
-        summary_for_user = "Found " + str(len(hits)) + " matching email(s): " + "; ".join(
-            [
-                f"{_text(hit.get('date_iso'))} - {_text(hit.get('subject'))}"
-                for hit in hits[:6]
-            ]
-        )
+        if _slug(plan.get("mode"), default="search") == "latest":
+            summary_for_user = "Latest email(s): " + "; ".join(
+                [
+                    f"{_text(hit.get('date_iso'))} - {_text(hit.get('subject'))}"
+                    for hit in hits[:6]
+                ]
+            )
+        else:
+            summary_for_user = "Found " + str(len(hits)) + " matching email(s): " + "; ".join(
+                [
+                    f"{_text(hit.get('date_iso'))} - {_text(hit.get('subject'))}"
+                    for hit in hits[:6]
+                ]
+            )
 
     return {
         "tool": "personal_email_search",
         "ok": True,
         "query": query,
-        "days": days,
-        "limit": limit,
-        "account_id": account_id,
+        "days": _as_int(plan.get("days"), 90, minimum=0, maximum=3650),
+        "limit": _as_int(plan.get("limit"), 8, minimum=1, maximum=50),
+        "account_id": _text(plan.get("account_id")),
+        "mode": _text(plan.get("mode")) or "search",
+        "date_from": _text(plan.get("date_from")),
+        "date_to": _text(plan.get("date_to")),
+        "resolved_query_terms": _text(plan.get("query_terms")),
         "matches": hits,
         "match_count": len(hits),
         "summary_for_user": summary_for_user,
@@ -2768,11 +3051,27 @@ def _fallback_summary_text(hits: List[Dict[str, Any]]) -> str:
 async def _tool_personal_email_summarize_async(args: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     payload = args if isinstance(args, dict) else {}
     query = _text(payload.get("query") or payload.get("text"))
-    limit = _as_int(payload.get("limit"), 12, minimum=1, maximum=50)
-    days = _as_int(payload.get("days"), 30, minimum=0, maximum=3650)
-    account_id = _text(payload.get("account_id"))
 
-    hits = _history_search(query=query, limit=limit, days=days, account_id=account_id)
+    plan = await _plan_email_tool_query_async(
+        args=payload,
+        llm_client=llm_client,
+        tool_name="personal_email_summarize",
+        default_days=30,
+        default_limit=12,
+    )
+    limit = _as_int(plan.get("limit"), 12, minimum=1, maximum=50)
+    days = _as_int(plan.get("days"), 30, minimum=0, maximum=3650)
+    account_id = _text(plan.get("account_id"))
+
+    hits = _history_search(
+        query=_text(plan.get("query_terms")),
+        limit=limit,
+        days=days,
+        account_id=account_id,
+        mode=_text(plan.get("mode")),
+        date_from=_text(plan.get("date_from")),
+        date_to=_text(plan.get("date_to")),
+    )
     if not hits:
         return {
             "tool": "personal_email_summarize",
@@ -2781,6 +3080,10 @@ async def _tool_personal_email_summarize_async(args: Dict[str, Any], llm_client:
             "summary": "No matching emails found.",
             "matches": [],
             "match_count": 0,
+            "mode": _text(plan.get("mode")) or "search",
+            "date_from": _text(plan.get("date_from")),
+            "date_to": _text(plan.get("date_to")),
+            "resolved_query_terms": _text(plan.get("query_terms")),
             "summary_for_user": "No matching emails found.",
         }
 
@@ -2793,6 +3096,10 @@ async def _tool_personal_email_summarize_async(args: Dict[str, Any], llm_client:
             "summary": fallback,
             "matches": hits,
             "match_count": len(hits),
+            "mode": _text(plan.get("mode")) or "search",
+            "date_from": _text(plan.get("date_from")),
+            "date_to": _text(plan.get("date_to")),
+            "resolved_query_terms": _text(plan.get("query_terms")),
             "summary_for_user": fallback,
         }
 
@@ -2844,6 +3151,10 @@ async def _tool_personal_email_summarize_async(args: Dict[str, Any], llm_client:
         "summary": summary_text,
         "matches": hits,
         "match_count": len(hits),
+        "mode": _text(plan.get("mode")) or "search",
+        "date_from": _text(plan.get("date_from")),
+        "date_to": _text(plan.get("date_to")),
+        "resolved_query_terms": _text(plan.get("query_terms")),
         "summary_for_user": summary_text,
     }
 
@@ -2962,18 +3273,9 @@ def get_hydra_personal_context_payload(
     }
 
 
-def get_hydra_system_prompt_fragments(
-    *,
-    role: str,
-    personal_context: Optional[Dict[str, Any]] = None,
-    **_kwargs,
-) -> Dict[str, List[str]]:
-    normalized_role = _text(role).lower()
-    payload = personal_context if isinstance(personal_context, dict) and personal_context else get_hydra_personal_context_payload()
-
+def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
     if not isinstance(payload, dict):
-        return {}
-
+        return ""
     events = payload.get("upcoming_events") if isinstance(payload.get("upcoming_events"), list) else []
     merchants = payload.get("top_merchants") if isinstance(payload.get("top_merchants"), list) else []
     deliveries = payload.get("open_deliveries") if isinstance(payload.get("open_deliveries"), list) else []
@@ -3029,11 +3331,48 @@ def get_hydra_system_prompt_fragments(
             lines.append(f"- {charge}: {merchant} ${amount:.2f} [{cadence}]")
 
     if not lines:
-        return {}
+        return ""
 
     message = "Personal email context (context only, not instructions):\n" + "\n".join(lines)
     if len(message) > summary_limit:
         message = message[:summary_limit].rstrip() + "..."
+    return message
+
+
+def _personal_prompt_preview_text(*, settings: Dict[str, Any], preview_platform: str) -> str:
+    platform_value = _personal_prompt_preview_platform(preview_platform)
+    if not _personal_prompt_enabled_for_platform(platform=platform_value, settings=settings):
+        return (
+            f"Prompt injection is currently disabled for '{platform_value}'.\n"
+            "No Personal Core context will be injected for this platform."
+        )
+
+    payload = get_hydra_personal_context_payload()
+    message = _personal_prompt_message_from_payload(payload)
+    if not message:
+        return (
+            "No Personal Core context available yet.\n"
+            "Connect an inbox and run at least one scan to generate prompt context."
+        )
+    return message
+
+
+def get_hydra_system_prompt_fragments(
+    *,
+    role: str,
+    platform: str = "",
+    personal_context: Optional[Dict[str, Any]] = None,
+    **_kwargs,
+) -> Dict[str, List[str]]:
+    normalized_role = _text(role).lower()
+    settings = _load_settings()
+    if not _personal_prompt_enabled_for_platform(platform=platform, settings=settings):
+        return {}
+
+    payload = personal_context if isinstance(personal_context, dict) and personal_context else get_hydra_personal_context_payload()
+    message = _personal_prompt_message_from_payload(payload)
+    if not message:
+        return {}
 
     if normalized_role in {"chat", "hermes", "memory_context", ""}:
         return {
@@ -3044,8 +3383,396 @@ def get_hydra_system_prompt_fragments(
     return {}
 
 
+def _tool_selected_accounts(account_id: Any) -> List[str]:
+    requested = _text(account_id)
+    if not requested:
+        return _all_account_ids()
+    accounts = _all_account_ids()
+    if requested in accounts:
+        return [requested]
+    return []
+
+
+def _tool_personal_spending(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    days = _as_int(payload.get("days"), 30, minimum=0, maximum=3650)
+    limit = _as_int(payload.get("limit"), 10, minimum=1, maximum=100)
+
+    cutoff = 0.0
+    if days > 0:
+        cutoff = time.time() - (days * 86400)
+
+    totals: Dict[str, Dict[str, Any]] = {}
+    observation_count = 0
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("spending_habits") if isinstance(profile.get("spending_habits"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            ts = _as_float(row.get("observed_ts"), 0.0, minimum=0.0)
+            if cutoff > 0 and ts > 0 and ts < cutoff:
+                continue
+            merchant = _text(row.get("merchant"))
+            amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
+            if not merchant or amount <= 0:
+                continue
+            observation_count += 1
+            bucket = totals.setdefault(merchant, {"amount": 0.0, "count": 0, "last_ts": 0.0})
+            bucket["amount"] = _as_float(bucket.get("amount"), 0.0, minimum=0.0) + amount
+            bucket["count"] = _as_int(bucket.get("count"), 0, minimum=0) + 1
+            bucket["last_ts"] = max(_as_float(bucket.get("last_ts"), 0.0, minimum=0.0), ts)
+
+    rows: List[Dict[str, Any]] = []
+    for merchant, meta in totals.items():
+        rows.append(
+            {
+                "merchant": merchant,
+                "amount": round(_as_float(meta.get("amount"), 0.0, minimum=0.0), 2),
+                "observations": _as_int(meta.get("count"), 0, minimum=0),
+                "last_seen": _iso_from_ts(meta.get("last_ts")),
+            }
+        )
+    rows.sort(key=lambda row: (-_as_float(row.get("amount"), 0.0), _text(row.get("merchant"))))
+
+    total_spend = round(sum(_as_float(row.get("amount"), 0.0, minimum=0.0) for row in rows), 2)
+    top_rows = rows[:limit]
+    summary_for_user = "No spending observations found."
+    if top_rows:
+        top_text = "; ".join([f"{_text(row.get('merchant'))} ${_as_float(row.get('amount'), 0.0):.2f}" for row in top_rows[:5]])
+        summary_for_user = (
+            f"Observed ${total_spend:.2f} across {_as_int(observation_count, 0, minimum=0)} purchase entries. "
+            f"Top merchants: {top_text}"
+        )
+
+    return {
+        "tool": "personal_spending",
+        "ok": True,
+        "account_id": account_id,
+        "days": days,
+        "limit": limit,
+        "total_spend": total_spend,
+        "observation_count": _as_int(observation_count, 0, minimum=0),
+        "merchant_count": len(rows),
+        "merchants": top_rows,
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_plans(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    days = _as_int(payload.get("days"), 60, minimum=0, maximum=3650)
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+    include_past = _as_bool(payload.get("include_past"), False)
+    now_ts = time.time()
+    end_ts = now_ts + (days * 86400) if days > 0 else 0.0
+
+    rows: List[Dict[str, Any]] = []
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("upcoming_events") if isinstance(profile.get("upcoming_events"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            starts_ts = _as_float(row.get("starts_ts"), 0.0, minimum=0.0)
+            if not include_past and starts_ts > 0 and starts_ts < now_ts:
+                continue
+            if end_ts > 0 and starts_ts > 0 and starts_ts > end_ts:
+                continue
+            rows.append(
+                {
+                    "account_id": aid,
+                    "title": _text(row.get("title")) or "Upcoming event",
+                    "kind": _text(row.get("kind")) or "event",
+                    "starts_at": _text(row.get("starts_at")) or _iso_from_ts(starts_ts),
+                    "starts_ts": starts_ts,
+                    "location": _text(row.get("location")),
+                    "summary": _text(row.get("summary")),
+                }
+            )
+
+    rows.sort(key=lambda row: _as_float(row.get("starts_ts"), 99999999999.0, minimum=0.0))
+    items = rows[:limit]
+    summary_for_user = "No planned events found."
+    if items:
+        preview = "; ".join([f"{_text(row.get('starts_at'))} - {_text(row.get('title'))}" for row in items[:5]])
+        summary_for_user = f"Found {len(items)} planned event(s). {preview}"
+
+    return {
+        "tool": "personal_plans",
+        "ok": True,
+        "account_id": account_id,
+        "days": days,
+        "limit": limit,
+        "include_past": include_past,
+        "events": items,
+        "event_count": len(items),
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_subscriptions(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    days = _as_int(payload.get("days"), 120, minimum=0, maximum=3650)
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+    include_past = _as_bool(payload.get("include_past"), False)
+    now_ts = time.time()
+    end_ts = now_ts + (days * 86400) if days > 0 else 0.0
+
+    rows: List[Dict[str, Any]] = []
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("subscriptions") if isinstance(profile.get("subscriptions"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            charge_ts = _as_float(row.get("next_charge_ts"), 0.0, minimum=0.0)
+            if not include_past and charge_ts > 0 and charge_ts < now_ts:
+                continue
+            if end_ts > 0 and charge_ts > 0 and charge_ts > end_ts:
+                continue
+            rows.append(
+                {
+                    "account_id": aid,
+                    "merchant": _text(row.get("merchant")) or "Subscription",
+                    "plan": _text(row.get("plan")),
+                    "amount": round(_as_float(row.get("amount"), 0.0, minimum=0.0), 2),
+                    "cadence": _text(row.get("cadence")) or "unknown",
+                    "next_charge_at": _text(row.get("next_charge_at")) or _iso_from_ts(charge_ts),
+                    "next_charge_ts": charge_ts,
+                }
+            )
+
+    rows.sort(key=lambda row: _as_float(row.get("next_charge_ts"), 99999999999.0, minimum=0.0))
+    items = rows[:limit]
+    summary_for_user = "No upcoming subscriptions found."
+    if items:
+        preview = "; ".join(
+            [f"{_text(row.get('next_charge_at'))} - {_text(row.get('merchant'))} ${_as_float(row.get('amount'), 0.0):.2f}" for row in items[:5]]
+        )
+        summary_for_user = f"Found {len(items)} subscription charge(s). {preview}"
+
+    return {
+        "tool": "personal_subscriptions",
+        "ok": True,
+        "account_id": account_id,
+        "days": days,
+        "limit": limit,
+        "include_past": include_past,
+        "subscriptions": items,
+        "subscription_count": len(items),
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_deliveries(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+    include_delivered = _as_bool(payload.get("include_delivered"), False)
+
+    rows: List[Dict[str, Any]] = []
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("deliveries") if isinstance(profile.get("deliveries"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            status = _slug(row.get("status"), default="update")
+            if not include_delivered and status == "delivered":
+                continue
+            eta_ts = _as_float(row.get("eta_ts"), 0.0, minimum=0.0)
+            rows.append(
+                {
+                    "account_id": aid,
+                    "carrier": _text(row.get("carrier")) or "n/a",
+                    "tracking_id": _text(row.get("tracking_id")) or "n/a",
+                    "status": status or "update",
+                    "eta_at": _text(row.get("eta_at")) or _iso_from_ts(eta_ts),
+                    "eta_ts": eta_ts,
+                    "merchant": _text(row.get("merchant")),
+                    "summary": _text(row.get("summary")),
+                }
+            )
+
+    rows.sort(key=lambda row: _as_float(row.get("eta_ts"), 0.0, minimum=0.0), reverse=True)
+    items = rows[:limit]
+    open_count = len([row for row in items if _slug(row.get("status"), default="update") != "delivered"])
+    summary_for_user = "No delivery updates found."
+    if items:
+        preview = "; ".join(
+            [f"{_text(row.get('carrier'))} {_text(row.get('tracking_id'))}: {_text(row.get('status'))}" for row in items[:5]]
+        )
+        summary_for_user = f"Found {len(items)} delivery update(s), {open_count} still open. {preview}"
+
+    return {
+        "tool": "personal_deliveries",
+        "ok": True,
+        "account_id": account_id,
+        "limit": limit,
+        "include_delivered": include_delivered,
+        "deliveries": items,
+        "delivery_count": len(items),
+        "open_count": open_count,
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_actions(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    days = _as_int(payload.get("days"), 30, minimum=0, maximum=3650)
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+    include_done = _as_bool(payload.get("include_done"), False)
+    now_ts = time.time()
+    end_ts = now_ts + (days * 86400) if days > 0 else 0.0
+
+    rows: List[Dict[str, Any]] = []
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("action_items") if isinstance(profile.get("action_items"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            status = _slug(row.get("status"), default="open")
+            if not include_done and status != "open":
+                continue
+            due_ts = _as_float(row.get("due_ts"), 0.0, minimum=0.0)
+            if end_ts > 0 and due_ts > 0 and due_ts > end_ts:
+                continue
+            rows.append(
+                {
+                    "account_id": aid,
+                    "title": _text(row.get("title")) or "Action item",
+                    "kind": _text(row.get("kind")) or "task",
+                    "due_at": _text(row.get("due_at")) or _iso_from_ts(due_ts),
+                    "due_ts": due_ts,
+                    "status": status or "open",
+                    "summary": _text(row.get("summary")),
+                }
+            )
+
+    rows.sort(key=lambda row: _as_float(row.get("due_ts"), 99999999999.0, minimum=0.0))
+    items = rows[:limit]
+    summary_for_user = "No action items found."
+    if items:
+        preview = "; ".join([f"{_text(row.get('due_at'))} - {_text(row.get('title'))} [{_text(row.get('status'))}]" for row in items[:5]])
+        summary_for_user = f"Found {len(items)} action item(s). {preview}"
+
+    return {
+        "tool": "personal_actions",
+        "ok": True,
+        "account_id": account_id,
+        "days": days,
+        "limit": limit,
+        "include_done": include_done,
+        "actions": items,
+        "action_count": len(items),
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_notes(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    days = _as_int(payload.get("days"), 180, minimum=0, maximum=3650)
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+
+    cutoff = 0.0
+    if days > 0:
+        cutoff = time.time() - (days * 86400)
+
+    rows: List[Dict[str, Any]] = []
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("important_notes") if isinstance(profile.get("important_notes"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            date_ts = _as_float(row.get("date_ts"), 0.0, minimum=0.0)
+            if cutoff > 0 and date_ts > 0 and date_ts < cutoff:
+                continue
+            rows.append(
+                {
+                    "account_id": aid,
+                    "title": _text(row.get("title")) or "Important note",
+                    "summary": _text(row.get("summary")),
+                    "kind": _text(row.get("kind")) or "important",
+                    "date_iso": _text(row.get("date_iso")) or _iso_from_ts(date_ts),
+                    "date_ts": date_ts,
+                }
+            )
+
+    rows.sort(key=lambda row: _as_float(row.get("date_ts"), 0.0, minimum=0.0), reverse=True)
+    items = rows[:limit]
+    summary_for_user = "No important notes found."
+    if items:
+        preview = "; ".join([f"{_text(row.get('date_iso'))} - {_text(row.get('title'))}" for row in items[:5]])
+        summary_for_user = f"Found {len(items)} important note(s). {preview}"
+
+    return {
+        "tool": "personal_notes",
+        "ok": True,
+        "account_id": account_id,
+        "days": days,
+        "limit": limit,
+        "notes": items,
+        "note_count": len(items),
+        "summary_for_user": summary_for_user,
+    }
+
+
+def _tool_personal_favorite_places(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    account_id = _text(payload.get("account_id"))
+    limit = _as_int(payload.get("limit"), 20, minimum=1, maximum=100)
+
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for aid in _tool_selected_accounts(account_id):
+        profile = _load_profile(aid)
+        for row in profile.get("favorite_places") if isinstance(profile.get("favorite_places"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            name = _text(row.get("name"))
+            if not name:
+                continue
+            bucket = buckets.setdefault(name, {"count": 0, "spend": 0.0, "last_seen": ""})
+            bucket["count"] = _as_int(bucket.get("count"), 0, minimum=0) + _as_int(row.get("count"), 1, minimum=0)
+            bucket["spend"] = _as_float(bucket.get("spend"), 0.0, minimum=0.0) + _as_float(row.get("spend"), 0.0, minimum=0.0)
+            current_last = _text(bucket.get("last_seen"))
+            row_last = _text(row.get("last_seen"))
+            if row_last and (not current_last or row_last > current_last):
+                bucket["last_seen"] = row_last
+
+    rows: List[Dict[str, Any]] = []
+    for name, meta in buckets.items():
+        rows.append(
+            {
+                "name": name,
+                "count": _as_int(meta.get("count"), 0, minimum=0),
+                "spend": round(_as_float(meta.get("spend"), 0.0, minimum=0.0), 2),
+                "last_seen": _text(meta.get("last_seen")),
+            }
+        )
+    rows.sort(key=lambda row: (-_as_int(row.get("count"), 0, minimum=0), -_as_float(row.get("spend"), 0.0), _text(row.get("name"))))
+    items = rows[:limit]
+
+    summary_for_user = "No favorite places found yet."
+    if items:
+        preview = "; ".join([f"{_text(row.get('name'))} (count={_as_int(row.get('count'), 0, minimum=0)})" for row in items[:5]])
+        summary_for_user = f"Found {len(items)} favorite place(s). {preview}"
+
+    return {
+        "tool": "personal_favorite_places",
+        "ok": True,
+        "account_id": account_id,
+        "limit": limit,
+        "favorite_places": items,
+        "place_count": len(items),
+        "summary_for_user": summary_for_user,
+    }
+
+
 def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
-    del platform
+    if not _personal_prompt_enabled_for_platform(platform=platform):
+        return []
     return [
         {
             "id": "personal_email_search",
@@ -3057,6 +3784,31 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
             "description": "Summarize matching emails and surface action items, events, and spending context.",
             "usage": '{"function":"personal_email_summarize","arguments":{"query":"trip to chicago","days":30,"limit":12}}',
         },
+        {
+            "id": "personal_spending",
+            "description": "Return spending observations and top merchants from stored personal profile.",
+            "usage": '{"function":"personal_spending","arguments":{"days":30,"limit":10}}',
+        },
+        {
+            "id": "personal_plans",
+            "description": "Return upcoming plans/events extracted from email.",
+            "usage": '{"function":"personal_plans","arguments":{"days":60,"limit":20}}',
+        },
+        {
+            "id": "personal_subscriptions",
+            "description": "Return recurring subscription charges and next charge dates.",
+            "usage": '{"function":"personal_subscriptions","arguments":{"days":120,"limit":20}}',
+        },
+        {
+            "id": "personal_deliveries",
+            "description": "Return delivery status updates from stored personal profile.",
+            "usage": '{"function":"personal_deliveries","arguments":{"limit":20,"include_delivered":false}}',
+        },
+        {
+            "id": "personal_favorite_places",
+            "description": "Return favorite places to shop inferred from spending patterns.",
+            "usage": '{"function":"personal_favorite_places","arguments":{"limit":20}}',
+        },
     ]
 
 
@@ -3065,16 +3817,40 @@ async def run_hydra_kernel_tool(
     tool_id: str,
     args: Optional[Dict[str, Any]] = None,
     llm_client: Any = None,
+    platform: str = "",
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
+    if not _personal_prompt_enabled_for_platform(platform=platform):
+        return {
+            "tool": _text(tool_id).lower(),
+            "ok": False,
+            "error": f"Personal Core tools are disabled for platform '{_slug(platform, default='unknown')}'.",
+            "summary_for_user": "Personal Core tools are disabled for this platform.",
+        }
+
     func = _text(tool_id).lower()
     payload = dict(args) if isinstance(args, dict) else {}
 
     if func in {"personal_email_search", "email_search", "personal_search"}:
-        return _tool_personal_email_search(payload)
+        return await _tool_personal_email_search_async(payload, llm_client)
 
     if func in {"personal_email_summarize", "email_summarize", "personal_summary"}:
         return await _tool_personal_email_summarize_async(payload, llm_client)
+
+    if func in {"personal_spending", "personal_spend"}:
+        return _tool_personal_spending(payload)
+
+    if func in {"personal_plans", "personal_events"}:
+        return _tool_personal_plans(payload)
+
+    if func in {"personal_subscriptions", "personal_subs"}:
+        return _tool_personal_subscriptions(payload)
+
+    if func in {"personal_deliveries", "personal_delivery"}:
+        return _tool_personal_deliveries(payload)
+
+    if func in {"personal_favorite_places", "personal_favorites"}:
+        return _tool_personal_favorite_places(payload)
 
     return None
 
@@ -3230,6 +4006,10 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             if _text(err):
                 overview_lines.append(f"- {_text(err)}")
 
+    settings = _load_settings()
+    preview_platform = _personal_prompt_preview_platform(settings.get("prompt_preview_platform"))
+    prompt_preview_text = _personal_prompt_preview_text(settings=settings, preview_platform=preview_platform)
+
     forms = [
         {
             "id": "__personal_overview__",
@@ -3350,6 +4130,68 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             ],
         }
     ]
+    forms.append(
+        {
+            "id": "__personal_prompt_controls__",
+            "group": "prompt",
+            "title": "Prompt Injection Controls",
+            "subtitle": "Enable or disable Personal Core prompt context by portal.",
+            "save_action": "personal_save_prompt_controls",
+            "save_label": "Save Prompt Controls",
+            "fields": [
+                {
+                    "key": "prompt_include_discord",
+                    "label": "Inject Into Discord",
+                    "type": "checkbox",
+                    "value": _as_bool(settings.get("prompt_include_discord"), False),
+                },
+                {
+                    "key": "prompt_include_irc",
+                    "label": "Inject Into IRC",
+                    "type": "checkbox",
+                    "value": _as_bool(settings.get("prompt_include_irc"), False),
+                },
+                {
+                    "key": "prompt_include_telegram",
+                    "label": "Inject Into Telegram",
+                    "type": "checkbox",
+                    "value": _as_bool(settings.get("prompt_include_telegram"), False),
+                },
+                {
+                    "key": "prompt_include_matrix",
+                    "label": "Inject Into Matrix",
+                    "type": "checkbox",
+                    "value": _as_bool(settings.get("prompt_include_matrix"), False),
+                },
+                {
+                    "key": "prompt_preview_platform",
+                    "label": "Preview Platform",
+                    "type": "select",
+                    "value": preview_platform,
+                    "options": [
+                        {"value": "discord", "label": "Discord"},
+                        {"value": "irc", "label": "IRC"},
+                        {"value": "telegram", "label": "Telegram"},
+                        {"value": "matrix", "label": "Matrix"},
+                        {"value": "webui", "label": "WebUI"},
+                    ],
+                },
+            ],
+            "sections": [
+                {
+                    "label": "Current Injected Prompt Example",
+                    "fields": [
+                        {
+                            "key": "prompt_preview_text",
+                            "label": "Preview",
+                            "type": "textarea",
+                            "value": prompt_preview_text,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     return {
         "kind": "settings_manager",
@@ -3363,6 +4205,13 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "source": "items",
                 "item_group": "overview",
                 "empty_message": "No overview data available.",
+            },
+            {
+                "key": "prompt",
+                "label": "Prompt",
+                "source": "items",
+                "item_group": "prompt",
+                "empty_message": "No prompt controls available.",
             },
             {
                 "key": "tools",
@@ -3565,6 +4414,43 @@ def _run_ui_tool_action(
     raise ValueError(f"Unknown tool action: {action}")
 
 
+def _save_prompt_controls(
+    *,
+    prompt_include_discord: Any,
+    prompt_include_irc: Any,
+    prompt_include_telegram: Any,
+    prompt_include_matrix: Any,
+    prompt_preview_platform: Any,
+) -> Dict[str, Any]:
+    current = _load_settings()
+    discord_enabled = _as_bool(prompt_include_discord, _as_bool(current.get("prompt_include_discord"), False))
+    irc_enabled = _as_bool(prompt_include_irc, _as_bool(current.get("prompt_include_irc"), False))
+    telegram_enabled = _as_bool(prompt_include_telegram, _as_bool(current.get("prompt_include_telegram"), False))
+    matrix_enabled = _as_bool(prompt_include_matrix, _as_bool(current.get("prompt_include_matrix"), False))
+    preview_platform = _personal_prompt_preview_platform(
+        _text(prompt_preview_platform) or _text(current.get("prompt_preview_platform"))
+    )
+
+    redis_client.hset(
+        _PERSONAL_SETTINGS_KEY,
+        mapping={
+            "prompt_include_discord": "1" if discord_enabled else "0",
+            "prompt_include_irc": "1" if irc_enabled else "0",
+            "prompt_include_telegram": "1" if telegram_enabled else "0",
+            "prompt_include_matrix": "1" if matrix_enabled else "0",
+            "prompt_preview_platform": preview_platform,
+        },
+    )
+    return {
+        "ok": True,
+        "preview_platform": preview_platform,
+        "prompt_include_discord": discord_enabled,
+        "prompt_include_irc": irc_enabled,
+        "prompt_include_telegram": telegram_enabled,
+        "prompt_include_matrix": matrix_enabled,
+    }
+
+
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
     del redis_client
     body = payload if isinstance(payload, dict) else {}
@@ -3584,6 +4470,26 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             confirm_text=_value("confirm_text"),
         )
         return {"ok": True, "message": message}
+
+    if action_name == "personal_save_prompt_controls":
+        result = _save_prompt_controls(
+            prompt_include_discord=_value("prompt_include_discord"),
+            prompt_include_irc=_value("prompt_include_irc"),
+            prompt_include_telegram=_value("prompt_include_telegram"),
+            prompt_include_matrix=_value("prompt_include_matrix"),
+            prompt_preview_platform=_value("prompt_preview_platform"),
+        )
+        return {
+            "ok": True,
+            "message": (
+                "Saved prompt controls: "
+                f"discord={'on' if _as_bool(result.get('prompt_include_discord'), False) else 'off'}, "
+                f"irc={'on' if _as_bool(result.get('prompt_include_irc'), False) else 'off'}, "
+                f"telegram={'on' if _as_bool(result.get('prompt_include_telegram'), False) else 'off'}, "
+                f"matrix={'on' if _as_bool(result.get('prompt_include_matrix'), False) else 'off'}, "
+                f"preview={_text(result.get('preview_platform')) or 'discord'}."
+            ),
+        }
 
     if action_name == "personal_remove_event":
         result = _remove_profile_event(_text(_value("account_id")), _text(_value("event_id")))
