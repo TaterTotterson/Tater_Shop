@@ -47,7 +47,7 @@
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -55,7 +55,7 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "f50257fdef8d14c0f07607e6714b46a6d281a03af44830ca895a7d42c5c18f36"
+      "sha256": "89ee7a6d7fc16fd3dae8a8f7f251c2b63874cee5c9f3ae84fc74503ae0cff877"
     },
     {
       "id": "rss",

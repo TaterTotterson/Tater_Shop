@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 load_dotenv()
 
@@ -686,6 +686,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             "max_uid_seen": _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0),
         }
 
+    last_uid = _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0)
     host, port = _imap_host_port(account)
     logger.info(
         "[personal_core] account=%s provider=%s email=%s scan start host=%s port=%s mailbox=%s last_uid=%s",
@@ -713,8 +714,6 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             "emails": [],
             "max_uid_seen": _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0),
         }
-
-    last_uid = _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0)
 
     imap = None
     try:
