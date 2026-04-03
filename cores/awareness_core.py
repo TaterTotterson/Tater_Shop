@@ -6033,7 +6033,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "events_query",
-            "description": "natural-language semantic search over Awareness event history, including timeframe and area reasoning",
+            "description": "Look up event history for activity around your home, including doors, windows, garage, and inside and outside camera areas.",
             "usage": '{"function":"events_query","arguments":{"query":"what happened in the front yard today?"}}',
         },
     ]
