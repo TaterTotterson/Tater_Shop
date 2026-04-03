@@ -33,7 +33,7 @@
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.18",
+      "version": "1.0.19",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
@@ -41,7 +41,21 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "f396454de31b099bc0de3a81679496b645d0b678cf8df3218e54a00a3f173d51"
+      "sha256": "d060b7470bc385665440890f79cd0cf57c3b3a6dbe76699120b70c53f70ee394"
+    },
+    {
+      "id": "personal",
+      "name": "Personal Core",
+      "module_key": "personal_core",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Personal Core integration core for Tater.",
+      "settings_category": "Personal Core Settings",
+      "required_settings_count": 19,
+      "autostart_key": "personal_core_running",
+      "tags": [],
+      "entry": "cores/personal_core.py",
+      "sha256": "86b96a98347b8ded10e795444a818e809c1bdbdc10c065518483903859b9dbcb"
     },
     {
       "id": "rss",
