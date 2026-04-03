@@ -6025,23 +6025,8 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "key": "overview",
                 "label": "Overview",
-                "source": "grouped_items",
-                "groups": [
-                    {
-                        "key": "dashboard",
-                        "label": "Dashboard",
-                        "item_group": "overview_dashboard",
-                        "selector": False,
-                        "empty_message": "No overview data available.",
-                    },
-                    {
-                        "key": "entries",
-                        "label": "Stored Entries",
-                        "item_group": "overview_entries",
-                        "selector": False,
-                        "empty_message": "No stored profile entries to manage yet.",
-                    },
-                ],
+                "source": "items",
+                "item_group": "overview_dashboard",
                 "empty_message": "No overview data available.",
             },
             {
@@ -6057,6 +6042,13 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "source": "items",
                 "item_group": "notifications",
                 "empty_message": "No notification controls available.",
+            },
+            {
+                "key": "entries",
+                "label": "Stored Entries",
+                "source": "items",
+                "item_group": "overview_entries",
+                "empty_message": "No stored profile entries to manage yet.",
             },
             {
                 "key": "tools",
