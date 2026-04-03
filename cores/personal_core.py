@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 load_dotenv()
 
@@ -273,6 +273,28 @@ def _provider_key(value: Any, *, default: str = "custom") -> str:
     if "aol" in token:
         return "aol"
     return token
+
+
+def _mask_email(value: Any) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    if "@" not in raw:
+        if len(raw) <= 2:
+            return raw[0] + "***" if raw else ""
+        return raw[:2] + "***"
+    local, domain = raw.split("@", 1)
+    local = local.strip()
+    domain = domain.strip()
+    if not domain:
+        return _mask_email(local)
+    if len(local) <= 1:
+        local_mask = (local[:1] or "u") + "***"
+    elif len(local) == 2:
+        local_mask = local[:1] + "***"
+    else:
+        local_mask = local[:2] + "***"
+    return f"{local_mask}@{domain}"
 
 
 def _json_safe(value: Any) -> Any:
@@ -614,27 +636,54 @@ def _normalize_email_row(msg: Any, *, account_id: str, uid: int) -> Optional[Dic
 
 def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
     account_id = _text(account.get("account_id")) or _account_storage_id(account)
+    provider = _provider_key(account.get("provider"), default="custom")
     email_address = _text(account.get("email_address"))
+    masked_email = _mask_email(email_address)
     email_password = _text(account.get("email_password"))
     mailbox = _text(account.get("mailbox")) or "INBOX"
     lookback_limit = _as_int(settings.get("lookback_limit"), 40, minimum=1, maximum=300)
     scan_days = _as_int(settings.get("scan_days"), 21, minimum=1, maximum=365)
 
     if not email_address or not email_password:
+        error_text = "Missing email credentials in settings."
+        logger.warning(
+            "[personal_core] account=%s provider=%s email=%s %s",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            error_text,
+        )
         return {
             "ok": False,
             "account_id": account_id,
-            "error": "Missing email credentials in settings.",
+            "error": error_text,
             "emails": [],
             "max_uid_seen": _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0),
         }
 
     host, port = _imap_host_port(account)
+    logger.info(
+        "[personal_core] account=%s provider=%s email=%s scan start host=%s port=%s mailbox=%s",
+        account_id,
+        provider,
+        masked_email or "n/a",
+        host or "n/a",
+        port,
+        mailbox,
+    )
     if not host:
+        error_text = "Missing IMAP host for this account."
+        logger.warning(
+            "[personal_core] account=%s provider=%s email=%s %s",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            error_text,
+        )
         return {
             "ok": False,
             "account_id": account_id,
-            "error": "Missing IMAP host for this account.",
+            "error": error_text,
             "emails": [],
             "max_uid_seen": _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0),
         }
@@ -643,11 +692,94 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
 
     imap = None
     try:
-        imap = imaplib.IMAP4_SSL(host=host, port=port, timeout=30)
-        imap.login(email_address, email_password)
-        select_status, _ = imap.select(mailbox, readonly=True)
+        try:
+            imap = imaplib.IMAP4_SSL(host=host, port=port, timeout=30)
+        except Exception as exc:
+            error_text = f"IMAP connection failed for {host}:{port}: {exc}"
+            logger.warning(
+                "[personal_core] account=%s provider=%s email=%s %s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                error_text,
+            )
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "emails": [],
+                "max_uid_seen": last_uid,
+                "error": error_text,
+            }
+
+        try:
+            imap.login(email_address, email_password)
+        except imaplib.IMAP4.error as exc:
+            error_text = f"IMAP login failed for {masked_email or 'account'}: {exc}"
+            logger.warning(
+                "[personal_core] account=%s provider=%s email=%s %s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                error_text,
+            )
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "emails": [],
+                "max_uid_seen": last_uid,
+                "error": error_text,
+            }
+        except Exception as exc:
+            error_text = f"IMAP login error for {masked_email or 'account'}: {exc}"
+            logger.warning(
+                "[personal_core] account=%s provider=%s email=%s %s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                error_text,
+            )
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "emails": [],
+                "max_uid_seen": last_uid,
+                "error": error_text,
+            }
+
+        try:
+            select_status, _ = imap.select(mailbox, readonly=True)
+        except Exception as exc:
+            error_text = f"Unable to open mailbox '{mailbox}': {exc}"
+            logger.warning(
+                "[personal_core] account=%s provider=%s email=%s %s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                error_text,
+            )
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "emails": [],
+                "max_uid_seen": last_uid,
+                "error": error_text,
+            }
         if _text(select_status).upper() != "OK":
-            raise RuntimeError(f"Unable to open mailbox '{mailbox}'")
+            error_text = f"Unable to open mailbox '{mailbox}' (status={_text(select_status) or 'UNKNOWN'})"
+            logger.warning(
+                "[personal_core] account=%s provider=%s email=%s %s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                error_text,
+            )
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "emails": [],
+                "max_uid_seen": last_uid,
+                "error": error_text,
+            }
 
         uid_numbers, _criteria_used = _imap_uid_search(
             imap,
@@ -713,20 +845,36 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             "max_uid_seen": max_uid_seen,
         }
     except imaplib.IMAP4.error as exc:
+        error_text = f"IMAP auth/connect error: {exc}"
+        logger.warning(
+            "[personal_core] account=%s provider=%s email=%s %s",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            error_text,
+        )
         return {
             "ok": False,
             "account_id": account_id,
             "emails": [],
             "max_uid_seen": last_uid,
-            "error": f"IMAP auth/connect error: {exc}",
+            "error": error_text,
         }
     except Exception as exc:
+        error_text = f"IMAP scan failed: {exc}"
+        logger.warning(
+            "[personal_core] account=%s provider=%s email=%s %s",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            error_text,
+        )
         return {
             "ok": False,
             "account_id": account_id,
             "emails": [],
             "max_uid_seen": last_uid,
-            "error": f"IMAP scan failed: {exc}",
+            "error": error_text,
         }
     finally:
         if imap is not None:
@@ -2181,16 +2329,22 @@ def run(stop_event: Optional[object] = None) -> None:
         try:
             stats = _run_cycle(llm_client, settings)
             _save_cycle_stats(stats, cycle_start=cycle_start)
-            if _as_int(stats.get("inserted_count"), 0, minimum=0) > 0 or _as_int(stats.get("updated_events"), 0, minimum=0) > 0:
-                logger.info(
-                    "[personal_core] cycle: accounts=%s new_emails=%s events=%s deliveries=%s actions=%s errors=%s",
-                    _as_int(stats.get("account_count"), 0, minimum=0),
-                    _as_int(stats.get("inserted_count"), 0, minimum=0),
-                    _as_int(stats.get("updated_events"), 0, minimum=0),
-                    _as_int(stats.get("updated_deliveries"), 0, minimum=0),
-                    _as_int(stats.get("updated_actions"), 0, minimum=0),
-                    _as_int(stats.get("error_count"), 0, minimum=0),
-                )
+            logger.info(
+                "[personal_core] cycle: accounts=%s ok=%s errors=%s fetched=%s new_emails=%s events=%s deliveries=%s actions=%s",
+                _as_int(stats.get("account_count"), 0, minimum=0),
+                _as_int(stats.get("ok_count"), 0, minimum=0),
+                _as_int(stats.get("error_count"), 0, minimum=0),
+                _as_int(stats.get("fetched_count"), 0, minimum=0),
+                _as_int(stats.get("inserted_count"), 0, minimum=0),
+                _as_int(stats.get("updated_events"), 0, minimum=0),
+                _as_int(stats.get("updated_deliveries"), 0, minimum=0),
+                _as_int(stats.get("updated_actions"), 0, minimum=0),
+            )
+            errors = list(stats.get("errors") or [])
+            for err in errors[:5]:
+                err_text = _clean_text_blob(err, max_chars=260)
+                if err_text:
+                    logger.warning("[personal_core] cycle error: %s", err_text)
         except Exception as exc:
             logger.exception("[personal_core] cycle failed: %s", exc)
 
