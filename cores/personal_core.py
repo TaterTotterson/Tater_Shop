@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.31"
+__version__ = "1.0.32"
 
 load_dotenv()
 
@@ -4038,6 +4038,7 @@ def _aggregate_profiles() -> Dict[str, Any]:
     subscriptions: List[Dict[str, Any]] = []
     deliveries: List[Dict[str, Any]] = []
     action_items: List[Dict[str, Any]] = []
+    important_notes: List[Dict[str, Any]] = []
     merchant_totals: Dict[str, float] = {}
     account_rows: List[Dict[str, Any]] = []
     open_deliveries = 0
@@ -4082,6 +4083,13 @@ def _aggregate_profiles() -> Dict[str, Any]:
             row_copy["account_id"] = account_id
             action_items.append(row_copy)
 
+        for row in profile.get("important_notes") if isinstance(profile.get("important_notes"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            row_copy = dict(row)
+            row_copy["account_id"] = account_id
+            important_notes.append(row_copy)
+
         for spend in profile.get("spending_habits") if isinstance(profile.get("spending_habits"), list) else []:
             if not isinstance(spend, dict):
                 continue
@@ -4124,6 +4132,7 @@ def _aggregate_profiles() -> Dict[str, Any]:
     subscriptions.sort(key=lambda row: _as_float(row.get("next_charge_ts"), 0.0))
     deliveries.sort(key=lambda row: _as_float(row.get("eta_ts"), 0.0), reverse=True)
     action_items.sort(key=lambda row: _as_float(row.get("due_ts"), 0.0))
+    important_notes.sort(key=lambda row: _as_float(row.get("date_ts"), 0.0), reverse=True)
 
     merchant_rows = [
         {"merchant": name, "amount": round(amount, 2)}
@@ -4142,6 +4151,7 @@ def _aggregate_profiles() -> Dict[str, Any]:
         "subscriptions": subscriptions,
         "deliveries": deliveries,
         "action_items": action_items,
+        "important_notes": important_notes,
         "open_deliveries": open_deliveries,
         "open_actions": open_actions,
         "merchant_rows": merchant_rows,
@@ -5536,6 +5546,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
     subscriptions_rows = list(aggregate.get("subscriptions") or [])
     deliveries_rows = list(aggregate.get("deliveries") or [])
     action_rows = list(aggregate.get("action_items") or [])
+    notes_rows = list(aggregate.get("important_notes") or [])
 
     merchant_points = [
         {"label": _text(row.get("merchant")), "value": round(_as_float(row.get("amount"), 0.0, minimum=0.0), 2)}
@@ -5623,6 +5634,18 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             }
         )
 
+    notes_table_rows = []
+    for row in notes_rows[:120]:
+        notes_table_rows.append(
+            {
+                "date": _text(row.get("date_iso")) or _iso_from_ts(row.get("date_ts")) or "n/a",
+                "title": _text(row.get("title")) or "Important note",
+                "kind": _text(row.get("kind")) or "important",
+                "summary": _clean_text_blob(row.get("summary"), max_chars=220),
+                "account": _text(row.get("account_id")),
+            }
+        )
+
     overview_lines = [
         f"Accounts: {_as_int(aggregate.get('account_count'), 0, minimum=0)}",
         f"Stored emails: {_as_int(aggregate.get('total_emails'), 0, minimum=0)}",
@@ -5632,6 +5655,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         f"Subscriptions tracked: {len(subscriptions_rows)}",
         f"Open deliveries: {_as_int(aggregate.get('open_deliveries'), 0, minimum=0)}",
         f"Open action items: {_as_int(aggregate.get('open_actions'), 0, minimum=0)}",
+        f"Important notes: {len(notes_rows)}",
         f"Last run: {_text(cycle_stats.get('last_run_text')) or 'n/a'}",
         f"Last run new emails: {_as_int(cycle_stats.get('inserted_count'), 0, minimum=0)}",
         f"Last run event updates: {_as_int(cycle_stats.get('updated_events'), 0, minimum=0)}",
@@ -5831,6 +5855,22 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                             ),
                             "rows": action_table_rows,
                         },
+                    ],
+                },
+                {
+                    "label": "Important Notes",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "notes_table",
+                            "label": "Important Notes",
+                            "type": "table",
+                            "columns": _table_columns(
+                                ["date", "title", "kind", "summary", "account"],
+                                ["Date", "Title", "Kind", "Summary", "Account"],
+                            ),
+                            "rows": notes_table_rows,
+                        }
                     ],
                 },
             ],
