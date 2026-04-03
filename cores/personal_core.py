@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.26"
+__version__ = "1.0.27"
 
 load_dotenv()
 
@@ -672,7 +672,7 @@ def _load_settings() -> Dict[str, Any]:
         "notification_destinations": _normalize_destination_values(raw.get("notification_destinations")),
         "notification_extra_destinations": _normalize_destination_values(raw.get("notification_extra_destinations")),
         "notification_max_per_cycle": _as_int(raw.get("notification_max_per_cycle"), 3, minimum=1, maximum=25),
-        "notification_ha_api_notification": _as_bool(raw.get("notification_ha_api_notification"), True),
+        "notification_ha_api_notification": _as_bool(raw.get("notification_ha_api_notification"), False),
         "notification_ha_device_services": _text(raw.get("notification_ha_device_services")),
     }
     return settings
@@ -3107,7 +3107,7 @@ async def _dispatch_personal_notification_async(
         routes = [{}]
 
     if platform_name == "homeassistant":
-        api_notification = _as_bool(settings.get("notification_ha_api_notification"), True)
+        api_notification = _as_bool(settings.get("notification_ha_api_notification"), False)
         global_services = _normalize_notify_services(settings.get("notification_ha_device_services"))
         sent_count = 0
         errors: List[str] = []
@@ -3140,8 +3140,11 @@ async def _dispatch_personal_notification_async(
             route_api_enabled = _as_bool(base_targets.get("api_notification"), api_notification)
             route_device_service = _normalize_notify_service(base_targets.get("device_service"))
             route_services = list(global_services)
-            if route_device_service and route_device_service not in route_services and not route_services:
+            if route_device_service and route_device_service not in route_services:
                 route_services.append(route_device_service)
+            if not (route_api_enabled or route_services):
+                errors.append("homeassistant route has api_notification disabled and no device services configured")
+                continue
 
             if route_api_enabled:
                 api_targets = dict(base_targets)
@@ -3156,11 +3159,6 @@ async def _dispatch_personal_notification_async(
                 svc_targets["api_notification"] = False
                 svc_targets["device_service"] = service
                 await _dispatch_ha_route(svc_targets)
-
-            if (not route_api_enabled) and (not route_services):
-                default_targets = dict(base_targets)
-                default_targets["persistent"] = False
-                await _dispatch_ha_route(default_targets)
 
         if sent_count > 0:
             return {"ok": True, "sent_count": sent_count, "errors": errors}
@@ -5373,7 +5371,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
     if has_homeassistant_route:
         route_preview_lines.append(
             "Home Assistant: "
-            + f"api_notification={'on' if _as_bool(settings.get('notification_ha_api_notification'), True) else 'off'}, "
+            + f"api_notification={'on' if _as_bool(settings.get('notification_ha_api_notification'), False) else 'off'}, "
             + f"notify_services={', '.join(ha_services_selected) if ha_services_selected else 'none'}"
         )
 
@@ -5610,7 +5608,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                             "key": "notification_ha_api_notification",
                             "label": "Send VoicePE/API Notification",
                             "type": "checkbox",
-                            "value": _as_bool(settings.get("notification_ha_api_notification"), True),
+                            "value": _as_bool(settings.get("notification_ha_api_notification"), False),
                         },
                         {
                             "key": "notification_ha_device_services",
@@ -5953,7 +5951,7 @@ def _save_notification_controls(
     )
     ha_api_notification = _as_bool(
         notification_ha_api_notification,
-        _as_bool(current.get("notification_ha_api_notification"), True),
+        _as_bool(current.get("notification_ha_api_notification"), False),
     )
     ha_services = _normalize_notify_services(notification_ha_device_services)
 
@@ -6057,7 +6055,7 @@ def _notification_test_settings_from_values(
     )
     settings["notification_ha_api_notification"] = _as_bool(
         notification_ha_api_notification,
-        _as_bool(settings.get("notification_ha_api_notification"), True),
+        _as_bool(settings.get("notification_ha_api_notification"), False),
     )
     settings["notification_ha_device_services"] = json.dumps(
         _normalize_notify_services(
