@@ -48,7 +48,6 @@
 | `discord_admin_response_mode` | Toggle always-respond mode for the current Discord channel only. | discord |
 | `discord_admin_roles` | Discord role listing and role assignment commands. | discord |
 | `discord_admin_setup` | Discord server setup and structural admin changes. | discord |
-| `events_query` | Natural-language semantic event-history search. | webui, macos, homeassistant, homekit, discord, telegram, matrix, irc |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, homeassistant, homekit, xbmc, discord, telegram, matrix, irc |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
 | `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, homeassistant, discord, telegram, matrix, irc |
