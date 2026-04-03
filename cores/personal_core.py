@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 load_dotenv()
 
@@ -258,6 +258,23 @@ def _slug(value: Any, *, default: str = "unknown") -> str:
     return text or default
 
 
+def _provider_key(value: Any, *, default: str = "custom") -> str:
+    token = _slug(value, default=default)
+    if token in _IMAP_PROVIDER_DEFAULTS:
+        return token
+    if "apple" in token or "icloud" in token or "me_com" in token:
+        return "apple"
+    if "office365" in token or "office_365" in token or "outlook" in token or "hotmail" in token or "live" in token:
+        return "outlook"
+    if "google" in token or "gmail" in token:
+        return "gmail"
+    if "yahoo" in token:
+        return "yahoo"
+    if "aol" in token:
+        return "aol"
+    return token
+
+
 def _json_safe(value: Any) -> Any:
     try:
         json.dumps(value, ensure_ascii=False)
@@ -412,7 +429,7 @@ def _stable_message_id(*, account_id: str, uid: int, message_id: str, subject: s
 
 
 def _account_storage_id(account: Dict[str, Any]) -> str:
-    provider = _slug(account.get("provider"), default="imap")
+    provider = _provider_key(account.get("provider"), default="imap")
     email_addr = _text(account.get("email_address")).lower()
     local = _slug(email_addr.split("@", 1)[0] if "@" in email_addr else email_addr, default="account")
     digest = hashlib.sha1(email_addr.encode("utf-8", errors="ignore")).hexdigest()[:10] if email_addr else "anon"
@@ -465,7 +482,7 @@ def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
     primary = {
-        "provider": _slug(settings.get("provider"), default="gmail"),
+        "provider": _provider_key(settings.get("provider"), default="gmail"),
         "email_address": _text(settings.get("email_address")),
         "email_password": _text(settings.get("email_password")),
         "imap_host": _text(settings.get("imap_host")),
@@ -491,7 +508,7 @@ def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if not enabled:
                     continue
                 merged = {
-                    "provider": _slug(row.get("provider") or primary.get("provider"), default="gmail"),
+                    "provider": _provider_key(row.get("provider") or primary.get("provider"), default="gmail"),
                     "email_address": _text(row.get("email_address") or row.get("username")),
                     "email_password": _text(row.get("email_password") or row.get("password")),
                     "imap_host": _text(row.get("imap_host")),
@@ -515,11 +532,50 @@ def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _imap_host_port(account: Dict[str, Any]) -> Tuple[str, int]:
-    provider = _slug(account.get("provider"), default="custom")
+    provider = _provider_key(account.get("provider"), default="custom")
     defaults = _IMAP_PROVIDER_DEFAULTS.get(provider) or _IMAP_PROVIDER_DEFAULTS.get("custom") or {"host": "", "port": 993}
     host = _text(account.get("imap_host")) or _text(defaults.get("host"))
     port = _as_int(account.get("imap_port"), _as_int(defaults.get("port"), 993, minimum=1, maximum=65535), minimum=1, maximum=65535)
     return host, port
+
+
+def _parse_uid_numbers(search_data: Any) -> List[int]:
+    raw_uid_line = b""
+    if isinstance(search_data, list) and search_data:
+        raw_uid_line = search_data[0] or b""
+    uid_values = _text(raw_uid_line).split()
+    uid_numbers = [
+        _as_int(token, 0, minimum=0)
+        for token in uid_values
+        if _as_int(token, 0, minimum=0) > 0
+    ]
+    return sorted(set(uid_numbers))
+
+
+def _imap_uid_search(imap: Any, *, last_uid: int, scan_days: int) -> Tuple[List[int], str]:
+    if last_uid > 0:
+        criteria_options = [
+            f"(UID {last_uid + 1}:*)",
+            f"UID {last_uid + 1}:*",
+        ]
+    else:
+        since_date = (datetime.utcnow() - timedelta(days=scan_days)).strftime("%d-%b-%Y")
+        criteria_options = [
+            f'(SINCE "{since_date}")',
+            f"(SINCE {since_date})",
+            f"SINCE {since_date}",
+        ]
+
+    attempts: List[str] = []
+    for criteria in criteria_options:
+        status, data = imap.uid("search", None, criteria)
+        status_text = _text(status).upper()
+        if status_text == "OK":
+            return _parse_uid_numbers(data), criteria
+        attempts.append(f"{criteria} -> {status_text or 'UNKNOWN'}")
+
+    attempt_text = "; ".join(attempts) if attempts else "no attempts"
+    raise RuntimeError(f"IMAP search failed ({attempt_text})")
 
 
 def _normalize_email_row(msg: Any, *, account_id: str, uid: int) -> Optional[Dict[str, Any]]:
@@ -593,26 +649,11 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
         if _text(select_status).upper() != "OK":
             raise RuntimeError(f"Unable to open mailbox '{mailbox}'")
 
-        if last_uid > 0:
-            criteria = f"(UID {last_uid + 1}:*)"
-        else:
-            since_date = (datetime.utcnow() - timedelta(days=scan_days)).strftime("%d-%b-%Y")
-            criteria = f'(SINCE "{since_date}")'
-
-        search_status, search_data = imap.uid("search", None, criteria)
-        if _text(search_status).upper() != "OK":
-            raise RuntimeError("IMAP search failed")
-
-        raw_uid_line = b""
-        if isinstance(search_data, list) and search_data:
-            raw_uid_line = search_data[0] or b""
-        uid_values = _text(raw_uid_line).split()
-        uid_numbers = [
-            _as_int(token, 0, minimum=0)
-            for token in uid_values
-            if _as_int(token, 0, minimum=0) > 0
-        ]
-        uid_numbers = sorted(set(uid_numbers))
+        uid_numbers, _criteria_used = _imap_uid_search(
+            imap,
+            last_uid=last_uid,
+            scan_days=scan_days,
+        )
         if not uid_numbers:
             try:
                 imap.close()
@@ -2799,6 +2840,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "spend_total": round(_as_float(row.get("spending_total"), 0.0, minimum=0.0), 2),
                 "last_scan": _text(row.get("last_scan")) or "n/a",
                 "status": _text(row.get("status")) or "idle",
+                "error": _text(row.get("error")) or "",
             }
         )
 
@@ -2930,8 +2972,8 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                             "label": "Account Status",
                             "type": "table",
                             "columns": _table_columns(
-                                ["account_id", "emails", "events", "subscriptions", "deliveries_open", "actions_open", "spend_total", "last_scan", "status"],
-                                ["Account", "Emails", "Events", "Subs", "Deliveries", "Actions", "Spend", "Last Scan", "Status"],
+                                ["account_id", "emails", "events", "subscriptions", "deliveries_open", "actions_open", "spend_total", "last_scan", "status", "error"],
+                                ["Account", "Emails", "Events", "Subs", "Deliveries", "Actions", "Spend", "Last Scan", "Status", "Error"],
                             ),
                             "rows": accounts_table_rows,
                         }
@@ -3164,7 +3206,7 @@ def _run_ui_tool_action(
         cycle_start = time.time()
         stats = _run_cycle(llm_client, settings)
         _save_cycle_stats(stats, cycle_start=cycle_start)
-        return (
+        message = (
             "Personal scan complete: "
             f"accounts={_as_int(stats.get('account_count'), 0, minimum=0)}, "
             f"new_emails={_as_int(stats.get('inserted_count'), 0, minimum=0)}, "
@@ -3173,6 +3215,12 @@ def _run_ui_tool_action(
             f"action_updates={_as_int(stats.get('updated_actions'), 0, minimum=0)}, "
             f"errors={_as_int(stats.get('error_count'), 0, minimum=0)}"
         )
+        errors = list(stats.get("errors") or [])
+        if errors:
+            first_error = _clean_text_blob(errors[0], max_chars=220)
+            if first_error:
+                message += f"; first_error={first_error}"
+        return message
 
     if action == "remove_event":
         result = _remove_profile_event(_text(account_id), _text(event_id))
