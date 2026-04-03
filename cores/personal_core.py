@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 load_dotenv()
 
@@ -589,12 +589,37 @@ def _imap_uid_search(imap: Any, *, last_uid: int, scan_days: int) -> Tuple[List[
         ]
 
     attempts: List[str] = []
+    had_ok_empty = False
     for criteria in criteria_options:
         status, data = imap.uid("search", None, criteria)
         status_text = _text(status).upper()
         if status_text == "OK":
-            return _parse_uid_numbers(data), criteria
+            parsed = _parse_uid_numbers(data)
+            if parsed:
+                return parsed, criteria
+            had_ok_empty = True
+            attempts.append(f"{criteria} -> OK(0)")
+            continue
         attempts.append(f"{criteria} -> {status_text or 'UNKNOWN'}")
+
+    # First run: if recent-window search is empty, fallback to ALL so initial backfill
+    # still picks up mailbox history (bounded later by lookback_limit).
+    if last_uid <= 0:
+        for criteria in ("ALL", "(ALL)"):
+            status, data = imap.uid("search", None, criteria)
+            status_text = _text(status).upper()
+            if status_text == "OK":
+                parsed = _parse_uid_numbers(data)
+                if parsed:
+                    return parsed, criteria
+                had_ok_empty = True
+                attempts.append(f"{criteria} -> OK(0)")
+                continue
+            attempts.append(f"{criteria} -> {status_text or 'UNKNOWN'}")
+
+    if had_ok_empty:
+        # Valid search responses with no matching messages.
+        return [], criteria_options[0] if criteria_options else "UNKNOWN"
 
     attempt_text = "; ".join(attempts) if attempts else "no attempts"
     raise RuntimeError(f"IMAP search failed ({attempt_text})")
@@ -663,13 +688,14 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
 
     host, port = _imap_host_port(account)
     logger.info(
-        "[personal_core] account=%s provider=%s email=%s scan start host=%s port=%s mailbox=%s",
+        "[personal_core] account=%s provider=%s email=%s scan start host=%s port=%s mailbox=%s last_uid=%s",
         account_id,
         provider,
         masked_email or "n/a",
         host or "n/a",
         port,
         mailbox,
+        last_uid,
     )
     if not host:
         error_text = "Missing IMAP host for this account."
@@ -781,11 +807,28 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
                 "error": error_text,
             }
 
-        uid_numbers, _criteria_used = _imap_uid_search(
+        uid_numbers, criteria_used = _imap_uid_search(
             imap,
             last_uid=last_uid,
             scan_days=scan_days,
         )
+        if uid_numbers:
+            logger.info(
+                "[personal_core] account=%s provider=%s email=%s search criteria=%s uid_candidates=%s",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                criteria_used,
+                len(uid_numbers),
+            )
+        else:
+            logger.info(
+                "[personal_core] account=%s provider=%s email=%s search criteria=%s uid_candidates=0",
+                account_id,
+                provider,
+                masked_email or "n/a",
+                criteria_used,
+            )
         if not uid_numbers:
             try:
                 imap.close()
@@ -803,6 +846,14 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             }
 
         target_uids = uid_numbers[-lookback_limit:]
+        logger.info(
+            "[personal_core] account=%s provider=%s email=%s fetching_uids=%s (lookback_limit=%s)",
+            account_id,
+            provider,
+            masked_email or "n/a",
+            len(target_uids),
+            lookback_limit,
+        )
         rows: List[Dict[str, Any]] = []
         max_uid_seen = last_uid
         for uid in target_uids:
