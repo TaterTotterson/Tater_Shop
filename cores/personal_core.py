@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.30"
+__version__ = "1.0.31"
 
 load_dotenv()
 
@@ -205,6 +205,16 @@ _PERSONAL_HISTORY_PREFIX = "personal:email_history"
 _PERSONAL_CURSOR_PREFIX = "personal:cursor_uid"
 _PERSONAL_PROCESSED_PREFIX = "personal:processed_msg"
 _PERSONAL_NOTIFY_SENT_PREFIX = "personal:notify_sent"
+
+_PROFILE_ENTRY_KIND_TO_BUCKET = {
+    "event": "upcoming_events",
+    "subscription": "subscriptions",
+    "delivery": "deliveries",
+    "action": "action_items",
+    "spending": "spending_habits",
+    "note": "important_notes",
+    "favorite": "favorite_places",
+}
 
 _AMOUNT_RE = re.compile(r"(?:USD|US\$|\$)\s*([0-9]+(?:\.[0-9]{1,2})?)", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -5307,6 +5317,217 @@ def _table_columns(keys: List[str], labels: List[str]) -> List[Dict[str, str]]:
     return out
 
 
+def _profile_entry_item_id(kind: str, account_id: str, row_id: str) -> str:
+    return f"{_slug(kind, default='entry')}|{_text(account_id)}|{_text(row_id)}"
+
+
+def _decode_profile_entry_item_id(value: Any) -> Tuple[str, str, str]:
+    raw = _text(value)
+    if not raw:
+        return "", "", ""
+    parts = raw.split("|", 2)
+    if len(parts) != 3:
+        return "", "", ""
+    return _slug(parts[0], default=""), _text(parts[1]), _text(parts[2])
+
+
+def _refresh_profile_stats(profile: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(profile) if isinstance(profile, dict) else {}
+    stats = updated.get("stats") if isinstance(updated.get("stats"), dict) else {}
+
+    spending_rows = list(updated.get("spending_habits") or [])
+    spend_total, spend_30d = _compute_spending_totals(spending_rows)
+    stats["spending_total"] = spend_total
+    stats["spending_30d"] = spend_30d
+    stats["upcoming_events"] = len(list(updated.get("upcoming_events") or []))
+    stats["subscriptions"] = len(list(updated.get("subscriptions") or []))
+    stats["deliveries_open"] = len(
+        [
+            row
+            for row in list(updated.get("deliveries") or [])
+            if isinstance(row, dict) and _slug(row.get("status"), default="update") != "delivered"
+        ]
+    )
+    stats["action_items_open"] = len(
+        [
+            row
+            for row in list(updated.get("action_items") or [])
+            if isinstance(row, dict) and _slug(row.get("status"), default="open") == "open"
+        ]
+    )
+    updated["stats"] = stats
+    return updated
+
+
+def _entry_manager_forms(profiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    forms: List[Dict[str, Any]] = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        account_id = _text(profile.get("account_id"))
+        if not account_id:
+            continue
+
+        spending_rows = [row for row in list(profile.get("spending_habits") or []) if isinstance(row, dict)]
+        spending_rows.sort(key=lambda row: _as_float(row.get("observed_ts"), 0.0, minimum=0.0), reverse=True)
+        for row in spending_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            merchant = _text(row.get("merchant")) or "Unknown merchant"
+            amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
+            observed = _text(row.get("observed_at")) or "date n/a"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("spending", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Spending: {merchant} ${amount:.2f}",
+                    "subtitle": f"{observed} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored spending entry?",
+                }
+            )
+
+        event_rows = [row for row in list(profile.get("upcoming_events") or []) if isinstance(row, dict)]
+        event_rows.sort(key=lambda row: _as_float(row.get("starts_ts"), 0.0, minimum=0.0))
+        for row in event_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            title = _text(row.get("title")) or "Upcoming event"
+            starts = _text(row.get("starts_at")) or _iso_from_ts(row.get("starts_ts")) or "date n/a"
+            kind = _text(row.get("kind")) or "event"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("event", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Event: {title}",
+                    "subtitle": f"{starts} · {kind} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored event?",
+                }
+            )
+
+        subscription_rows = [row for row in list(profile.get("subscriptions") or []) if isinstance(row, dict)]
+        subscription_rows.sort(key=lambda row: _as_float(row.get("next_charge_ts"), 0.0, minimum=0.0))
+        for row in subscription_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            merchant = _text(row.get("merchant")) or "Subscription"
+            amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
+            cadence = _text(row.get("cadence")) or "unknown"
+            next_charge = _text(row.get("next_charge_at")) or "date n/a"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("subscription", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Subscription: {merchant} ${amount:.2f}",
+                    "subtitle": f"{next_charge} · {cadence} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored subscription?",
+                }
+            )
+
+        delivery_rows = [row for row in list(profile.get("deliveries") or []) if isinstance(row, dict)]
+        delivery_rows.sort(key=lambda row: _as_float(row.get("eta_ts"), 0.0, minimum=0.0), reverse=True)
+        for row in delivery_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            carrier = _text(row.get("carrier")) or "Carrier n/a"
+            item_text = _text(row.get("item_description"))
+            status = _text(row.get("status")) or "update"
+            eta = _text(row.get("eta_at")) or "eta n/a"
+            ref = _text(row.get("tracking_id")) or _text(row.get("order_number")) or "reference n/a"
+            detail = f"{carrier}: {status} · {eta} · {ref}"
+            if item_text:
+                detail = f"{carrier}: {item_text} · {status} · {eta} · {ref}"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("delivery", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": "Delivery",
+                    "subtitle": f"{detail} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored delivery update?",
+                }
+            )
+
+        action_rows = [row for row in list(profile.get("action_items") or []) if isinstance(row, dict)]
+        action_rows.sort(key=lambda row: _as_float(row.get("due_ts"), 0.0, minimum=0.0))
+        for row in action_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            title = _text(row.get("title")) or "Action item"
+            due = _text(row.get("due_at")) or "date n/a"
+            status = _text(row.get("status")) or "open"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("action", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Action: {title}",
+                    "subtitle": f"{due} · {status} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored action item?",
+                }
+            )
+
+        note_rows = [row for row in list(profile.get("important_notes") or []) if isinstance(row, dict)]
+        note_rows.sort(key=lambda row: _as_float(row.get("date_ts"), 0.0, minimum=0.0), reverse=True)
+        for row in note_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            title = _text(row.get("title")) or "Important note"
+            date_iso = _text(row.get("date_iso")) or "date n/a"
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("note", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Note: {title}",
+                    "subtitle": f"{date_iso} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored note?",
+                }
+            )
+
+        favorite_rows = [row for row in list(profile.get("favorite_places") or []) if isinstance(row, dict)]
+        favorite_rows.sort(
+            key=lambda row: (
+                -_as_int(row.get("count"), 0, minimum=0),
+                -_as_float(row.get("spend"), 0.0, minimum=0.0),
+                _text(row.get("name")),
+            )
+        )
+        for row in favorite_rows:
+            row_id = _text(row.get("id"))
+            if not row_id:
+                continue
+            name = _text(row.get("name")) or "Favorite place"
+            count = _as_int(row.get("count"), 0, minimum=0)
+            spend = _as_float(row.get("spend"), 0.0, minimum=0.0)
+            forms.append(
+                {
+                    "id": _profile_entry_item_id("favorite", account_id, row_id),
+                    "group": "overview_entries",
+                    "title": f"Favorite: {name}",
+                    "subtitle": f"count={count} · spend=${spend:.2f} · {account_id}",
+                    "run_action": "personal_remove_profile_entry",
+                    "run_label": "X",
+                    "run_confirm": "Remove this stored favorite place?",
+                }
+            )
+    return forms
+
+
 def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[str, Any]:
     profiles = list(aggregate.get("profiles") or [])
     account_rows = list(aggregate.get("account_rows") or [])
@@ -5499,7 +5720,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         {
             "id": "__personal_overview__",
             "title": "Overview + Insights",
-            "group": "overview",
+            "group": "overview_dashboard",
             "subtitle": "Email-derived profile stats, spending patterns, and upcoming events.",
             "sections": [
                 {
@@ -5615,6 +5836,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             ],
         }
     ]
+    forms.extend(_entry_manager_forms(profiles))
     forms.append(
         {
             "id": "__personal_prompt_controls__",
@@ -5763,8 +5985,23 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "key": "overview",
                 "label": "Overview",
-                "source": "items",
-                "item_group": "overview",
+                "source": "grouped_items",
+                "groups": [
+                    {
+                        "key": "dashboard",
+                        "label": "Dashboard",
+                        "item_group": "overview_dashboard",
+                        "selector": False,
+                        "empty_message": "No overview data available.",
+                    },
+                    {
+                        "key": "entries",
+                        "label": "Stored Entries",
+                        "item_group": "overview_entries",
+                        "selector": False,
+                        "empty_message": "No stored profile entries to manage yet.",
+                    },
+                ],
                 "empty_message": "No overview data available.",
             },
             {
@@ -5928,6 +6165,42 @@ def _remove_profile_event(account_id: str, event_id: str) -> Dict[str, Any]:
     profile["last_updated"] = time.time()
     _save_profile(aid, profile)
     return {"ok": True, "removed": 1}
+
+
+def _remove_profile_entry(account_id: str, *, bucket: str, row_id: str) -> Dict[str, Any]:
+    aid = _text(account_id)
+    rid = _text(row_id)
+    bucket_name = _text(bucket)
+    if not aid:
+        return {"ok": False, "error": "account_id is required."}
+    if not rid:
+        return {"ok": False, "error": "entry id is required."}
+    if not bucket_name:
+        return {"ok": False, "error": "entry bucket is required."}
+
+    profile = _load_profile(aid)
+    rows = list(profile.get(bucket_name) or [])
+    next_rows = [row for row in rows if _text((row or {}).get("id")) != rid]
+    if len(next_rows) == len(rows):
+        return {"ok": False, "error": "Entry not found."}
+
+    profile[bucket_name] = next_rows
+    if bucket_name == "spending_habits":
+        profile["favorite_places"] = _compute_favorite_places(next_rows)
+    profile = _refresh_profile_stats(profile)
+    profile["last_updated"] = time.time()
+    _save_profile(aid, profile)
+    return {"ok": True, "removed": 1, "bucket": bucket_name}
+
+
+def _remove_profile_entry_from_item_id(item_id: Any) -> Dict[str, Any]:
+    kind, account_id, row_id = _decode_profile_entry_item_id(item_id)
+    if not kind or not account_id or not row_id:
+        return {"ok": False, "error": "Invalid entry id."}
+    bucket = _PROFILE_ENTRY_KIND_TO_BUCKET.get(kind)
+    if not bucket:
+        return {"ok": False, "error": f"Unsupported entry type: {kind}"}
+    return _remove_profile_entry(account_id, bucket=bucket, row_id=row_id)
 
 
 def _run_ui_tool_action(
@@ -6284,6 +6557,12 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "message": _text(result.get("message")) or "Notification test finished.",
             "data": result,
         }
+
+    if action_name == "personal_remove_profile_entry":
+        result = _remove_profile_entry_from_item_id(_value("id"))
+        if not bool(result.get("ok")):
+            raise ValueError(_text(result.get("error")) or "Could not remove profile entry.")
+        return {"ok": True, "message": "Profile entry removed."}
 
     if action_name == "personal_remove_event":
         result = _remove_profile_event(_text(_value("account_id")), _text(_value("event_id")))
