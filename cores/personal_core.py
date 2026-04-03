@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.14"
+__version__ = "1.0.15"
 
 load_dotenv()
 
@@ -3776,12 +3776,12 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
         },
         {
             "id": "personal_actions",
-            "description": "Return open or upcoming action items extracted from email.",
+            "description": "Return things the user needs to do, extracted from email (open/upcoming action items).",
             "usage": '{"function":"personal_actions","arguments":{"days":30,"limit":20}}',
         },
         {
             "id": "personal_notes",
-            "description": "Return important note items extracted from email history.",
+            "description": "Return important context from email history (helpful notes that are not tasks).",
             "usage": '{"function":"personal_notes","arguments":{"days":180,"limit":20}}',
         },
         {
