@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.15"
+__version__ = "1.0.16"
 
 load_dotenv()
 
@@ -753,7 +753,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
 
     last_uid = _as_int(redis_client.get(_cursor_key(account_id)), 0, minimum=0)
     host, port = _imap_host_port(account)
-    logger.info(
+    logger.debug(
         "[personal_core] account=%s provider=%s email=%s scan start host=%s port=%s mailbox=%s last_uid=%s",
         account_id,
         provider,
@@ -877,7 +877,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             scan_days=scan_days,
         )
         if uid_numbers:
-            logger.info(
+            logger.debug(
                 "[personal_core] account=%s provider=%s email=%s search criteria=%s uid_candidates=%s",
                 account_id,
                 provider,
@@ -886,7 +886,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
                 len(uid_numbers),
             )
         else:
-            logger.info(
+            logger.debug(
                 "[personal_core] account=%s provider=%s email=%s search criteria=%s uid_candidates=0",
                 account_id,
                 provider,
@@ -910,7 +910,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
             }
 
         target_uids = uid_numbers[-lookback_limit:]
-        logger.info(
+        logger.debug(
             "[personal_core] account=%s provider=%s email=%s fetching_uids=%s (lookback_limit=%s)",
             account_id,
             provider,
@@ -962,7 +962,7 @@ def _fetch_new_emails_for_account(account: Dict[str, Any], settings: Dict[str, A
                 dropped_empty_count += 1
 
         rows.sort(key=lambda row: int(row.get("uid") or 0))
-        logger.info(
+        logger.debug(
             "[personal_core] account=%s provider=%s email=%s fetch summary: uid_candidates=%s selected=%s attempted=%s ok=%s non_ok=%s raw=%s raw_missing=%s parsed=%s parse_errors=%s normalized=%s dropped_empty=%s",
             account_id,
             provider,
@@ -2541,10 +2541,17 @@ def run(stop_event: Optional[object] = None) -> None:
             stats = _run_cycle(llm_client, settings)
             _save_cycle_stats(stats, cycle_start=cycle_start)
             logger.info(
-                "[personal_core] cycle: accounts=%s ok=%s errors=%s uid_candidates=%s selected=%s fetched=%s normalized=%s parse_errors=%s raw_missing=%s fetch_non_ok=%s new_emails=%s events=%s deliveries=%s actions=%s",
+                "[personal_core] cycle: accounts=%s ok=%s errors=%s new_emails=%s events=%s deliveries=%s actions=%s",
                 _as_int(stats.get("account_count"), 0, minimum=0),
                 _as_int(stats.get("ok_count"), 0, minimum=0),
                 _as_int(stats.get("error_count"), 0, minimum=0),
+                _as_int(stats.get("inserted_count"), 0, minimum=0),
+                _as_int(stats.get("updated_events"), 0, minimum=0),
+                _as_int(stats.get("updated_deliveries"), 0, minimum=0),
+                _as_int(stats.get("updated_actions"), 0, minimum=0),
+            )
+            logger.debug(
+                "[personal_core] cycle details: uid_candidates=%s selected=%s fetched=%s normalized=%s parse_errors=%s raw_missing=%s fetch_non_ok=%s",
                 _as_int(stats.get("uid_candidates"), 0, minimum=0),
                 _as_int(stats.get("selected_count"), 0, minimum=0),
                 _as_int(stats.get("fetched_count"), 0, minimum=0),
@@ -2552,10 +2559,6 @@ def run(stop_event: Optional[object] = None) -> None:
                 _as_int(stats.get("parse_error_count"), 0, minimum=0),
                 _as_int(stats.get("raw_missing_count"), 0, minimum=0),
                 _as_int(stats.get("fetch_non_ok_count"), 0, minimum=0),
-                _as_int(stats.get("inserted_count"), 0, minimum=0),
-                _as_int(stats.get("updated_events"), 0, minimum=0),
-                _as_int(stats.get("updated_deliveries"), 0, minimum=0),
-                _as_int(stats.get("updated_actions"), 0, minimum=0),
             )
             errors = list(stats.get("errors") or [])
             for err in errors[:5]:
