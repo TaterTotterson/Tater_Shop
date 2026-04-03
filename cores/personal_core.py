@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.24"
+__version__ = "1.0.26"
 
 load_dotenv()
 
@@ -229,6 +229,23 @@ _MONTH_WORDS_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"\b(20[0-9]{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12][0-9]|3[01])\b")
 _TRACKING_TOKEN_RE = re.compile(r"\b([A-Z0-9]{10,24})\b")
+_DELIVERY_TOKEN_RE = re.compile(r"\b([A-Z0-9][A-Z0-9\-]{8,40})\b")
+_ORDER_REF_RE = re.compile(
+    r"\b(?:order|ord(?:er)?)\s*(?:number|no\.?|num(?:ber)?|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-]{2,31})\b",
+    re.IGNORECASE,
+)
+_TRACKING_REF_RE = re.compile(
+    r"\b(?:tracking(?:\s*(?:number|#|id))?|track(?:ing)?(?:\s*(?:number|#|id))?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-]{6,40})\b",
+    re.IGNORECASE,
+)
+_DELIVERY_ITEM_LINE_RE = re.compile(
+    r"\b(?:item(?:s)?|product(?:s)?|contents?|package(?:\s*contains)?|shipped item(?:s)?)\s*[:#-]\s*([^\n\r.;]{4,140})",
+    re.IGNORECASE,
+)
+_DELIVERY_SUBJECT_ITEM_RE = re.compile(
+    r"\b(?:your|the)\s+(.{4,90}?)\s+(?:has|have)\s+(?:shipped|been shipped|is on the way)\b",
+    re.IGNORECASE,
+)
 
 
 def _text(value: Any) -> str:
@@ -396,6 +413,126 @@ def _strip_html(html: Any, *, max_chars: int = 6000) -> str:
     if len(text) > max(256, int(max_chars)):
         text = text[: max(256, int(max_chars))].rstrip() + "..."
     return text.strip()
+
+
+def _normalize_tracking_id(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    text = re.sub(
+        r"(?i)^(?:tracking(?:\s*(?:number|#|id))?|track(?:ing)?(?:\s*(?:number|#|id))?)\s*[:#-]?\s*",
+        "",
+        text,
+    ).strip()
+    text = text.strip(".,:;()[]{}<>")
+    text = text.lstrip("#")
+    text = re.sub(r"\s+", "", text)
+    return text[:40]
+
+
+def _normalize_order_number(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    text = re.sub(
+        r"(?i)^(?:order|ord(?:er)?)(?:\s*(?:number|no\.?|num(?:ber)?|#))?\s*[:#-]?\s*",
+        "",
+        text,
+    ).strip()
+    text = text.strip(".,:;()[]{}<>")
+    text = text.lstrip("#")
+    text = re.sub(r"\s+", "", text)
+    return text[:40]
+
+
+def _looks_like_order_reference(value: Any) -> bool:
+    raw = _text(value)
+    if not raw:
+        return False
+    upper = raw.upper()
+    if "ORDER" in upper:
+        return True
+    token = _normalize_order_number(raw)
+    if not token:
+        return False
+    bare = token.replace("-", "")
+    if len(bare) <= 9 and bare.isdigit():
+        return True
+    if re.fullmatch(r"[A-Z]{0,3}\d{3,8}", bare):
+        return True
+    return False
+
+
+def _looks_like_tracking_reference(value: Any) -> bool:
+    token = _normalize_tracking_id(value)
+    if not token:
+        return False
+    bare = token.replace("-", "")
+    if len(bare) < 8:
+        return False
+    if bare.isdigit():
+        return len(bare) >= 12
+    has_alpha = any(ch.isalpha() for ch in bare)
+    has_digit = any(ch.isdigit() for ch in bare)
+    if has_alpha and has_digit:
+        if _looks_like_order_reference(token) and len(bare) < 11:
+            return False
+        return True
+    return False
+
+
+def _extract_order_number_from_text(*parts: Any) -> str:
+    for part in parts:
+        text = _text(part)
+        if not text:
+            continue
+        for match in _ORDER_REF_RE.finditer(text):
+            token = _normalize_order_number(match.group(1))
+            if token:
+                return token
+    return ""
+
+
+def _extract_tracking_id_from_text(*parts: Any) -> str:
+    for part in parts:
+        text = _text(part)
+        if not text:
+            continue
+        for match in _TRACKING_REF_RE.finditer(text):
+            token = _normalize_tracking_id(match.group(1))
+            if token and _looks_like_tracking_reference(token):
+                return token
+
+    blob = " ".join([_text(part).upper() for part in parts if _text(part)])
+    for token in _DELIVERY_TOKEN_RE.findall(blob):
+        normalized = _normalize_tracking_id(token)
+        if not normalized:
+            continue
+        if _looks_like_order_reference(normalized):
+            continue
+        if _looks_like_tracking_reference(normalized):
+            return normalized
+    return ""
+
+
+def _extract_delivery_item_from_text(*parts: Any) -> str:
+    for part in parts:
+        text = _text(part)
+        if not text:
+            continue
+        match = _DELIVERY_ITEM_LINE_RE.search(text)
+        if match:
+            item = _clean_text_blob(match.group(1), max_chars=140).strip(" .,:;-")
+            if item:
+                return item[:120]
+
+        match = _DELIVERY_SUBJECT_ITEM_RE.search(text)
+        if match:
+            item = _clean_text_blob(match.group(1), max_chars=140)
+            item = re.sub(r"(?i)^(?:your|the)\s+", "", item).strip(" .,:;-")
+            if item:
+                return item[:120]
+    return ""
 
 
 def _extract_message_text(msg: Any) -> str:
@@ -1845,14 +1982,16 @@ def _heuristic_extract_updates(rows: List[Dict[str, Any]]) -> Dict[str, List[Dic
                 )
 
         if any(token in corpus for token in delivery_keywords):
-            upper_blob = " ".join([subject, snippet]).upper()
-            tracking_id = ""
-            for token in _TRACKING_TOKEN_RE.findall(upper_blob):
-                has_alpha = any(ch.isalpha() for ch in token)
-                has_digit = any(ch.isdigit() for ch in token)
-                if has_alpha and has_digit:
-                    tracking_id = token
-                    break
+            upper_blob = " ".join([subject, snippet, body]).upper()
+            tracking_id = _extract_tracking_id_from_text(subject, snippet, body)
+            order_number = _extract_order_number_from_text(subject, snippet, body)
+            if tracking_id and not order_number and _looks_like_order_reference(tracking_id):
+                order_number = _normalize_order_number(tracking_id)
+                tracking_id = ""
+            if order_number and not tracking_id and _looks_like_tracking_reference(order_number):
+                tracking_id = _normalize_tracking_id(order_number)
+                order_number = ""
+            item_description = _extract_delivery_item_from_text(subject, snippet, body)
 
             carrier = ""
             if "UPS" in upper_blob:
@@ -1879,21 +2018,23 @@ def _heuristic_extract_updates(rows: List[Dict[str, Any]]) -> Dict[str, List[Dic
                 status = "exception"
 
             eta_ts = _coerce_event_ts(" ".join([subject, snippet, body]), fallback_ts=0.0)
-            if tracking_id or eta_ts > 0 or status in {"in_transit", "out_for_delivery", "delivered"}:
+            if tracking_id or order_number or eta_ts > 0 or status in {"in_transit", "out_for_delivery", "delivered"}:
                 merchant = _merchant_from_sender(sender) or "Unknown Merchant"
-                confidence = 0.62 if tracking_id else 0.56
+                confidence = 0.64 if tracking_id else (0.6 if order_number else 0.56)
                 stable = hashlib.sha1(
-                    f"delivery|{carrier}|{tracking_id}|{status}|{eta_ts}|{email_id}".encode("utf-8", errors="ignore")
+                    f"delivery|{carrier}|{tracking_id}|{order_number}|{status}|{eta_ts}|{email_id}".encode("utf-8", errors="ignore")
                 ).hexdigest()[:24]
                 deliveries.append(
                     {
                         "id": stable,
                         "carrier": carrier,
                         "tracking_id": tracking_id,
+                        "order_number": order_number,
                         "status": status,
                         "eta_at": _iso_from_ts(eta_ts) if eta_ts > 0 else "",
                         "eta_ts": eta_ts if eta_ts > 0 else 0.0,
                         "merchant": merchant,
+                        "item_description": item_description,
                         "summary": snippet,
                         "confidence": confidence,
                         "email_id": email_id,
@@ -1997,7 +2138,7 @@ def _llm_extract_updates(
         "  \"important_notes\":[{\"title\":\"\",\"summary\":\"\",\"kind\":\"\",\"confidence\":0.0,\"email_id\":\"\",\"date_iso\":\"YYYY-MM-DDTHH:MM:SS\"}],\n"
         "  \"upcoming_events\":[{\"title\":\"\",\"kind\":\"movie|trip|appointment|payment_due|event|other\",\"starts_at\":\"YYYY-MM-DDTHH:MM:SS\",\"ends_at\":\"\",\"location\":\"\",\"summary\":\"\",\"confidence\":0.0,\"email_id\":\"\"}],\n"
         "  \"subscriptions\":[{\"merchant\":\"\",\"plan\":\"\",\"amount\":0.0,\"currency\":\"USD\",\"cadence\":\"monthly|yearly|weekly|quarterly|unknown\",\"next_charge_at\":\"YYYY-MM-DDTHH:MM:SS\",\"confidence\":0.0,\"email_id\":\"\"}],\n"
-        "  \"deliveries\":[{\"carrier\":\"\",\"tracking_id\":\"\",\"status\":\"label_created|in_transit|out_for_delivery|delivered|exception|update\",\"eta_at\":\"YYYY-MM-DDTHH:MM:SS\",\"merchant\":\"\",\"summary\":\"\",\"confidence\":0.0,\"email_id\":\"\"}],\n"
+        "  \"deliveries\":[{\"carrier\":\"\",\"tracking_id\":\"\",\"order_number\":\"\",\"item_description\":\"\",\"status\":\"label_created|in_transit|out_for_delivery|delivered|exception|update\",\"eta_at\":\"YYYY-MM-DDTHH:MM:SS\",\"merchant\":\"\",\"summary\":\"\",\"confidence\":0.0,\"email_id\":\"\"}],\n"
         "  \"action_items\":[{\"title\":\"\",\"summary\":\"\",\"kind\":\"payment_due|verification|response_required|task\",\"due_at\":\"YYYY-MM-DDTHH:MM:SS\",\"status\":\"open|done\",\"confidence\":0.0,\"email_id\":\"\"}]\n"
         "}\n"
         "Rules:\n"
@@ -2009,6 +2150,9 @@ def _llm_extract_updates(
         "- upcoming_events should only include events with explicit/plausible future schedule details.\n"
         "- subscriptions should capture recurring or renewal billing when present.\n"
         "- deliveries should capture shipping/tracking status when present.\n"
+        "- Put purchase identifiers in order_number (not tracking_id).\n"
+        "- Use tracking_id only for carrier tracking references.\n"
+        "- Include item_description when the shipped item can be identified.\n"
         "- action_items should capture user-facing required actions and due dates.\n"
         "- Keep notes concise and practical.\n"
         "- If no valid updates exist for a category, return an empty array for that category."
@@ -2228,8 +2372,22 @@ def _normalize_delivery_row(row: Dict[str, Any], *, min_conf: float) -> Optional
     status = _slug(row.get("status"), default="update")
     if status not in {"label_created", "in_transit", "out_for_delivery", "delivered", "exception", "update"}:
         status = "update"
-    tracking_id = _text(row.get("tracking_id"))
+    tracking_id = _normalize_tracking_id(row.get("tracking_id") or row.get("tracking_number") or row.get("tracking"))
+    order_number = _normalize_order_number(row.get("order_number") or row.get("order_id") or row.get("order"))
     carrier = _text(row.get("carrier"))
+    item_description = _clean_text_blob(
+        row.get("item_description") or row.get("item_name") or row.get("product"),
+        max_chars=160,
+    )
+    if not item_description:
+        item_description = _extract_delivery_item_from_text(_text(row.get("summary")), _text(row.get("title")))
+
+    if tracking_id and not order_number and _looks_like_order_reference(tracking_id):
+        order_number = _normalize_order_number(tracking_id)
+        tracking_id = ""
+    if order_number and not tracking_id and _looks_like_tracking_reference(order_number):
+        tracking_id = _normalize_tracking_id(order_number)
+        order_number = ""
 
     eta_at = _text(row.get("eta_at") or row.get("estimated_delivery"))
     eta_ts = _parse_iso_to_ts(eta_at)
@@ -2237,24 +2395,26 @@ def _normalize_delivery_row(row: Dict[str, Any], *, min_conf: float) -> Optional
         eta_ts = _coerce_event_ts(" ".join([_text(row.get("summary")), _text(row.get("title"))]), fallback_ts=0.0)
         eta_at = _iso_from_ts(eta_ts) if eta_ts > 0 else ""
 
-    if not tracking_id and not carrier and not eta_at and status == "update":
+    if not tracking_id and not order_number and not carrier and not eta_at and status == "update":
         return None
 
     email_id = _text(row.get("email_id"))
     stable = _text(row.get("id"))
     if not stable:
         stable = hashlib.sha1(
-            f"delivery|{carrier}|{tracking_id}|{status}|{eta_at}|{email_id}".encode("utf-8", errors="ignore")
+            f"delivery|{carrier}|{tracking_id}|{order_number}|{status}|{eta_at}|{email_id}".encode("utf-8", errors="ignore")
         ).hexdigest()[:24]
 
     return {
         "id": stable,
         "carrier": carrier,
         "tracking_id": tracking_id,
+        "order_number": order_number,
         "status": status,
         "eta_at": eta_at,
         "eta_ts": eta_ts if eta_ts > 0 else 0.0,
         "merchant": _text(row.get("merchant")),
+        "item_description": item_description,
         "summary": _text(row.get("summary")),
         "confidence": confidence,
         "email_id": email_id,
@@ -2431,6 +2591,27 @@ def _compute_spending_totals(rows: List[Dict[str, Any]]) -> Tuple[float, float]:
     return round(total, 2), round(total_30d, 2)
 
 
+def _repair_delivery_row_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    fixed = dict(row) if isinstance(row, dict) else {}
+    tracking_id = _normalize_tracking_id(fixed.get("tracking_id"))
+    order_number = _normalize_order_number(fixed.get("order_number") or fixed.get("order_id") or fixed.get("order"))
+    if tracking_id and not order_number and _looks_like_order_reference(tracking_id):
+        order_number = _normalize_order_number(tracking_id)
+        tracking_id = ""
+    if order_number and not tracking_id and _looks_like_tracking_reference(order_number):
+        tracking_id = _normalize_tracking_id(order_number)
+        order_number = ""
+
+    item_description = _clean_text_blob(fixed.get("item_description"), max_chars=160)
+    if not item_description:
+        item_description = _extract_delivery_item_from_text(fixed.get("summary"), fixed.get("title"))
+
+    fixed["tracking_id"] = tracking_id
+    fixed["order_number"] = order_number
+    fixed["item_description"] = item_description
+    return fixed
+
+
 def _cleanup_events(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
     kept: List[Dict[str, Any]] = []
     cutoff = time.time() - (30 * 86400)
@@ -2451,14 +2632,16 @@ def _cleanup_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[D
     for row in rows:
         if not isinstance(row, dict):
             continue
-        status = _slug(row.get("status"), default="update")
-        eta_ts = _as_float(row.get("eta_ts"), 0.0, minimum=0.0)
+        fixed = _repair_delivery_row_fields(row)
+        status = _slug(fixed.get("status"), default="update")
+        eta_ts = _as_float(fixed.get("eta_ts"), 0.0, minimum=0.0)
         if status == "delivered" and eta_ts > 0 and eta_ts < stale_cutoff:
             continue
-        kept.append(dict(row))
+        kept.append(fixed)
     kept.sort(
         key=lambda row: (
             _as_float(row.get("eta_ts"), 0.0, minimum=0.0),
+            _text(row.get("order_number")),
             _text(row.get("carrier")),
             _text(row.get("tracking_id")),
         ),
@@ -2716,13 +2899,16 @@ def _notification_candidates_from_updates(
                 continue
             carrier = _text(row.get("carrier")) or "A shipment"
             tracking = _text(row.get("tracking_id"))
+            order_number = _text(row.get("order_number"))
+            item_description = _text(row.get("item_description"))
             status_text = _delivery_status_text(row.get("status"))
             eta = _text(row.get("eta_at"))
             merchant = _text(row.get("merchant"))
-            track_text = f" ({tracking})" if tracking else ""
+            ref_text = f" ({tracking})" if tracking else (f" (order {order_number})" if order_number else "")
             eta_text = f" ETA {eta}." if eta else "."
             merchant_text = f" from {merchant}" if merchant else ""
-            message = f"It looks like your delivery{merchant_text} via {carrier}{track_text} is now {status_text}.{eta_text}"
+            item_text = f" for {item_description}" if item_description else ""
+            message = f"It looks like your delivery{merchant_text}{item_text} via {carrier}{ref_text} is now {status_text}.{eta_text}"
             out.append(
                 {
                     "kind": "deliveries",
@@ -2793,6 +2979,107 @@ def _run_async_blocking(coro: Any) -> Any:
                 loop.close()
             except Exception:
                 pass
+
+
+def _normalize_notification_copy_text(value: Any, *, max_chars: int) -> str:
+    text = _clean_text_blob(value, max_chars=max_chars).replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+async def _rewrite_notification_copy_async(
+    *,
+    llm_client: Any,
+    kind: str,
+    title: str,
+    message: str,
+    is_test: bool,
+) -> Dict[str, str]:
+    fallback = {
+        "title": _normalize_notification_copy_text(title, max_chars=72) or "Personal update",
+        "message": _normalize_notification_copy_text(message, max_chars=320),
+    }
+    if llm_client is None:
+        return fallback
+
+    prompt = (
+        "You rewrite personal assistant notification copy.\n"
+        "Return strict JSON only with keys title and message.\n"
+        "Rules:\n"
+        "- Keep facts exactly as provided.\n"
+        "- No hallucinations, no extra claims.\n"
+        "- Keep title <= 60 chars.\n"
+        "- Keep message <= 220 chars, one concise sentence.\n"
+        "- Friendly tone, natural wording variation, no emojis.\n"
+        "- No markdown."
+    )
+    payload = {
+        "kind": _slug(kind, default="update"),
+        "mode": "test" if bool(is_test) else "live",
+        "current_title": fallback["title"],
+        "current_message": fallback["message"],
+    }
+
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            max_tokens=180,
+            temperature=0.55,
+        )
+    except Exception as exc:
+        logger.debug("[personal_core] notification rewrite failed: %s", exc)
+        return fallback
+
+    text = _text(((response or {}).get("message") or {}).get("content"))
+    if not text:
+        return fallback
+    blob = extract_json(text) or text
+    try:
+        parsed = json.loads(blob)
+    except Exception:
+        return fallback
+    if not isinstance(parsed, dict):
+        return fallback
+
+    title_text = _normalize_notification_copy_text(parsed.get("title"), max_chars=72) or fallback["title"]
+    message_text = _normalize_notification_copy_text(parsed.get("message"), max_chars=320) or fallback["message"]
+    return {
+        "title": title_text,
+        "message": message_text,
+    }
+
+
+def _notification_copy_for_send(
+    *,
+    row: Dict[str, Any],
+    llm_client: Any,
+    is_test: bool,
+) -> Dict[str, str]:
+    title = _text(row.get("title")) or ("Personal notification test" if is_test else "Personal update")
+    message = _text(row.get("message"))
+    fallback = {
+        "title": _normalize_notification_copy_text(title, max_chars=72) or "Personal update",
+        "message": _normalize_notification_copy_text(message, max_chars=320),
+    }
+    if not fallback["message"]:
+        return fallback
+    rewritten = _run_async_blocking(
+        _rewrite_notification_copy_async(
+            llm_client=llm_client,
+            kind=_text(row.get("kind")),
+            title=fallback["title"],
+            message=fallback["message"],
+            is_test=is_test,
+        )
+    )
+    if not isinstance(rewritten, dict):
+        return fallback
+    out_title = _normalize_notification_copy_text(rewritten.get("title"), max_chars=72) or fallback["title"]
+    out_message = _normalize_notification_copy_text(rewritten.get("message"), max_chars=320) or fallback["message"]
+    return {"title": out_title, "message": out_message}
 
 
 async def _dispatch_personal_notification_async(
@@ -2911,6 +3198,7 @@ def _send_new_update_notifications(
     account_id: str,
     updates: Dict[str, List[Dict[str, Any]]],
     settings: Dict[str, Any],
+    llm_client: Any = None,
 ) -> Dict[str, Any]:
     if not _as_bool(settings.get("notifications_enabled"), False):
         return {"sent_count": 0, "attempted_count": 0, "error_count": 0, "errors": [], "skipped": "disabled"}
@@ -2950,12 +3238,15 @@ def _send_new_update_notifications(
         attempted_count += 1
         item_sent = 0
         item_errors: List[str] = []
+        copy = _notification_copy_for_send(row=row, llm_client=llm_client, is_test=False)
+        title_text = _text(copy.get("title")) or _text(row.get("title")) or "Personal update"
+        message_text = _text(copy.get("message")) or _text(row.get("message"))
         for route_platform, route_targets in grouped_routes.items():
             result = _run_async_blocking(
                 _dispatch_personal_notification_async(
                     platform=route_platform,
-                    title=_text(row.get("title")) or "Personal update",
-                    message=_text(row.get("message")),
+                    title=title_text,
+                    message=message_text,
                     target_routes=route_targets,
                     account_id=account_id,
                     settings=settings,
@@ -3087,17 +3378,20 @@ def _notification_test_messages_from_saved_items(settings: Optional[Dict[str, An
     if deliveries_enabled and isinstance(delivery, dict):
         carrier = _text(delivery.get("carrier")) or "A shipment"
         tracking = _text(delivery.get("tracking_id"))
+        order_number = _text(delivery.get("order_number"))
+        item_description = _text(delivery.get("item_description"))
         status_text = _delivery_status_text(delivery.get("status"))
         eta = _text(delivery.get("eta_at"))
         merchant = _text(delivery.get("merchant"))
-        track_text = f" ({tracking})" if tracking else ""
+        ref_text = f" ({tracking})" if tracking else (f" (order {order_number})" if order_number else "")
         eta_text = f" ETA {eta}." if eta else "."
         merchant_text = f" from {merchant}" if merchant else ""
+        item_text = f" for {item_description}" if item_description else ""
         out.append(
             {
                 "kind": "deliveries",
                 "title": "Test: delivery notification",
-                "message": f"It looks like your delivery{merchant_text} via {carrier}{track_text} is now {status_text}.{eta_text}",
+                "message": f"It looks like your delivery{merchant_text}{item_text} via {carrier}{ref_text} is now {status_text}.{eta_text}",
             }
         )
 
@@ -3132,7 +3426,7 @@ def _notification_test_messages_from_saved_items(settings: Optional[Dict[str, An
     return out
 
 
-def _send_notification_tests_with_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+def _send_notification_tests_with_settings(settings: Dict[str, Any], llm_client: Any = None) -> Dict[str, Any]:
     catalog = _load_destination_catalog()
     grouped_routes, config_errors = _group_notification_routes(settings=settings, catalog=catalog)
     if not grouped_routes:
@@ -3155,12 +3449,15 @@ def _send_notification_tests_with_settings(settings: Dict[str, Any]) -> Dict[str
     sent_count = 0
     errors: List[str] = []
     for test in tests:
+        copy = _notification_copy_for_send(row=test, llm_client=llm_client, is_test=True)
+        title_text = _text(copy.get("title")) or _text(test.get("title")) or "Personal notification test"
+        message_text = _text(copy.get("message")) or _text(test.get("message"))
         for route_platform, route_targets in grouped_routes.items():
             result = _run_async_blocking(
                 _dispatch_personal_notification_async(
                     platform=route_platform,
-                    title=_text(test.get("title")) or "Personal notification test",
-                    message=_text(test.get("message")),
+                    title=title_text,
+                    message=message_text,
                     target_routes=route_targets,
                     account_id="test",
                     settings=settings,
@@ -3259,6 +3556,7 @@ def _run_account_cycle(llm_client: Any, account: Dict[str, Any], settings: Dict[
         account_id=account_id,
         updates=updates,
         settings=settings,
+        llm_client=llm_client,
     )
 
     if fetch_error:
@@ -4290,9 +4588,18 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
         for row in deliveries[:6]:
             carrier = _text(row.get("carrier")) or "carrier n/a"
             tracking = _text(row.get("tracking_id")) or "tracking n/a"
+            order_number = _text(row.get("order_number"))
+            item_description = _text(row.get("item_description"))
             status = _text(row.get("status")) or "update"
             eta = _text(row.get("eta_at")) or "eta n/a"
-            lines.append(f"- {carrier} {tracking}: {status} (ETA {eta})")
+            if tracking and tracking != "tracking n/a":
+                ref = tracking
+            elif order_number:
+                ref = f"order {order_number}"
+            else:
+                ref = "tracking n/a"
+            item_text = f" {item_description}" if item_description else ""
+            lines.append(f"- {carrier}{item_text} {ref}: {status} (ETA {eta})")
 
     if subscriptions:
         lines.append("Upcoming subscription charges:")
@@ -4552,6 +4859,8 @@ def _tool_personal_deliveries(args: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "account_id": aid,
                     "carrier": _text(row.get("carrier")) or "n/a",
+                    "item_description": _text(row.get("item_description")) or "",
+                    "order_number": _text(row.get("order_number")) or "",
                     "tracking_id": _text(row.get("tracking_id")) or "n/a",
                     "status": status or "update",
                     "eta_at": _text(row.get("eta_at")) or _iso_from_ts(eta_ts),
@@ -4567,7 +4876,14 @@ def _tool_personal_deliveries(args: Dict[str, Any]) -> Dict[str, Any]:
     summary_for_user = "No delivery updates found."
     if items:
         preview = "; ".join(
-            [f"{_text(row.get('carrier'))} {_text(row.get('tracking_id'))}: {_text(row.get('status'))}" for row in items[:5]]
+            [
+                (
+                    f"{_text(row.get('carrier'))} "
+                    f"{(_text(row.get('tracking_id')) if _text(row.get('tracking_id')) != 'n/a' else ('order ' + _text(row.get('order_number')) if _text(row.get('order_number')) else 'tracking n/a'))}: "
+                    f"{_text(row.get('status'))}"
+                )
+                for row in items[:5]
+            ]
         )
         summary_for_user = f"Found {len(items)} delivery update(s), {open_count} still open. {preview}"
 
@@ -4947,6 +5263,8 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         deliveries_table_rows.append(
             {
                 "carrier": _text(row.get("carrier")) or "n/a",
+                "item": _text(row.get("item_description")) or "n/a",
+                "order_number": _text(row.get("order_number")) or "n/a",
                 "tracking": _text(row.get("tracking_id")) or "n/a",
                 "status": _text(row.get("status")) or "update",
                 "eta": _text(row.get("eta_at")) or "n/a",
@@ -5159,8 +5477,8 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                             "label": "Delivery Tracking",
                             "type": "table",
                             "columns": _table_columns(
-                                ["carrier", "tracking", "status", "eta", "account"],
-                                ["Carrier", "Tracking", "Status", "ETA", "Account"],
+                                ["carrier", "item", "order_number", "tracking", "status", "eta", "account"],
+                                ["Carrier", "Item", "Order #", "Tracking", "Status", "ETA", "Account"],
                             ),
                             "rows": deliveries_table_rows,
                         },
@@ -5816,6 +6134,11 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
 
     if action_name == "personal_send_notification_test":
         current = _load_settings()
+        llm_client = None
+        try:
+            llm_client = get_llm_client_from_env()
+        except Exception:
+            llm_client = None
         test_settings = _notification_test_settings_from_values(
             current=current,
             notifications_enabled=_value("notifications_enabled", current.get("notifications_enabled")),
@@ -5837,7 +6160,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 current.get("notification_ha_device_services"),
             ),
         )
-        result = _send_notification_tests_with_settings(test_settings)
+        result = _send_notification_tests_with_settings(test_settings, llm_client=llm_client)
         return {
             "ok": bool(result.get("ok")),
             "message": _text(result.get("message")) or "Notification test finished.",
