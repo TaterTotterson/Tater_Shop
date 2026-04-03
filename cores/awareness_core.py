@@ -22,7 +22,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "3.1.2"
+__version__ = "3.1.3"
 
 load_dotenv()
 
