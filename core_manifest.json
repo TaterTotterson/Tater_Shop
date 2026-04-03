@@ -55,7 +55,7 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "ee419091ad7452ffa124f5195cee770fbf608a7d06260ef687aab0313a04d13a"
+      "sha256": "61cc0c353c37357e74d2830afe2a49a8e272375386b91a9b645657dce5ab2d67"
     },
     {
       "id": "rss",
