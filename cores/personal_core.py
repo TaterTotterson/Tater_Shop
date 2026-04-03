@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 
-__version__ = "1.0.11"
+__version__ = "1.0.14"
 
 load_dotenv()
 
@@ -187,19 +187,6 @@ CORE_SETTINGS = {
             "default": False,
             "description": "Allow Personal Core prompt context on Matrix conversations.",
         },
-        "prompt_preview_platform": {
-            "label": "Prompt Preview Platform",
-            "type": "select",
-            "default": "discord",
-            "options": [
-                {"value": "discord", "label": "Discord"},
-                {"value": "irc", "label": "IRC"},
-                {"value": "telegram", "label": "Telegram"},
-                {"value": "matrix", "label": "Matrix"},
-                {"value": "webui", "label": "WebUI"},
-            ],
-            "description": "Which platform to simulate in the prompt preview panel.",
-        },
     },
 }
 
@@ -239,8 +226,6 @@ _MONTH_WORDS_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"\b(20[0-9]{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12][0-9]|3[01])\b")
 _TRACKING_TOKEN_RE = re.compile(r"\b([A-Z0-9]{10,24})\b")
-_PROMPT_PREVIEW_PLATFORMS = ("discord", "irc", "telegram", "matrix", "webui")
-_PROMPT_PREVIEW_PLATFORM_SET = set(_PROMPT_PREVIEW_PLATFORMS)
 
 
 def _text(value: Any) -> str:
@@ -539,17 +524,8 @@ def _load_settings() -> Dict[str, Any]:
         "prompt_include_irc": _as_bool(raw.get("prompt_include_irc"), False),
         "prompt_include_telegram": _as_bool(raw.get("prompt_include_telegram"), False),
         "prompt_include_matrix": _as_bool(raw.get("prompt_include_matrix"), False),
-        "prompt_preview_platform": _slug(raw.get("prompt_preview_platform"), default="discord"),
     }
-    settings["prompt_preview_platform"] = _personal_prompt_preview_platform(settings.get("prompt_preview_platform"))
     return settings
-
-
-def _personal_prompt_preview_platform(value: Any) -> str:
-    normalized = _slug(value, default="discord")
-    if normalized in _PROMPT_PREVIEW_PLATFORM_SET:
-        return normalized
-    return "discord"
 
 
 def _personal_prompt_enabled_for_platform(*, platform: Any, settings: Optional[Dict[str, Any]] = None) -> bool:
@@ -3339,14 +3315,8 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
     return message
 
 
-def _personal_prompt_preview_text(*, settings: Dict[str, Any], preview_platform: str) -> str:
-    platform_value = _personal_prompt_preview_platform(preview_platform)
-    if not _personal_prompt_enabled_for_platform(platform=platform_value, settings=settings):
-        return (
-            f"Prompt injection is currently disabled for '{platform_value}'.\n"
-            "No Personal Core context will be injected for this platform."
-        )
-
+def _personal_prompt_preview_text(*, settings: Dict[str, Any]) -> str:
+    del settings
     payload = get_hydra_personal_context_payload()
     message = _personal_prompt_message_from_payload(payload)
     if not message:
@@ -3805,6 +3775,16 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
             "usage": '{"function":"personal_deliveries","arguments":{"limit":20,"include_delivered":false}}',
         },
         {
+            "id": "personal_actions",
+            "description": "Return open or upcoming action items extracted from email.",
+            "usage": '{"function":"personal_actions","arguments":{"days":30,"limit":20}}',
+        },
+        {
+            "id": "personal_notes",
+            "description": "Return important note items extracted from email history.",
+            "usage": '{"function":"personal_notes","arguments":{"days":180,"limit":20}}',
+        },
+        {
             "id": "personal_favorite_places",
             "description": "Return favorite places to shop inferred from spending patterns.",
             "usage": '{"function":"personal_favorite_places","arguments":{"limit":20}}',
@@ -3848,6 +3828,12 @@ async def run_hydra_kernel_tool(
 
     if func in {"personal_deliveries", "personal_delivery"}:
         return _tool_personal_deliveries(payload)
+
+    if func in {"personal_actions", "personal_action_items"}:
+        return _tool_personal_actions(payload)
+
+    if func in {"personal_notes", "personal_important_notes"}:
+        return _tool_personal_notes(payload)
 
     if func in {"personal_favorite_places", "personal_favorites"}:
         return _tool_personal_favorite_places(payload)
@@ -4007,8 +3993,10 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 overview_lines.append(f"- {_text(err)}")
 
     settings = _load_settings()
-    preview_platform = _personal_prompt_preview_platform(settings.get("prompt_preview_platform"))
-    prompt_preview_text = _personal_prompt_preview_text(settings=settings, preview_platform=preview_platform)
+    prompt_preview_text = _personal_prompt_preview_text(settings=settings)
+    prompt_preview_rows = [{"line": line} for line in prompt_preview_text.splitlines()] if prompt_preview_text else []
+    if not prompt_preview_rows:
+        prompt_preview_rows = [{"line": "No Personal Core context available yet."}]
 
     forms = [
         {
@@ -4163,29 +4151,17 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                     "type": "checkbox",
                     "value": _as_bool(settings.get("prompt_include_matrix"), False),
                 },
-                {
-                    "key": "prompt_preview_platform",
-                    "label": "Preview Platform",
-                    "type": "select",
-                    "value": preview_platform,
-                    "options": [
-                        {"value": "discord", "label": "Discord"},
-                        {"value": "irc", "label": "IRC"},
-                        {"value": "telegram", "label": "Telegram"},
-                        {"value": "matrix", "label": "Matrix"},
-                        {"value": "webui", "label": "WebUI"},
-                    ],
-                },
             ],
             "sections": [
                 {
                     "label": "Current Injected Prompt Example",
                     "fields": [
                         {
-                            "key": "prompt_preview_text",
+                            "key": "prompt_preview_table",
                             "label": "Preview",
-                            "type": "textarea",
-                            "value": prompt_preview_text,
+                            "type": "table",
+                            "columns": _table_columns(["line"], ["Prompt"]),
+                            "rows": prompt_preview_rows,
                         }
                     ],
                 }
@@ -4420,16 +4396,12 @@ def _save_prompt_controls(
     prompt_include_irc: Any,
     prompt_include_telegram: Any,
     prompt_include_matrix: Any,
-    prompt_preview_platform: Any,
 ) -> Dict[str, Any]:
     current = _load_settings()
     discord_enabled = _as_bool(prompt_include_discord, _as_bool(current.get("prompt_include_discord"), False))
     irc_enabled = _as_bool(prompt_include_irc, _as_bool(current.get("prompt_include_irc"), False))
     telegram_enabled = _as_bool(prompt_include_telegram, _as_bool(current.get("prompt_include_telegram"), False))
     matrix_enabled = _as_bool(prompt_include_matrix, _as_bool(current.get("prompt_include_matrix"), False))
-    preview_platform = _personal_prompt_preview_platform(
-        _text(prompt_preview_platform) or _text(current.get("prompt_preview_platform"))
-    )
 
     redis_client.hset(
         _PERSONAL_SETTINGS_KEY,
@@ -4438,12 +4410,14 @@ def _save_prompt_controls(
             "prompt_include_irc": "1" if irc_enabled else "0",
             "prompt_include_telegram": "1" if telegram_enabled else "0",
             "prompt_include_matrix": "1" if matrix_enabled else "0",
-            "prompt_preview_platform": preview_platform,
         },
     )
+    try:
+        redis_client.hdel(_PERSONAL_SETTINGS_KEY, "prompt_preview_platform")
+    except Exception:
+        pass
     return {
         "ok": True,
-        "preview_platform": preview_platform,
         "prompt_include_discord": discord_enabled,
         "prompt_include_irc": irc_enabled,
         "prompt_include_telegram": telegram_enabled,
@@ -4477,7 +4451,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             prompt_include_irc=_value("prompt_include_irc"),
             prompt_include_telegram=_value("prompt_include_telegram"),
             prompt_include_matrix=_value("prompt_include_matrix"),
-            prompt_preview_platform=_value("prompt_preview_platform"),
         )
         return {
             "ok": True,
@@ -4486,8 +4459,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 f"discord={'on' if _as_bool(result.get('prompt_include_discord'), False) else 'off'}, "
                 f"irc={'on' if _as_bool(result.get('prompt_include_irc'), False) else 'off'}, "
                 f"telegram={'on' if _as_bool(result.get('prompt_include_telegram'), False) else 'off'}, "
-                f"matrix={'on' if _as_bool(result.get('prompt_include_matrix'), False) else 'off'}, "
-                f"preview={_text(result.get('preview_platform')) or 'discord'}."
+                f"matrix={'on' if _as_bool(result.get('prompt_include_matrix'), False) else 'off'}."
             ),
         }
 
