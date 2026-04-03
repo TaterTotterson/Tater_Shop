@@ -21,7 +21,7 @@ from helpers import get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 
 load_dotenv()
 
@@ -1516,6 +1516,20 @@ def _compact(text: str, limit: int = 220) -> str:
     return cut.rstrip(".,;: ") + "..."
 
 
+def _is_nothing_notable_summary(summary: Any) -> bool:
+    token = _text(summary).lower()
+    if not token:
+        return False
+    normalized = re.sub(r"[^a-z]+", " ", token).strip()
+    if not normalized:
+        return False
+    return normalized.startswith("nothing notable") or normalized in {
+        "nothing notable",
+        "nothing of note",
+        "no notable activity",
+    }
+
+
 def _normalize_device_service(raw: Any) -> str:
     text = _text(raw)
     if not text:
@@ -1608,6 +1622,7 @@ def _vision_describe_sync(
             "Write one short sentence describing this camera snapshot. "
             "Keep it general and focus on the most important visible activity or subjects "
             "(people, animals, vehicles, packages, or notable movement). "
+            "If no people or animals are visible, reply exactly: Nothing notable. "
             "If this appears to be a delivery, name the company when clearly visible "
             "(UPS, FedEx, USPS, Amazon); otherwise say 'delivery driver'. "
             "Mention counts only when clear and avoid guessing uncertain details. "
@@ -1625,7 +1640,8 @@ def _vision_describe_sync(
             )
     system_prompt = (
         "You are a concise vision assistant. Describe what is visible. "
-        "Never list absent objects or use 'no X visible' phrasing."
+        "Never list absent objects or use 'no X visible' phrasing. "
+        "For camera mode when there are no people or animals, output exactly: Nothing notable."
     )
     payload = {
         "model": model,
@@ -1912,6 +1928,18 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         summary = "Motion event detected, but camera analysis was unavailable."
         used_fallback = True
     summary = _compact(summary) or "Motion event detected."
+    if _is_nothing_notable_summary(summary):
+        _clear_cooldown(_camera_cooldown_key(camera))
+        return {
+            "ok": True,
+            "summary": "Nothing notable.",
+            "camera": camera,
+            "area": area,
+            "provider": provider,
+            "vision_fallback_used": used_fallback,
+            "skipped": "nothing_notable",
+            "notification": {"ok": True, "sent_count": 0, "skipped": "nothing_notable"},
+        }
     snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
     event_payload = {
         "source": _slug(area),
@@ -2700,9 +2728,35 @@ def _json_object_from_text(text: Any) -> Dict[str, Any]:
 
 
 def _format_datetime_for_brief(now: datetime) -> Tuple[str, str]:
-    date_text = now.strftime("%A, %B %d, %Y")
+    date_text = f"{now.strftime('%a, %b')} {now.day}"
     time_text = now.strftime("%I:%M %p").lstrip("0")
     return date_text, time_text
+
+
+def _message_has_date_hint(message: str, now: datetime) -> bool:
+    text = _text(message).lower()
+    if not text:
+        return False
+    month_tokens = {now.strftime("%B").lower(), now.strftime("%b").lower()}
+    weekday_tokens = {now.strftime("%A").lower(), now.strftime("%a").lower()}
+    if any(token and token in text for token in month_tokens):
+        return True
+    if str(now.year) in text:
+        return True
+    if any(token and token in text for token in weekday_tokens):
+        return True
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b", text):
+        return True
+    return False
+
+
+def _message_has_time_hint(message: str) -> bool:
+    text = _text(message).lower()
+    if not text:
+        return False
+    if re.search(r"\b\d{1,2}:\d{2}\s*(am|pm)?\b", text):
+        return True
+    return False
 
 
 async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
@@ -2720,7 +2774,7 @@ async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
         "One sentence, plain text, no markdown, no emojis, no quotes. "
         f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER."
     )
-    date_str = now.strftime("%A, %B %d") if include_date else ""
+    date_str = f"{now.strftime('%a, %b')} {now.day}" if include_date else ""
     user_payload = {
         "time": now.strftime("%H:%M"),
         "date": date_str,
@@ -2773,7 +2827,8 @@ async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dic
         system = (
             "You write warm greeting cards in a reflective, conversational voice. "
             "Return JSON only with keys message, quote, quote_source. "
-            "message rules: plain text, natural flow, starts with the provided greeting, includes date and time. "
+            "message rules: plain text, natural flow, starts with the provided greeting, includes concise date and time once. "
+            "Do not repeat date or time. "
             "quote rules: provide one Alan Watts quote and avoid repeating any recent quotes provided. "
             f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER (message + quote line). "
             "No markdown, no emojis."
@@ -2806,13 +2861,17 @@ async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dic
         except Exception as exc:
             logger.info("[awareness] alan watts greeting generation failed, using fallback: %s", exc)
     if not message:
-        message = f"{greeting}. It's {date_text} at {time_text}, and this moment is enough to begin gently."
+        message = f"{greeting}. {date_text}, {time_text}. Begin gently."
     elif not message.lower().startswith(greeting.lower()):
         message = f"{greeting}. {message}"
-    if date_text.lower() not in message.lower():
-        message = f"{message} Today is {date_text}."
-    if time_text.lower() not in message.lower():
-        message = f"{message} The time is {time_text}."
+    has_date = _message_has_date_hint(message, now)
+    has_time = _message_has_time_hint(message)
+    if not has_date and not has_time:
+        message = f"{message} {date_text}, {time_text}."
+    elif not has_date:
+        message = f"{message} {date_text}."
+    elif not has_time:
+        message = f"{message} {time_text}."
     quote_line = ""
     if quote:
         quote_line = f"\"{quote}\" - {quote_source}"
