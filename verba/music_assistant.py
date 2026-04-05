@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.10"
+    version = "1.0.11"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -408,6 +408,19 @@ class MusicAssistantPlugin(ToolVerba):
         t = re.sub(r"\s+", " ", t).strip()
         return t
 
+    @staticmethod
+    def _ctx_text(context: Optional[Dict[str, Any]], *keys: str) -> str:
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        for key in keys:
+            raw = ctx.get(key)
+            if raw in (None, ""):
+                raw = origin.get(key)
+            txt = str(raw or "").strip()
+            if txt:
+                return txt
+        return ""
+
     # -------------------- LLM planning / choosing --------------------
     async def _llm_plan(self, request_text: str, room: Optional[str], llm_client) -> Dict[str, Any]:
         """
@@ -664,8 +677,101 @@ class MusicAssistantPlugin(ToolVerba):
         domain, service = svc_map[action]
         await asyncio.to_thread(self._ha_call_service, domain, service, {"entity_id": media_player}, False, 15)
 
+    async def _media_players_for_device_id(self, device_id: str) -> List[Dict[str, str]]:
+        """
+        Return media_player entities that belong to the specified HA device_id.
+        """
+        did = (device_id or "").strip()
+        if not did:
+            return []
+
+        try:
+            entities = await self._ha_ws_call("config/entity_registry/list")
+        except Exception as e:
+            logger.warning(f"[music_assistant] device-scoped lookup failed (ws): {e}")
+            return []
+
+        ids: List[str] = []
+        for row in (entities or []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("device_id") or "").strip() != did:
+                continue
+            if row.get("disabled_by") not in (None, ""):
+                continue
+            ent = str(row.get("entity_id") or "").strip()
+            if ent.startswith("media_player."):
+                ids.append(ent)
+
+        if not ids:
+            return []
+
+        try:
+            states = await self._ha_states()
+        except Exception:
+            states = []
+
+        state_map = {}
+        for s in (states or []):
+            eid = str((s or {}).get("entity_id") or "").strip()
+            if eid:
+                state_map[eid] = s or {}
+
+        out: List[Dict[str, str]] = []
+        for eid in sorted(set(ids)):
+            st = state_map.get(eid) or {}
+            out.append(
+                {
+                    "entity_id": eid,
+                    "friendly_name": ((st.get("attributes") or {}).get("friendly_name") or eid),
+                }
+            )
+        return out
+
+    def _pick_best_device_player(
+        self,
+        players: List[Dict[str, str]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        if not players:
+            return None
+        if len(players) == 1:
+            return players[0].get("entity_id")
+
+        device_name = self._ctx_text(context, "device_name", "device")
+        device_slug = self._slugify(device_name)
+
+        best_id = None
+        best_score = -999
+        for p in players:
+            eid = str(p.get("entity_id") or "").strip()
+            friendly = str(p.get("friendly_name") or "").strip().lower()
+            low = eid.lower()
+            score = 0
+            if device_slug and device_slug in low:
+                score += 20
+            if device_name and device_name.lower() in friendly:
+                score += 16
+            if low.endswith("_media_player"):
+                score += 8
+            if low.endswith("_speaker"):
+                score += 5
+            if score > best_score:
+                best_score = score
+                best_id = eid
+
+        return best_id or players[0].get("entity_id")
+
     # -------------------- Room -> media_player resolution --------------------
-    async def _resolve_media_player(self, room: Optional[str], args: Dict[str, Any], llm_client) -> str:
+    async def _resolve_media_player(
+        self,
+        room: Optional[str],
+        args: Dict[str, Any],
+        llm_client,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+        prefer_context_device: bool = False,
+    ) -> str:
         explicit = (args or {}).get("media_player")
         if explicit:
             return explicit
@@ -684,6 +790,23 @@ class MusicAssistantPlugin(ToolVerba):
             if mapped:
                 logger.info(f"[music_assistant] ROOM_MAP override: room='{room}' -> {mapped}")
                 return mapped
+
+        # Home Assistant default: when room is NOT specified, target the same speaking device.
+        if prefer_context_device and not room:
+            device_id = self._ctx_text(context, "device_id")
+            if not device_id:
+                raise RoomPlayerNotFound(
+                    "I couldn't determine which speaker you are talking to. "
+                    "Please specify a room, or pass a media_player entity."
+                )
+            players = await self._media_players_for_device_id(device_id)
+            chosen = self._pick_best_device_player(players, context=context)
+            if chosen:
+                return chosen
+            raise RoomPlayerNotFound(
+                "I couldn't find a media_player linked to this device. "
+                "Please specify a room, or pass a media_player entity."
+            )
 
         # NEW: If we have a room, try to reduce candidates to only players in that HA Area
         players: List[Dict[str, str]] = []
@@ -738,7 +861,14 @@ class MusicAssistantPlugin(ToolVerba):
         raise RoomPlayerNotFound(f"I couldn’t find a player for '{room}'. Available players include: {choices}")
 
     # -------------------- Main runner --------------------
-    async def _run(self, args: Dict[str, Any], llm_client) -> str:
+    async def _run(
+        self,
+        args: Dict[str, Any],
+        llm_client,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+        prefer_context_device: bool = False,
+    ) -> str:
         args = args or {}
         request_text = (args.get("request") or "").strip()
         action = (args.get("action") or "").strip().lower()
@@ -798,7 +928,13 @@ class MusicAssistantPlugin(ToolVerba):
         plan_room = room
 
         try:
-            media_player = await self._resolve_media_player(plan_room, args, llm_client)
+            media_player = await self._resolve_media_player(
+                plan_room,
+                args,
+                llm_client,
+                context=context,
+                prefer_context_device=prefer_context_device,
+            )
         except RoomPlayerNotFound as e:
             return str(e)
 
@@ -948,6 +1084,8 @@ class MusicAssistantPlugin(ToolVerba):
             or "missing action" in low
             or "what should i play" in low
             or "which room should i play it in" in low
+            or "couldn't determine which speaker you are talking to" in low
+            or "couldn't find a media_player linked to this device" in low
             or "couldn’t find a player" in low
             or "couldn't find a player" in low
             or "i searched music assistant" in low
@@ -982,8 +1120,20 @@ class MusicAssistantPlugin(ToolVerba):
             suggested_followups=["Want me to queue something else?"],
         )
 
-    async def _run_structured(self, args: Dict[str, Any], llm_client):
-        out = await self._run(args or {}, llm_client)
+    async def _run_structured(
+        self,
+        args: Dict[str, Any],
+        llm_client,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+        prefer_context_device: bool = False,
+    ):
+        out = await self._run(
+            args or {},
+            llm_client,
+            context=context,
+            prefer_context_device=prefer_context_device,
+        )
         if isinstance(out, dict) and "ok" in out:
             return out
         return self._to_contract(str(out), args or {})
@@ -1014,9 +1164,14 @@ class MusicAssistantPlugin(ToolVerba):
             return await self.handle_webui(args, llm_client, context=context)
         except TypeError:
             return await self.handle_webui(args, llm_client)
-    async def handle_homeassistant(self, args, llm_client):
+    async def handle_homeassistant(self, args, llm_client, context: Optional[Dict[str, Any]] = None):
         try:
-            return await self._run_structured(args or {}, llm_client)
+            return await self._run_structured(
+                args or {},
+                llm_client,
+                context=context,
+                prefer_context_device=True,
+            )
         except Exception as e:
             logger.error(f"[music_assistant:ha] {e}")
             return action_failure(

@@ -30,7 +30,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.1.1"
+    version = "1.1.3"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -167,6 +167,178 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         s = re.sub(r"_+", "_", s).strip("_")
         return s
 
+    @staticmethod
+    def _ctx_text(context: dict | None, *keys: str) -> str:
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        for key in keys:
+            raw = ctx.get(key)
+            if raw in (None, ""):
+                raw = origin.get(key)
+            txt = str(raw or "").strip()
+            if txt:
+                return txt
+        return ""
+
+    @staticmethod
+    def _ha_ws_url(base_url: str) -> str:
+        base = str(base_url or "").strip().rstrip("/")
+        if base.startswith("https://"):
+            return base.replace("https://", "wss://", 1) + "/api/websocket"
+        return base.replace("http://", "ws://", 1) + "/api/websocket"
+
+    async def _ha_ws_call(self, ha_base: str, token: str, msg_type: str, timeout_s: float = 20.0):
+        try:
+            import aiohttp
+        except Exception as e:
+            raise RuntimeError(f"aiohttp is required for Home Assistant websocket calls: {e}")
+
+        ws_url = self._ha_ws_url(ha_base)
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                first = await ws.receive_json()
+                if (first or {}).get("type") == "auth_required":
+                    await ws.send_json({"type": "auth", "access_token": token})
+                    auth = await ws.receive_json()
+                    if (auth or {}).get("type") != "auth_ok":
+                        raise RuntimeError(f"HA websocket auth failed: {auth}")
+                elif (first or {}).get("type") != "auth_ok":
+                    await ws.send_json({"type": "auth", "access_token": token})
+                    auth = await ws.receive_json()
+                    if (auth or {}).get("type") != "auth_ok":
+                        raise RuntimeError(f"Unexpected HA websocket hello/auth flow: first={first}, auth={auth}")
+
+                await ws.send_json({"id": 1, "type": msg_type})
+                while True:
+                    msg = await ws.receive_json()
+                    if msg.get("type") != "result" or msg.get("id") != 1:
+                        continue
+                    if not msg.get("success", False):
+                        raise RuntimeError(f"HA websocket call failed: {msg}")
+                    return msg.get("result")
+
+    @staticmethod
+    def _pick_best_entity(
+        entity_ids: list[str],
+        domain: str,
+        required_parts: list[str],
+        optional_parts: list[str] | None = None,
+        avoid_parts: list[str] | None = None,
+    ) -> str | None:
+        """
+        Score entity ids and return best match for a timer role.
+        """
+        opts = optional_parts or []
+        avoids = avoid_parts or []
+        best = None
+        best_score = -1
+        for eid in entity_ids or []:
+            eid_text = str(eid or "").strip()
+            if not eid_text.startswith(domain + "."):
+                continue
+            low = eid_text.lower()
+            if any(part not in low for part in required_parts):
+                continue
+            if any(part in low for part in avoids):
+                continue
+            score = 100 + (10 * len(required_parts))
+            for part in opts:
+                if part in low:
+                    score += 4
+            if "remote_timer" in low:
+                score += 6
+            if "_timer_" in low:
+                score += 3
+            if score > best_score:
+                best_score = score
+                best = eid_text
+        return best
+
+    def _bundle_timer_entities_from_ids(self, entity_ids: list[str]) -> dict | None:
+        ids = [str(x or "").strip() for x in (entity_ids or []) if str(x or "").strip()]
+        if not ids:
+            return None
+
+        seconds = (
+            self._pick_best_entity(ids, "number", ["remote", "timer", "seconds"])
+            or self._pick_best_entity(ids, "number", ["timer", "seconds"])
+            or self._pick_best_entity(ids, "number", ["seconds"])
+        )
+        start = (
+            self._pick_best_entity(ids, "button", ["remote", "timer", "start"], optional_parts=["press"], avoid_parts=["restart"])
+            or self._pick_best_entity(ids, "button", ["timer", "start"], optional_parts=["press"], avoid_parts=["restart"])
+            or self._pick_best_entity(ids, "button", ["start"], optional_parts=["timer", "press"], avoid_parts=["restart"])
+        )
+        cancel = (
+            self._pick_best_entity(ids, "button", ["remote", "timer", "cancel"], optional_parts=["press"])
+            or self._pick_best_entity(ids, "button", ["timer", "cancel"], optional_parts=["press"])
+            or self._pick_best_entity(ids, "button", ["cancel"], optional_parts=["timer", "press"])
+        )
+        remaining = (
+            self._pick_best_entity(ids, "sensor", ["remote", "timer", "remaining"], optional_parts=["seconds"])
+            or self._pick_best_entity(ids, "sensor", ["timer", "remaining"], optional_parts=["seconds"])
+            or self._pick_best_entity(ids, "sensor", ["remaining"], optional_parts=["timer", "seconds"])
+        )
+        running = (
+            self._pick_best_entity(ids, "binary_sensor", ["remote", "timer", "running"])
+            or self._pick_best_entity(ids, "binary_sensor", ["timer", "running"])
+            or self._pick_best_entity(ids, "binary_sensor", ["running"], optional_parts=["timer"])
+        )
+
+        if not (seconds and start and cancel and remaining and running):
+            return None
+        return {
+            "TIMER_SECONDS_ENTITY": seconds,
+            "START_BUTTON_ENTITY": start,
+            "CANCEL_BUTTON_ENTITY": cancel,
+            "REMAINING_SENSOR_ENTITY": remaining,
+            "RUNNING_SENSOR_ENTITY": running,
+        }
+
+    async def _infer_entities_from_device_registry(self, context: dict | None) -> dict | None:
+        """
+        Deterministic path: use speaking HA device_id and entity registry to grab the
+        timer entities that belong to the same device.
+        """
+        ha = self._ha_settings()
+        ha_base = ha["base_url"]
+        token = ha["token"]
+        if not token:
+            return None
+
+        device_id = self._ctx_text(context, "device_id")
+        if not device_id:
+            return None
+
+        try:
+            entity_reg = await self._ha_ws_call(ha_base, token, "config/entity_registry/list", timeout_s=30.0)
+        except Exception as e:
+            logger.warning(f"[voicepe_remote_timer] device-registry lookup failed for device_id={device_id}: {e}")
+            return None
+
+        ids_on_device: list[str] = []
+        for row in (entity_reg or []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("device_id") or "").strip() != device_id:
+                continue
+            if row.get("disabled_by") not in (None, ""):
+                continue
+            eid = str(row.get("entity_id") or "").strip()
+            if eid:
+                ids_on_device.append(eid)
+
+        resolved = self._bundle_timer_entities_from_ids(ids_on_device)
+        if resolved:
+            logger.info(
+                "[voicepe_remote_timer] resolved entities via device registry for device_id=%s start=%s running=%s",
+                device_id,
+                resolved.get("START_BUTTON_ENTITY"),
+                resolved.get("RUNNING_SENSOR_ENTITY"),
+            )
+        return resolved
+
     def _infer_entities_from_context(self, context: dict | None) -> dict | None:
         """
         Try to infer the correct entity ids based on the speaking device (context.device_name).
@@ -187,18 +359,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if not token:
             return None
 
-        ctx = context or {}
-        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
-        device_name = (
-            ctx.get("device_name")
-            or ctx.get("device")
-            or ctx.get("device_id")
-            or origin.get("device_name")
-            or origin.get("device")
-            or origin.get("device_id")
-            or ""
-        )
-        device_name = str(device_name).strip()
+        device_name = self._ctx_text(context, "device_name", "device")
+        if device_name.startswith("assist_satellite.") and "." in device_name:
+            device_name = device_name.split(".", 1)[1]
         if not device_name and (s.get("VOICEPE_ENTITY_PREFIX") or "").strip():
             # if user set prefix, allow inference without device_name
             device_name = s.get("VOICEPE_ENTITY_PREFIX")
@@ -311,11 +474,27 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             return out
         return None
 
-    def _resolve_entities(self, context: dict | None = None) -> dict | None:
+    def _missing_entities_message(self, context: dict | None = None) -> str:
+        dev = self._ctx_text(context, "device_name", "device_id")
+        area = self._ctx_text(context, "area_name", "area_id")
+        hint = ""
+        if dev or area:
+            hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
+        return (
+            "Voice PE Remote Timer couldn't determine which device timer entities to use."
+            f"{hint} "
+            "Either set the timer entity IDs in the plugin settings, or ensure your Voice PE device "
+            "exposes timer entities in Home Assistant."
+        )
+
+    async def _resolve_entities(self, context: dict | None = None) -> dict | None:
         explicit = self._explicit_entities_from_settings()
         if explicit:
             return explicit
-        return self._infer_entities_from_context(context)
+        by_device = await self._infer_entities_from_device_registry(context)
+        if by_device:
+            return by_device
+        return None
 
     # ─────────────────────────────────────────────────────────────
     # Duration parsing (forgiving)
@@ -516,13 +695,12 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     # Read timer state (running + remaining)
     # ─────────────────────────────────────────────────────────────
 
-    async def _is_timer_running(self, context: dict | None = None) -> bool | None:
-        s = self._get_settings()
+    async def _is_timer_running(self, context: dict | None = None, entities: dict | None = None) -> bool | None:
         ha = self._ha_settings()
         ha_base = ha["base_url"]
         token = ha["token"]
 
-        ents = self._resolve_entities(context=context)
+        ents = entities or await self._resolve_entities(context=context)
         if not token or not ents:
             return None
 
@@ -545,13 +723,12 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             logger.error(f"[voicepe_remote_timer] Failed reading running sensor: {e}")
             return None
 
-    async def _get_remaining_seconds(self, context: dict | None = None) -> int | None:
-        s = self._get_settings()
+    async def _get_remaining_seconds(self, context: dict | None = None, entities: dict | None = None) -> int | None:
         ha = self._ha_settings()
         ha_base = ha["base_url"]
         token = ha["token"]
 
-        ents = self._resolve_entities(context=context)
+        ents = entities or await self._resolve_entities(context=context)
         if not token or not ents:
             return None
 
@@ -588,19 +765,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
                 "and add a Long-Lived Access Token."
             )
 
-        ents = self._resolve_entities(context=context)
+        ents = await self._resolve_entities(context=context)
         if not ents:
-            dev = ((context or {}).get("device_name") or (context or {}).get("device_id") or "").strip()
-            area = ((context or {}).get("area_name") or (context or {}).get("area_id") or "").strip()
-            hint = ""
-            if dev or area:
-                hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
-            return (
-                "Voice PE Remote Timer couldn't determine which device timer entities to use."
-                f"{hint} "
-                "Either set the timer entity IDs in the plugin settings, or ensure your Voice PE devices "
-                "use predictable entity IDs that include the device name."
-            )
+            return self._missing_entities_message(context)
 
         seconds_entity = (ents.get("TIMER_SECONDS_ENTITY") or "").strip()
         start_entity = (ents.get("START_BUTTON_ENTITY") or "").strip()
@@ -618,12 +785,12 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if new_seconds <= 0:
             return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
-        running = await self._is_timer_running(context=context)
+        running = await self._is_timer_running(context=context, entities=ents)
         if running is None:
             return "I couldn't read the Voice PE running sensor (check plugin settings)."
 
         if running:
-            remaining = await self._get_remaining_seconds(context=context)
+            remaining = await self._get_remaining_seconds(context=context, entities=ents)
             return (await self._llm_block_new_timer_message(remaining, llm_client)).strip()
 
         def do_calls():
@@ -651,14 +818,17 @@ class VoicePERemoteTimerPlugin(ToolVerba):
                 "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                 "and add a Long-Lived Access Token."
             )
-        running = await self._is_timer_running(context=context)
+        ents = await self._resolve_entities(context=context)
+        running = await self._is_timer_running(context=context, entities=ents)
         if running is None:
+            if not ents:
+                return self._missing_entities_message(context)
             return "I couldn't read the Voice PE running sensor (check plugin settings)."
 
         if not running:
             return (await self._llm_no_timer_message(llm_client)).strip()
 
-        remaining = await self._get_remaining_seconds(context=context)
+        remaining = await self._get_remaining_seconds(context=context, entities=ents)
         if remaining is None:
             fallback = "A timer is running, but I couldn't read the remaining time."
             return (await self._llm_phrase(
@@ -686,7 +856,6 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         return (await self._llm_time_left_message(remaining, llm_client)).strip()
 
     async def _cancel(self, llm_client, context: dict | None = None) -> str:
-        s = self._get_settings()
         ha = self._ha_settings()
         ha_base = ha["base_url"]
         token = ha["token"]
@@ -696,26 +865,16 @@ class VoicePERemoteTimerPlugin(ToolVerba):
                 "and add a Long-Lived Access Token."
             )
 
-        ents = self._resolve_entities(context=context)
+        ents = await self._resolve_entities(context=context)
         if not ents:
-            dev = ((context or {}).get("device_name") or (context or {}).get("device_id") or "").strip()
-            area = ((context or {}).get("area_name") or (context or {}).get("area_id") or "").strip()
-            hint = ""
-            if dev or area:
-                hint = f" (I heard you from device={dev or 'unknown'}, area={area or 'unknown'}.)"
-            return (
-                "Voice PE Remote Timer couldn't determine which device timer entities to use."
-                f"{hint} "
-                "Either set the timer entity IDs in the plugin settings, or ensure your Voice PE devices "
-                "use predictable entity IDs that include the device name."
-            )
+            return self._missing_entities_message(context)
 
         cancel_entity = (ents.get("CANCEL_BUTTON_ENTITY") or "").strip()
         running_entity = (ents.get("RUNNING_SENSOR_ENTITY") or "").strip()
         if not cancel_entity or not running_entity:
             return "Voice PE Remote Timer is missing CANCEL_BUTTON_ENTITY / RUNNING_SENSOR_ENTITY."
 
-        running = await self._is_timer_running(context=context)
+        running = await self._is_timer_running(context=context, entities=ents)
         if running is None:
             return "I couldn't read the Voice PE running sensor (check plugin settings)."
         if not running:
