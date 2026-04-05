@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.23"
+    version = "1.0.24"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -1425,9 +1425,13 @@ class MusicAssistantPlugin(ToolVerba):
                 break
 
         choose_prefer = prefer_token if prefer_token in {"track", "album", "playlist", "radio", "artist"} else "track"
-        chosen = await self._llm_choose_item(request_text, cleaned, choose_prefer, search_payload, llm_client)
-        if not chosen:
-            chosen = self._autopick_item(search_payload, choose_prefer, cleaned)
+        chosen = self._autopick_item(search_payload, choose_prefer, cleaned)
+        if chosen:
+            logger.info(
+                "[music_assistant] top-match picked: %s (%s)",
+                chosen.get("name") or cleaned,
+                chosen.get("media_type") or "?",
+            )
 
         if chosen and chosen.get("uri") and chosen.get("media_type"):
             uri = chosen["uri"]
