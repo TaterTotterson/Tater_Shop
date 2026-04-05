@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.21"
+    version = "1.0.23"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -1030,6 +1030,26 @@ class MusicAssistantPlugin(ToolVerba):
         }
         await self._ma_service_call("play_media", data, return_response=False, timeout=25)
 
+    async def _ma_play_query(
+        self,
+        media_player: str,
+        query: str,
+        media_type: str,
+        enqueue: str = "play",
+        radio_mode: bool = False,
+    ) -> None:
+        """
+        Direct query play fallback when URI resolution is unavailable.
+        """
+        data = {
+            "entity_id": media_player,
+            "media_id": str(query or "").strip(),
+            "media_type": str(media_type or "").strip(),
+            "enqueue": enqueue,
+            "radio_mode": bool(radio_mode),
+        }
+        await self._ma_service_call("play_media", data, return_response=False, timeout=25)
+
     async def _speaker_label(self, media_player: str) -> str:
         st = await self._ha_state(media_player)
         attrs = st.get("attributes") if isinstance(st, dict) else {}
@@ -1357,7 +1377,7 @@ class MusicAssistantPlugin(ToolVerba):
         if not request_text:
             request_text = query or action
 
-        # LLM-first query rewriting (no regex fallback matching path).
+        # LLM-first query rewriting
         try:
             rewrite = await self._llm_build_search_queries(
                 request_text=request_text,
@@ -1370,29 +1390,31 @@ class MusicAssistantPlugin(ToolVerba):
             return self._siri_flatten(str(e))
 
         search_queries = rewrite.get("queries") or []
-        prefer = rewrite.get("prefer")
+        prefer = rewrite.get("prefer") or prefer
         cleaned = str(search_queries[0] if search_queries else (query or request_text)).strip()
+        prefer_token = str(prefer or "").strip().lower()
+        artist_only = prefer_token == "artist"
 
-        # If random requested: try MA random library pick first
-        if want_random:
+        # Artist-only request -> always pick a random song by that artist.
+        if artist_only:
             uri = await self._ma_get_random_track_uri(cleaned)
-            if uri:
-                await self._ma_play_uri(
-                    media_player,
-                    uri,
-                    "track",
-                    enqueue=("add" if action == "queue" else "play"),
-                    radio_mode=True,
-                )
-                if action == "play":
-                    verified = await self._verify_playback_started(media_player)
-                    if not verified:
-                        return f"I sent a random track based on '{cleaned}' to {where_label}, but couldn't confirm playback yet."
-                if action == "queue":
-                    return f"Queued something random based on '{cleaned}' on {where_label}."
-                return f"Playing something random based on '{cleaned}' on {where_label}."
+            if not uri:
+                return f"I searched Music Assistant for '{cleaned}' but didn’t find anything playable. Want to try a different artist?"
+            await self._ma_play_uri(
+                media_player,
+                uri,
+                "track",
+                enqueue=("add" if action == "queue" else "play"),
+                radio_mode=True,
+            )
+            if action == "queue":
+                return f"Queued a random track for '{cleaned}' on {where_label}."
+            verified = await self._verify_playback_started(media_player)
+            if not verified:
+                return f"I sent a random track for '{cleaned}' to {where_label}, but couldn't confirm playback yet."
+            return f"Playing a random track for '{cleaned}' on {where_label}."
 
-        # Search with LLM-produced query variants before giving up.
+        # Specific request (artist + song / album / playlist): try to play that exact match first.
         search_payload: Dict[str, Any] = {}
         for q in search_queries:
             search_payload = await self._ma_search(name=q, limit=25, library_only=False)
@@ -1402,87 +1424,18 @@ class MusicAssistantPlugin(ToolVerba):
                 cleaned = q
                 break
 
-        # Let the LLM choose the correct item from the results
-        chosen = await self._llm_choose_item(request_text, cleaned, prefer, search_payload, llm_client)
+        choose_prefer = prefer_token if prefer_token in {"track", "album", "playlist", "radio", "artist"} else "track"
+        chosen = await self._llm_choose_item(request_text, cleaned, choose_prefer, search_payload, llm_client)
         if not chosen:
-            chosen = self._autopick_item(search_payload, prefer, cleaned)
-            if chosen:
-                logger.info(
-                    "[music_assistant] chooser fallback picked: %s (%s)",
-                    chosen.get("name") or cleaned,
-                    chosen.get("media_type") or "?",
-                )
-            else:
-                # Last-resort auto-play fallback: pick any track from library search terms.
-                seeds: List[str] = []
-                for s in [cleaned] + [str(x) for x in (search_queries or [])] + [request_text]:
-                    token = " ".join(str(s or "").split()).strip()
-                    if len(token) < 2:
-                        continue
-                    if token not in seeds:
-                        seeds.append(token)
-
-                for seed in seeds[:6]:
-                    uri = await self._ma_get_random_track_uri(seed)
-                    if not uri:
-                        continue
-                    await self._ma_play_uri(
-                        media_player,
-                        uri,
-                        "track",
-                        enqueue=("add" if action == "queue" else "play"),
-                        radio_mode=True,
-                    )
-                    if action == "play":
-                        verified = await self._verify_playback_started(media_player)
-                        if not verified:
-                            return f"I sent a track for '{seed}' to {where_label}, but couldn't confirm playback yet."
-                    if action == "queue":
-                        return f"Queued a track for '{seed}' on {where_label}."
-                    return f"Playing a track for '{seed}' on {where_label}."
-
-                return (
-                    f"I found results for '{cleaned}', but couldn't confidently pick a single match. "
-                    "Try saying artist + song, artist + album, or a playlist name."
-                )
-
-        # If user likely asked for ONLY an artist and LLM chose artist, start with a random track by that artist
-        if chosen and chosen.get("media_type") == "artist":
-            seed = chosen.get("name") or cleaned
-            uri = await self._ma_get_random_track_uri(seed)
-            if uri:
-                await self._ma_play_uri(
-                    media_player,
-                    uri,
-                    "track",
-                    enqueue=("add" if action == "queue" else "play"),
-                    radio_mode=True,
-                )
-                if action == "play":
-                    verified = await self._verify_playback_started(media_player)
-                    if not verified:
-                        return f"I sent a random {seed} track to {where_label}, but couldn't confirm playback yet."
-                if action == "queue":
-                    return f"Queued a random {seed} track on {where_label}."
-                return f"Playing a random {seed} track on {where_label}."
-
-            enqueue = "add" if action == "queue" else "play"
-            await self._ma_play_uri(media_player, chosen["uri"], "artist", enqueue=enqueue, radio_mode=True)
-            if action == "play":
-                verified = await self._verify_playback_started(media_player)
-                if not verified:
-                    return f"I sent {chosen.get('name') or cleaned} (artist) to {where_label}, but couldn't confirm playback yet."
-            if action == "queue":
-                return f"Queued {chosen.get('name') or cleaned} (artist) on {where_label}."
-            return f"Playing {chosen.get('name') or cleaned} (artist) on {where_label}."
+            chosen = self._autopick_item(search_payload, choose_prefer, cleaned)
 
         if chosen and chosen.get("uri") and chosen.get("media_type"):
             uri = chosen["uri"]
-            mtype = chosen["media_type"]
+            mtype = str(chosen["media_type"]).strip().lower()
             title = chosen.get("name") or cleaned
             logger.info(f"[music_assistant] play resolve: media_player={media_player} item={title} type={mtype} uri={uri}")
             enqueue = "add" if action == "queue" else "play"
-            radio_mode = True if mtype in {"artist", "track", "radio"} else False
+            radio_mode = mtype in {"artist", "track", "radio"}
             await self._ma_play_uri(media_player, uri, mtype, enqueue=enqueue, radio_mode=radio_mode)
             if action == "queue":
                 return f"Queued {title} ({mtype}) on {where_label}."
@@ -1490,6 +1443,29 @@ class MusicAssistantPlugin(ToolVerba):
             if not verified:
                 return f"I sent {title} ({mtype}) to {where_label}, but couldn't confirm playback yet."
             return f"Playing {title} ({mtype}) on {where_label}."
+
+        # Final non-random fallback for specific requests: direct query play.
+        order = [choose_prefer]
+        for mt in ("track", "album", "playlist", "artist", "radio"):
+            if mt not in order:
+                order.append(mt)
+        for mt in order:
+            try:
+                await self._ma_play_query(
+                    media_player,
+                    cleaned,
+                    mt,
+                    enqueue=("add" if action == "queue" else "play"),
+                    radio_mode=(mt in {"artist", "track", "radio"}),
+                )
+                if action == "queue":
+                    return f"Queued '{cleaned}' as {mt} on {where_label}."
+                verified = await self._verify_playback_started(media_player)
+                if not verified:
+                    return f"I sent '{cleaned}' as {mt} to {where_label}, but couldn't confirm playback yet."
+                return f"Playing '{cleaned}' as {mt} on {where_label}."
+            except Exception:
+                continue
 
         return f"I searched Music Assistant for '{cleaned}' but didn’t find anything playable. Want to try a different search?"
 
