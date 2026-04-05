@@ -1,5 +1,6 @@
 # verba/voicepe_remote_timer.py
 import asyncio
+import json
 import logging
 import re
 from typing import Any, Dict, Optional
@@ -30,7 +31,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -500,6 +501,210 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     # Duration parsing (forgiving)
     # ─────────────────────────────────────────────────────────────
 
+    def _parse_integer_word_tokens(self, tokens: list[str]) -> int | None:
+        """
+        Parse integer-like number words (supports up to thousands).
+        Examples:
+          - ["two"] -> 2
+          - ["twenty", "five"] -> 25
+          - ["one", "hundred", "ten"] -> 110
+        """
+        if not tokens:
+            return None
+
+        units = {
+            "zero": 0,
+            "one": 1, "a": 1, "an": 1,
+            "two": 2, "couple": 2,
+            "three": 3, "few": 3,
+            "four": 4,
+            "five": 5,
+            "six": 6,
+            "seven": 7,
+            "eight": 8,
+            "nine": 9,
+            "ten": 10,
+            "eleven": 11,
+            "twelve": 12, "dozen": 12,
+            "thirteen": 13,
+            "fourteen": 14,
+            "fifteen": 15,
+            "sixteen": 16,
+            "seventeen": 17,
+            "eighteen": 18,
+            "nineteen": 19,
+        }
+        tens = {
+            "twenty": 20,
+            "thirty": 30,
+            "forty": 40,
+            "fifty": 50,
+            "sixty": 60,
+            "seventy": 70,
+            "eighty": 80,
+            "ninety": 90,
+        }
+
+        total = 0
+        current = 0
+        seen = False
+        for tok in tokens:
+            t = str(tok or "").strip().lower()
+            if not t:
+                continue
+            if t in {"and", "of"}:
+                continue
+            if re.fullmatch(r"\d+", t):
+                current += int(t)
+                seen = True
+                continue
+            if t in units:
+                current += units[t]
+                seen = True
+                continue
+            if t in tens:
+                current += tens[t]
+                seen = True
+                continue
+            if t == "hundred":
+                current = (current or 1) * 100
+                seen = True
+                continue
+            if t == "thousand":
+                total += (current or 1) * 1000
+                current = 0
+                seen = True
+                continue
+            return None
+
+        if not seen:
+            return None
+        return total + current
+
+    def _parse_amount_phrase(self, phrase: str) -> float | None:
+        """
+        Parse quantity phrases used before duration units.
+        Handles numerals and common spoken forms:
+          - "2", "2.5", "two", "twenty five"
+          - "half", "quarter", "three quarters"
+          - "one and a half", "two and a quarter"
+        """
+        text = str(phrase or "").strip().lower()
+        if not text:
+            return None
+
+        text = text.replace("-", " ")
+        text = re.sub(r"[^a-z0-9.\s]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return None
+
+        def parse_fractional(raw: str) -> float | None:
+            s = str(raw or "").strip()
+            if not s:
+                return None
+            if re.fullmatch(r"\d+(?:\.\d+)?", s):
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+
+            direct = {
+                "half": 0.5,
+                "a half": 0.5,
+                "one half": 0.5,
+                "quarter": 0.25,
+                "a quarter": 0.25,
+                "one quarter": 0.25,
+                "three quarters": 0.75,
+                "three quarter": 0.75,
+            }
+            if s in direct:
+                return direct[s]
+
+            patterns = [
+                (r"^(.+?)\s+and\s+a\s+half$", 0.5),
+                (r"^(.+?)\s+and\s+half$", 0.5),
+                (r"^(.+?)\s+and\s+a\s+quarter$", 0.25),
+                (r"^(.+?)\s+and\s+quarter$", 0.25),
+                (r"^(.+?)\s+and\s+three\s+quarters?$", 0.75),
+            ]
+            for pat, frac in patterns:
+                m = re.match(pat, s)
+                if not m:
+                    continue
+                base = m.group(1).strip()
+                base_int = self._parse_integer_word_tokens(base.split())
+                if base_int is not None:
+                    return float(base_int) + frac
+                try:
+                    return float(base) + frac
+                except Exception:
+                    continue
+
+            int_val = self._parse_integer_word_tokens(s.split())
+            if int_val is not None:
+                return float(int_val)
+            return None
+
+        tokens = text.split()
+        for i in range(len(tokens)):
+            suffix = " ".join(tokens[i:]).strip()
+            val = parse_fractional(suffix)
+            if val is not None:
+                return val
+
+        return parse_fractional(text)
+
+    def _duration_components_from_text(self, text: str) -> list[tuple[float, int]]:
+        """
+        Extract duration components from free text as (amount, unit_seconds).
+        """
+        src = str(text or "").strip().lower()
+        if not src:
+            return []
+
+        src = src.replace("-", " ")
+        src = re.sub(r"\s+", " ", src).strip()
+
+        unit_seconds = {
+            "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+            "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+            "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+        }
+        unit_pattern = r"(hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)"
+        amount_pattern = r"(\d+(?:\.\d+)?|[a-z]+(?:\s+[a-z]+){0,7})"
+        pattern = re.compile(rf"\b{amount_pattern}\s*{unit_pattern}\b")
+
+        parts: list[tuple[float, int]] = []
+        for m in pattern.finditer(src):
+            amount_raw = (m.group(1) or "").strip()
+            unit_raw = (m.group(2) or "").strip().lower()
+            amt = self._parse_amount_phrase(amount_raw)
+            if amt is None or amt <= 0:
+                continue
+            mult = unit_seconds.get(unit_raw)
+            if not mult:
+                continue
+            parts.append((amt, mult))
+
+        return parts
+
+    @staticmethod
+    def _merged_request_text(args: Dict[str, Any]) -> str:
+        a = args if isinstance(args, dict) else {}
+        text_fields = (
+            a.get("request"),
+            a.get("query"),
+            a.get("message"),
+            a.get("prompt"),
+            a.get("text"),
+            a.get("content"),
+            a.get("duration"),
+        )
+        merged = " ".join(str(v or "").strip() for v in text_fields if str(v or "").strip()).strip().lower()
+        return re.sub(r"\s+", " ", merged).strip()
+
     def _parse_duration_to_seconds(self, text: str, max_seconds: int) -> int:
         t = (text or "").strip().lower()
         if not t:
@@ -518,23 +723,25 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             total = int(mm) * 60 + int(ss)
             return max(0, min(total, max_seconds))
 
-        unit_map = {
-            "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-            "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-            "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-        }
-
         t_spaced = re.sub(r"(\d)([a-z])", r"\1 \2", t)
         t_spaced = re.sub(r"([a-z])(\d)", r"\1 \2", t_spaced)
         t_spaced = re.sub(r"\s+", " ", t_spaced).strip()
 
-        total = 0
-        for n, u in re.findall(r"(\d+)\s*([a-z]+)", t_spaced):
-            mult = unit_map.get(u)
-            if mult:
-                total += int(n) * mult
+        total = 0.0
+        for amount, mult in self._duration_components_from_text(t_spaced):
+            total += float(amount) * int(mult)
 
-        return max(0, min(total, max_seconds))
+        if total > 0:
+            return max(0, min(int(round(total)), max_seconds))
+
+        # If we got only a plain number token, interpret as seconds.
+        if re.fullmatch(r"\d+(?:\.\d+)?", t_spaced):
+            try:
+                return max(0, min(int(round(float(t_spaced))), max_seconds))
+            except Exception:
+                return 0
+
+        return 0
 
     def _format_remaining(self, seconds: int) -> str:
         seconds = max(0, int(seconds))
@@ -555,12 +762,8 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if hhmm:
             return hhmm.group(1)
 
-        matches = re.findall(
-            r"\b(\d+\s*(?:hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s))\b",
-            src,
-        )
-        if matches:
-            return " ".join(matches)
+        if self._duration_components_from_text(src):
+            return src
 
         if "timer" in src:
             n_for = re.search(r"\bfor\s+(\d{1,4})\b", src)
@@ -578,15 +781,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if duration:
             return action, duration
 
-        text_fields = (
-            a.get("request"),
-            a.get("query"),
-            a.get("message"),
-            a.get("prompt"),
-            a.get("text"),
-            a.get("content"),
-        )
-        merged = " ".join(str(v or "").strip() for v in text_fields if str(v or "").strip()).strip().lower()
+        merged = self._merged_request_text(a)
         if not merged:
             return action, ""
 
@@ -691,6 +886,59 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         )
         return await self._llm_phrase(llm_client, prompt, fallback)
 
+    async def _llm_infer_duration_seconds(self, request_text: str, llm_client, max_seconds: int) -> int | None:
+        """
+        Last-resort parser for odd/natural duration phrases.
+        Returns clamped seconds or None.
+        """
+        if llm_client is None:
+            return None
+
+        text = str(request_text or "").strip()
+        if not text:
+            return None
+
+        system_prompt = (
+            "Extract the timer duration from the user request.\n"
+            "Return ONLY JSON in this exact shape:\n"
+            '{"seconds": <integer|null>}\n'
+            "Rules:\n"
+            "- Parse natural language durations (e.g. 'two minutes', 'one and a half hours', '90 seconds').\n"
+            "- If no duration is present, use null.\n"
+            "- If a bare number appears in a timer request, interpret it as minutes.\n"
+            "- No explanation text, no markdown, JSON only."
+        )
+        user_prompt = f"Request: {text}"
+
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            content = (resp.get("message") or {}).get("content", "").strip()
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                m = re.search(r"\{.*\}", content, re.S)
+                if not m:
+                    return None
+                parsed = json.loads(m.group(0))
+
+            if not isinstance(parsed, dict):
+                return None
+            value = parsed.get("seconds")
+            if value in (None, "", False):
+                return None
+            seconds = int(round(float(value)))
+            if seconds <= 0:
+                return None
+            return max(1, min(seconds, int(max_seconds)))
+        except Exception as e:
+            logger.debug(f"[voicepe_remote_timer] LLM duration parse failed: {e}")
+            return None
+
     # ─────────────────────────────────────────────────────────────
     # Read timer state (running + remaining)
     # ─────────────────────────────────────────────────────────────
@@ -782,6 +1030,10 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             max_seconds = 7200
 
         new_seconds = self._parse_duration_to_seconds(duration_text, max_seconds)
+        if new_seconds <= 0:
+            llm_seconds = await self._llm_infer_duration_seconds(duration_text, llm_client, max_seconds)
+            if llm_seconds:
+                new_seconds = llm_seconds
         if new_seconds <= 0:
             return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
@@ -901,15 +1153,25 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     async def _handle(self, args, llm_client, context: dict | None = None) -> str:
         args = args or {}
         action, duration = self._resolve_action_duration(args)
+        merged_request = self._merged_request_text(args)
 
         if action in ("cancel", "stop", "clear"):
             return await self._cancel(llm_client, context=context)
 
-        if action in ("status", "check", "remaining", "time_left") and not duration:
+        if action in ("status", "check", "remaining", "time_left"):
             return await self._status(llm_client, context=context)
 
         if action in ("start", "set") and not duration:
-            return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
+            try:
+                max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+            except Exception:
+                max_seconds = 7200
+
+            llm_seconds = await self._llm_infer_duration_seconds(merged_request, llm_client, max_seconds)
+            if llm_seconds:
+                duration = str(llm_seconds)
+            else:
+                return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
         if not duration:
             return await self._status(llm_client, context=context)
