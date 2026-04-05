@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.15"
+    version = "1.0.17"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -68,18 +68,14 @@ class MusicAssistantPlugin(ToolVerba):
     settings_category = "Music Assistant"
 
     required_settings = {
-        "MA_CONFIG_ENTRY_ID": {
-            "label": "Music Assistant config_entry_id",
-            "type": "string",
-            "default": "",
-        },
         "ROOM_MAP": {
             "label": "Room → Media Player Map (optional)",
             "type": "textarea",
             "default": "",
             "rows": 10,
             "description": (
-                "Optional. One per line. Simplest format:\n"
+                "Optional advanced override. Usually not needed because this verba auto-resolves by same device "
+                "or Home Assistant area.\n\nOne per line. Simplest format:\n"
                 "Kitchen: media_player.sonos_kitchen\n"
                 "Family Room: media_player.sonos_family_room\n\n"
                 "Also accepts JSON formats for backwards compatibility."
@@ -100,17 +96,13 @@ class MusicAssistantPlugin(ToolVerba):
 
     # -------------------- HA helpers --------------------
     def _ha_settings(self) -> Dict[str, str]:
-        raw = redis_client.hgetall("verba_settings:Music Assistant") or {}
-        settings = _decode_redis_map(raw)
-
         # IMPORTANT: decode HA settings too (hgetall often returns bytes)
         ha_raw = redis_client.hgetall("homeassistant_settings") or {}
         ha_settings = _decode_redis_map(ha_raw)
 
         base_url = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
         token = (ha_settings.get("HA_TOKEN") or "").strip()
-        entry_id = (settings.get("MA_CONFIG_ENTRY_ID") or "").strip()
-        return {"base_url": base_url, "token": token, "entry_id": entry_id}
+        return {"base_url": base_url, "token": token}
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -703,15 +695,10 @@ class MusicAssistantPlugin(ToolVerba):
 
     # -------------------- Music Assistant wrappers --------------------
     async def _ma_search(self, name: str, limit: int = 25, library_only: bool = False) -> Dict[str, Any]:
-        cfg = self._ha_settings()
-        if not cfg["entry_id"]:
-            raise RuntimeError("Music Assistant config_entry_id is missing. Set MA_CONFIG_ENTRY_ID in plugin settings.")
-
         data: Dict[str, Any] = {
             "name": name,
             "limit": int(limit),
             "library_only": bool(library_only),
-            "config_entry_id": cfg["entry_id"],
         }
 
         result = await asyncio.to_thread(self._ha_call_service, "music_assistant", "search", data, True, 25)
@@ -737,16 +724,11 @@ class MusicAssistantPlugin(ToolVerba):
         """
         Use music_assistant.get_library with order_by=random (per MA docs).
         """
-        cfg = self._ha_settings()
-        if not cfg["entry_id"]:
-            raise RuntimeError("Music Assistant config_entry_id is missing. Set MA_CONFIG_ENTRY_ID in plugin settings.")
-
         data: Dict[str, Any] = {
             "media_type": "track",
             "search": search_text,
             "limit": 1,
             "order_by": "random",
-            "config_entry_id": cfg["entry_id"],
         }
         result = await asyncio.to_thread(self._ha_call_service, "music_assistant", "get_library", data, True, 25)
 
@@ -1209,11 +1191,6 @@ class MusicAssistantPlugin(ToolVerba):
         return f"I searched Music Assistant for '{cleaned}' but didn’t find anything playable. Want to try a different search?"
 
     def _diagnosis(self) -> Dict[str, str]:
-        music_diag = diagnose_hash_fields(
-            "verba_settings:Music Assistant",
-            fields={"ma_config_entry_id": "MA_CONFIG_ENTRY_ID"},
-            validators={"ma_config_entry_id": lambda v: len(v.strip()) >= 3},
-        )
         ha_diag = diagnose_hash_fields(
             "homeassistant_settings",
             fields={"ha_base_url": "HA_BASE_URL", "ha_token": "HA_TOKEN"},
@@ -1229,7 +1206,7 @@ class MusicAssistantPlugin(ToolVerba):
                 "ha_token": lambda v: len(v.strip()) >= 10,
             },
         )
-        return combine_diagnosis(music_diag, ha_diag, ha_key_diag)
+        return combine_diagnosis(ha_diag, ha_key_diag)
 
     def _to_contract(self, raw: str, args: Dict[str, Any]) -> Dict[str, Any]:
         msg = (raw or "").strip()
@@ -1255,7 +1232,6 @@ class MusicAssistantPlugin(ToolVerba):
                 {
                     "ha_base_url": "Please set your Home Assistant base URL in settings.",
                     "ha_token": "Please set your Home Assistant long-lived access token in settings.",
-                    "ma_config_entry_id": "Please set your Music Assistant config_entry_id in settings.",
                 },
             )
             return action_failure(
