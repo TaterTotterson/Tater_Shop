@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.17"
+    version = "1.0.18"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -478,6 +478,51 @@ class MusicAssistantPlugin(ToolVerba):
                 return txt
         return ""
 
+    @staticmethod
+    def _json_loads_loose(text: str) -> Any:
+        """
+        Parse JSON while tolerating fenced output.
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            raise ValueError("empty json text")
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            if len(lines) >= 3 and lines[-1].strip().startswith("```"):
+                raw = "\n".join(lines[1:-1]).strip()
+        return json.loads(raw)
+
+    async def _llm_repair_json(
+        self,
+        content: str,
+        schema_hint: str,
+        llm_client,
+    ) -> Dict[str, Any]:
+        """
+        LLM-only repair pass when the first model output is not strict JSON.
+        """
+        first, last = get_tater_name()
+        sys = (
+            f"You are {first} {last}. Convert the input into strict valid JSON only.\n"
+            "Return ONLY JSON. No prose, no markdown, no code fences."
+        )
+        user = json.dumps(
+            {
+                "schema": schema_hint,
+                "input": str(content or ""),
+            },
+            ensure_ascii=False,
+        )
+        resp = await llm_client.chat(
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            temperature=0.0,
+        )
+        repaired = (resp.get("message") or {}).get("content", "").strip()
+        obj = self._json_loads_loose(repaired)
+        if not isinstance(obj, dict):
+            raise ValueError("repaired output was not a JSON object")
+        return obj
+
     async def _llm_build_search_queries(
         self,
         request_text: str,
@@ -515,10 +560,19 @@ class MusicAssistantPlugin(ToolVerba):
         resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
         content = (resp.get("message") or {}).get("content", "").strip()
 
+        schema_hint = '{"queries":[string], "prefer": null|"artist"|"album"|"track"|"playlist"|"radio"}'
         try:
-            data = json.loads(content)
+            data = self._json_loads_loose(content)
         except Exception as e:
-            raise RuntimeError("I couldn't interpret that music request clearly. Please try again.") from e
+            try:
+                data = await self._llm_repair_json(content, schema_hint, llm_client)
+            except Exception as repair_err:
+                logger.warning(
+                    "[music_assistant] query rewrite JSON parse failed. raw=%r repair_err=%s",
+                    content[:400],
+                    repair_err,
+                )
+                raise RuntimeError("I couldn't interpret that music request clearly. Please try again.") from e
 
         if not isinstance(data, dict):
             raise RuntimeError("I couldn't interpret that music request clearly. Please try again.")
@@ -679,10 +733,14 @@ class MusicAssistantPlugin(ToolVerba):
         resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
         content = (resp.get("message") or {}).get("content", "").strip()
 
+        schema_hint = '{"uri":string,"media_type":"track|album|artist|playlist|radio","name":string}'
         try:
-            j = json.loads(content)
+            j = self._json_loads_loose(content)
         except Exception:
-            return None
+            try:
+                j = await self._llm_repair_json(content, schema_hint, llm_client)
+            except Exception:
+                return None
 
         if not isinstance(j, dict):
             return None
