@@ -22,7 +22,7 @@ import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 load_dotenv()
 
@@ -754,57 +754,19 @@ async def _generate_followup_question(assistant_text: str) -> str:
     - This MUST NOT be a question (no '?'), to avoid creating weird loops.
     - This text is NOT saved into Redis history and is NOT passed to _should_follow_up().
     """
-    t = (assistant_text or "").strip()
-    tail = t[-300:] if len(t) > 300 else t
-
-    prompt = (
-        "Write a very short spoken cue that tells the user the mic is open.\n"
-        "Rules:\n"
-        "- 1 to 4 words\n"
-        "- Exactly one sentence fragment (no extra punctuation)\n"
-        "- MUST NOT be a question (do not use '?')\n"
-        "- MUST NOT include emojis\n"
-        "- MUST NOT mention devices, rooms, or names\n"
-        "- MUST NOT introduce new actions or topics\n"
-        "- Avoid filler like 'Okay' if possible\n"
-        "Good examples:\n"
-        "- Go ahead.\n"
-        "- I'm listening.\n"
-        "- Tell me.\n"
-        "- Say it.\n"
-        "Bad examples:\n"
-        "- Just say yes or no?\n"
-        "- Which one?\n\n"
-        f"Context (assistant just spoke):\n{tail!r}\n"
+    # Keep this deterministic/local to avoid async HTTP client shutdown races in background tasks.
+    # This path runs after final replies and does not need an extra LLM call.
+    cues = (
+        "I'm listening.",
+        "Go ahead.",
+        "Tell me.",
+        "Say it.",
     )
-
-    try:
-        r = await _llm.chat(
-            [
-                {"role": "system", "content": "You write ultra-short voice cues. No emojis. No questions."},
-                {"role": "user", "content": prompt},
-            ],
-            timeout=6,
-        )
-        text = (r.get("message", {}) or {}).get("content", "") if isinstance(r, dict) else ""
-        text = (text or "").strip()
-        text = text.split("\n")[0].strip()
-        text = text[:40].strip()
-
-        # Hard safety: never allow a question mark
-        text = text.replace("?", "").strip()
-
-        # Ensure it ends with a period for TTS cadence (optional but nice)
-        if text and text[-1].isalnum():
-            text += "."
-
-        # Fallbacks
-        if not text or len(text) < 2:
-            return "I'm listening."
-
-        return text
-    except Exception:
+    tail = (assistant_text or "").strip().lower()[-240:]
+    if not tail:
         return "I'm listening."
+    idx = sum(ord(ch) for ch in tail) % len(cues)
+    return cues[idx]
 
 def _start_satellite_followup(entity_id: str, start_message: str) -> None:
     msg = (start_message or "").strip()

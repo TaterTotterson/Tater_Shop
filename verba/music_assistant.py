@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.11"
+    version = "1.0.12"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -564,6 +564,45 @@ class MusicAssistantPlugin(ToolVerba):
             return None
         return {"uri": uri, "media_type": mtype, "name": name or cleaned_query}
 
+    def _deterministic_choose_item(self, search_payload: Dict[str, Any], prefer: Optional[str], cleaned_query: str) -> Optional[Dict[str, Any]]:
+        """
+        Deterministic fallback when LLM item choice is unavailable.
+        """
+        p = str(prefer or "").strip().lower()
+        key_map = {
+            "artist": "artists",
+            "album": "albums",
+            "track": "tracks",
+            "playlist": "playlists",
+            "radio": "radio",
+        }
+
+        def first_valid(items: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(items, list):
+                return None
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                uri = str(it.get("uri") or "").strip()
+                media_type = str(it.get("media_type") or "").strip()
+                name = str(it.get("name") or "").strip()
+                if uri and media_type:
+                    return {"uri": uri, "media_type": media_type, "name": name or cleaned_query}
+            return None
+
+        if p in key_map:
+            chosen = first_valid(search_payload.get(key_map[p]))
+            if chosen:
+                return chosen
+
+        # Practical priority when no explicit preference.
+        for bucket in ("tracks", "artists", "playlists", "albums", "radio"):
+            chosen = first_valid(search_payload.get(bucket))
+            if chosen:
+                return chosen
+
+        return None
+
     # -------------------- Music Assistant wrappers --------------------
     async def _ma_search(self, name: str, limit: int = 25, library_only: bool = False) -> Dict[str, Any]:
         cfg = self._ha_settings()
@@ -777,15 +816,14 @@ class MusicAssistantPlugin(ToolVerba):
             return explicit
 
         # optional ROOM_MAP override
-        room_map: Dict[str, str] = {}
-        try:
-            raw = redis_client.hgetall("verba_settings:Music Assistant") or {}
-            settings = _decode_redis_map(raw)
-            room_map = self._parse_room_map(settings.get("ROOM_MAP", ""))
-        except Exception:
-            room_map = {}
-
         if room:
+            room_map: Dict[str, str] = {}
+            try:
+                raw = redis_client.hgetall("verba_settings:Music Assistant") or {}
+                settings = _decode_redis_map(raw)
+                room_map = self._parse_room_map(settings.get("ROOM_MAP", ""))
+            except Exception:
+                room_map = {}
             mapped = room_map.get(room.strip().lower())
             if mapped:
                 logger.info(f"[music_assistant] ROOM_MAP override: room='{room}' -> {mapped}")
@@ -802,6 +840,7 @@ class MusicAssistantPlugin(ToolVerba):
             players = await self._media_players_for_device_id(device_id)
             chosen = self._pick_best_device_player(players, context=context)
             if chosen:
+                logger.info(f"[music_assistant] same-device resolve: device_id={device_id} -> {chosen}")
                 return chosen
             raise RoomPlayerNotFound(
                 "I couldn't find a media_player linked to this device. "
@@ -980,6 +1019,8 @@ class MusicAssistantPlugin(ToolVerba):
 
         # Let the LLM choose the correct item from the results
         chosen = await self._llm_choose_item(request_text, cleaned, prefer, search_payload, llm_client)
+        if not chosen:
+            chosen = self._deterministic_choose_item(search_payload, prefer, cleaned)
 
         # If user likely asked for ONLY an artist and LLM chose artist, start with a random track by that artist
         if chosen and chosen.get("media_type") == "artist":
@@ -1005,6 +1046,7 @@ class MusicAssistantPlugin(ToolVerba):
             uri = chosen["uri"]
             mtype = chosen["media_type"]
             title = chosen.get("name") or cleaned
+            logger.info(f"[music_assistant] play resolve: media_player={media_player} item={title} type={mtype} uri={uri}")
             enqueue = "add" if action == "queue" else "play"
             radio_mode = True if mtype in {"artist", "track", "radio"} else False
             await self._ma_play_uri(media_player, uri, mtype, enqueue=enqueue, radio_mode=radio_mode)
@@ -1013,13 +1055,7 @@ class MusicAssistantPlugin(ToolVerba):
                 return f"Queued {title} ({mtype}) in {where}."
             return f"Playing {title} ({mtype}) in {where}."
 
-        # LAST-RESORT: play by name directly
-        try:
-            await self._media_player_play_by_name(media_player, cleaned)
-            where = plan_room or "that room"
-            return f"Playing {cleaned} in {where}."
-        except Exception:
-            return f"I searched Music Assistant for '{cleaned}' but didn’t find anything. Want to try a different search?"
+        return f"I searched Music Assistant for '{cleaned}' but didn’t find anything playable. Want to try a different search?"
 
     def _diagnosis(self) -> Dict[str, str]:
         music_diag = diagnose_hash_fields(
