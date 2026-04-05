@@ -19,7 +19,7 @@
       "id": "homeassistant",
       "name": "Home Assistant",
       "module_key": "homeassistant_portal",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Home Assistant integration portal for Tater.",
       "settings_category": "Home Assistant Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "homeassistant_portal_running",
       "tags": [],
       "entry": "portals/homeassistant_portal.py",
-      "sha256": "04b524a9537e2193fad0287a926a8b4fc4a2fdd87bc7c51228d03107acdade8e"
+      "sha256": "a777d84ba349ed94b23c59712381cac8c40af6e54397097fbd005b8777e8f7c6"
     },
     {
       "id": "homekit",
