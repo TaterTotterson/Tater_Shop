@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.19"
+    version = "1.0.20"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -932,7 +932,33 @@ class MusicAssistantPlugin(ToolVerba):
         name = (j.get("name") or "").strip()
         if not uri or not mtype:
             return None
-        return {"uri": uri, "media_type": mtype, "name": name or cleaned_query}
+        return {"uri": uri, "media_type": mtype.lower(), "name": name or cleaned_query}
+
+    def _autopick_item(self, search_payload: Dict[str, Any], prefer: Optional[str], cleaned_query: str) -> Optional[Dict[str, Any]]:
+        """
+        Non-blocking local fallback when LLM chooser is uncertain.
+        """
+        p = str(prefer or "").strip().lower()
+        by_prefer = {
+            "artist": ("artists", "tracks", "albums", "playlists", "radio"),
+            "track": ("tracks", "artists", "albums", "playlists", "radio"),
+            "album": ("albums", "tracks", "artists", "playlists", "radio"),
+            "playlist": ("playlists", "tracks", "artists", "albums", "radio"),
+            "radio": ("radio", "playlists", "tracks", "artists", "albums"),
+        }
+        order = by_prefer.get(p, ("tracks", "artists", "playlists", "albums", "radio"))
+
+        for bucket in order:
+            singular = bucket[:-1] if bucket.endswith("s") else bucket
+            for it in self._bucket_items(search_payload, bucket):
+                if not isinstance(it, dict):
+                    continue
+                uri = str(it.get("uri") or "").strip()
+                mtype = str(it.get("media_type") or singular).strip().lower()
+                name = str(it.get("name") or "").strip()
+                if uri and mtype:
+                    return {"uri": uri, "media_type": mtype, "name": name or cleaned_query}
+        return None
 
     # -------------------- Music Assistant wrappers --------------------
     async def _ma_search(self, name: str, limit: int = 25, library_only: bool = False) -> Dict[str, Any]:
@@ -1379,10 +1405,18 @@ class MusicAssistantPlugin(ToolVerba):
         # Let the LLM choose the correct item from the results
         chosen = await self._llm_choose_item(request_text, cleaned, prefer, search_payload, llm_client)
         if not chosen:
-            return (
-                f"I found results for '{cleaned}', but couldn't confidently pick a single match. "
-                "Try saying artist + song, artist + album, or a playlist name."
-            )
+            chosen = self._autopick_item(search_payload, prefer, cleaned)
+            if chosen:
+                logger.info(
+                    "[music_assistant] chooser fallback picked: %s (%s)",
+                    chosen.get("name") or cleaned,
+                    chosen.get("media_type") or "?",
+                )
+            else:
+                return (
+                    f"I found results for '{cleaned}', but couldn't confidently pick a single match. "
+                    "Try saying artist + song, artist + album, or a playlist name."
+                )
 
         # If user likely asked for ONLY an artist and LLM chose artist, start with a random track by that artist
         if chosen and chosen.get("media_type") == "artist":
