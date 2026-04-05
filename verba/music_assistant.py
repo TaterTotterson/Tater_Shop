@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.12"
+    version = "1.0.15"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -163,6 +163,29 @@ class MusicAssistantPlugin(ToolVerba):
             return r.json()
 
         return await asyncio.to_thread(_get)
+
+    async def _ha_state(self, entity_id: str) -> Dict[str, Any]:
+        cfg = self._ha_settings()
+        if not cfg["token"]:
+            raise RuntimeError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
+        ent = str(entity_id or "").strip()
+        if not ent:
+            return {}
+        url = f'{cfg["base_url"]}/api/states/{ent}'
+        headers = self._ha_headers(cfg["token"])
+
+        def _get():
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            return r.json()
+
+        try:
+            return await asyncio.to_thread(_get)
+        except Exception:
+            return {}
 
     async def _ha_ws_call(self, msg_type: str) -> Any:
         """
@@ -382,31 +405,73 @@ class MusicAssistantPlugin(ToolVerba):
         out = re.sub(r"\s+", " ", out).strip()
         return out[:450]
 
-    def _normalize_query(self, text: str) -> str:
-        """
-        Fix a common cause of 'found nothing':
-        LLM sometimes returns query like 'play stick figure' instead of 'stick figure'.
-        Also strips common filler phrases.
-        """
-        t = (text or "").strip()
+    @staticmethod
+    def _as_item_list(raw: Any) -> List[Dict[str, Any]]:
+        if isinstance(raw, list):
+            out: List[Dict[str, Any]] = []
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                # Some MA responses wrap real item data under "item".
+                wrapped = row.get("item")
+                if isinstance(wrapped, dict):
+                    merged = dict(wrapped)
+                    if not merged.get("media_type") and row.get("media_type"):
+                        merged["media_type"] = row.get("media_type")
+                    if not merged.get("uri") and row.get("uri"):
+                        merged["uri"] = row.get("uri")
+                    out.append(merged)
+                else:
+                    out.append(row)
+            return out
+        if isinstance(raw, dict):
+            return MusicAssistantPlugin._as_item_list(raw.get("items"))
+        return []
 
-        # remove obvious control verbs at the start
-        t = re.sub(
-            r"^(?:play|queue|enqueue|put on|start|listen to|turn on|shuffle)\b\s*",
-            "",
-            t,
-            flags=re.I,
-        )
+    def _bucket_items(self, payload: Dict[str, Any], bucket: str) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
 
-        # remove "some/a/an" directly after verbs
-        t = re.sub(r"^(?:some|a|an)\b\s*", "", t, flags=re.I)
+        singular = bucket[:-1] if bucket.endswith("s") else bucket
 
-        # remove trailing "in the <room>" etc (room should be handled separately)
-        t = re.sub(r"\s+(?:in|on)\s+the\s+.+$", "", t, flags=re.I)
+        direct = self._as_item_list(payload.get(bucket))
+        if direct:
+            return direct
+        direct = self._as_item_list(payload.get(singular))
+        if direct:
+            return direct
 
-        # collapse spaces
-        t = re.sub(r"\s+", " ", t).strip()
-        return t
+        # Some payloads have grouped data under "result"/"results".
+        for parent in ("result", "results", "response", "search_results"):
+            parent_val = payload.get(parent)
+            if isinstance(parent_val, dict):
+                grouped = self._as_item_list(parent_val.get(bucket))
+                if grouped:
+                    return grouped
+                grouped = self._as_item_list(parent_val.get(singular))
+                if grouped:
+                    return grouped
+
+        # Flat "items" payload: filter by media_type.
+        flat = self._as_item_list(payload.get("items"))
+        if flat:
+            wanted = singular.lower()
+            out = []
+            for it in flat:
+                mt = str(it.get("media_type") or it.get("type") or "").strip().lower()
+                if mt == wanted:
+                    out.append(it)
+            if out:
+                return out
+        return []
+
+    def _search_payload_has_results(self, payload: Dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        for key in ("artists", "albums", "tracks", "playlists", "radio"):
+            if self._bucket_items(payload, key):
+                return True
+        return False
 
     @staticmethod
     def _ctx_text(context: Optional[Dict[str, Any]], *keys: str) -> str:
@@ -420,6 +485,79 @@ class MusicAssistantPlugin(ToolVerba):
             if txt:
                 return txt
         return ""
+
+    async def _llm_build_search_queries(
+        self,
+        request_text: str,
+        query_text: str,
+        room: Optional[str],
+        prefer: Optional[str],
+        llm_client,
+    ) -> Dict[str, Any]:
+        """
+        LLM-first query normalization:
+        produce ordered search queries with no regex fallback path.
+        """
+        first, last = get_tater_name()
+        sys = (
+            f"You are {first} {last}. Rewrite the user's music request into Music Assistant search queries.\n"
+            "Output ONLY valid JSON.\n"
+            "Schema:\n"
+            '{"queries":[string], "prefer": null|"artist"|"album"|"track"|"playlist"|"radio"}\n'
+            "Rules:\n"
+            "- Remove command words and filler words.\n"
+            "- Remove room/location phrases.\n"
+            "- Keep artist/song/album names intact.\n"
+            "- Return 1 to 4 queries, best to broadest.\n"
+            "- If artist-only request, first query should be just the artist name.\n"
+        )
+        user = json.dumps(
+            {
+                "request_text": request_text,
+                "query_text": query_text,
+                "room_hint": room,
+                "prefer_hint": prefer,
+            },
+            ensure_ascii=False,
+        )
+        resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        content = (resp.get("message") or {}).get("content", "").strip()
+
+        try:
+            data = json.loads(content)
+        except Exception as e:
+            raise RuntimeError("I couldn't interpret that music request clearly. Please try again.") from e
+
+        if not isinstance(data, dict):
+            raise RuntimeError("I couldn't interpret that music request clearly. Please try again.")
+
+        raw_queries = data.get("queries")
+        if not isinstance(raw_queries, list):
+            raise RuntimeError("I couldn't build a valid music search query. Please try again.")
+
+        queries: List[str] = []
+        seen = set()
+        for q in raw_queries[:8]:
+            q2 = " ".join(str(q or "").split()).strip()
+            if len(q2) < 2:
+                continue
+            low = q2.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            queries.append(q2)
+
+        if not queries:
+            raise RuntimeError("I couldn't build a valid music search query. Please try again.")
+
+        allowed = {"artist", "album", "track", "playlist", "radio"}
+        prefer_out = str(data.get("prefer") or "").strip().lower()
+        if prefer_out not in allowed:
+            prefer_out = str(prefer or "").strip().lower()
+            if prefer_out not in allowed:
+                prefer_out = None
+
+        return {"queries": queries, "prefer": prefer_out}
 
     # -------------------- LLM planning / choosing --------------------
     async def _llm_plan(self, request_text: str, room: Optional[str], llm_client) -> Dict[str, Any]:
@@ -453,14 +591,7 @@ class MusicAssistantPlugin(ToolVerba):
         try:
             plan = json.loads(content)
         except Exception:
-            m = re.search(r"\{.*\}", content, re.S)
-            if m:
-                try:
-                    plan = json.loads(m.group(0))
-                except Exception:
-                    plan = {}
-            else:
-                plan = {}
+            plan = {}
 
         if not isinstance(plan, dict):
             plan = {}
@@ -478,32 +609,44 @@ class MusicAssistantPlugin(ToolVerba):
         """
         Keep tokens under control: send the LLM a small, stable view of results.
         """
-        def take(items: Any) -> List[Dict[str, Any]]:
-            if not isinstance(items, list):
-                return []
+        def take(items: List[Dict[str, Any]], fallback_media_type: str) -> List[Dict[str, Any]]:
             out = []
-            for it in items[:max_each]:
-                if isinstance(it, dict):
-                    artists = []
-                    for a in (it.get("artists") or [])[:2]:
+            for it in (items or [])[:max_each]:
+                if not isinstance(it, dict):
+                    continue
+                artists: List[str] = []
+                raw_artists = it.get("artists")
+                if isinstance(raw_artists, list):
+                    for a in raw_artists[:2]:
                         if isinstance(a, dict) and a.get("name"):
-                            artists.append(a.get("name"))
-                    out.append(
-                        {
-                            "name": it.get("name"),
-                            "uri": it.get("uri"),
-                            "media_type": it.get("media_type"),
-                            "artists": artists,
-                        }
-                    )
+                            artists.append(str(a.get("name")))
+                        elif isinstance(a, str) and a.strip():
+                            artists.append(a.strip())
+                elif isinstance(raw_artists, dict) and raw_artists.get("name"):
+                    artists.append(str(raw_artists.get("name")))
+                elif isinstance(raw_artists, str) and raw_artists.strip():
+                    artists.append(raw_artists.strip())
+
+                artist_name = str(it.get("artist") or "").strip()
+                if artist_name and artist_name not in artists:
+                    artists.append(artist_name)
+
+                out.append(
+                    {
+                        "name": it.get("name"),
+                        "uri": it.get("uri"),
+                        "media_type": it.get("media_type") or fallback_media_type,
+                        "artists": artists,
+                    }
+                )
             return out
 
         return {
-            "artists": take(payload.get("artists")),
-            "albums": take(payload.get("albums")),
-            "tracks": take(payload.get("tracks")),
-            "playlists": take(payload.get("playlists")),
-            "radio": take(payload.get("radio")),
+            "artists": take(self._bucket_items(payload, "artists"), "artist"),
+            "albums": take(self._bucket_items(payload, "albums"), "album"),
+            "tracks": take(self._bucket_items(payload, "tracks"), "track"),
+            "playlists": take(self._bucket_items(payload, "playlists"), "playlist"),
+            "radio": take(self._bucket_items(payload, "radio"), "radio"),
         }
 
     async def _llm_choose_item(
@@ -547,13 +690,7 @@ class MusicAssistantPlugin(ToolVerba):
         try:
             j = json.loads(content)
         except Exception:
-            m = re.search(r"\{.*\}", content, re.S)
-            if not m:
-                return None
-            try:
-                j = json.loads(m.group(0))
-            except Exception:
-                return None
+            return None
 
         if not isinstance(j, dict):
             return None
@@ -563,45 +700,6 @@ class MusicAssistantPlugin(ToolVerba):
         if not uri or not mtype:
             return None
         return {"uri": uri, "media_type": mtype, "name": name or cleaned_query}
-
-    def _deterministic_choose_item(self, search_payload: Dict[str, Any], prefer: Optional[str], cleaned_query: str) -> Optional[Dict[str, Any]]:
-        """
-        Deterministic fallback when LLM item choice is unavailable.
-        """
-        p = str(prefer or "").strip().lower()
-        key_map = {
-            "artist": "artists",
-            "album": "albums",
-            "track": "tracks",
-            "playlist": "playlists",
-            "radio": "radio",
-        }
-
-        def first_valid(items: Any) -> Optional[Dict[str, Any]]:
-            if not isinstance(items, list):
-                return None
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                uri = str(it.get("uri") or "").strip()
-                media_type = str(it.get("media_type") or "").strip()
-                name = str(it.get("name") or "").strip()
-                if uri and media_type:
-                    return {"uri": uri, "media_type": media_type, "name": name or cleaned_query}
-            return None
-
-        if p in key_map:
-            chosen = first_valid(search_payload.get(key_map[p]))
-            if chosen:
-                return chosen
-
-        # Practical priority when no explicit preference.
-        for bucket in ("tracks", "artists", "playlists", "albums", "radio"):
-            chosen = first_valid(search_payload.get(bucket))
-            if chosen:
-                return chosen
-
-        return None
 
     # -------------------- Music Assistant wrappers --------------------
     async def _ma_search(self, name: str, limit: int = 25, library_only: bool = False) -> Dict[str, Any]:
@@ -663,17 +761,6 @@ class MusicAssistantPlugin(ToolVerba):
             return items[0].get("uri")
         return None
 
-    async def _media_player_play_by_name(self, media_player: str, name: str) -> None:
-        """
-        MA FAQ: media_player.play_media can accept a name with media_content_type=music.
-        """
-        data = {
-            "entity_id": media_player,
-            "media_content_id": name,
-            "media_content_type": "music",
-        }
-        await asyncio.to_thread(self._ha_call_service, "media_player", "play_media", data, False, 20)
-
     async def _ma_play_uri(
         self,
         media_player: str,
@@ -693,6 +780,35 @@ class MusicAssistantPlugin(ToolVerba):
             "radio_mode": bool(radio_mode),
         }
         await asyncio.to_thread(self._ha_call_service, "music_assistant", "play_media", data, False, 25)
+
+    async def _speaker_label(self, media_player: str) -> str:
+        st = await self._ha_state(media_player)
+        attrs = st.get("attributes") if isinstance(st, dict) else {}
+        friendly = (attrs or {}).get("friendly_name") if isinstance(attrs, dict) else ""
+        label = str(friendly or "").strip()
+        return label or str(media_player or "").strip()
+
+    async def _verify_playback_started(self, media_player: str, timeout_s: float = 6.0) -> bool:
+        """
+        Best-effort playback verification after issuing a play command.
+        """
+        checks = max(1, int(timeout_s / 0.75))
+        for _ in range(checks):
+            st = await self._ha_state(media_player)
+            state = str((st or {}).get("state") or "").strip().lower()
+            attrs = (st or {}).get("attributes") if isinstance(st, dict) else {}
+            attrs = attrs if isinstance(attrs, dict) else {}
+            has_media_meta = bool(
+                str(attrs.get("media_title") or "").strip()
+                or str(attrs.get("media_artist") or "").strip()
+                or str(attrs.get("media_content_id") or "").strip()
+            )
+            if state in {"playing", "buffering"}:
+                return True
+            if state == "paused" and has_media_meta:
+                return True
+            await asyncio.sleep(0.75)
+        return False
 
     async def _player_control(self, media_player: str, action: str, volume: Optional[int] = None) -> None:
         if action == "volume":
@@ -977,12 +1093,14 @@ class MusicAssistantPlugin(ToolVerba):
         except RoomPlayerNotFound as e:
             return str(e)
 
+        where_label = plan_room or await self._speaker_label(media_player) or media_player
+
         # Controls
         if action in {"pause", "resume", "stop", "next", "previous", "volume"}:
             await self._player_control(media_player, action, vol)
             if action == "volume":
-                return f"Set volume to {max(0, min(100, int(vol or 0)))}."
-            return f"Done ({action})."
+                return f"Set volume to {max(0, min(100, int(vol or 0)))} on {where_label}."
+            return f"Done ({action}) on {where_label}."
 
         if action not in {"play", "queue"}:
             return "Sorry — I’m not sure what to do with that request."
@@ -990,8 +1108,21 @@ class MusicAssistantPlugin(ToolVerba):
         if not request_text:
             request_text = query or action
 
-        # Clean the query so we don't search for "play stick figure"
-        cleaned = self._normalize_query(query) or self._normalize_query(request_text) or query
+        # LLM-first query rewriting (no regex fallback matching path).
+        try:
+            rewrite = await self._llm_build_search_queries(
+                request_text=request_text,
+                query_text=query,
+                room=plan_room,
+                prefer=prefer,
+                llm_client=llm_client,
+            )
+        except Exception as e:
+            return self._siri_flatten(str(e))
+
+        search_queries = rewrite.get("queries") or []
+        prefer = rewrite.get("prefer")
+        cleaned = str(search_queries[0] if search_queries else (query or request_text)).strip()
 
         # If random requested: try MA random library pick first
         if want_random:
@@ -1004,23 +1135,31 @@ class MusicAssistantPlugin(ToolVerba):
                     enqueue=("add" if action == "queue" else "play"),
                     radio_mode=True,
                 )
-                where = plan_room or "that room"
-                return f"Playing something random based on '{cleaned}' in {where}."
+                if action == "play":
+                    verified = await self._verify_playback_started(media_player)
+                    if not verified:
+                        return f"I sent a random track based on '{cleaned}' to {where_label}, but couldn't confirm playback yet."
+                if action == "queue":
+                    return f"Queued something random based on '{cleaned}' on {where_label}."
+                return f"Playing something random based on '{cleaned}' on {where_label}."
 
-        # Search
-        search_payload = await self._ma_search(name=cleaned, limit=25, library_only=False)
-
-        # If search is empty, do ONE retry with an even more aggressive cleaned version
-        if not any((search_payload.get(k) or []) for k in ("artists", "albums", "tracks", "playlists", "radio")):
-            retry = self._normalize_query(cleaned)
-            if retry and retry != cleaned:
-                search_payload = await self._ma_search(name=retry, limit=25, library_only=False)
-                cleaned = retry
+        # Search with LLM-produced query variants before giving up.
+        search_payload: Dict[str, Any] = {}
+        for q in search_queries:
+            search_payload = await self._ma_search(name=q, limit=25, library_only=False)
+            if self._search_payload_has_results(search_payload):
+                if q != cleaned:
+                    logger.info(f"[music_assistant] search variant matched: '{cleaned}' -> '{q}'")
+                cleaned = q
+                break
 
         # Let the LLM choose the correct item from the results
         chosen = await self._llm_choose_item(request_text, cleaned, prefer, search_payload, llm_client)
         if not chosen:
-            chosen = self._deterministic_choose_item(search_payload, prefer, cleaned)
+            return (
+                f"I found results for '{cleaned}', but couldn't confidently pick a single match. "
+                "Try saying artist + song, artist + album, or a playlist name."
+            )
 
         # If user likely asked for ONLY an artist and LLM chose artist, start with a random track by that artist
         if chosen and chosen.get("media_type") == "artist":
@@ -1034,13 +1173,23 @@ class MusicAssistantPlugin(ToolVerba):
                     enqueue=("add" if action == "queue" else "play"),
                     radio_mode=True,
                 )
-                where = plan_room or "that room"
-                return f"Playing a random {seed} track in {where}."
+                if action == "play":
+                    verified = await self._verify_playback_started(media_player)
+                    if not verified:
+                        return f"I sent a random {seed} track to {where_label}, but couldn't confirm playback yet."
+                if action == "queue":
+                    return f"Queued a random {seed} track on {where_label}."
+                return f"Playing a random {seed} track on {where_label}."
 
             enqueue = "add" if action == "queue" else "play"
             await self._ma_play_uri(media_player, chosen["uri"], "artist", enqueue=enqueue, radio_mode=True)
-            where = plan_room or "that room"
-            return f"Playing {chosen.get('name') or cleaned} (artist) in {where}."
+            if action == "play":
+                verified = await self._verify_playback_started(media_player)
+                if not verified:
+                    return f"I sent {chosen.get('name') or cleaned} (artist) to {where_label}, but couldn't confirm playback yet."
+            if action == "queue":
+                return f"Queued {chosen.get('name') or cleaned} (artist) on {where_label}."
+            return f"Playing {chosen.get('name') or cleaned} (artist) on {where_label}."
 
         if chosen and chosen.get("uri") and chosen.get("media_type"):
             uri = chosen["uri"]
@@ -1050,10 +1199,12 @@ class MusicAssistantPlugin(ToolVerba):
             enqueue = "add" if action == "queue" else "play"
             radio_mode = True if mtype in {"artist", "track", "radio"} else False
             await self._ma_play_uri(media_player, uri, mtype, enqueue=enqueue, radio_mode=radio_mode)
-            where = plan_room or "that room"
             if action == "queue":
-                return f"Queued {title} ({mtype}) in {where}."
-            return f"Playing {title} ({mtype}) in {where}."
+                return f"Queued {title} ({mtype}) on {where_label}."
+            verified = await self._verify_playback_started(media_player)
+            if not verified:
+                return f"I sent {title} ({mtype}) to {where_label}, but couldn't confirm playback yet."
+            return f"Playing {title} ({mtype}) on {where_label}."
 
         return f"I searched Music Assistant for '{cleaned}' but didn’t find anything playable. Want to try a different search?"
 
