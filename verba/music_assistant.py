@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.20"
+    version = "1.0.21"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -1413,6 +1413,34 @@ class MusicAssistantPlugin(ToolVerba):
                     chosen.get("media_type") or "?",
                 )
             else:
+                # Last-resort auto-play fallback: pick any track from library search terms.
+                seeds: List[str] = []
+                for s in [cleaned] + [str(x) for x in (search_queries or [])] + [request_text]:
+                    token = " ".join(str(s or "").split()).strip()
+                    if len(token) < 2:
+                        continue
+                    if token not in seeds:
+                        seeds.append(token)
+
+                for seed in seeds[:6]:
+                    uri = await self._ma_get_random_track_uri(seed)
+                    if not uri:
+                        continue
+                    await self._ma_play_uri(
+                        media_player,
+                        uri,
+                        "track",
+                        enqueue=("add" if action == "queue" else "play"),
+                        radio_mode=True,
+                    )
+                    if action == "play":
+                        verified = await self._verify_playback_started(media_player)
+                        if not verified:
+                            return f"I sent a track for '{seed}' to {where_label}, but couldn't confirm playback yet."
+                    if action == "queue":
+                        return f"Queued a track for '{seed}' on {where_label}."
+                    return f"Playing a track for '{seed}' on {where_label}."
+
                 return (
                     f"I found results for '{cleaned}', but couldn't confidently pick a single match. "
                     "Try saying artist + song, artist + album, or a playlist name."
