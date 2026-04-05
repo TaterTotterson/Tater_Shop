@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.24"
+    version = "1.0.25"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -401,6 +401,72 @@ class MusicAssistantPlugin(ToolVerba):
             raise errors[-1]
         raise RuntimeError("Music Assistant service call failed.")
 
+    async def _media_players_for_area_id(self, area_id: str) -> List[Dict[str, str]]:
+        """
+        Return media_player entities for a specific HA area_id.
+        """
+        aid = str(area_id or "").strip()
+        if not aid:
+            return []
+
+        try:
+            entities = await self._ha_ws_call("config/entity_registry/list")
+            devices = await self._ha_ws_call("config/device_registry/list")
+        except Exception as e:
+            logger.warning(f"[music_assistant] area_id-scoped lookup failed (ws): {e}")
+            return []
+
+        # Map device_id -> area_id
+        device_area: Dict[str, str] = {}
+        for d in (devices or []):
+            if isinstance(d, dict) and d.get("id"):
+                device_area[str(d["id"])] = str(d.get("area_id") or "")
+
+        in_area_rows: Dict[str, Dict[str, Any]] = {}
+        for e in (entities or []):
+            if not isinstance(e, dict):
+                continue
+            ent_id = str(e.get("entity_id") or "").strip()
+            if not ent_id.startswith("media_player."):
+                continue
+            if e.get("disabled_by") not in (None, ""):
+                continue
+
+            ent_area = str(e.get("area_id") or "")
+            dev_id = str(e.get("device_id") or "")
+            dev_area = device_area.get(dev_id, "")
+            if ent_area == aid or dev_area == aid:
+                in_area_rows[ent_id] = e
+
+        if not in_area_rows:
+            return []
+
+        # Enrich with current state/friendly_name
+        try:
+            states = await self._ha_states()
+        except Exception:
+            states = []
+        state_map = {}
+        for s in (states or []):
+            eid = str((s or {}).get("entity_id") or "").strip()
+            if eid:
+                state_map[eid] = s or {}
+
+        players: List[Dict[str, str]] = []
+        for eid in sorted(in_area_rows.keys()):
+            row = in_area_rows.get(eid) or {}
+            st = state_map.get(eid) or {}
+            players.append(
+                {
+                    "entity_id": eid,
+                    "friendly_name": ((st.get("attributes") or {}).get("friendly_name") or eid),
+                    "platform": str(row.get("platform") or ""),
+                    "state": str(st.get("state") or ""),
+                    "area_id": str(row.get("area_id") or ""),
+                }
+            )
+        return players
+
     async def _media_players_for_room_area(self, room: str) -> List[Dict[str, str]]:
         """
         Try to reduce the candidate list by using HA Areas/Device/Entity registry via WebSocket.
@@ -416,8 +482,6 @@ class MusicAssistantPlugin(ToolVerba):
 
         try:
             areas = await self._ha_ws_call("config/area_registry/list")
-            entities = await self._ha_ws_call("config/entity_registry/list")
-            devices = await self._ha_ws_call("config/device_registry/list")
         except Exception as e:
             logger.warning(f"[music_assistant] area-scoped lookup failed (ws): {e}")
             return []
@@ -428,57 +492,13 @@ class MusicAssistantPlugin(ToolVerba):
             if not isinstance(a, dict):
                 continue
             if (a.get("name") or "").strip().lower() == room_l:
-                area_id = a.get("area_id")
+                area_id = str(a.get("area_id") or "")
                 break
 
         if not area_id:
             return []
 
-        # Map device_id -> area_id
-        device_area: Dict[str, str] = {}
-        for d in (devices or []):
-            if isinstance(d, dict) and d.get("id"):
-                device_area[d["id"]] = d.get("area_id")
-
-        in_area: set = set()
-
-        for e in (entities or []):
-            if not isinstance(e, dict):
-                continue
-            ent_id = (e.get("entity_id") or "").strip()
-            if not ent_id.startswith("media_player."):
-                continue
-
-            ent_area = e.get("area_id")
-            if ent_area == area_id:
-                in_area.add(ent_id)
-                continue
-
-            dev_id = e.get("device_id")
-            if dev_id and device_area.get(dev_id) == area_id:
-                in_area.add(ent_id)
-
-        if not in_area:
-            return []
-
-        # Enrich with friendly_name from /api/states (registry doesn't reliably include it)
-        try:
-            states = await self._ha_states()
-        except Exception:
-            states = []
-
-        players: List[Dict[str, str]] = []
-        for s in states:
-            ent = s.get("entity_id") or ""
-            if ent in in_area:
-                players.append(
-                    {
-                        "entity_id": ent,
-                        "friendly_name": ((s.get("attributes") or {}).get("friendly_name") or ent),
-                    }
-                )
-
-        return players
+        return await self._media_players_for_area_id(area_id)
 
     # -------------------- Room map parsing --------------------
     def _parse_room_map(self, raw: str) -> Dict[str, str]:
@@ -1115,7 +1135,7 @@ class MusicAssistantPlugin(ToolVerba):
             logger.warning(f"[music_assistant] device-scoped lookup failed (ws): {e}")
             return []
 
-        ids: List[str] = []
+        rows_by_eid: Dict[str, Dict[str, Any]] = {}
         for row in (entities or []):
             if not isinstance(row, dict):
                 continue
@@ -1125,9 +1145,9 @@ class MusicAssistantPlugin(ToolVerba):
                 continue
             ent = str(row.get("entity_id") or "").strip()
             if ent.startswith("media_player."):
-                ids.append(ent)
+                rows_by_eid[ent] = row
 
-        if not ids:
+        if not rows_by_eid:
             return []
 
         try:
@@ -1142,15 +1162,23 @@ class MusicAssistantPlugin(ToolVerba):
                 state_map[eid] = s or {}
 
         out: List[Dict[str, str]] = []
-        for eid in sorted(set(ids)):
+        for eid in sorted(rows_by_eid.keys()):
+            row = rows_by_eid.get(eid) or {}
             st = state_map.get(eid) or {}
             out.append(
                 {
                     "entity_id": eid,
                     "friendly_name": ((st.get("attributes") or {}).get("friendly_name") or eid),
+                    "platform": str(row.get("platform") or ""),
+                    "state": str(st.get("state") or ""),
+                    "area_id": str(row.get("area_id") or ""),
                 }
             )
         return out
+
+    @staticmethod
+    def _slugify(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
 
     def _pick_best_device_player(
         self,
@@ -1171,15 +1199,25 @@ class MusicAssistantPlugin(ToolVerba):
             eid = str(p.get("entity_id") or "").strip()
             friendly = str(p.get("friendly_name") or "").strip().lower()
             low = eid.lower()
+            platform = str(p.get("platform") or "").strip().lower()
+            state = str(p.get("state") or "").strip().lower()
             score = 0
+            if state and state not in {"unavailable", "unknown"}:
+                score += 40
+            else:
+                score -= 40
+            if platform == "music_assistant":
+                score += 35
+            if re.search(r"_[0-9a-f]{6,}$", low):
+                score += 10
             if device_slug and device_slug in low:
                 score += 20
             if device_name and device_name.lower() in friendly:
                 score += 16
             if low.endswith("_media_player"):
-                score += 8
+                score += 3
             if low.endswith("_speaker"):
-                score += 5
+                score += 2
             if score > best_score:
                 best_score = score
                 best_id = eid
@@ -1216,6 +1254,14 @@ class MusicAssistantPlugin(ToolVerba):
 
         # Home Assistant default: when room is NOT specified, target the same speaking device.
         if prefer_context_device and not room:
+            area_id = self._ctx_text(context, "area_id")
+            if area_id:
+                area_players = await self._media_players_for_area_id(area_id)
+                area_choice = self._pick_best_device_player(area_players, context=context)
+                if area_choice:
+                    logger.info(f"[music_assistant] same-area resolve: area_id={area_id} -> {area_choice}")
+                    return area_choice
+
             device_id = self._ctx_text(context, "device_id")
             if not device_id:
                 raise RoomPlayerNotFound(
