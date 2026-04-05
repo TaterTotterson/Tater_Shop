@@ -1056,7 +1056,7 @@
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.17",
+      "version": "1.0.18",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
@@ -1074,7 +1074,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "2b09b55286310737e718b0eb18e329b91760348b6ecc0b6876899e04a9998bf5"
+      "sha256": "00ecb95075daea53155eeb2dfac2fe8d117ede3aad0abe18d8dcc079ec347b4a"
     },
     {
       "id": "obsidian_note",
