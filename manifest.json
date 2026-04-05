@@ -1056,7 +1056,7 @@
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.10",
+      "version": "1.0.11",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
@@ -1074,7 +1074,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "323b314ef9010d40f43339a18f579a4d12598f06bc0ca559419121a45796af19"
+      "sha256": "872cf679aa3441fcce38a2c9875683afeb9abdc4e70e8879b9a82a605c91a4e4"
     },
     {
       "id": "obsidian_note",
@@ -1575,7 +1575,7 @@
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.1.1",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
@@ -1593,7 +1593,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "96fa35b24650a54c36dc22f937cf4da80de9078ee6d45675e0bee7e0c3c049b1"
+      "sha256": "5612c0cd6c84cefd0615798cfed4173fc3b6b20d56a7aeaac5941e91a9cacb05"
     },
     {
       "id": "weather_forecast",
