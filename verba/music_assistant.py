@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.25"
+    version = "1.0.27"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -1190,12 +1190,16 @@ class MusicAssistantPlugin(ToolVerba):
         if len(players) == 1:
             return players[0].get("entity_id")
 
+        # Hard preference: if Music Assistant-backed entities exist, only rank those.
+        ma_players = [p for p in players if str(p.get("platform") or "").strip().lower() == "music_assistant"]
+        candidates = ma_players if ma_players else players
+
         device_name = self._ctx_text(context, "device_name", "device")
         device_slug = self._slugify(device_name)
 
         best_id = None
         best_score = -999
-        for p in players:
+        for p in candidates:
             eid = str(p.get("entity_id") or "").strip()
             friendly = str(p.get("friendly_name") or "").strip().lower()
             low = eid.lower()
@@ -1206,8 +1210,11 @@ class MusicAssistantPlugin(ToolVerba):
                 score += 40
             else:
                 score -= 40
+            # Within preferred set, prioritize Sonos-labeled players.
+            if "sonos" in low or "sonos" in friendly:
+                score += 55
             if platform == "music_assistant":
-                score += 35
+                score += 20
             if re.search(r"_[0-9a-f]{6,}$", low):
                 score += 10
             if device_slug and device_slug in low:
@@ -1222,7 +1229,7 @@ class MusicAssistantPlugin(ToolVerba):
                 best_score = score
                 best_id = eid
 
-        return best_id or players[0].get("entity_id")
+        return best_id or candidates[0].get("entity_id")
 
     # -------------------- Room -> media_player resolution --------------------
     async def _resolve_media_player(
