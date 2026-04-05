@@ -22,7 +22,7 @@ import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 load_dotenv()
 
@@ -49,7 +49,7 @@ DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
 REDIS_NOTIF_LIST = "tater:ha:notifications"  # LPUSH new, LRANGE read, then clear
 
 # Cache keys
-REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v1"  # json map: area_id -> entity_id
+REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v2"  # json map: device_id -> entity_id
 
 PORTAL_SETTINGS = {
     "category": "Home Assistant Settings",
@@ -105,7 +105,7 @@ PORTAL_SETTINGS = {
             "label": "Assist satellite map cache TTL (seconds)",
             "type": "number",
             "default": DEFAULT_SATELLITE_MAP_CACHE_TTL_S,
-            "description": "How long to cache the area→assist_satellite mapping (registry lookups).",
+            "description": "How long to cache the device_id→assist_satellite mapping (registry lookups).",
         },
 
         # --- Existing Voice PE ring fields (optional) ---
@@ -554,7 +554,7 @@ def _ring_off():
         except Exception as e:
             logger.warning(f"[notify] failed to turn off ring {eid}: {e}")
 
-# -------------------- Assist satellite resolver (area→entity) --------------------
+# -------------------- Assist satellite resolver (device_id→entity) --------------------
 _satellite_refresh_lock = asyncio.Lock()
 _satellite_map_mem: Dict[str, str] = {}
 _satellite_map_mem_ts: float = 0.0
@@ -577,8 +577,8 @@ async def _ha_ws_call(session: aiohttp.ClientSession, ws: aiohttp.ClientWebSocke
 async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
     """
     Build a map of:
-      area_id -> assist_satellite.entity_id
-    using HA entity registry + device registry.
+      device_id -> assist_satellite.entity_id
+    using HA entity registry.
     """
     ha = _HA()
     ws_url = ha.ws_url()
@@ -607,45 +607,29 @@ async def _fetch_satellite_map_from_ha() -> Dict[str, str]:
                 expect_id=1,
                 timeout=30,
             )
-            device_reg = await _ha_ws_call(
-                session, ws,
-                {"id": 2, "type": "config/device_registry/list"},
-                expect_id=2,
-                timeout=30,
-            )
 
-    # device_id -> area_id
-    dev_area: Dict[str, str] = {}
-    if isinstance(device_reg, list):
-        for d in device_reg:
-            try:
-                did = d.get("id")
-                aid = d.get("area_id")
-                if did and aid:
-                    dev_area[str(did)] = str(aid)
-            except Exception:
-                continue
-
-    # area_id -> assist_satellite entity_id
-    area_sat: Dict[str, str] = {}
+    # device_id -> assist_satellite entity_id
+    device_sat: Dict[str, str] = {}
     if isinstance(entity_reg, list):
         for e in entity_reg:
             try:
                 ent = (e.get("entity_id") or "").strip()
                 if not ent.startswith("assist_satellite."):
                     continue
+                if e.get("disabled_by") not in (None, ""):
+                    continue
                 did = e.get("device_id")
                 if not did:
                     continue
-                aid = dev_area.get(str(did))
-                if not aid:
+                did_text = str(did).strip()
+                if not did_text:
                     continue
-                if aid not in area_sat:
-                    area_sat[aid] = ent
+                if did_text not in device_sat:
+                    device_sat[did_text] = ent
             except Exception:
                 continue
 
-    return area_sat
+    return device_sat
 
 def _satellite_cache_ttl_s() -> int:
     return _get_int_platform_setting("SATELLITE_MAP_CACHE_TTL_S", DEFAULT_SATELLITE_MAP_CACHE_TTL_S)
@@ -718,17 +702,17 @@ async def _get_satellite_map(force_refresh: bool = False) -> Dict[str, str]:
 async def _resolve_assist_satellite_entity(ctx: Dict[str, Any]) -> Optional[str]:
     if not ctx:
         return None
-    area_id = (ctx.get("area_id") or "").strip()
-    if not area_id:
+    device_id = (ctx.get("device_id") or "").strip()
+    if not device_id:
         return None
 
     m = await _get_satellite_map(force_refresh=False)
-    ent = (m.get(area_id) or "").strip()
+    ent = (m.get(device_id) or "").strip()
     if ent:
         return ent
 
     m2 = await _get_satellite_map(force_refresh=True)
-    ent2 = (m2.get(area_id) or "").strip()
+    ent2 = (m2.get(device_id) or "").strip()
     return ent2 or None
 
 async def _wait_for_satellite_idle(entity_id: str, timeout_s: float) -> bool:
@@ -848,8 +832,8 @@ def _should_follow_up(text: str) -> bool:
 
 async def _maybe_reopen_listening(conv_key: str, ctx: Dict[str, Any], assistant_text: str):
     """
-    If assistant ended in a question, and we have area context,
-    reopen listening on the correct satellite entity for that area.
+    If assistant ended in a question, and we have device context,
+    reopen listening on the same Assist satellite device.
 
     Flow:
     - Trigger ONLY based on assistant_text (the real assistant reply)
@@ -865,7 +849,7 @@ async def _maybe_reopen_listening(conv_key: str, ctx: Dict[str, Any], assistant_
 
     sat = await _resolve_assist_satellite_entity(ctx)
     if not sat:
-        logger.info("[followup] skip (no assist satellite found for area)")
+        logger.info("[followup] skip (no assist satellite found for device_id)")
         return
 
     idle_timeout = _get_float_platform_setting("FOLLOWUP_IDLE_TIMEOUT_S", DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S)
