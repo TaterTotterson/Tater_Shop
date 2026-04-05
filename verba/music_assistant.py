@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.18"
+    version = "1.0.19"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -93,6 +93,9 @@ class MusicAssistantPlugin(ToolVerba):
     )
 
     platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+
+    def __init__(self):
+        self._ma_entry_id_cache: Optional[str] = None
 
     # -------------------- HA helpers --------------------
     def _ha_settings(self) -> Dict[str, str]:
@@ -179,7 +182,32 @@ class MusicAssistantPlugin(ToolVerba):
         except Exception:
             return {}
 
-    async def _ha_ws_call(self, msg_type: str) -> Any:
+    async def _ha_get_json(self, path: str, timeout: int = 20) -> Any:
+        cfg = self._ha_settings()
+        if not cfg["token"]:
+            raise RuntimeError(
+                "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
+                "and add a Long-Lived Access Token."
+            )
+        p = str(path or "").strip()
+        if not p.startswith("/"):
+            p = "/" + p
+        url = f'{cfg["base_url"]}{p}'
+        headers = self._ha_headers(cfg["token"])
+
+        def _get():
+            r = requests.get(url, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            if not (r.text or "").strip():
+                return None
+            try:
+                return r.json()
+            except Exception:
+                return r.text
+
+        return await asyncio.to_thread(_get)
+
+    async def _ha_ws_call(self, message: Any) -> Any:
         """
         Call a Home Assistant WebSocket command using the SAME HA_TOKEN as REST.
 
@@ -210,13 +238,168 @@ class MusicAssistantPlugin(ToolVerba):
                     raise RuntimeError(f"HA websocket auth failed: {auth_ok}")
 
                 # 3) request
-                await ws.send_json({"id": 1, "type": msg_type})
+                if isinstance(message, dict):
+                    payload = dict(message)
+                else:
+                    payload = {"type": str(message or "").strip()}
+                if not str(payload.get("type") or "").strip():
+                    raise RuntimeError("HA websocket call missing message type.")
+                payload["id"] = 1
+                await ws.send_json(payload)
                 resp = await ws.receive_json()
 
                 if not resp.get("success", False):
                     raise RuntimeError(f"HA websocket call failed: {resp}")
 
                 return resp.get("result")
+
+    @staticmethod
+    def _extract_ma_config_entry_id(payload: Any) -> Optional[str]:
+        rows: List[Dict[str, Any]] = []
+        if isinstance(payload, list):
+            rows = [r for r in payload if isinstance(r, dict)]
+        elif isinstance(payload, dict):
+            for key in ("entries", "result", "data", "items"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    rows = [r for r in val if isinstance(r, dict)]
+                    break
+
+        for row in rows:
+            domain = str(row.get("domain") or "").strip().lower()
+            if domain != "music_assistant":
+                continue
+            entry = str(row.get("entry_id") or row.get("id") or "").strip()
+            if entry:
+                return entry
+        return None
+
+    async def _discover_ma_config_entry_id(self, refresh: bool = False) -> Optional[str]:
+        if self._ma_entry_id_cache and not refresh:
+            return self._ma_entry_id_cache
+
+        # 1) WebSocket config entries
+        ws_queries = [
+            {"type": "config_entries/get", "domain": "music_assistant"},
+            {"type": "config_entries/get"},
+        ]
+        for q in ws_queries:
+            try:
+                result = await self._ha_ws_call(q)
+            except Exception:
+                continue
+            entry = self._extract_ma_config_entry_id(result)
+            if entry:
+                self._ma_entry_id_cache = entry
+                logger.info(f"[music_assistant] discovered MA config_entry_id via ws: {entry}")
+                return entry
+
+        # 2) Entity registry fallback (works even when config_entries/get is unavailable).
+        try:
+            entities = await self._ha_ws_call("config/entity_registry/list")
+        except Exception:
+            entities = []
+        counts: Dict[str, int] = {}
+        for row in (entities or []):
+            if not isinstance(row, dict):
+                continue
+            eid = str(row.get("entity_id") or "").strip().lower()
+            platform = str(row.get("platform") or "").strip().lower()
+            cfg = str(row.get("config_entry_id") or "").strip()
+            if not cfg:
+                continue
+            is_music_assistantish = (
+                platform == "music_assistant"
+                or "music_assistant" in eid
+                or ".mass_" in eid
+            )
+            if not is_music_assistantish:
+                continue
+            counts[cfg] = counts.get(cfg, 0) + 1
+        if counts:
+            entry = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            self._ma_entry_id_cache = entry
+            logger.info(f"[music_assistant] discovered MA config_entry_id via entity_registry: {entry}")
+            return entry
+
+        # 3) REST fallback endpoints (shape varies by HA version)
+        rest_paths = [
+            "/api/config/config_entries/entry?domain=music_assistant",
+            "/api/config/config_entries/entry",
+        ]
+        for path in rest_paths:
+            try:
+                result = await self._ha_get_json(path, timeout=20)
+            except Exception:
+                continue
+            entry = self._extract_ma_config_entry_id(result)
+            if entry:
+                self._ma_entry_id_cache = entry
+                logger.info(f"[music_assistant] discovered MA config_entry_id via rest: {entry}")
+                return entry
+
+        return None
+
+    async def _ma_service_call(
+        self,
+        service: str,
+        data: Dict[str, Any],
+        *,
+        return_response: bool = True,
+        timeout: int = 25,
+    ) -> Any:
+        """
+        Some HA/MA setups require config_entry_id and others do not.
+        Try both payload styles automatically.
+        """
+        base = dict(data or {})
+        base.pop("config_entry_id", None)
+        errors: List[Exception] = []
+
+        discovered = await self._discover_ma_config_entry_id(refresh=False)
+        attempts: List[Dict[str, Any]] = []
+        if discovered:
+            with_entry = dict(base)
+            with_entry["config_entry_id"] = discovered
+            attempts.append(with_entry)
+        attempts.append(dict(base))
+
+        for payload in attempts:
+            try:
+                return await asyncio.to_thread(
+                    self._ha_call_service,
+                    "music_assistant",
+                    service,
+                    payload,
+                    return_response,
+                    timeout,
+                )
+            except Exception as e:
+                errors.append(e)
+                if "400" not in str(e):
+                    raise
+                continue
+
+        # One more chance: force-refresh entry discovery and retry with entry_id.
+        refreshed = await self._discover_ma_config_entry_id(refresh=True)
+        if refreshed:
+            payload = dict(base)
+            payload["config_entry_id"] = refreshed
+            try:
+                return await asyncio.to_thread(
+                    self._ha_call_service,
+                    "music_assistant",
+                    service,
+                    payload,
+                    return_response,
+                    timeout,
+                )
+            except Exception as e:
+                errors.append(e)
+
+        if errors:
+            raise errors[-1]
+        raise RuntimeError("Music Assistant service call failed.")
 
     async def _media_players_for_room_area(self, room: str) -> List[Dict[str, str]]:
         """
@@ -759,7 +942,7 @@ class MusicAssistantPlugin(ToolVerba):
             "library_only": bool(library_only),
         }
 
-        result = await asyncio.to_thread(self._ha_call_service, "music_assistant", "search", data, True, 25)
+        result = await self._ma_service_call("search", data, return_response=True, timeout=25)
 
         # Normalize HA wrappers: [{"response": {...}}] or [{"result": {...}}]
         if isinstance(result, list) and result:
@@ -788,7 +971,7 @@ class MusicAssistantPlugin(ToolVerba):
             "limit": 1,
             "order_by": "random",
         }
-        result = await asyncio.to_thread(self._ha_call_service, "music_assistant", "get_library", data, True, 25)
+        result = await self._ma_service_call("get_library", data, return_response=True, timeout=25)
 
         payload = None
         if isinstance(result, list) and result and isinstance(result[0], dict):
@@ -819,7 +1002,7 @@ class MusicAssistantPlugin(ToolVerba):
             "enqueue": enqueue,  # play | add
             "radio_mode": bool(radio_mode),
         }
-        await asyncio.to_thread(self._ha_call_service, "music_assistant", "play_media", data, False, 25)
+        await self._ma_service_call("play_media", data, return_response=False, timeout=25)
 
     async def _speaker_label(self, media_player: str) -> str:
         st = await self._ha_state(media_player)
