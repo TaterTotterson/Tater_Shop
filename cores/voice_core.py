@@ -45,7 +45,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 load_dotenv()
 
@@ -1456,15 +1456,6 @@ def _voice_satellite_option_rows(*, current_values: List[str]) -> List[Dict[str,
         label = " • ".join([part for part in [name or selector, entity_id, host, source] if part]) or selector
         options_by_value[selector] = {"value": selector, "label": label}
 
-    cached, ok = _load_satellite_map_from_redis()
-    if ok:
-        for device_id, entity_id in cached.items():
-            selector = f"device:{str(device_id).strip()}"
-            if selector in blocked or selector in options_by_value:
-                continue
-            label = f"{entity_id} • {selector} • homeassistant_registry"
-            options_by_value[selector] = {"value": selector, "label": label}
-
     for value in current_values:
         token = _text(value)
         if not token or token in options_by_value:
@@ -1786,7 +1777,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "subtitle": (
                 f"Last run: {_voice_core_format_timestamp(discovery.get('last_run_ts'))} • "
                 f"manual={int(last_counts.get('manual') or 0)} "
-                f"ha={int(last_counts.get('ha_registry') or 0)} "
                 f"mdns={int(last_counts.get('mdns_esphome') or 0)} "
                 f"blocked={int(last_counts.get('blocked') or 0)}"
             ),
@@ -1889,7 +1879,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     add_form_source_options = [
         {"value": "manual", "label": "manual"},
         {"value": "esphome", "label": "esphome"},
-        {"value": "ha_registry", "label": "ha_registry"},
         {"value": "mdns_esphome", "label": "mdns_esphome"},
     ]
 
@@ -2744,7 +2733,14 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
 
     except Exception as exc:
         msg = str(exc)
-        await _compat_set_error(token, msg)
+        lower_msg = _lower(msg)
+        display_msg = msg
+        if "requires encryption" in lower_msg:
+            display_msg = (
+                "ESPHome API requires encryption (noise_psk). "
+                "Set VOICE_ESPHOME_NOISE_PSK to the device API encryption key."
+            )
+        await _compat_set_error(token, display_msg)
         async with _esphome_native_lock:
             row = _esphome_native_clients.get(token) or {}
             row.update(
@@ -2753,12 +2749,12 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "host": host_token,
                     "port": connect_port,
                     "connected": False,
-                    "last_error": msg,
+                    "last_error": display_msg,
                     "source": source,
                 }
             )
             _esphome_native_clients[token] = row
-        raise
+        raise RuntimeError(display_msg) from exc
 
 
 async def _esphome_disconnect_all(reason: str, *, clear: bool = False) -> None:
@@ -3630,7 +3626,21 @@ def _native_discover_satellites_mdns_sync(scan_seconds: float) -> List[Dict[str,
             return token
         return server_host
 
-    def _on_service_state(zc: Any, service_type: str, name: str, state_change: Any) -> None:
+    def _on_service_state(*args: Any, **kwargs: Any) -> None:
+        zc = kwargs.get("zeroconf")
+        service_type = kwargs.get("service_type")
+        name = kwargs.get("name")
+        state_change = kwargs.get("state_change")
+        if zc is None and len(args) >= 1:
+            zc = args[0]
+        if service_type is None and len(args) >= 2:
+            service_type = args[1]
+        if name is None and len(args) >= 3:
+            name = args[2]
+        if state_change is None and len(args) >= 4:
+            state_change = args[3]
+        if zc is None or not service_type or not name:
+            return
         if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
             return
         info = None
@@ -3703,8 +3713,12 @@ async def _native_discover_satellites_mdns() -> List[Dict[str, Any]]:
 
 async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) -> Dict[str, Any]:
     now = _native_now()
-    counts = {"manual": 0, "ha_registry": 0, "mdns_esphome": 0, "blocked": 0}
+    counts = {"manual": 0, "mdns_esphome": 0, "blocked": 0}
     blocked = _load_voice_satellite_blocked_selectors()
+    current_rows = _load_voice_satellite_registry()
+    filtered_rows = [row for row in current_rows if _lower((row or {}).get("source")) != "homeassistant_registry"]
+    if len(filtered_rows) != len(current_rows):
+        _save_voice_satellite_registry(filtered_rows)
 
     manual_targets = _normalize_csv_or_lines(_portal_settings().get("VOICE_MANUAL_TARGETS"))
     for host in manual_targets:
@@ -3722,24 +3736,6 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
             }
         )
         counts["manual"] += 1
-
-    sat_map = await _get_satellite_map(force_refresh=force_ha_refresh)
-    for device_id, entity_id in sat_map.items():
-        selector = f"device:{str(device_id).strip()}"
-        if selector in blocked:
-            counts["blocked"] += 1
-            continue
-        _upsert_voice_satellite(
-            {
-                "selector": selector,
-                "satellite_id": str(device_id).strip(),
-                "entity_id": _lower(entity_id),
-                "name": _text(entity_id),
-                "source": "homeassistant_registry",
-                "metadata": {"homeassistant_entity": _text(entity_id)},
-            }
-        )
-        counts["ha_registry"] += 1
 
     for row in await _native_discover_satellites_mdns():
         selector = _text((row or {}).get("selector"))
