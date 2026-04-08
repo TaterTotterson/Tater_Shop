@@ -45,7 +45,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.1"
+__version__ = "2.0.3"
 
 load_dotenv()
 
@@ -1748,7 +1748,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     satellites = [
         row
         for row in _load_voice_satellite_registry()
-        if _text(row.get("selector")) and _text(row.get("selector")) not in blocked
+        if _text(row.get("selector"))
+        and _text(row.get("selector")) not in blocked
+        and _lower(row.get("source")) != "homeassistant_registry"
     ]
     satellites = sorted(satellites, key=lambda row: _lower(row.get("name") or row.get("selector")))
     discovery = runtime_status.get("discovery") if isinstance(runtime_status.get("discovery"), dict) else {}
@@ -2228,6 +2230,9 @@ async def _maybe_reopen_listening(conv_key: str, ctx: Dict[str, Any], assistant_
     NOTE:
     conv_key is only used for logging/clarity (history continuity is handled by _conv_key()).
     """
+    if _voice_backend_mode() != VOICE_BACKEND_MODE_HA:
+        return
+
     if not _should_follow_up(assistant_text):
         return
 
@@ -3991,7 +3996,12 @@ async def voice_config(x_tater_token: Optional[str] = Header(None)):
 async def voice_satellites(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
     blocked = _load_voice_satellite_blocked_selectors()
-    rows = [row for row in _load_voice_satellite_registry() if _text(row.get("selector")) not in blocked]
+    rows = [
+        row
+        for row in _load_voice_satellite_registry()
+        if _text(row.get("selector")) not in blocked
+        and _lower(row.get("source")) != "homeassistant_registry"
+    ]
     rows = sorted(rows, key=lambda row: _lower(row.get("name") or row.get("selector")))
     return {"satellites": rows}
 
