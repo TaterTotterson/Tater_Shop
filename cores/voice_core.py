@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.41"
+__version__ = "2.0.42"
 
 load_dotenv()
 
@@ -125,13 +125,14 @@ DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 15.0
 DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.48
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.45
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
 DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 8.0
+DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS = 6
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
@@ -2759,6 +2760,14 @@ def _esphome_server_vad_strong_margin_db() -> float:
     return min(20.0, max(1.0, float(value)))
 
 
+def _esphome_server_vad_strong_streak_chunks() -> int:
+    value = _get_int_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS",
+        DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS,
+    )
+    return min(30, max(2, int(value)))
+
+
 def _esphome_server_vad_max_release_above_floor_db() -> float:
     value = _get_float_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB",
@@ -4026,6 +4035,7 @@ async def _esphome_subscribe_voice_assistant(
                     trigger_margin = _esphome_server_vad_trigger_margin_db()
                     release_margin = _esphome_server_vad_release_margin_db()
                     strong_margin = _esphome_server_vad_strong_margin_db()
+                    strong_streak_chunks = _esphome_server_vad_strong_streak_chunks()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
                     silence_target_s = _esphome_server_vad_silence_s()
@@ -4083,7 +4093,7 @@ async def _esphome_subscribe_voice_assistant(
                                 if strong_threshold is not None and dbfs >= float(strong_threshold):
                                     streak = int(runtime.get("vad_strong_streak") or 0) + 1
                                     runtime["vad_strong_streak"] = streak
-                                    if streak >= 2:
+                                    if streak >= strong_streak_chunks:
                                         runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                                         runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
                                         runtime["vad_last_strong_speech_ts"] = now
@@ -4095,7 +4105,7 @@ async def _esphome_subscribe_voice_assistant(
                             if strong_threshold is not None and dbfs >= float(strong_threshold):
                                 streak = int(runtime.get("vad_strong_streak") or 0) + 1
                                 runtime["vad_strong_streak"] = streak
-                                if streak >= 2:
+                                if streak >= strong_streak_chunks:
                                     runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                                     runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
                                     runtime["vad_last_strong_speech_ts"] = now
