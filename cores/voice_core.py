@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.8"
+__version__ = "2.0.10"
 
 load_dotenv()
 
@@ -79,7 +79,7 @@ VOICE_CORE_LEGACY_SETTINGS_HASH_KEYS = ("homeassistant_portal_settings",)
 VOICE_BACKEND_MODE_HA = "homeassistant_bridge"
 VOICE_BACKEND_MODE_NATIVE = "native_voice_pipeline"
 VOICE_BACKEND_MODE_OPTIONS = [VOICE_BACKEND_MODE_HA, VOICE_BACKEND_MODE_NATIVE]
-VOICE_MULTISELECT_FIELDS = {"VOICE_SATELLITE_TARGETS", "VOICE_SENSOR_ENTITY_IDS"}
+VOICE_MULTISELECT_FIELDS: set[str] = set()
 
 DEFAULT_VOICE_DISCOVERY_SCAN_SECONDS = 45
 DEFAULT_VOICE_DISCOVERY_MDNS_TIMEOUT_S = 3.0
@@ -1596,10 +1596,15 @@ def webui_settings_fields(
 ) -> List[Dict[str, Any]]:
     base_fields = list(fields or [])
     current = current_settings if isinstance(current_settings, dict) else {}
+    keys_present = {_text(item.get("key")) for item in base_fields if isinstance(item, dict)}
     selected_satellites = _parse_json_string_list(current.get("VOICE_SATELLITE_TARGETS"))
     selected_sensors = _parse_json_string_list(current.get("VOICE_SENSOR_ENTITY_IDS"))
-    satellite_options = _voice_satellite_option_rows(current_values=selected_satellites)
-    sensor_options = _voice_sensor_option_rows(current_values=selected_sensors)
+    satellite_options: List[Dict[str, str]] = []
+    sensor_options: List[Dict[str, str]] = []
+    if "VOICE_SATELLITE_TARGETS" in keys_present:
+        satellite_options = _voice_satellite_option_rows(current_values=selected_satellites)
+    if "VOICE_SENSOR_ENTITY_IDS" in keys_present:
+        sensor_options = _voice_sensor_option_rows(current_values=selected_sensors)
 
     out: List[Dict[str, Any]] = []
     for item in base_fields:
@@ -1615,7 +1620,7 @@ def webui_settings_fields(
             updated["default"] = []
             updated["description"] = (
                 f"{_text(item.get('description'))} "
-                "Selectors come from the adopted registry and HA assist satellite cache."
+                "Selectors come from discovered and manually added satellite entries."
             ).strip()
             out.append(updated)
             continue
@@ -1665,9 +1670,26 @@ def _run_async_blocking(coro: Any) -> Any:
 def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
     required = CORE_SETTINGS.get("required") if isinstance(CORE_SETTINGS, dict) else {}
     required_map = required if isinstance(required, dict) else {}
+    exposed_keys = {
+        "VOICE_WYOMING_STT_HOST",
+        "VOICE_WYOMING_STT_PORT",
+        "VOICE_WYOMING_TTS_HOST",
+        "VOICE_WYOMING_TTS_PORT",
+        "VOICE_NATIVE_WYOMING_TIMEOUT_S",
+        "VOICE_NATIVE_SESSION_TTL_S",
+        "VOICE_NATIVE_MAX_AUDIO_BYTES",
+        "VOICE_NATIVE_DEBUG",
+        "VOICE_ESPHOME_API_PORT",
+        "VOICE_ESPHOME_PASSWORD",
+        "VOICE_ESPHOME_NOISE_PSK",
+        "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
+        "VOICE_ESPHOME_RETRY_SECONDS",
+    }
     fields: List[Dict[str, Any]] = []
     for setting_key, setting_meta in required_map.items():
         if not isinstance(setting_meta, dict):
+            continue
+        if setting_key not in exposed_keys:
             continue
         default_value = setting_meta.get("default", "")
         raw_value = current.get(setting_key, default_value)
@@ -1711,28 +1733,6 @@ def _voice_core_find_satellite(selector: str) -> Dict[str, Any]:
 def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     groups: List[Tuple[str, List[str]]] = [
         (
-            "Pipeline",
-            [
-                "bind_port",
-                "API_AUTH_ENABLED",
-                "API_AUTH_KEY",
-                "VOICE_EOU_MODE",
-                "VOICE_STREAM_SAMPLE_RATE_HZ",
-            ],
-        ),
-        (
-            "Discovery + Targets",
-            [
-                "VOICE_DISCOVERY_ENABLED",
-                "VOICE_DISCOVERY_SCAN_SECONDS",
-                "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
-                "VOICE_DISCOVERY_EXCLUDE_HA_ASSIST",
-                "VOICE_SATELLITE_TARGETS",
-                "VOICE_MANUAL_TARGETS",
-                "VOICE_SENSOR_ENTITY_IDS",
-            ],
-        ),
-        (
             "Wyoming",
             [
                 "VOICE_WYOMING_STT_HOST",
@@ -1753,7 +1753,6 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "VOICE_ESPHOME_NOISE_PSK",
                 "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
                 "VOICE_ESPHOME_RETRY_SECONDS",
-                "VOICE_ESPHOME_AUTO_TARGET_MANUAL",
             ],
         ),
     ]
@@ -1819,7 +1818,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "title": "Discover / Refresh Satellites",
             "subtitle": (
                 f"Last run: {_voice_core_format_timestamp(discovery.get('last_run_ts'))} • "
-                f"manual={int(last_counts.get('manual') or 0)} "
                 f"mdns={int(last_counts.get('mdns_esphome') or 0)} "
                 f"excluded_ha={int(last_counts.get('excluded_ha') or 0)}"
             ),
@@ -1946,7 +1944,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "source": "items",
                     "item_group": "satellites",
                     "page_size": 8,
-                    "empty_message": "No satellites discovered or adopted yet.",
+                    "empty_message": "No satellites discovered yet.",
                 },
                 {
                     "key": "settings",
@@ -1956,14 +1954,14 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "empty_message": "No settings fields available.",
                 },
                 {
-                    "key": "adopt",
-                    "label": "Add / Adopt",
+                    "key": "add",
+                    "label": "Add",
                     "source": "add_form",
                 },
             ],
             "add_form": {
                 "action": "voice_adopt_satellite",
-                "submit_label": "Add / Adopt Satellite",
+                "submit_label": "Add Satellite",
                 "fields": [
                     {
                         "key": "selector",
@@ -2072,7 +2070,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         }
         model = VoiceSatelliteAdoptIn(**adopt_payload)
         _run_async_blocking(voice_satellite_adopt(model, x_tater_token=request_token))
-        return {"ok": True, "message": "Satellite adopted."}
+        return {"ok": True, "message": "Satellite added."}
 
     if action_name == "voice_refresh_satellites":
         result = _run_async_blocking(voice_satellite_refresh(x_tater_token=request_token))
@@ -2337,11 +2335,11 @@ _esphome_native_stats: Dict[str, Any] = {
 
 
 def _compat_bridge_enabled() -> bool:
-    return _get_bool_platform_setting("VOICE_COMPAT_ENABLED", True)
+    return True
 
 
 def _compat_require_adopted() -> bool:
-    return _get_bool_platform_setting("VOICE_COMPAT_REQUIRE_ADOPTED", False)
+    return False
 
 
 def _compat_event_backlog() -> int:
@@ -2350,9 +2348,7 @@ def _compat_event_backlog() -> int:
 
 
 def _adopted_selector_set() -> set[str]:
-    raw = _portal_settings().get("VOICE_SATELLITE_TARGETS")
-    values = _parse_json_string_list(raw)
-    return {str(v).strip() for v in values if str(v).strip()}
+    return set()
 
 
 def _selector_normalize(value: Any) -> str:
@@ -2363,12 +2359,7 @@ def _selector_allowed(selector: str) -> bool:
     token = _selector_normalize(selector)
     if not token:
         return False
-    if not _compat_require_adopted():
-        return True
-    adopted = _adopted_selector_set()
-    if not adopted:
-        return False
-    return token in adopted
+    return True
 
 
 async def _compat_require_selector(selector: str) -> str:
@@ -2566,28 +2557,6 @@ def _esphome_target_map() -> Dict[str, str]:
         if not selector or not host:
             continue
         by_selector[selector] = host
-
-    if _esphome_auto_target_manual():
-        for host in _normalize_csv_or_lines(_portal_settings().get("VOICE_MANUAL_TARGETS")):
-            token = _lower(host)
-            if not token:
-                continue
-            selector = f"host:{token}"
-            by_selector.setdefault(selector, token)
-
-    adopted = _adopted_selector_set()
-    if adopted:
-        filtered: Dict[str, str] = {}
-        for selector in adopted:
-            if selector in by_selector:
-                filtered[selector] = by_selector[selector]
-                continue
-            if selector.startswith("host:"):
-                host = _lower(selector.split(":", 1)[1])
-                if host:
-                    filtered[selector] = host
-        if filtered:
-            return filtered
 
     return by_selector
 
@@ -3822,7 +3791,7 @@ async def _native_discover_satellites_mdns() -> List[Dict[str, Any]]:
 
 async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) -> Dict[str, Any]:
     now = _native_now()
-    counts = {"manual": 0, "mdns_esphome": 0, "excluded_ha": 0}
+    counts = {"mdns_esphome": 0, "excluded_ha": 0}
     exclude_ha_assist = _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True)
     ha_entity_ids: List[str] = []
     if exclude_ha_assist:
@@ -3852,20 +3821,6 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
             counts["excluded_ha"] += removed
             _save_voice_satellite_registry(kept_rows)
 
-    manual_targets = _normalize_csv_or_lines(_portal_settings().get("VOICE_MANUAL_TARGETS"))
-    for host in manual_targets:
-        selector = f"host:{_lower(host)}"
-        _upsert_voice_satellite(
-            {
-                "selector": selector,
-                "host": _lower(host),
-                "name": host,
-                "source": "manual",
-                "metadata": {"manual": True},
-            }
-        )
-        counts["manual"] += 1
-
     for row in await _native_discover_satellites_mdns():
         selector = _text((row or {}).get("selector"))
         if not selector:
@@ -3886,7 +3841,6 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
     _native_voice_discovery_state["last_counts"] = counts
     _native_debug(
         "discovery summary "
-        f"manual={counts.get('manual', 0)} "
         f"mdns={counts.get('mdns_esphome', 0)} "
         f"excluded_ha={counts.get('excluded_ha', 0)}"
     )
@@ -4096,16 +4050,12 @@ async def _on_startup():
         _native_debug("startup cleared legacy blocked satellite cache")
     except Exception:
         pass
-    if _native_voice_discovery_task is None or _native_voice_discovery_task.done():
-        _native_voice_discovery_task = asyncio.create_task(_native_discovery_loop())
+    # Discovery is manual-only: run when user clicks Discover / Refresh.
+    _native_voice_discovery_task = None
     if _esphome_native_task is None or _esphome_native_task.done():
         _esphome_native_task = asyncio.create_task(_esphome_native_loop())
     await _compat_tcp_start_server()
-    if _voice_backend_mode() == VOICE_BACKEND_MODE_NATIVE:
-        try:
-            await _native_discover_satellites_once(force_ha_refresh=True)
-        except Exception as exc:
-            logger.warning("[native-voice] startup discovery failed: %s", exc)
+    logger.info("[voice_core] discovery mode=manual_only (no startup scan, no background scan)")
 
 
 @app.on_event("shutdown")
@@ -4391,7 +4341,7 @@ async def voice_esphome_connect(payload: VoiceESPHomeConnectIn, x_tater_token: O
     if not host and selector.startswith("host:"):
         host = _lower(selector.split(":", 1)[1])
     if not host:
-        raise HTTPException(status_code=400, detail="No host resolved for selector. Provide host or configure manual/adopted host.")
+        raise HTTPException(status_code=400, detail="No host resolved for selector. Provide host or add the satellite first.")
     logger.info(
         "[voice_core] manual esphome connect selector=%s host=%s port=%s",
         selector,
