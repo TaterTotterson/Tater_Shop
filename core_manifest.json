@@ -83,7 +83,7 @@
       "autostart_key": "voice_core_running",
       "tags": [],
       "entry": "cores/voice_core.py",
-      "sha256": "26e6ff18efe95050d59078c428387af2ec1a382e6f785997e67b3c4df386b737"
+      "sha256": "ad3aaf996e328e24dcc302310bc8920ec266b5dfaca77bc2acc18b36b75928fe"
     }
   ]
 }
