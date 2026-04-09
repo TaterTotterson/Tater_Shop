@@ -55,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.1.3'
+    version = '2.1.4'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -120,6 +120,43 @@ class HALightsPlugin(ToolVerba):
     @staticmethod
     def _coerce_text(value: Any) -> str:
         return str(value or "").strip()
+
+    def _normalize_handler_args(self, args: Any) -> Dict[str, Any]:
+        """Accept multiple caller shapes (voice_core/hydra) and normalize to dict."""
+        if isinstance(args, dict):
+            payload = dict(args)
+            nested = payload.get("arguments")
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                # Preserve explicit top-level overrides (for example entity_id)
+                for key, value in payload.items():
+                    if key == "arguments":
+                        continue
+                    merged[key] = value
+                return merged
+            return payload
+
+        if isinstance(args, str):
+            text = self._coerce_text(args)
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    nested = parsed.get("arguments")
+                    if isinstance(nested, dict):
+                        merged = dict(nested)
+                        for key, value in parsed.items():
+                            if key == "arguments":
+                                continue
+                            merged[key] = value
+                        return merged
+                    return dict(parsed)
+            except Exception:
+                pass
+            return {"query": text}
+
+        return {}
 
     @staticmethod
     def _decode_map(raw: Optional[dict]) -> dict:
@@ -767,7 +804,7 @@ class HALightsPlugin(ToolVerba):
         )
 
     async def _handle(self, args, llm_client):
-        args = args or {}
+        args = self._normalize_handler_args(args)
         query = self._coerce_text(args.get("query"))
         if not query:
             return action_failure(
@@ -997,11 +1034,21 @@ class HALightsPlugin(ToolVerba):
             say_hint="Reply briefly that the light command is complete. Do not include rgb/xy/hs/internal attribute dumps.",
         )
 
-    async def handle_homeassistant(self, args, llm_client):
-        return await self._handle(args, llm_client)
+    async def handle_homeassistant(self, args=None, llm_client=None, *unused_args, **unused_kwargs):
+        payload = self._normalize_handler_args(args)
+        if not self._coerce_text(payload.get("query")):
+            payload_query = self._coerce_text(unused_kwargs.get("query"))
+            if payload_query:
+                payload["query"] = payload_query
+        return await self._handle(payload, llm_client)
 
-    async def handle_voice_core(self, args, llm_client):
-        return await self._handle(args, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, *unused_args, **unused_kwargs):
+        payload = self._normalize_handler_args(args)
+        if not self._coerce_text(payload.get("query")):
+            payload_query = self._coerce_text(unused_kwargs.get("query"))
+            if payload_query:
+                payload["query"] = payload_query
+        return await self._handle(payload, llm_client)
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
