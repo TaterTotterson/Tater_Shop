@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.26"
+__version__ = "2.0.28"
 
 load_dotenv()
 
@@ -120,13 +120,13 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
-DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.0
+DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.70
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 1.25
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
-DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
+DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
@@ -2060,6 +2060,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         sensor_rows = metadata.get("sensor_entity_ids") if isinstance(metadata.get("sensor_entity_ids"), list) else []
         sensor_ids = [str(item).strip() for item in sensor_rows if str(item).strip()]
+        entity_count = int(metadata.get("esphome_entity_count") or 0)
         client = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
         connected = bool(client.get("connected"))
         selected = bool(metadata.get("esphome_selected"))
@@ -2095,6 +2096,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     {"key": "satellite_id", "label": "Satellite ID", "type": "text", "value": _text(row.get("satellite_id")) or "-", "read_only": True},
                     {"key": "connection", "label": "ESPHome Connection", "type": "text", "value": connection_label, "read_only": True},
                     {"key": "selected", "label": "Selected", "type": "text", "value": "yes" if selected else "no", "read_only": True},
+                    {"key": "entity_count", "label": "ESPHome Entities", "type": "text", "value": str(entity_count) if entity_count > 0 else "-", "read_only": True},
                     {"key": "sensors", "label": "Sensors", "type": "textarea", "value": "\n".join(sensor_ids) if sensor_ids else "-", "read_only": True},
                 ],
             }
@@ -2960,6 +2962,93 @@ def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict
         "api_audio_supported": True if not api_audio_known else bool(api_audio_bit and (int(flags) & int(api_audio_bit))),
         "speaker_supported": True if not speaker_known else bool(speaker_bit and (int(flags) & int(speaker_bit))),
     }
+
+
+def _esphome_entity_type_token(info: Any) -> str:
+    cls = _text(getattr(getattr(info, "__class__", None), "__name__", ""))
+    if not cls:
+        return ""
+    token = _lower(cls)
+    if token.endswith("info"):
+        token = token[:-4]
+    token = token.replace("_", "")
+    mapping = {
+        "binarysensor": "binary_sensor",
+        "textsensor": "text_sensor",
+        "numbersensor": "sensor",
+        "select": "select",
+        "switch": "switch",
+        "light": "light",
+        "sensor": "sensor",
+        "button": "button",
+        "cover": "cover",
+        "lock": "lock",
+        "fan": "fan",
+        "climate": "climate",
+        "mediaplayer": "media_player",
+        "camera": "camera",
+    }
+    if token in mapping:
+        return mapping[token]
+    if "sensor" in token:
+        return "sensor"
+    return token
+
+
+def _esphome_entity_info_row(info: Any) -> Optional[Dict[str, Any]]:
+    entity_type = _esphome_entity_type_token(info)
+    key_val = getattr(info, "key", None)
+    try:
+        entity_key = int(key_val) if key_val is not None else 0
+    except Exception:
+        entity_key = 0
+    object_id = _text(getattr(info, "object_id", None))
+    name = _text(getattr(info, "name", None))
+    device_class = _text(getattr(info, "device_class", None))
+    unit = _text(getattr(info, "unit_of_measurement", None))
+    if not object_id and not name and not entity_type and not entity_key:
+        return None
+    slug = _lower(object_id or name).replace(" ", "_")
+    entity_id = f"{entity_type}.{slug}" if entity_type and slug else ""
+    return {
+        "key": int(entity_key),
+        "type": entity_type or "entity",
+        "object_id": object_id,
+        "name": name,
+        "device_class": device_class,
+        "unit": unit,
+        "entity_id": entity_id,
+    }
+
+
+async def _esphome_fetch_entities_snapshot(client: Any, *, timeout: float) -> List[Dict[str, Any]]:
+    method = getattr(client, "list_entities_services", None)
+    if not callable(method):
+        return []
+    try:
+        result = method()
+    except Exception:
+        return []
+    if inspect.isawaitable(result):
+        with contextlib.suppress(Exception):
+            result = await asyncio.wait_for(result, timeout=max(1.0, float(timeout)))
+
+    entries: List[Any] = []
+    if isinstance(result, tuple):
+        for item in result:
+            if isinstance(item, list):
+                entries.extend(item)
+    elif isinstance(result, list):
+        entries = list(result)
+
+    rows: List[Dict[str, Any]] = []
+    for item in entries:
+        row = _esphome_entity_info_row(item)
+        if not isinstance(row, dict):
+            continue
+        rows.append(row)
+    rows.sort(key=lambda row: (_text(row.get("type")), _text(row.get("name")), _text(row.get("object_id"))))
+    return rows
 
 
 async def _esphome_client_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -4331,6 +4420,8 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
             "api_audio_supported": True,
             "speaker_supported": True,
         }
+        entity_rows: List[Dict[str, Any]] = []
+        sensor_ids: List[str] = []
         with contextlib.suppress(Exception):
             info = await _esphome_client_call(client, "device_info")
             name_fields = (
@@ -4343,6 +4434,22 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     device_name = label
                     break
             voice_features = _esphome_voice_feature_snapshot(info, client, module)
+        with contextlib.suppress(Exception):
+            entity_rows = await _esphome_fetch_entities_snapshot(
+                client,
+                timeout=max(2.0, timeout),
+            )
+        if entity_rows:
+            seen_sensor = set()
+            for row in entity_rows:
+                entity_type = _text(row.get("type"))
+                if entity_type not in {"sensor", "binary_sensor", "text_sensor"}:
+                    continue
+                entity_id = _text(row.get("entity_id")) or _text(row.get("object_id"))
+                if not entity_id or entity_id in seen_sensor:
+                    continue
+                seen_sensor.add(entity_id)
+                sensor_ids.append(entity_id)
 
         unsubscribe = await _esphome_subscribe_voice_assistant(
             token,
@@ -4371,6 +4478,8 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                    "esphome_entity_count": len(entity_rows),
+                    "sensor_entity_ids": sensor_ids,
                 },
             }
         )
@@ -4388,6 +4497,8 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                    "esphome_entity_count": len(entity_rows),
+                    "sensor_entity_ids": sensor_ids,
                 },
             },
         )
@@ -4407,6 +4518,9 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                    "esphome_entity_count": len(entity_rows),
+                    "sensor_entity_ids": sensor_ids,
+                    "entities": entity_rows,
                     "last_success_ts": _native_now(),
                     "last_error": "",
                     "source": source,
