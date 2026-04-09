@@ -60,7 +60,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.19"
+__version__ = "2.0.20"
 
 load_dotenv()
 
@@ -124,6 +124,9 @@ DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
 DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.95
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
+DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
+DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
+DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -2745,6 +2748,30 @@ def _esphome_server_vad_silence_s() -> float:
     return min(5.0, max(0.25, float(value)))
 
 
+def _esphome_server_vad_drop_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_DROP_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_DROP_DB,
+    )
+    return min(40.0, max(4.0, float(value)))
+
+
+def _esphome_server_vad_trigger_margin_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB,
+    )
+    return min(30.0, max(2.0, float(value)))
+
+
+def _esphome_server_vad_release_margin_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB,
+    )
+    return min(20.0, max(1.0, float(value)))
+
+
 def _esphome_server_vad_min_speech_chunks() -> int:
     value = _get_int_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS",
@@ -2995,6 +3022,10 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_speech_chunks": 0,
             "vad_silence_start_ts": 0.0,
             "vad_last_dbfs": None,
+            "vad_noise_floor_dbfs": None,
+            "vad_peak_dbfs": None,
+            "vad_dynamic_trigger_dbfs": None,
+            "vad_dynamic_release_dbfs": None,
             "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
@@ -3118,6 +3149,10 @@ async def _esphome_finalize_voice_session(
         runtime["vad_speech_chunks"] = 0
         runtime["vad_silence_start_ts"] = 0.0
         runtime["vad_last_dbfs"] = None
+        runtime["vad_noise_floor_dbfs"] = None
+        runtime["vad_peak_dbfs"] = None
+        runtime["vad_dynamic_trigger_dbfs"] = None
+        runtime["vad_dynamic_release_dbfs"] = None
 
     if not session_id:
         return
@@ -3324,6 +3359,10 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_speech_chunks"] = 0
             runtime["vad_silence_start_ts"] = 0.0
             runtime["vad_last_dbfs"] = None
+            runtime["vad_noise_floor_dbfs"] = None
+            runtime["vad_peak_dbfs"] = None
+            runtime["vad_dynamic_trigger_dbfs"] = None
+            runtime["vad_dynamic_release_dbfs"] = None
             runtime["watchdog_task"] = asyncio.create_task(
                 _esphome_session_watchdog(token, client, module, session_id)
             )
@@ -3376,6 +3415,10 @@ async def _esphome_subscribe_voice_assistant(
             should_finalize = False
             finalize_details: Dict[str, Any] = {}
             dbfs: Optional[float] = None
+            trigger_threshold: Optional[float] = None
+            release_threshold: Optional[float] = None
+            noise_floor_dbfs: Optional[float] = None
+            peak_dbfs: Optional[float] = None
             async with lock:
                 now = _native_now()
                 runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
@@ -3390,14 +3433,45 @@ async def _esphome_subscribe_voice_assistant(
                     runtime["vad_last_dbfs"] = round(float(dbfs), 2)
 
                 if _esphome_server_vad_enabled() and dbfs is not None:
-                    threshold = _esphome_server_vad_threshold_dbfs()
+                    abs_floor = _esphome_server_vad_threshold_dbfs()
+                    drop_db = _esphome_server_vad_drop_db()
+                    trigger_margin = _esphome_server_vad_trigger_margin_db()
+                    release_margin = _esphome_server_vad_release_margin_db()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     silence_target_s = _esphome_server_vad_silence_s()
-                    if dbfs >= threshold:
-                        runtime["vad_voice_seen"] = True
+
+                    floor_prev = runtime.get("vad_noise_floor_dbfs")
+                    floor = float(floor_prev) if isinstance(floor_prev, (int, float)) else float(dbfs)
+                    if not bool(runtime.get("vad_voice_seen")) and dbfs <= (floor + trigger_margin):
+                        floor = (floor * 0.9) + (float(dbfs) * 0.1)
+                    runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
+
+                    peak_prev = runtime.get("vad_peak_dbfs")
+                    peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
+                    if dbfs > peak:
+                        peak = float(dbfs)
+                    runtime["vad_peak_dbfs"] = round(float(peak), 2)
+
+                    trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
+                    release_threshold = max(
+                        float(abs_floor),
+                        float(floor) + float(release_margin),
+                        float(peak) - float(drop_db),
+                    )
+                    runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
+                    runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
+                    noise_floor_dbfs = float(floor)
+                    peak_dbfs = float(peak)
+
+                    if not bool(runtime.get("vad_voice_seen")):
+                        if dbfs >= trigger_threshold:
+                            runtime["vad_voice_seen"] = True
+                            runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                            runtime["vad_silence_start_ts"] = 0.0
+                    elif dbfs >= release_threshold:
                         runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                         runtime["vad_silence_start_ts"] = 0.0
-                    elif bool(runtime.get("vad_voice_seen")):
+                    else:
                         silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
                         if silence_start_ts <= 0.0:
                             silence_start_ts = now
@@ -3410,22 +3484,30 @@ async def _esphome_subscribe_voice_assistant(
                                 "speech_chunks": speech_chunks,
                                 "silence_elapsed": silence_elapsed,
                                 "dbfs": float(dbfs),
-                                "threshold": float(threshold),
+                                "trigger_threshold": float(trigger_threshold),
+                                "release_threshold": float(release_threshold),
+                                "noise_floor_dbfs": float(floor),
+                                "peak_dbfs": float(peak),
                             }
             if chunks in {1, 5, 10}:
                 dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
+                trigger_text = "-" if trigger_threshold is None else f"{trigger_threshold:.1f}"
+                release_text = "-" if release_threshold is None else f"{release_threshold:.1f}"
                 _native_debug(
-                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} dbfs={dbfs_text}"
+                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} dbfs={dbfs_text} trigger={trigger_text} release={release_text}"
                 )
             if should_finalize:
                 logger.info(
-                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s dbfs=%.1f threshold=%.1f",
+                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s dbfs=%.1f trigger=%.1f release=%.1f floor=%.1f peak=%.1f",
                     token,
                     session_id,
                     float(finalize_details.get("silence_elapsed") or 0.0),
                     int(finalize_details.get("speech_chunks") or 0),
                     float(finalize_details.get("dbfs") or 0.0),
-                    float(finalize_details.get("threshold") or 0.0),
+                    float(finalize_details.get("trigger_threshold") or 0.0),
+                    float(finalize_details.get("release_threshold") or 0.0),
+                    float(finalize_details.get("noise_floor_dbfs") or 0.0),
+                    float(finalize_details.get("peak_dbfs") or 0.0),
                 )
                 with contextlib.suppress(Exception):
                     await _esphome_finalize_voice_session(
