@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.32"
+__version__ = "2.0.33"
 
 load_dotenv()
 
@@ -131,7 +131,6 @@ DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
-DEFAULT_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
@@ -2750,14 +2749,6 @@ def _esphome_server_vad_release_margin_db() -> float:
     return min(20.0, max(1.0, float(value)))
 
 
-def _esphome_server_vad_max_trigger_above_floor_db() -> float:
-    value = _get_float_platform_setting(
-        "VOICE_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB",
-        DEFAULT_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB,
-    )
-    return min(20.0, max(0.5, float(value)))
-
-
 def _esphome_server_vad_max_release_above_floor_db() -> float:
     value = _get_float_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB",
@@ -4017,20 +4008,16 @@ async def _esphome_subscribe_voice_assistant(
                             peak = float(dbfs)
                         runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
-                        trigger_raw = max(float(abs_floor), float(floor) + float(trigger_margin))
-                        trigger_cap = float(floor) + float(_esphome_server_vad_max_trigger_above_floor_db())
-                        trigger_threshold = max(float(abs_floor), min(float(trigger_raw), float(trigger_cap)))
+                        trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
                         release_raw = max(
                             float(abs_floor),
                             float(floor) + float(release_margin),
                             float(peak) - float(drop_db),
                         )
-                        # Prevent short wake beeps/loud transients from forcing an overly-high
-                        # release threshold that keeps listening open too long.
-                        release_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
-                        release_threshold = max(float(abs_floor), min(float(release_raw), float(release_cap)))
-                        # Keep release threshold at or below trigger threshold to avoid sticky sessions.
-                        release_threshold = min(float(release_threshold), float(trigger_threshold))
+                        # Clamp release to avoid falling too low (too sticky) or jumping too high (too aggressive).
+                        release_min = float(trigger_threshold) - float(_esphome_server_vad_max_release_above_floor_db())
+                        release_max = float(trigger_threshold) + 2.0
+                        release_threshold = min(float(release_max), max(float(release_raw), float(release_min)))
                         runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
                         runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
@@ -4077,12 +4064,29 @@ async def _esphome_subscribe_voice_assistant(
                                     "noise_floor_dbfs": float(floor),
                                     "peak_dbfs": float(peak),
                                 }
-            if chunks in {1, 5, 10}:
+            if chunks in {1, 5, 10} or (chunks > 0 and (chunks % 50 == 0)):
                 dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
                 trigger_text = "-" if trigger_threshold is None else f"{trigger_threshold:.1f}"
                 release_text = "-" if release_threshold is None else f"{release_threshold:.1f}"
+                floor_text = "-"
+                peak_text = "-"
+                silence_text = "-"
+                voice_seen = False
+                async with lock:
+                    floor_val = runtime.get("vad_noise_floor_dbfs")
+                    peak_val = runtime.get("vad_peak_dbfs")
+                    silence_val = runtime.get("vad_silence_start_ts")
+                    voice_seen = bool(runtime.get("vad_voice_seen"))
+                if isinstance(floor_val, (int, float)):
+                    floor_text = f"{float(floor_val):.1f}"
+                if isinstance(peak_val, (int, float)):
+                    peak_text = f"{float(peak_val):.1f}"
+                if isinstance(silence_val, (int, float)) and float(silence_val) > 0.0:
+                    silence_text = f"{max(0.0, _native_now() - float(silence_val)):.2f}"
                 _native_debug(
-                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} dbfs={dbfs_text} trigger={trigger_text} release={release_text}"
+                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} "
+                    f"dbfs={dbfs_text} trigger={trigger_text} release={release_text} floor={floor_text} "
+                    f"peak={peak_text} silence_s={silence_text} voice_seen={str(voice_seen).lower()}"
                 )
             if emit_vad_start:
                 sent = await _esphome_send_event(
@@ -4283,6 +4287,12 @@ async def _esphome_subscribe_voice_assistant(
         )
         _native_debug(
             f"esphome session start flags selector={token} flags={int(_flags or 0)} transport={'api_audio' if api_audio_supported else f'udp:{udp_port}'}"
+        )
+        _native_debug(
+            "esphome watchdog config "
+            f"selector={token} idle_timeout_s={max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)):.2f} "
+            f"max_listen_s={max(max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)) + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS)):.2f} "
+            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f}"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
