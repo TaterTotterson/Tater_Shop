@@ -11,6 +11,8 @@ import contextlib
 import inspect
 import importlib
 import socket
+import math
+import audioop
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -46,7 +48,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.15"
+__version__ = "2.0.17"
 
 load_dotenv()
 
@@ -103,6 +105,10 @@ DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
 DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
+DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
+DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.95
+DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -137,13 +143,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_VOICE_DISCOVERY_MDNS_TIMEOUT_S,
             "description": "How long each manual discovery run listens for ESPHome mDNS service announcements.",
-        },
-        "VOICE_DISCOVERY_EXCLUDE_HA_ASSIST": {
-            "label": "Exclude HA-Connected Assist Satellites",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Hide discovered satellites that appear to already be connected as Home Assistant Assist satellites.",
         },
         "VOICE_WYOMING_STT_HOST": {
             "label": "Wyoming STT Host",
@@ -398,7 +397,7 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
         "backend_mode": _voice_backend_mode(),
         "discovery_enabled": False,
         "discovery_scan_seconds": 0,
-        "discovery_exclude_ha_assist": _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
+        "discovery_exclude_ha_assist": False,
         "satellite_targets": _parse_json_string_list(settings.get("VOICE_SATELLITE_TARGETS")),
         "manual_targets": _normalize_csv_or_lines(settings.get("VOICE_MANUAL_TARGETS")),
         "sensor_entity_ids": _parse_json_string_list(settings.get("VOICE_SENSOR_ENTITY_IDS")),
@@ -1671,12 +1670,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         for row in clients.values()
         if isinstance(row, dict) and bool(row.get("connected"))
     )
-    satellites = [
-        row
-        for row in _load_voice_satellite_registry()
-        if _text(row.get("selector"))
-        and _lower(row.get("source")) != "homeassistant_registry"
-    ]
+    satellites = [row for row in _load_voice_satellite_registry() if _text(row.get("selector"))]
     satellites = sorted(satellites, key=lambda row: _lower(row.get("name") or row.get("selector")))
     discovery = runtime_status.get("discovery") if isinstance(runtime_status.get("discovery"), dict) else {}
     last_counts = discovery.get("last_counts") if isinstance(discovery.get("last_counts"), dict) else {}
@@ -1703,8 +1697,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "title": "Discover / Refresh Satellites",
             "subtitle": (
                 f"Last run: {_voice_core_format_timestamp(discovery.get('last_run_ts'))} • "
-                f"mdns={int(last_counts.get('mdns_esphome') or 0)} "
-                f"excluded_ha={int(last_counts.get('excluded_ha') or 0)}"
+                f"mdns={int(last_counts.get('mdns_esphome') or 0)}"
             ),
             "run_action": "voice_refresh_satellites",
             "run_label": "Discover / Refresh",
@@ -1721,13 +1714,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "label": "mDNS window (sec)",
                     "type": "text",
                     "value": str(_native_discovery_mdns_timeout_s()),
-                    "read_only": True,
-                },
-                {
-                    "key": "exclude_ha",
-                    "label": "Exclude HA-connected satellites",
-                    "type": "text",
-                    "value": "yes" if _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True) else "no",
                     "read_only": True,
                 },
             ],
@@ -2401,6 +2387,34 @@ def _esphome_retry_seconds() -> int:
     return max(3, int(value))
 
 
+def _esphome_server_vad_enabled() -> bool:
+    return _get_bool_platform_setting("VOICE_ESPHOME_SERVER_VAD_ENABLED", DEFAULT_ESPHOME_SERVER_VAD_ENABLED)
+
+
+def _esphome_server_vad_threshold_dbfs() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_THRESHOLD_DBFS",
+        DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS,
+    )
+    return min(-5.0, max(-80.0, float(value)))
+
+
+def _esphome_server_vad_silence_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_SILENCE_SECONDS",
+        DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS,
+    )
+    return min(5.0, max(0.25, float(value)))
+
+
+def _esphome_server_vad_min_speech_chunks() -> int:
+    value = _get_int_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS",
+        DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS,
+    )
+    return min(60, max(1, int(value)))
+
+
 def _esphome_auto_target_manual() -> bool:
     return _get_bool_platform_setting("VOICE_ESPHOME_AUTO_TARGET_MANUAL", True)
 
@@ -2501,6 +2515,31 @@ def _esphome_audio_settings_format(audio_settings: Any) -> Dict[str, int]:
         "width": _read_int(["width", "sample_width", "sample_width_bytes"], base["width"]),
         "channels": _read_int(["channels", "num_channels"], base["channels"]),
     }
+
+
+def _esphome_pcm_dbfs(audio_bytes: bytes, *, sample_width: int) -> Optional[float]:
+    data = bytes(audio_bytes or b"")
+    width = int(sample_width or DEFAULT_VOICE_SAMPLE_WIDTH)
+    if not data or width < 1 or width > 4:
+        return None
+
+    frame_size = max(1, width)
+    usable = len(data) - (len(data) % frame_size)
+    if usable <= 0:
+        return None
+    if usable != len(data):
+        data = data[:usable]
+
+    with contextlib.suppress(Exception):
+        rms = float(audioop.rms(data, width))
+        if rms <= 0.0:
+            return -120.0
+        full_scale = float((1 << ((8 * width) - 1)) - 1)
+        if full_scale <= 0.0:
+            return None
+        normalized = min(1.0, max(rms / full_scale, 1e-9))
+        return 20.0 * math.log10(normalized)
+    return None
 
 
 def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
@@ -2611,6 +2650,10 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "last_audio_ts": 0.0,
             "audio_chunks": 0,
             "audio_bytes": 0,
+            "vad_voice_seen": False,
+            "vad_speech_chunks": 0,
+            "vad_silence_start_ts": 0.0,
+            "vad_last_dbfs": None,
             "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
@@ -2730,6 +2773,10 @@ async def _esphome_finalize_voice_session(
         runtime["conversation_id"] = ""
         runtime["session_start_ts"] = 0.0
         runtime["last_audio_ts"] = 0.0
+        runtime["vad_voice_seen"] = False
+        runtime["vad_speech_chunks"] = 0
+        runtime["vad_silence_start_ts"] = 0.0
+        runtime["vad_last_dbfs"] = None
 
     if not session_id:
         return
@@ -2930,6 +2977,10 @@ async def _esphome_subscribe_voice_assistant(
             runtime["audio_bytes"] = 0
             runtime["session_start_ts"] = _native_now()
             runtime["last_audio_ts"] = 0.0
+            runtime["vad_voice_seen"] = False
+            runtime["vad_speech_chunks"] = 0
+            runtime["vad_silence_start_ts"] = 0.0
+            runtime["vad_last_dbfs"] = None
             runtime["watchdog_task"] = asyncio.create_task(
                 _esphome_session_watchdog(token, client, module, session_id)
             )
@@ -2979,16 +3030,87 @@ async def _esphome_subscribe_voice_assistant(
                     final_chunk=False,
                 ),
             )
+            should_finalize = False
+            finalize_details: Dict[str, Any] = {}
+            dbfs: Optional[float] = None
             async with lock:
+                now = _native_now()
                 runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
                 runtime["audio_bytes"] = int(runtime.get("audio_bytes") or 0) + len(audio_bytes)
-                runtime["last_audio_ts"] = _native_now()
+                runtime["last_audio_ts"] = now
                 chunks = int(runtime.get("audio_chunks") or 0)
                 total = int(runtime.get("audio_bytes") or 0)
+                audio_format = runtime.get("audio_format") if isinstance(runtime.get("audio_format"), dict) else {}
+                sample_width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+                dbfs = _esphome_pcm_dbfs(audio_bytes, sample_width=sample_width)
+                if dbfs is not None:
+                    runtime["vad_last_dbfs"] = round(float(dbfs), 2)
+
+                if _esphome_server_vad_enabled() and dbfs is not None:
+                    threshold = _esphome_server_vad_threshold_dbfs()
+                    min_speech_chunks = _esphome_server_vad_min_speech_chunks()
+                    silence_target_s = _esphome_server_vad_silence_s()
+                    if dbfs >= threshold:
+                        runtime["vad_voice_seen"] = True
+                        runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                        runtime["vad_silence_start_ts"] = 0.0
+                    elif bool(runtime.get("vad_voice_seen")):
+                        silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+                        if silence_start_ts <= 0.0:
+                            silence_start_ts = now
+                            runtime["vad_silence_start_ts"] = silence_start_ts
+                        silence_elapsed = max(0.0, now - silence_start_ts)
+                        speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+                        if speech_chunks >= min_speech_chunks and silence_elapsed >= silence_target_s:
+                            should_finalize = True
+                            finalize_details = {
+                                "speech_chunks": speech_chunks,
+                                "silence_elapsed": silence_elapsed,
+                                "dbfs": float(dbfs),
+                                "threshold": float(threshold),
+                            }
             if chunks in {1, 5, 10}:
+                dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
                 _native_debug(
-                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total}"
+                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} dbfs={dbfs_text}"
                 )
+            if should_finalize:
+                logger.info(
+                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s dbfs=%.1f threshold=%.1f",
+                    token,
+                    session_id,
+                    float(finalize_details.get("silence_elapsed") or 0.0),
+                    int(finalize_details.get("speech_chunks") or 0),
+                    float(finalize_details.get("dbfs") or 0.0),
+                    float(finalize_details.get("threshold") or 0.0),
+                )
+                with contextlib.suppress(Exception):
+                    await _esphome_finalize_voice_session(
+                        token,
+                        client,
+                        module,
+                        abort=False,
+                        reason="server_vad",
+                    )
+        except HTTPException as exc:
+            if int(getattr(exc, "status_code", 0) or 0) in {404, 409}:
+                _native_debug(
+                    f"esphome audio ignored selector={token} session_id={session_id} status={int(getattr(exc, 'status_code', 0) or 0)}"
+                )
+                return
+            logger.warning(
+                "[native-voice] audio ingest failed selector=%s session_id=%s error=%s",
+                token,
+                session_id,
+                exc,
+            )
+            await _compat_set_error(token, str(exc))
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "tater_audio_ingest", "message": str(exc)},
+            )
         except Exception as exc:
             logger.warning(
                 "[native-voice] audio ingest failed selector=%s session_id=%s error=%s",
@@ -4432,46 +4554,12 @@ async def _native_discover_satellites_mdns() -> List[Dict[str, Any]]:
 
 async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) -> Dict[str, Any]:
     now = _native_now()
-    counts = {"mdns_esphome": 0, "excluded_ha": 0}
-    exclude_ha_assist = _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True)
-    ha_entity_ids: List[str] = []
-    if exclude_ha_assist:
-        ha_entity_ids = await _ha_assist_entity_ids_for_discovery(force_refresh=bool(force_ha_refresh))
-        _native_debug(f"discovery ha_assist_entities={len(ha_entity_ids)} force_refresh={bool(force_ha_refresh)}")
-
-    current_rows = _load_voice_satellite_registry()
-    filtered_rows = [row for row in current_rows if _lower((row or {}).get("source")) != "homeassistant_registry"]
-    if len(filtered_rows) != len(current_rows):
-        _save_voice_satellite_registry(filtered_rows)
-        _native_debug(f"discovery pruned legacy_ha_rows={len(current_rows) - len(filtered_rows)}")
-    if exclude_ha_assist and ha_entity_ids:
-        kept_rows: List[Dict[str, Any]] = []
-        removed = 0
-        for row in filtered_rows:
-            source = _lower((row or {}).get("source"))
-            if source == "mdns_esphome":
-                matched, reason = _mdns_row_matches_ha_assist(row if isinstance(row, dict) else {}, ha_entity_ids)
-                if matched:
-                    removed += 1
-                    _native_debug(
-                        f"discovery purged_existing_mDNS selector={_text((row or {}).get('selector'))} reason={reason}"
-                    )
-                    continue
-            kept_rows.append(row)
-        if removed:
-            counts["excluded_ha"] += removed
-            _save_voice_satellite_registry(kept_rows)
+    counts = {"mdns_esphome": 0}
 
     for row in await _native_discover_satellites_mdns():
         selector = _text((row or {}).get("selector"))
         if not selector:
             continue
-        if exclude_ha_assist:
-            matched, reason = _mdns_row_matches_ha_assist(row if isinstance(row, dict) else {}, ha_entity_ids)
-            if matched:
-                counts["excluded_ha"] += 1
-                _native_debug(f"discovery mdns excluded_ha selector={selector} reason={reason}")
-                continue
         _upsert_voice_satellite(row if isinstance(row, dict) else {})
         counts["mdns_esphome"] += 1
 
@@ -4482,8 +4570,7 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
     _native_voice_discovery_state["last_counts"] = counts
     _native_debug(
         "discovery summary "
-        f"mdns={counts.get('mdns_esphome', 0)} "
-        f"excluded_ha={counts.get('excluded_ha', 0)}"
+        f"mdns={counts.get('mdns_esphome', 0)}"
     )
     return counts
 
@@ -4679,11 +4766,10 @@ async def _on_startup():
     global _llm, _native_voice_discovery_task, _esphome_native_task
     _llm = get_llm_client_from_env()
     logger.info(
-        "[voice_core] startup version=%s backend=%s discovery_mode=%s exclude_ha_assist=%s esphome_native=%s",
+        "[voice_core] startup version=%s backend=%s discovery_mode=%s esphome_native=%s",
         __version__,
         _voice_backend_mode(),
         "manual_only",
-        _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
         _esphome_native_enabled(),
     )
     try:
@@ -4737,11 +4823,7 @@ async def voice_config(x_tater_token: Optional[str] = Header(None)):
 @app.get("/tater-ha/v1/voice/satellites", response_model=VoiceSatellitesOut)
 async def voice_satellites(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
-    rows = [
-        row
-        for row in _load_voice_satellite_registry()
-        if _lower(row.get("source")) != "homeassistant_registry"
-    ]
+    rows = list(_load_voice_satellite_registry())
     rows = sorted(rows, key=lambda row: _lower(row.get("name") or row.get("selector")))
     return {"satellites": rows}
 
