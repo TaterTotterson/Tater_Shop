@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.14"
+__version__ = "2.0.15"
 
 load_dotenv()
 
@@ -2871,6 +2871,27 @@ async def _esphome_subscribe_voice_assistant(
             )
             return None
 
+        if WYOMING_IMPORT_ERROR:
+            msg = (
+                "Wyoming dependency is unavailable in Voice Core runtime. "
+                f"Import error: {WYOMING_IMPORT_ERROR}"
+            )
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _compat_set_error(token, msg)
+            await _compat_emit_event(
+                token,
+                "esphome_pipeline_unavailable",
+                {"reason": "wyoming_unavailable"},
+            )
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "wyoming_unavailable", "message": msg},
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
+
         if _text(runtime.get("session_id")):
             with contextlib.suppress(Exception):
                 await _esphome_finalize_voice_session(
@@ -2984,6 +3005,10 @@ async def _esphome_subscribe_voice_assistant(
             )
 
     async def _handle_stop(abort: bool) -> None:
+        lock = runtime.get("lock")
+        if lock is None or not hasattr(lock, "acquire"):
+            runtime["lock"] = asyncio.Lock()
+            lock = runtime["lock"]
         async with lock:
             session_id = _text(runtime.get("session_id"))
             chunks = int(runtime.get("audio_chunks") or 0)
