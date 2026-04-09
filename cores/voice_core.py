@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.24"
+__version__ = "2.0.26"
 
 load_dotenv()
 
@@ -120,15 +120,16 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
-DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 0.8
+DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.0
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.45
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.70
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
-DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
+DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
+DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
 DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS = -52.0
@@ -3012,25 +3013,12 @@ async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size
     return chunks
 
 
-def _esphome_estimate_pcm_duration_s(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> float:
-    data = bytes(audio_bytes or b"")
-    if not data:
-        return 0.0
-    fmt = audio_format if isinstance(audio_format, dict) else {}
-    rate = int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
-    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
-    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
-    if rate <= 0 or width <= 0 or channels <= 0:
-        return 0.0
-    frame_bytes = width * channels
-    if frame_bytes <= 0:
-        return 0.0
-    return float(len(data)) / float(rate * frame_bytes)
-
-
-def _esphome_url_run_end_timeout_s(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> float:
-    estimate = _esphome_estimate_pcm_duration_s(audio_bytes, audio_format)
-    return max(1.5, min(30.0, float(estimate) + 1.0))
+def _esphome_url_run_end_timeout_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_ANNOUNCEMENT_TIMEOUT_S",
+        DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S,
+    )
+    return max(2.0, min(35.0, float(value)))
 
 
 def _esphome_cancel_announcement_wait(runtime: Dict[str, Any]) -> None:
@@ -3554,7 +3542,7 @@ async def _esphome_finalize_voice_session(
                 speaker_supported = True
                 tts_mode = "stream_fallback"
         wait_for_announcement = (not speaker_supported) and tts_url.startswith(("http://", "https://"))
-        run_end_timeout_s = _esphome_url_run_end_timeout_s(tts_audio, tts_format) if wait_for_announcement else 0.0
+        run_end_timeout_s = _esphome_url_run_end_timeout_s() if wait_for_announcement else 0.0
 
         await _esphome_send_event(
             client,
