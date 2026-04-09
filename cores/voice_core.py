@@ -13,9 +13,11 @@ import importlib
 import socket
 import math
 import audioop
+import io
+import wave
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 import uvicorn
 import requests
@@ -60,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.20"
+__version__ = "2.0.22"
 
 load_dotenv()
 
@@ -127,6 +129,7 @@ DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
+DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -2502,6 +2505,7 @@ async def _maybe_reopen_listening(conv_key: str, ctx: Dict[str, Any], assistant_
 _native_voice_sessions: Dict[str, Dict[str, Any]] = {}
 _native_voice_sessions_lock = asyncio.Lock()
 _native_voice_discovery_task: Optional[asyncio.Task] = None
+_voice_core_runtime_port = int(DEFAULT_VOICE_CORE_BIND_PORT)
 _native_voice_discovery_state: Dict[str, Any] = {
     "runs": 0,
     "last_run_ts": 0.0,
@@ -2526,6 +2530,8 @@ _esphome_native_stats: Dict[str, Any] = {
     "last_error": "",
 }
 _esphome_voice_runtime: Dict[str, Dict[str, Any]] = {}
+_esphome_tts_url_store: Dict[str, Dict[str, Any]] = {}
+_esphome_tts_url_store_lock = threading.Lock()
 _wyoming_tts_voice_catalog_mem: List[Dict[str, str]] = []
 _wyoming_tts_voice_catalog_meta_mem: Dict[str, Any] = {
     "host": "",
@@ -3002,6 +3008,154 @@ async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size
     return chunks
 
 
+def _esphome_tts_url_ttl_s() -> float:
+    value = _get_float_platform_setting("VOICE_ESPHOME_TTS_URL_TTL_S", DEFAULT_ESPHOME_TTS_URL_TTL_S)
+    return max(30.0, min(900.0, float(value)))
+
+
+def _voice_core_service_host_for_peer(peer_host: str) -> str:
+    env_host = _text(os.getenv("VOICE_CORE_PUBLIC_HOST"))
+    if env_host:
+        return env_host
+
+    if _text(BIND_HOST) and BIND_HOST not in {"0.0.0.0", "::"}:
+        return _text(BIND_HOST)
+
+    targets: List[str] = []
+    peer = _lower(peer_host)
+    if peer and not peer.startswith("127."):
+        targets.append(peer)
+    targets.append("8.8.8.8")
+
+    for target in targets:
+        with contextlib.suppress(Exception):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((target, 80))
+                host = _text(probe.getsockname()[0])
+                if host and not host.startswith("127."):
+                    return host
+
+    with contextlib.suppress(Exception):
+        host = _text(socket.gethostbyname(socket.gethostname()))
+        if host and not host.startswith("127."):
+            return host
+    return "127.0.0.1"
+
+
+def _esphome_selector_host(selector: str) -> str:
+    token = _text(selector)
+    if token.startswith("host:"):
+        return _lower(token.split(":", 1)[1])
+    registry = _load_voice_satellite_registry()
+    for row in registry:
+        if _text(row.get("selector")) != token:
+            continue
+        host = _lower(row.get("host"))
+        if host:
+            return host
+    return ""
+
+
+def _esphome_pcm_to_wav(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> Tuple[bytes, Dict[str, int]]:
+    pcm = bytes(audio_bytes or b"")
+    if not pcm:
+        return b"", {
+            "rate": int(DEFAULT_VOICE_SAMPLE_RATE_HZ),
+            "width": int(DEFAULT_VOICE_SAMPLE_WIDTH),
+            "channels": int(DEFAULT_VOICE_CHANNELS),
+        }
+
+    fmt = audio_format if isinstance(audio_format, dict) else {}
+    rate = int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+
+    if rate < 8000 or rate > 192000:
+        rate = int(DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    if width not in {1, 2, 3, 4}:
+        width = int(DEFAULT_VOICE_SAMPLE_WIDTH)
+    if channels < 1 or channels > 8:
+        channels = int(DEFAULT_VOICE_CHANNELS)
+
+    block_align = max(1, width * channels)
+    usable = len(pcm) - (len(pcm) % block_align)
+    if usable <= 0:
+        return b"", {
+            "rate": rate,
+            "width": width,
+            "channels": channels,
+        }
+    if usable != len(pcm):
+        pcm = pcm[:usable]
+
+    with io.BytesIO() as out:
+        with wave.open(out, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(width)
+            wav_file.setframerate(rate)
+            wav_file.writeframes(pcm)
+        return out.getvalue(), {
+            "rate": rate,
+            "width": width,
+            "channels": channels,
+        }
+
+
+def _esphome_tts_url_prune_locked(now_ts: Optional[float] = None) -> int:
+    now = float(now_ts if isinstance(now_ts, (int, float)) else _native_now())
+    removed = 0
+    for stream_id, row in list(_esphome_tts_url_store.items()):
+        if not isinstance(row, dict):
+            _esphome_tts_url_store.pop(stream_id, None)
+            removed += 1
+            continue
+        expires_ts = float(row.get("expires_ts") or 0.0)
+        if expires_ts > 0.0 and now >= expires_ts:
+            _esphome_tts_url_store.pop(stream_id, None)
+            removed += 1
+    return removed
+
+
+def _esphome_store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> str:
+    wav_bytes, normalized_format = _esphome_pcm_to_wav(audio_bytes, audio_format)
+    if not wav_bytes:
+        return ""
+
+    stream_id = uuid.uuid4().hex
+    expires_ts = _native_now() + _esphome_tts_url_ttl_s()
+    with _esphome_tts_url_store_lock:
+        _esphome_tts_url_prune_locked()
+        _esphome_tts_url_store[stream_id] = {
+            "id": stream_id,
+            "selector": _text(selector),
+            "session_id": _text(session_id),
+            "created_ts": _native_now(),
+            "expires_ts": expires_ts,
+            "audio_format": normalized_format,
+            "wav_bytes": wav_bytes,
+        }
+
+    host = _voice_core_service_host_for_peer(_esphome_selector_host(selector))
+    port = int(_voice_core_runtime_port or DEFAULT_VOICE_CORE_BIND_PORT)
+    url = f"http://{host}:{port}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
+    _native_debug(
+        f"esphome tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
+    )
+    return url
+
+
+def _esphome_fetch_tts_url(stream_id: str) -> Optional[Dict[str, Any]]:
+    token = _text(stream_id)
+    if not token:
+        return None
+    with _esphome_tts_url_store_lock:
+        _esphome_tts_url_prune_locked()
+        row = _esphome_tts_url_store.get(token)
+        if not isinstance(row, dict):
+            return None
+        return dict(row)
+
+
 def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
     token = _text(selector)
     row = _esphome_voice_runtime.get(token)
@@ -3026,6 +3180,7 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_peak_dbfs": None,
             "vad_dynamic_trigger_dbfs": None,
             "vad_dynamic_release_dbfs": None,
+            "vad_start_sent": False,
             "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
@@ -3153,6 +3308,7 @@ async def _esphome_finalize_voice_session(
         runtime["vad_peak_dbfs"] = None
         runtime["vad_dynamic_trigger_dbfs"] = None
         runtime["vad_dynamic_release_dbfs"] = None
+        runtime["vad_start_sent"] = False
 
     if not session_id:
         return
@@ -3174,6 +3330,14 @@ async def _esphome_finalize_voice_session(
         return
 
     try:
+        # Home Assistant emits STT_VAD_END before microphone stop/awaiting-response transitions.
+        with contextlib.suppress(Exception):
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"),
+                None,
+            )
         await _native_append_audio_chunk(
             session_id,
             VoiceNativeSessionAudioIn(audio_base64="", final_chunk=True),
@@ -3183,6 +3347,10 @@ async def _esphome_finalize_voice_session(
         response_text = _text(result.get("response_text"))
         tts_b64 = _text(result.get("tts_audio_base64"))
         tts_audio = base64.b64decode(tts_b64) if tts_b64 else b""
+        tts_format = result.get("tts_audio_format") if isinstance(result.get("tts_audio_format"), dict) else {}
+        tts_url = _esphome_store_tts_url(token, session_id, tts_audio, tts_format)
+        if not tts_url:
+            tts_url = "voice-assistant://stream"
 
         await _esphome_send_event(
             client,
@@ -3205,18 +3373,37 @@ async def _esphome_finalize_voice_session(
                 "continue_conversation": "0",
             },
         )
+        # Matches ESPHome/Assist event flow for streamed local speaker output.
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_INTENT_PROGRESS", "INTENT_PROGRESS"),
+            {"tts_start_streaming": "1"},
+        )
         await _esphome_send_event(
             client,
             module,
             ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
             {"text": response_text},
         )
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_STREAM_START", "TTS_STREAM_START"),
+            None,
+        )
         tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
         await _esphome_send_event(
             client,
             module,
+            ("VOICE_ASSISTANT_TTS_STREAM_END", "TTS_STREAM_END"),
+            None,
+        )
+        await _esphome_send_event(
+            client,
+            module,
             ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
-            {"text": response_text},
+            {"url": tts_url},
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         await _compat_emit_event(
@@ -3229,16 +3416,18 @@ async def _esphome_finalize_voice_session(
                 "response_text": response_text,
                 "tts_audio_bytes": len(tts_audio),
                 "tts_audio_chunks": int(tts_chunks),
+                "tts_url": tts_url,
             },
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_url=%s",
             token,
             session_id,
             len(transcript),
             len(response_text),
             len(tts_audio),
             int(tts_chunks),
+            tts_url,
         )
     except Exception as exc:
         msg = str(exc)
@@ -3363,6 +3552,7 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_peak_dbfs"] = None
             runtime["vad_dynamic_trigger_dbfs"] = None
             runtime["vad_dynamic_release_dbfs"] = None
+            runtime["vad_start_sent"] = False
             runtime["watchdog_task"] = asyncio.create_task(
                 _esphome_session_watchdog(token, client, module, session_id)
             )
@@ -3419,6 +3609,7 @@ async def _esphome_subscribe_voice_assistant(
             release_threshold: Optional[float] = None
             noise_floor_dbfs: Optional[float] = None
             peak_dbfs: Optional[float] = None
+            emit_vad_start = False
             async with lock:
                 now = _native_now()
                 runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
@@ -3468,6 +3659,9 @@ async def _esphome_subscribe_voice_assistant(
                             runtime["vad_voice_seen"] = True
                             runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                             runtime["vad_silence_start_ts"] = 0.0
+                            if not bool(runtime.get("vad_start_sent")):
+                                runtime["vad_start_sent"] = True
+                                emit_vad_start = True
                     elif dbfs >= release_threshold:
                         runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                         runtime["vad_silence_start_ts"] = 0.0
@@ -3495,6 +3689,16 @@ async def _esphome_subscribe_voice_assistant(
                 release_text = "-" if release_threshold is None else f"{release_threshold:.1f}"
                 _native_debug(
                     f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} dbfs={dbfs_text} trigger={trigger_text} release={release_text}"
+                )
+            if emit_vad_start:
+                sent = await _esphome_send_event(
+                    client,
+                    module,
+                    ("VOICE_ASSISTANT_STT_VAD_START", "STT_VAD_START"),
+                    None,
+                )
+                _native_debug(
+                    f"esphome vad_start selector={token} session_id={session_id} sent={bool(sent)}"
                 )
             if should_finalize:
                 logger.info(
@@ -5454,6 +5658,29 @@ async def voice_wyoming_tts_voices_refresh(x_tater_token: Optional[str] = Header
     return {"ok": True, **result}
 
 
+@app.get("/tater-ha/v1/voice/esphome/tts/{stream_id}.wav")
+async def voice_esphome_tts_wav(stream_id: str):
+    row = _esphome_fetch_tts_url(stream_id)
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail="TTS stream not found or expired.")
+    wav_bytes = row.get("wav_bytes")
+    data = bytes(wav_bytes) if isinstance(wav_bytes, (bytes, bytearray)) else b""
+    if not data:
+        raise HTTPException(status_code=404, detail="TTS stream audio is unavailable.")
+    _native_debug(
+        f"esphome tts url fetch stream_id={_text(stream_id)} session_id={_text(row.get('session_id'))} "
+        f"selector={_text(row.get('selector'))} bytes={len(data)}"
+    )
+    return Response(
+        content=data,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 @app.get("/tater-ha/v1/voice/native/status", response_model=VoiceNativeStatusOut)
 async def voice_native_status(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
@@ -5777,6 +6004,7 @@ async def voice_compat_control(payload: VoiceCompatControlIn, x_tater_token: Opt
 
 def run(stop_event: Optional[threading.Event] = None):
     """Match your other platforms’ run signature and graceful stop behavior."""
+    global _voice_core_runtime_port
     settings = _voice_core_settings()
     raw_port = settings.get("bind_port")
     try:
@@ -5816,6 +6044,7 @@ def run(stop_event: Optional[threading.Event] = None):
             fallback_port,
         )
         port = int(fallback_port)
+    _voice_core_runtime_port = int(port)
 
     config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
