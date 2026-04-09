@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.13"
+__version__ = "2.0.14"
 
 load_dotenv()
 
@@ -101,6 +101,8 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
+DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
+DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -2605,6 +2607,11 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
                 "width": int(DEFAULT_VOICE_SAMPLE_WIDTH),
                 "channels": int(DEFAULT_VOICE_CHANNELS),
             },
+            "session_start_ts": 0.0,
+            "last_audio_ts": 0.0,
+            "audio_chunks": 0,
+            "audio_bytes": 0,
+            "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
         _esphome_voice_runtime[token] = row
@@ -2612,6 +2619,76 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
     if lock is None or not hasattr(lock, "acquire"):
         row["lock"] = asyncio.Lock()
     return row
+
+
+def _esphome_cancel_watchdog(runtime: Dict[str, Any]) -> None:
+    task = runtime.get("watchdog_task")
+    if isinstance(task, asyncio.Task):
+        if task is asyncio.current_task():
+            runtime["watchdog_task"] = None
+            return
+        task.cancel()
+    runtime["watchdog_task"] = None
+
+
+async def _esphome_session_watchdog(selector: str, client: Any, module: Any, session_id: str) -> None:
+    token = _text(selector)
+    sid = _text(session_id)
+    if not token or not sid:
+        return
+
+    idle_timeout = max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S))
+    max_listen = max(idle_timeout + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS))
+
+    while True:
+        await asyncio.sleep(0.35)
+        runtime = _esphome_voice_runtime.get(token)
+        if not isinstance(runtime, dict):
+            return
+        current_session = _text(runtime.get("session_id"))
+        if not current_session or current_session != sid:
+            return
+
+        now = _native_now()
+        chunks = int(runtime.get("audio_chunks") or 0)
+        last_audio_ts = float(runtime.get("last_audio_ts") or 0.0)
+        start_ts = float(runtime.get("session_start_ts") or 0.0)
+
+        if chunks > 0 and last_audio_ts > 0.0 and (now - last_audio_ts) >= idle_timeout:
+            logger.info(
+                "[native-voice] watchdog finalize selector=%s session_id=%s reason=idle_timeout chunks=%s bytes=%s",
+                token,
+                sid,
+                chunks,
+                int(runtime.get("audio_bytes") or 0),
+            )
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=False,
+                    reason="idle_timeout",
+                )
+            return
+
+        if start_ts > 0.0 and (now - start_ts) >= max_listen:
+            logger.info(
+                "[native-voice] watchdog finalize selector=%s session_id=%s reason=max_listen_timeout chunks=%s bytes=%s",
+                token,
+                sid,
+                chunks,
+                int(runtime.get("audio_bytes") or 0),
+            )
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=False,
+                    reason="max_listen_timeout",
+                )
+            return
 
 
 async def _native_mark_session_aborted(session_id: str, reason: str) -> None:
@@ -2646,10 +2723,13 @@ async def _esphome_finalize_voice_session(
         lock = runtime["lock"]
 
     async with lock:
+        _esphome_cancel_watchdog(runtime)
         session_id = _text(runtime.get("session_id"))
         conversation_id = _text(runtime.get("conversation_id"))
         runtime["session_id"] = ""
         runtime["conversation_id"] = ""
+        runtime["session_start_ts"] = 0.0
+        runtime["last_audio_ts"] = 0.0
 
     if not session_id:
         return
@@ -2821,11 +2901,17 @@ async def _esphome_subscribe_voice_assistant(
             runtime["lock"] = asyncio.Lock()
             lock = runtime["lock"]
         async with lock:
+            _esphome_cancel_watchdog(runtime)
             runtime["session_id"] = session_id
             runtime["conversation_id"] = _text(conversation_id)
             runtime["audio_format"] = audio_format
             runtime["audio_chunks"] = 0
             runtime["audio_bytes"] = 0
+            runtime["session_start_ts"] = _native_now()
+            runtime["last_audio_ts"] = 0.0
+            runtime["watchdog_task"] = asyncio.create_task(
+                _esphome_session_watchdog(token, client, module, session_id)
+            )
 
         await _compat_emit_event(
             token,
@@ -2847,6 +2933,7 @@ async def _esphome_subscribe_voice_assistant(
             int(audio_format.get("width") or 0),
             int(audio_format.get("channels") or 0),
         )
+        _native_debug(f"esphome session start flags selector={token} flags={int(_flags or 0)}")
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
         return 0
@@ -2874,6 +2961,7 @@ async def _esphome_subscribe_voice_assistant(
             async with lock:
                 runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
                 runtime["audio_bytes"] = int(runtime.get("audio_bytes") or 0) + len(audio_bytes)
+                runtime["last_audio_ts"] = _native_now()
                 chunks = int(runtime.get("audio_chunks") or 0)
                 total = int(runtime.get("audio_bytes") or 0)
             if chunks in {1, 5, 10}:
@@ -2900,6 +2988,7 @@ async def _esphome_subscribe_voice_assistant(
             session_id = _text(runtime.get("session_id"))
             chunks = int(runtime.get("audio_chunks") or 0)
             total = int(runtime.get("audio_bytes") or 0)
+            _esphome_cancel_watchdog(runtime)
         logger.info(
             "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
             token,
@@ -3032,6 +3121,7 @@ async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
 
     runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
     if isinstance(runtime, dict) and _text(runtime.get("session_id")):
+        _esphome_cancel_watchdog(runtime)
         module, _ = _esphome_import()
         if module is not None and client is not None:
             with contextlib.suppress(Exception):
@@ -3074,6 +3164,7 @@ async def _esphome_client_stopped(selector: str, *, expected_disconnect: bool) -
     was_connected = False
     runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
     if isinstance(runtime, dict) and _text(runtime.get("session_id")):
+        _esphome_cancel_watchdog(runtime)
         with contextlib.suppress(Exception):
             await _native_mark_session_aborted(
                 _text(runtime.get("session_id")),
