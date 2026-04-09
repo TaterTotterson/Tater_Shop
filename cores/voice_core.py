@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.31"
+__version__ = "2.0.32"
 
 load_dotenv()
 
@@ -121,15 +121,17 @@ DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
 DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
-DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
+DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 15.0
+DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
 DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.80
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
-DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
-DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
-DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
+DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
+DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
+DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
+DEFAULT_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
@@ -2699,6 +2701,11 @@ def _esphome_retry_seconds() -> int:
     return max(3, int(value))
 
 
+def _esphome_no_voice_timeout_s() -> float:
+    value = _get_float_platform_setting("VOICE_ESPHOME_NO_VOICE_TIMEOUT_S", DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S)
+    return max(3.0, min(20.0, float(value)))
+
+
 def _esphome_server_vad_enabled() -> bool:
     return _get_bool_platform_setting("VOICE_ESPHOME_SERVER_VAD_ENABLED", DEFAULT_ESPHOME_SERVER_VAD_ENABLED)
 
@@ -2741,6 +2748,14 @@ def _esphome_server_vad_release_margin_db() -> float:
         DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB,
     )
     return min(20.0, max(1.0, float(value)))
+
+
+def _esphome_server_vad_max_trigger_above_floor_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_MAX_TRIGGER_ABOVE_FLOOR_DB,
+    )
+    return min(20.0, max(0.5, float(value)))
 
 
 def _esphome_server_vad_max_release_above_floor_db() -> float:
@@ -3544,6 +3559,7 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "audio_chunks": 0,
             "audio_bytes": 0,
             "vad_voice_seen": False,
+            "vad_soft_speech_chunks": 0,
             "vad_speech_chunks": 0,
             "vad_silence_start_ts": 0.0,
             "vad_last_dbfs": None,
@@ -3587,6 +3603,7 @@ async def _esphome_session_watchdog(selector: str, client: Any, module: Any, ses
 
     idle_timeout = max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S))
     max_listen = max(idle_timeout + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS))
+    no_voice_timeout = _esphome_no_voice_timeout_s()
 
     while True:
         await asyncio.sleep(0.35)
@@ -3601,6 +3618,7 @@ async def _esphome_session_watchdog(selector: str, client: Any, module: Any, ses
         chunks = int(runtime.get("audio_chunks") or 0)
         last_audio_ts = float(runtime.get("last_audio_ts") or 0.0)
         start_ts = float(runtime.get("session_start_ts") or 0.0)
+        voice_seen = bool(runtime.get("vad_voice_seen"))
 
         if chunks > 0 and last_audio_ts > 0.0 and (now - last_audio_ts) >= idle_timeout:
             logger.info(
@@ -3617,6 +3635,24 @@ async def _esphome_session_watchdog(selector: str, client: Any, module: Any, ses
                     module,
                     abort=False,
                     reason="idle_timeout",
+                )
+            return
+
+        if chunks > 0 and (not voice_seen) and start_ts > 0.0 and (now - start_ts) >= no_voice_timeout:
+            logger.info(
+                "[native-voice] watchdog finalize selector=%s session_id=%s reason=no_voice_timeout chunks=%s bytes=%s",
+                token,
+                sid,
+                chunks,
+                int(runtime.get("audio_bytes") or 0),
+            )
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=False,
+                    reason="no_voice_timeout",
                 )
             return
 
@@ -3682,6 +3718,7 @@ async def _esphome_finalize_voice_session(
         runtime["session_start_ts"] = 0.0
         runtime["last_audio_ts"] = 0.0
         runtime["vad_voice_seen"] = False
+        runtime["vad_soft_speech_chunks"] = 0
         runtime["vad_speech_chunks"] = 0
         runtime["vad_silence_start_ts"] = 0.0
         runtime["vad_last_dbfs"] = None
@@ -3980,8 +4017,10 @@ async def _esphome_subscribe_voice_assistant(
                             peak = float(dbfs)
                         runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
-                        trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
-                        release_threshold = max(
+                        trigger_raw = max(float(abs_floor), float(floor) + float(trigger_margin))
+                        trigger_cap = float(floor) + float(_esphome_server_vad_max_trigger_above_floor_db())
+                        trigger_threshold = max(float(abs_floor), min(float(trigger_raw), float(trigger_cap)))
+                        release_raw = max(
                             float(abs_floor),
                             float(floor) + float(release_margin),
                             float(peak) - float(drop_db),
@@ -3989,12 +4028,28 @@ async def _esphome_subscribe_voice_assistant(
                         # Prevent short wake beeps/loud transients from forcing an overly-high
                         # release threshold that keeps listening open too long.
                         release_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
-                        release_threshold = min(float(release_threshold), float(release_cap))
+                        release_threshold = max(float(abs_floor), min(float(release_raw), float(release_cap)))
+                        # Keep release threshold at or below trigger threshold to avoid sticky sessions.
+                        release_threshold = min(float(release_threshold), float(trigger_threshold))
                         runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
                         runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
                         if not bool(runtime.get("vad_voice_seen")):
+                            start_detected = False
                             if dbfs >= trigger_threshold:
+                                start_detected = True
+                                runtime["vad_soft_speech_chunks"] = 0
+                            else:
+                                soft_trigger_threshold = max(float(abs_floor), float(trigger_threshold) - 1.0)
+                                if dbfs >= soft_trigger_threshold:
+                                    soft_chunks = int(runtime.get("vad_soft_speech_chunks") or 0) + 1
+                                    runtime["vad_soft_speech_chunks"] = soft_chunks
+                                    if soft_chunks >= max(2, min_speech_chunks - 1):
+                                        start_detected = True
+                                else:
+                                    runtime["vad_soft_speech_chunks"] = 0
+
+                            if start_detected:
                                 runtime["vad_voice_seen"] = True
                                 runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                                 runtime["vad_silence_start_ts"] = 0.0
@@ -4188,6 +4243,7 @@ async def _esphome_subscribe_voice_assistant(
             runtime["session_start_ts"] = _native_now()
             runtime["last_audio_ts"] = 0.0
             runtime["vad_voice_seen"] = False
+            runtime["vad_soft_speech_chunks"] = 0
             runtime["vad_speech_chunks"] = 0
             runtime["vad_silence_start_ts"] = 0.0
             runtime["vad_last_dbfs"] = None
