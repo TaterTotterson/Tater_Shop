@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.5"
+__version__ = "2.0.7"
 
 load_dotenv()
 
@@ -547,9 +547,6 @@ def _coerce_webui_multiselect_json(raw: Any) -> Optional[str]:
 
 
 def _voice_backend_mode() -> str:
-    mode = _lower(_portal_settings().get("VOICE_BACKEND_MODE"))
-    if mode in VOICE_BACKEND_MODE_OPTIONS:
-        return mode
     return VOICE_BACKEND_MODE_NATIVE
 
 
@@ -591,7 +588,7 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
         "compat_tcp_port": _get_int_platform_setting("VOICE_COMPAT_TCP_PORT", DEFAULT_COMPAT_TCP_PORT),
         "compat_tcp_require_token": _get_bool_platform_setting("VOICE_COMPAT_TCP_REQUIRE_TOKEN", True),
         "compat_tcp_token_set": bool(_text(settings.get("VOICE_COMPAT_TCP_TOKEN"))),
-        "esphome_native_enabled": _get_bool_platform_setting("VOICE_ESPHOME_NATIVE_ENABLED", False),
+        "esphome_native_enabled": True,
         "esphome_api_port": _get_int_platform_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT),
         "esphome_connect_timeout_s": _get_float_platform_setting(
             "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
@@ -1187,6 +1184,10 @@ def _ring_off():
 _satellite_refresh_lock = asyncio.Lock()
 _satellite_map_mem: Dict[str, str] = {}
 _satellite_map_mem_ts: float = 0.0
+_voice_satellite_registry_mem: List[Dict[str, Any]] = []
+_voice_satellite_blocked_mem: set[str] = set()
+_voice_satellite_registry_redis_warned = False
+_voice_satellite_blocked_redis_warned = False
 
 async def _ha_ws_call(session: aiohttp.ClientSession, ws: aiohttp.ClientWebSocketResponse, msg: dict, expect_id: int, timeout: float = 20.0) -> Any:
     await ws.send_json(msg)
@@ -1420,15 +1421,19 @@ def _normalize_voice_satellite_row(raw: Any) -> Dict[str, Any]:
 
 
 def _load_voice_satellite_registry() -> List[Dict[str, Any]]:
+    global _voice_satellite_registry_mem, _voice_satellite_registry_redis_warned
     try:
         raw = redis_client.get(REDIS_VOICE_SATELLITE_REGISTRY_KEY)
         if not raw:
-            return []
+            return [dict(row) for row in _voice_satellite_registry_mem]
         payload = json.loads(raw)
         if not isinstance(payload, list):
-            return []
-    except Exception:
-        return []
+            return [dict(row) for row in _voice_satellite_registry_mem]
+    except Exception as exc:
+        if not _voice_satellite_registry_redis_warned:
+            _voice_satellite_registry_redis_warned = True
+            logger.warning("[voice_core] satellite registry redis unavailable; using in-memory fallback: %s", exc)
+        return [dict(row) for row in _voice_satellite_registry_mem]
 
     rows: List[Dict[str, Any]] = []
     seen = set()
@@ -1439,10 +1444,12 @@ def _load_voice_satellite_registry() -> List[Dict[str, Any]]:
             continue
         seen.add(selector)
         rows.append(row)
+    _voice_satellite_registry_mem = [dict(row) for row in rows]
     return rows
 
 
 def _save_voice_satellite_registry(rows: List[Dict[str, Any]]) -> None:
+    global _voice_satellite_registry_mem, _voice_satellite_registry_redis_warned
     clean: List[Dict[str, Any]] = []
     seen = set()
     for row in rows:
@@ -1452,32 +1459,45 @@ def _save_voice_satellite_registry(rows: List[Dict[str, Any]]) -> None:
             continue
         seen.add(selector)
         clean.append(normalized)
+    _voice_satellite_registry_mem = [dict(row) for row in clean]
     try:
         redis_client.set(REDIS_VOICE_SATELLITE_REGISTRY_KEY, json.dumps(clean, ensure_ascii=False))
-    except Exception:
-        pass
+    except Exception as exc:
+        if not _voice_satellite_registry_redis_warned:
+            _voice_satellite_registry_redis_warned = True
+            logger.warning("[voice_core] satellite registry redis unavailable; using in-memory fallback: %s", exc)
 
 
 def _load_voice_satellite_blocked_selectors() -> set[str]:
+    global _voice_satellite_blocked_mem, _voice_satellite_blocked_redis_warned
     try:
         raw = redis_client.get(REDIS_VOICE_SATELLITE_BLOCKED_KEY)
         if not raw:
-            return set()
+            return set(_voice_satellite_blocked_mem)
         payload = json.loads(raw)
-    except Exception:
-        return set()
+    except Exception as exc:
+        if not _voice_satellite_blocked_redis_warned:
+            _voice_satellite_blocked_redis_warned = True
+            logger.warning("[voice_core] satellite blocked-set redis unavailable; using in-memory fallback: %s", exc)
+        return set(_voice_satellite_blocked_mem)
 
     if not isinstance(payload, list):
-        return set()
-    return {_text(item) for item in payload if _text(item)}
+        return set(_voice_satellite_blocked_mem)
+    parsed = {_text(item) for item in payload if _text(item)}
+    _voice_satellite_blocked_mem = set(parsed)
+    return parsed
 
 
 def _save_voice_satellite_blocked_selectors(rows: set[str]) -> None:
+    global _voice_satellite_blocked_mem, _voice_satellite_blocked_redis_warned
     clean = sorted({_text(item) for item in rows if _text(item)})
+    _voice_satellite_blocked_mem = set(clean)
     try:
         redis_client.set(REDIS_VOICE_SATELLITE_BLOCKED_KEY, json.dumps(clean, ensure_ascii=False))
-    except Exception:
-        pass
+    except Exception as exc:
+        if not _voice_satellite_blocked_redis_warned:
+            _voice_satellite_blocked_redis_warned = True
+            logger.warning("[voice_core] satellite blocked-set redis unavailable; using in-memory fallback: %s", exc)
 
 
 def _block_voice_satellite_selector(selector: str) -> None:
@@ -1750,9 +1770,6 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "bind_port",
                 "API_AUTH_ENABLED",
                 "API_AUTH_KEY",
-                "SESSION_TTL_SECONDS",
-                "CONTINUED_CHAT_ENABLED",
-                "VOICE_BACKEND_MODE",
                 "VOICE_EOU_MODE",
                 "VOICE_STREAM_SAMPLE_RATE_HZ",
             ],
@@ -1783,40 +1800,14 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
             ],
         ),
         (
-            "Compatibility Adapter",
-            [
-                "VOICE_COMPAT_ENABLED",
-                "VOICE_COMPAT_REQUIRE_ADOPTED",
-                "VOICE_COMPAT_EVENT_BACKLOG",
-                "VOICE_COMPAT_TCP_ENABLED",
-                "VOICE_COMPAT_TCP_HOST",
-                "VOICE_COMPAT_TCP_PORT",
-                "VOICE_COMPAT_TCP_REQUIRE_TOKEN",
-                "VOICE_COMPAT_TCP_TOKEN",
-            ],
-        ),
-        (
             "ESPHome",
             [
-                "VOICE_ESPHOME_NATIVE_ENABLED",
                 "VOICE_ESPHOME_API_PORT",
                 "VOICE_ESPHOME_PASSWORD",
                 "VOICE_ESPHOME_NOISE_PSK",
                 "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
                 "VOICE_ESPHOME_RETRY_SECONDS",
                 "VOICE_ESPHOME_AUTO_TARGET_MANUAL",
-            ],
-        ),
-        (
-            "Legacy Follow-up",
-            [
-                "FOLLOWUP_IDLE_TIMEOUT_S",
-                "SATELLITE_MAP_CACHE_TTL_S",
-                "VOICE_PE_ENTITY_1",
-                "VOICE_PE_ENTITY_2",
-                "VOICE_PE_ENTITY_3",
-                "VOICE_PE_ENTITY_4",
-                "VOICE_PE_ENTITY_5",
             ],
         ),
     ]
@@ -1867,7 +1858,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         "group": "settings",
         "title": "Voice Core Settings",
         "subtitle": (
-            f"Backend: {_text(runtime_status.get('backend_mode')) or VOICE_BACKEND_MODE_HA} • "
+            f"Backend: {_text(runtime_status.get('backend_mode')) or VOICE_BACKEND_MODE_NATIVE} • "
             f"STT: {_text(current.get('VOICE_WYOMING_STT_HOST'))}:{_text(current.get('VOICE_WYOMING_STT_PORT')) or DEFAULT_WYOMING_STT_PORT} • "
             f"TTS: {_text(current.get('VOICE_WYOMING_TTS_HOST'))}:{_text(current.get('VOICE_WYOMING_TTS_PORT')) or DEFAULT_WYOMING_TTS_PORT}"
         ),
@@ -1979,7 +1970,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         )
 
     stats = [
-        {"label": "Backend", "value": _text(runtime_status.get("backend_mode")) or VOICE_BACKEND_MODE_HA},
+        {"label": "Backend", "value": _text(runtime_status.get("backend_mode")) or VOICE_BACKEND_MODE_NATIVE},
         {"label": "Satellites", "value": len(satellites)},
         {"label": "Active Sessions", "value": int(runtime_status.get("sessions_active") or 0)},
         {"label": "ESPHome Clients", "value": f"{connected_clients}/{len(clients)}"},
@@ -2581,7 +2572,7 @@ async def _compat_emit_pipeline_state(selector: str, *, session_id: str, state: 
 
 
 def _esphome_native_enabled() -> bool:
-    return _get_bool_platform_setting("VOICE_ESPHOME_NATIVE_ENABLED", False)
+    return True
 
 
 def _esphome_api_port() -> int:
