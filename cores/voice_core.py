@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.12"
+__version__ = "2.0.13"
 
 load_dotenv()
 
@@ -1568,7 +1568,6 @@ def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
         "VOICE_ESPHOME_PASSWORD",
         "VOICE_ESPHOME_NOISE_PSK",
         "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
-        "VOICE_ESPHOME_RETRY_SECONDS",
     }
     fields: List[Dict[str, Any]] = []
     for setting_key, setting_meta in required_map.items():
@@ -1637,7 +1636,6 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "VOICE_ESPHOME_PASSWORD",
                 "VOICE_ESPHOME_NOISE_PSK",
                 "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
-                "VOICE_ESPHOME_RETRY_SECONDS",
             ],
         ),
     ]
@@ -1730,27 +1728,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "value": "yes" if _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True) else "no",
                     "read_only": True,
                 },
-            ],
-        },
-        {
-            "id": "esphome_reconcile",
-            "group": "satellites",
-            "title": "ESPHome Native Reconcile",
-            "subtitle": (
-                f"enabled={bool(esphome_status.get('enabled'))} • "
-                f"available={bool(esphome_status.get('available'))} • "
-                f"clients={connected_clients}/{len(clients)}"
-            ),
-            "run_action": "voice_esphome_reconcile",
-            "run_label": "Reconcile ESPHome",
-            "fields": [
-                {
-                    "key": "esphome_error",
-                    "label": "Last error",
-                    "type": "text",
-                    "value": _text(esphome_status.get("import_error")) or _text((esphome_status.get("stats") or {}).get("last_error")) or "-",
-                    "read_only": True,
-                }
             ],
         },
     ]
@@ -2524,6 +2501,50 @@ def _esphome_audio_settings_format(audio_settings: Any) -> Dict[str, int]:
     }
 
 
+def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
+    flags = 0
+    api_audio_bit = 0
+    speaker_bit = 0
+    feature_enum = _esphome_module_attr(module, "VoiceAssistantFeature")
+    if feature_enum is not None:
+        with contextlib.suppress(Exception):
+            api_audio_bit = int(getattr(feature_enum, "API_AUDIO"))
+        with contextlib.suppress(Exception):
+            speaker_bit = int(getattr(feature_enum, "SPEAKER"))
+
+    compat_fn = getattr(info, "voice_assistant_feature_flags_compat", None)
+    if callable(compat_fn):
+        with contextlib.suppress(Exception):
+            api_version = getattr(client, "api_version", None)
+            if api_version is not None:
+                flags = int(compat_fn(api_version) or 0)
+            else:
+                flags = int(compat_fn() or 0)
+    if not flags:
+        for attr in ("voice_assistant_feature_flags", "voice_assistant_feature_flags_compat"):
+            value = getattr(info, attr, None)
+            if callable(value):
+                with contextlib.suppress(Exception):
+                    value = value()
+            with contextlib.suppress(Exception):
+                parsed = int(value or 0)
+                if parsed:
+                    flags = parsed
+                    break
+
+    api_audio_known = bool(api_audio_bit and flags)
+    speaker_known = bool(speaker_bit and flags)
+    return {
+        "flags": int(flags),
+        "api_audio_bit": int(api_audio_bit),
+        "speaker_bit": int(speaker_bit),
+        "api_audio_known": api_audio_known,
+        "speaker_known": speaker_known,
+        "api_audio_supported": True if not api_audio_known else bool(api_audio_bit and (int(flags) & int(api_audio_bit))),
+        "speaker_supported": True if not speaker_known else bool(speaker_bit and (int(flags) & int(speaker_bit))),
+    }
+
+
 async def _esphome_client_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
     method = getattr(client, method_name, None)
     if not callable(method):
@@ -2640,6 +2661,12 @@ async def _esphome_finalize_voice_session(
             "esphome_session_aborted",
             {"session_id": session_id, "reason": _text(reason) or "device_stopped"},
         )
+        logger.info(
+            "[native-voice] session aborted selector=%s session_id=%s reason=%s",
+            token,
+            session_id,
+            _text(reason) or "device_stopped",
+        )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         return
 
@@ -2700,8 +2727,22 @@ async def _esphome_finalize_voice_session(
                 "tts_audio_bytes": len(tts_audio),
             },
         )
+        logger.info(
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s",
+            token,
+            session_id,
+            len(transcript),
+            len(response_text),
+            len(tts_audio),
+        )
     except Exception as exc:
         msg = str(exc)
+        logger.warning(
+            "[native-voice] session finalize failed selector=%s session_id=%s error=%s",
+            token,
+            session_id,
+            msg,
+        )
         await _compat_set_error(token, msg)
         await _esphome_send_event(
             client,
@@ -2713,7 +2754,13 @@ async def _esphome_finalize_voice_session(
         raise
 
 
-async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module: Any) -> Callable[[], None]:
+async def _esphome_subscribe_voice_assistant(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    api_audio_supported: bool = True,
+) -> Callable[[], None]:
     subscribe = getattr(client, "subscribe_voice_assistant", None)
     if not callable(subscribe):
         raise RuntimeError("ESPHome client does not support subscribe_voice_assistant()")
@@ -2729,7 +2776,21 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         _flags: int,
         audio_settings: Any,
         wake_word_phrase: Optional[str],
-    ) -> int:
+    ) -> Optional[int]:
+        if not api_audio_supported:
+            msg = (
+                "Device does not report VoiceAssistant API_AUDIO support. "
+                "Current Voice Core requires API_AUDIO-capable ESPHome firmware."
+            )
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _compat_set_error(token, msg)
+            await _compat_emit_event(
+                token,
+                "esphome_voice_unsupported",
+                {"reason": "api_audio_not_supported"},
+            )
+            return None
+
         if _text(runtime.get("session_id")):
             with contextlib.suppress(Exception):
                 await _esphome_finalize_voice_session(
@@ -2763,6 +2824,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             runtime["session_id"] = session_id
             runtime["conversation_id"] = _text(conversation_id)
             runtime["audio_format"] = audio_format
+            runtime["audio_chunks"] = 0
+            runtime["audio_bytes"] = 0
 
         await _compat_emit_event(
             token,
@@ -2773,6 +2836,16 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 "wake_word": _text(wake_word_phrase),
                 "audio_format": audio_format,
             },
+        )
+        logger.info(
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s rate=%s width=%s ch=%s",
+            token,
+            _text(conversation_id),
+            session_id,
+            _text(wake_word_phrase),
+            int(audio_format.get("rate") or 0),
+            int(audio_format.get("width") or 0),
+            int(audio_format.get("channels") or 0),
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
@@ -2798,7 +2871,22 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     final_chunk=False,
                 ),
             )
+            async with lock:
+                runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
+                runtime["audio_bytes"] = int(runtime.get("audio_bytes") or 0) + len(audio_bytes)
+                chunks = int(runtime.get("audio_chunks") or 0)
+                total = int(runtime.get("audio_bytes") or 0)
+            if chunks in {1, 5, 10}:
+                _native_debug(
+                    f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total}"
+                )
         except Exception as exc:
+            logger.warning(
+                "[native-voice] audio ingest failed selector=%s session_id=%s error=%s",
+                token,
+                session_id,
+                exc,
+            )
             await _compat_set_error(token, str(exc))
             await _esphome_send_event(
                 client,
@@ -2808,6 +2896,18 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
 
     async def _handle_stop(abort: bool) -> None:
+        async with lock:
+            session_id = _text(runtime.get("session_id"))
+            chunks = int(runtime.get("audio_chunks") or 0)
+            total = int(runtime.get("audio_bytes") or 0)
+        logger.info(
+            "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
+            token,
+            session_id,
+            bool(abort),
+            chunks,
+            total,
+        )
         with contextlib.suppress(Exception):
             await _esphome_finalize_voice_session(
                 token,
@@ -2821,7 +2921,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         unsub = subscribe(
             handle_start=_handle_start,
             handle_stop=_handle_stop,
-            handle_audio=_handle_audio,
+            handle_audio=_handle_audio if api_audio_supported else None,
         )
     except TypeError:
         unsub = subscribe(
@@ -3118,9 +3218,16 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "ESPHome API connection could not be verified. "
                 f"Details: {verify_reason}"
             )
-        unsubscribe = await _esphome_subscribe_voice_assistant(token, client, module)
-
         device_name = token
+        voice_features = {
+            "flags": 0,
+            "api_audio_bit": 0,
+            "speaker_bit": 0,
+            "api_audio_known": False,
+            "speaker_known": False,
+            "api_audio_supported": True,
+            "speaker_supported": True,
+        }
         with contextlib.suppress(Exception):
             info = await _esphome_client_call(client, "device_info")
             name_fields = (
@@ -3132,6 +3239,22 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 if label:
                     device_name = label
                     break
+            voice_features = _esphome_voice_feature_snapshot(info, client, module)
+
+        unsubscribe = await _esphome_subscribe_voice_assistant(
+            token,
+            client,
+            module,
+            api_audio_supported=bool(voice_features.get("api_audio_supported")),
+        )
+        logger.info(
+            "[native-voice] esphome voice features selector=%s flags=%s api_audio_known=%s api_audio_supported=%s speaker_supported=%s",
+            token,
+            int(voice_features.get("flags") or 0),
+            bool(voice_features.get("api_audio_known")),
+            bool(voice_features.get("api_audio_supported")),
+            bool(voice_features.get("speaker_supported")),
+        )
 
         _upsert_voice_satellite(
             {
@@ -3139,7 +3262,12 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "host": host_token,
                 "name": device_name,
                 "source": "esphome_native",
-                "metadata": {"esphome_port": connect_port},
+                "metadata": {
+                    "esphome_port": connect_port,
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                },
             }
         )
         await _compat_set_connected(
@@ -3149,7 +3277,13 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "transport": "esphome_native",
                 "protocol": "esphome_api",
                 "host": host_token,
-                "metadata": {"port": connect_port, "verify": verify_reason},
+                "metadata": {
+                    "port": connect_port,
+                    "verify": verify_reason,
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                },
             },
         )
         await _compat_emit_event(token, "esphome_connected", {"host": host_token, "port": connect_port})
@@ -3164,6 +3298,9 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "client": client,
                     "unsubscribe": unsubscribe,
                     "connected": True,
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "last_success_ts": _native_now(),
                     "last_error": "",
                     "source": source,
@@ -3231,7 +3368,6 @@ async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
 
     targets = _esphome_target_map()
     retry_seconds = _esphome_retry_seconds()
-    _native_debug(f"esphome reconcile force={force} targets={len(targets)} retry_s={retry_seconds}")
 
     async with _esphome_native_lock:
         snapshot = {k: dict(v) for k, v in _esphome_native_clients.items()}
@@ -3295,6 +3431,9 @@ def _esphome_native_status() -> Dict[str, Any]:
             "selected": selector in targets,
             "voice_subscribed": bool(row.get("unsubscribe")),
             "active_session_id": _text(runtime.get("session_id")) if isinstance(runtime, dict) else "",
+            "voice_feature_flags": int(row.get("voice_feature_flags") or 0),
+            "voice_api_audio_known": bool(row.get("voice_api_audio_known")),
+            "voice_api_audio_supported": bool(row.get("voice_api_audio_supported")),
             "last_attempt_ts": float(row.get("last_attempt_ts") or 0.0),
             "last_success_ts": float(row.get("last_success_ts") or 0.0),
             "last_disconnect_ts": float(row.get("last_disconnect_ts") or 0.0),
