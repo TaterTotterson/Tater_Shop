@@ -15,7 +15,7 @@ import math
 import audioop
 import io
 import wave
-from typing import Optional, Dict, Any, List, Tuple, Callable
+from typing import Optional, Dict, Any, List, Tuple, Callable, cast
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.28"
+__version__ = "2.0.29"
 
 load_dotenv()
 
@@ -129,18 +129,24 @@ DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
+DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.35
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
 DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS = -52.0
 DEFAULT_ESPHOME_TTS_TRIM_LEAD_MS = 40
 DEFAULT_ESPHOME_TTS_TRIM_TAIL_MS = 120
+DEFAULT_ESPHOME_UDP_TTS_SAMPLES_PER_CHUNK = 512
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
 VOICE_STATE_THINKING = "thinking"
 VOICE_STATE_SPEAKING = "speaking"
 VOICE_STATE_ERROR = "error"
+
+
+class NoTranscriptError(RuntimeError):
+    """Raised when STT completes without usable transcript text."""
 
 CORE_SETTINGS = {
     "category": "Voice Core Settings",
@@ -150,19 +156,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_VOICE_CORE_BIND_PORT,
             "description": "TCP port for the Voice Core API service.",
-        },
-        "API_AUTH_ENABLED": {
-            "label": "Require API Key",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "false",
-            "description": "Require X-Tater-Token on Voice Core API endpoints.",
-        },
-        "API_AUTH_KEY": {
-            "label": "API Key",
-            "type": "password",
-            "default": "",
-            "description": "Shared API key expected in the X-Tater-Token header when auth is enabled.",
         },
         "VOICE_DISCOVERY_MDNS_TIMEOUT_S": {
             "label": "mDNS Discovery Window (sec)",
@@ -208,24 +201,6 @@ CORE_SETTINGS = {
             "default": "false",
             "description": "Enable extra logging for native voice pipeline compatibility behavior.",
         },
-        "VOICE_NATIVE_SESSION_TTL_S": {
-            "label": "Native Session TTL (sec)",
-            "type": "number",
-            "default": DEFAULT_VOICE_SESSION_TTL_SECONDS,
-            "description": "How long native voice session objects remain queryable after creation.",
-        },
-        "VOICE_NATIVE_MAX_AUDIO_BYTES": {
-            "label": "Native Max Audio Bytes",
-            "type": "number",
-            "default": DEFAULT_NATIVE_MAX_AUDIO_BYTES,
-            "description": "Maximum buffered audio size per native voice session before ingestion is rejected.",
-        },
-        "VOICE_NATIVE_WYOMING_TIMEOUT_S": {
-            "label": "Wyoming Timeout (sec)",
-            "type": "number",
-            "default": DEFAULT_NATIVE_WYOMING_TIMEOUT_SECONDS,
-            "description": "Timeout for Wyoming STT/TTS request-response operations.",
-        },
         "VOICE_ESPHOME_API_PORT": {
             "label": "ESPHome API Port",
             "type": "number",
@@ -255,24 +230,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_ESPHOME_RETRY_SECONDS,
             "description": "Retry delay between ESPHome connection attempts.",
-        },
-        "SATELLITE_MAP_CACHE_TTL_S": {
-            "label": "Assist satellite map cache TTL (seconds)",
-            "type": "number",
-            "default": DEFAULT_SATELLITE_MAP_CACHE_TTL_S,
-            "description": "How long to cache the device_id→assist_satellite mapping (registry lookups).",
-        },
-        "VOICE_NATIVE_SESSION_TTL_S": {
-            "label": "Native Session TTL (sec)",
-            "type": "number",
-            "default": DEFAULT_VOICE_SESSION_TTL_SECONDS,
-            "description": "How long native voice session objects remain queryable after creation.",
-        },
-        "VOICE_NATIVE_MAX_AUDIO_BYTES": {
-            "label": "Native Max Audio Bytes",
-            "type": "number",
-            "default": DEFAULT_NATIVE_MAX_AUDIO_BYTES,
-            "description": "Maximum buffered audio size per native voice session before ingestion is rejected.",
         },
     }
 }
@@ -3087,6 +3044,103 @@ async def _esphome_send_event(
         return False
 
 
+class _ESPHomeVoiceUDPServer(asyncio.DatagramProtocol):
+    """UDP bridge for ESPHome devices that do not support API_AUDIO."""
+
+    def __init__(self, selector: str, on_audio: Callable[[bytes], None]) -> None:
+        super().__init__()
+        self.selector = _text(selector)
+        self._on_audio = on_audio
+        self.transport: Optional[asyncio.DatagramTransport] = None
+        self.remote_addr: Optional[Tuple[str, int]] = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = cast(asyncio.DatagramTransport, transport)
+
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
+        packet = bytes(data or b"")
+        if not packet:
+            return
+        if self.remote_addr is None:
+            self.remote_addr = addr
+            _native_debug(
+                f"esphome udp peer discovered selector={self.selector} peer={addr[0]}:{addr[1]}"
+            )
+        elif addr != self.remote_addr:
+            return
+        with contextlib.suppress(Exception):
+            self._on_audio(packet)
+
+    def error_received(self, exc: Exception) -> None:
+        logger.warning(
+            "[native-voice] esphome udp error selector=%s error=%s",
+            self.selector,
+            exc,
+        )
+
+    def close(self) -> None:
+        if self.transport is not None:
+            with contextlib.suppress(Exception):
+                self.transport.close()
+        self.transport = None
+        self.remote_addr = None
+
+    def send_audio_bytes(self, data: bytes) -> bool:
+        packet = bytes(data or b"")
+        if not packet:
+            return False
+        if self.transport is None or self.remote_addr is None:
+            return False
+        with contextlib.suppress(Exception):
+            self.transport.sendto(packet, self.remote_addr)
+            return True
+        return False
+
+
+def _esphome_close_udp_locked(runtime: Dict[str, Any]) -> None:
+    protocol = runtime.get("udp_protocol")
+    transport = runtime.get("udp_transport")
+    runtime["udp_protocol"] = None
+    runtime["udp_transport"] = None
+    runtime["udp_port"] = 0
+    if isinstance(protocol, _ESPHomeVoiceUDPServer):
+        protocol.close()
+        return
+    if transport is not None:
+        with contextlib.suppress(Exception):
+            transport.close()
+
+
+async def _esphome_start_udp_server(
+    selector: str,
+    runtime: Dict[str, Any],
+    on_audio: Callable[[bytes], None],
+) -> int:
+    _esphome_close_udp_locked(runtime)
+    loop = asyncio.get_running_loop()
+
+    def _factory() -> _ESPHomeVoiceUDPServer:
+        return _ESPHomeVoiceUDPServer(selector, on_audio)
+
+    transport, protocol = await loop.create_datagram_endpoint(
+        _factory,
+        local_addr=("0.0.0.0", 0),
+    )
+    udp_protocol = cast(_ESPHomeVoiceUDPServer, protocol)
+    udp_transport = cast(asyncio.DatagramTransport, transport)
+    sock = udp_transport.get_extra_info("sockname")
+    udp_port = int(sock[1]) if isinstance(sock, tuple) and len(sock) >= 2 else 0
+    if udp_port <= 0:
+        with contextlib.suppress(Exception):
+            udp_transport.close()
+        raise RuntimeError("failed to allocate UDP audio port")
+    runtime["udp_protocol"] = udp_protocol
+    runtime["udp_transport"] = udp_transport
+    runtime["udp_port"] = udp_port
+    _native_debug(f"esphome udp server ready selector={_text(selector)} port={udp_port}")
+    return udp_port
+
+
 async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size: int = DEFAULT_ESPHOME_TTS_CHUNK_BYTES) -> int:
     data = bytes(tts_audio or b"")
     if not data:
@@ -3099,6 +3153,49 @@ async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size
         offset += len(chunk)
         await _esphome_client_call(client, "send_voice_assistant_audio", chunk)
         chunks += 1
+    return chunks
+
+
+async def _esphome_stream_tts_audio_udp(
+    protocol: Optional[_ESPHomeVoiceUDPServer],
+    tts_audio: bytes,
+    *,
+    audio_format: Optional[Dict[str, Any]],
+) -> int:
+    data = bytes(tts_audio or b"")
+    if not data:
+        return 0
+    if not isinstance(protocol, _ESPHomeVoiceUDPServer):
+        return 0
+    if protocol.remote_addr is None:
+        return 0
+
+    fmt = audio_format if isinstance(audio_format, dict) else {}
+    rate = int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if rate <= 0:
+        rate = int(DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    if width <= 0:
+        width = int(DEFAULT_VOICE_SAMPLE_WIDTH)
+    if channels <= 0:
+        channels = int(DEFAULT_VOICE_CHANNELS)
+
+    frame_bytes = max(1, width * channels)
+    chunk_bytes = max(frame_bytes, frame_bytes * int(DEFAULT_ESPHOME_UDP_TTS_SAMPLES_PER_CHUNK))
+    offset = 0
+    chunks = 0
+    while offset < len(data):
+        chunk = data[offset: offset + chunk_bytes]
+        offset += len(chunk)
+        if not chunk:
+            continue
+        if not protocol.send_audio_bytes(chunk):
+            break
+        chunks += 1
+        samples = len(chunk) / float(frame_bytes)
+        duration_s = samples / float(max(1, rate))
+        await asyncio.sleep(max(0.001, duration_s * 0.9))
     return chunks
 
 
@@ -3446,6 +3543,10 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_dynamic_trigger_dbfs": None,
             "vad_dynamic_release_dbfs": None,
             "vad_start_sent": False,
+            "api_audio_supported": True,
+            "udp_transport": None,
+            "udp_protocol": None,
+            "udp_port": 0,
             "awaiting_announcement": False,
             "awaiting_announcement_session_id": "",
             "announcement_task": None,
@@ -3565,6 +3666,8 @@ async def _esphome_finalize_voice_session(
         _esphome_cancel_announcement_wait(runtime)
         session_id = _text(runtime.get("session_id"))
         conversation_id = _text(runtime.get("conversation_id"))
+        api_audio_supported = bool(runtime.get("api_audio_supported", True))
+        udp_protocol = runtime.get("udp_protocol")
         runtime["session_id"] = ""
         runtime["conversation_id"] = ""
         runtime["session_start_ts"] = 0.0
@@ -3580,6 +3683,8 @@ async def _esphome_finalize_voice_session(
         runtime["vad_start_sent"] = False
         runtime["awaiting_announcement"] = False
         runtime["awaiting_announcement_session_id"] = ""
+        if bool(abort):
+            _esphome_close_udp_locked(runtime)
 
     if not session_id:
         return
@@ -3600,6 +3705,7 @@ async def _esphome_finalize_voice_session(
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         return
 
+    close_udp_after_finalize = not api_audio_supported
     try:
         # Home Assistant emits STT_VAD_END before microphone stop/awaiting-response transitions.
         with contextlib.suppress(Exception):
@@ -3620,7 +3726,9 @@ async def _esphome_finalize_voice_session(
         tts_audio = base64.b64decode(tts_b64) if tts_b64 else b""
         tts_format = result.get("tts_audio_format") if isinstance(result.get("tts_audio_format"), dict) else {}
         speaker_supported = await _esphome_selector_speaker_supported(token)
-        tts_mode = "stream" if speaker_supported else "url"
+        tts_mode = "stream_api" if (speaker_supported and api_audio_supported) else (
+            "stream_udp" if speaker_supported else "url"
+        )
         tts_url = "voice-assistant://stream"
         if not speaker_supported:
             prepared_url = _esphome_store_tts_url(token, session_id, tts_audio, tts_format)
@@ -3629,7 +3737,7 @@ async def _esphome_finalize_voice_session(
             else:
                 # Fallback when URL streaming could not be prepared; continue with API audio stream.
                 speaker_supported = True
-                tts_mode = "stream_fallback"
+                tts_mode = "stream_api_fallback" if api_audio_supported else "stream_udp_fallback"
         wait_for_announcement = (not speaker_supported) and tts_url.startswith(("http://", "https://"))
         run_end_timeout_s = _esphome_url_run_end_timeout_s() if wait_for_announcement else 0.0
 
@@ -3675,7 +3783,14 @@ async def _esphome_finalize_voice_session(
                 ("VOICE_ASSISTANT_TTS_STREAM_START", "TTS_STREAM_START"),
                 None,
             )
-            tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
+            if api_audio_supported:
+                tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
+            else:
+                tts_chunks = await _esphome_stream_tts_audio_udp(
+                    udp_protocol if isinstance(udp_protocol, _ESPHomeVoiceUDPServer) else None,
+                    tts_audio,
+                    audio_format=tts_format,
+                )
             await _esphome_send_event(
                 client,
                 module,
@@ -3731,6 +3846,22 @@ async def _esphome_finalize_voice_session(
             "announcement" if wait_for_announcement else "immediate",
             tts_url,
         )
+    except NoTranscriptError as exc:
+        msg = _text(exc) or "No transcript produced from audio."
+        logger.info(
+            "[native-voice] no transcript selector=%s session_id=%s reason=%s",
+            token,
+            session_id,
+            msg,
+        )
+        await _compat_set_error(token, msg)
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_ERROR", "ERROR"),
+            {"code": "no_speech_detected", "message": msg},
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
     except Exception as exc:
         msg = str(exc)
         logger.warning(
@@ -3748,6 +3879,10 @@ async def _esphome_finalize_voice_session(
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         raise
+    finally:
+        if close_udp_after_finalize:
+            async with lock:
+                _esphome_close_udp_locked(runtime)
 
 
 async def _esphome_subscribe_voice_assistant(
@@ -3767,131 +3902,15 @@ async def _esphome_subscribe_voice_assistant(
 
     runtime = _esphome_voice_runtime_state(token)
 
-    async def _handle_start(
-        conversation_id: str,
-        _flags: int,
-        audio_settings: Any,
-        wake_word_phrase: Optional[str],
-    ) -> Optional[int]:
-        if not api_audio_supported:
-            msg = (
-                "Device does not report VoiceAssistant API_AUDIO support. "
-                "Current Voice Core requires API_AUDIO-capable ESPHome firmware."
-            )
-            logger.warning("[native-voice] %s selector=%s", msg, token)
-            await _compat_set_error(token, msg)
-            await _compat_emit_event(
-                token,
-                "esphome_voice_unsupported",
-                {"reason": "api_audio_not_supported"},
-            )
-            return None
-
-        if WYOMING_IMPORT_ERROR:
-            msg = (
-                "Wyoming dependency is unavailable in Voice Core runtime. "
-                f"Import error: {WYOMING_IMPORT_ERROR}"
-            )
-            logger.warning("[native-voice] %s selector=%s", msg, token)
-            await _compat_set_error(token, msg)
-            await _compat_emit_event(
-                token,
-                "esphome_pipeline_unavailable",
-                {"reason": "wyoming_unavailable"},
-            )
-            await _esphome_send_event(
-                client,
-                module,
-                ("VOICE_ASSISTANT_ERROR", "ERROR"),
-                {"code": "wyoming_unavailable", "message": msg},
-            )
-            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
-            return None
-
-        if _text(runtime.get("session_id")):
-            with contextlib.suppress(Exception):
-                await _esphome_finalize_voice_session(
-                    token,
-                    client,
-                    module,
-                    abort=True,
-                    reason="new_session_started",
-                )
-
-        audio_format = _esphome_audio_settings_format(audio_settings)
-        session = await _native_create_session(
-            VoiceNativeSessionStartIn(
-                satellite_selector=token,
-                wake_word=_text(wake_word_phrase),
-                sample_rate_hz=int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
-                sample_width_bytes=int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
-                channels=int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
-                context={
-                    "esphome_conversation_id": _text(conversation_id),
-                    "source": "esphome_native",
-                },
-            )
-        )
-        session_id = _text(session.get("id"))
-        lock = runtime.get("lock")
-        if lock is None or not hasattr(lock, "acquire"):
+    def _runtime_lock() -> asyncio.Lock:
+        lock_obj = runtime.get("lock")
+        if lock_obj is None or not hasattr(lock_obj, "acquire"):
             runtime["lock"] = asyncio.Lock()
-            lock = runtime["lock"]
-        async with lock:
-            _esphome_cancel_watchdog(runtime)
-            _esphome_cancel_announcement_wait(runtime)
-            runtime["session_id"] = session_id
-            runtime["conversation_id"] = _text(conversation_id)
-            runtime["audio_format"] = audio_format
-            runtime["audio_chunks"] = 0
-            runtime["audio_bytes"] = 0
-            runtime["session_start_ts"] = _native_now()
-            runtime["last_audio_ts"] = 0.0
-            runtime["vad_voice_seen"] = False
-            runtime["vad_speech_chunks"] = 0
-            runtime["vad_silence_start_ts"] = 0.0
-            runtime["vad_last_dbfs"] = None
-            runtime["vad_noise_floor_dbfs"] = None
-            runtime["vad_peak_dbfs"] = None
-            runtime["vad_dynamic_trigger_dbfs"] = None
-            runtime["vad_dynamic_release_dbfs"] = None
-            runtime["vad_start_sent"] = False
-            runtime["awaiting_announcement"] = False
-            runtime["awaiting_announcement_session_id"] = ""
-            runtime["watchdog_task"] = asyncio.create_task(
-                _esphome_session_watchdog(token, client, module, session_id)
-            )
+            lock_obj = runtime["lock"]
+        return cast(asyncio.Lock, lock_obj)
 
-        await _compat_emit_event(
-            token,
-            "esphome_session_started",
-            {
-                "session_id": session_id,
-                "conversation_id": _text(conversation_id),
-                "wake_word": _text(wake_word_phrase),
-                "audio_format": audio_format,
-            },
-        )
-        logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s rate=%s width=%s ch=%s",
-            token,
-            _text(conversation_id),
-            session_id,
-            _text(wake_word_phrase),
-            int(audio_format.get("rate") or 0),
-            int(audio_format.get("width") or 0),
-            int(audio_format.get("channels") or 0),
-        )
-        _native_debug(f"esphome session start flags selector={token} flags={int(_flags or 0)}")
-        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
-        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
-        return 0
-
-    async def _handle_audio(data: bytes) -> None:
-        lock = runtime.get("lock")
-        if lock is None or not hasattr(lock, "acquire"):
-            runtime["lock"] = asyncio.Lock()
-            lock = runtime["lock"]
+    async def _ingest_audio_chunk(data: bytes) -> None:
+        lock = _runtime_lock()
         async with lock:
             session_id = _text(runtime.get("session_id"))
         if not session_id:
@@ -3912,8 +3931,6 @@ async def _esphome_subscribe_voice_assistant(
             dbfs: Optional[float] = None
             trigger_threshold: Optional[float] = None
             release_threshold: Optional[float] = None
-            noise_floor_dbfs: Optional[float] = None
-            peak_dbfs: Optional[float] = None
             emit_vad_start = False
             async with lock:
                 now = _native_now()
@@ -3935,59 +3952,63 @@ async def _esphome_subscribe_voice_assistant(
                     release_margin = _esphome_server_vad_release_margin_db()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     silence_target_s = _esphome_server_vad_silence_s()
+                    start_ts = float(runtime.get("session_start_ts") or 0.0)
 
                     floor_prev = runtime.get("vad_noise_floor_dbfs")
-                    floor = float(floor_prev) if isinstance(floor_prev, (int, float)) else float(dbfs)
-                    if not bool(runtime.get("vad_voice_seen")) and dbfs <= (floor + trigger_margin):
-                        floor = (floor * 0.9) + (float(dbfs) * 0.1)
-                    runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
+                    floor = float(floor_prev) if isinstance(floor_prev, (int, float)) else float(abs_floor)
+                    if (start_ts > 0.0) and ((now - start_ts) < float(DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS)):
+                        if dbfs < floor:
+                            floor = (floor * 0.85) + (float(dbfs) * 0.15)
+                        runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
+                    else:
+                        if not bool(runtime.get("vad_voice_seen")) and dbfs <= (floor + trigger_margin):
+                            floor = (floor * 0.92) + (float(dbfs) * 0.08)
+                        runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
 
-                    peak_prev = runtime.get("vad_peak_dbfs")
-                    peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
-                    if dbfs > peak:
-                        peak = float(dbfs)
-                    runtime["vad_peak_dbfs"] = round(float(peak), 2)
+                        peak_prev = runtime.get("vad_peak_dbfs")
+                        peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
+                        if dbfs > peak:
+                            peak = float(dbfs)
+                        runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
-                    trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
-                    release_threshold = max(
-                        float(abs_floor),
-                        float(floor) + float(release_margin),
-                        float(peak) - float(drop_db),
-                    )
-                    runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
-                    runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
-                    noise_floor_dbfs = float(floor)
-                    peak_dbfs = float(peak)
+                        trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
+                        release_threshold = max(
+                            float(abs_floor),
+                            float(floor) + float(release_margin),
+                            float(peak) - float(drop_db),
+                        )
+                        runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
+                        runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
-                    if not bool(runtime.get("vad_voice_seen")):
-                        if dbfs >= trigger_threshold:
-                            runtime["vad_voice_seen"] = True
+                        if not bool(runtime.get("vad_voice_seen")):
+                            if dbfs >= trigger_threshold:
+                                runtime["vad_voice_seen"] = True
+                                runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                                runtime["vad_silence_start_ts"] = 0.0
+                                if not bool(runtime.get("vad_start_sent")):
+                                    runtime["vad_start_sent"] = True
+                                    emit_vad_start = True
+                        elif dbfs >= release_threshold:
                             runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
                             runtime["vad_silence_start_ts"] = 0.0
-                            if not bool(runtime.get("vad_start_sent")):
-                                runtime["vad_start_sent"] = True
-                                emit_vad_start = True
-                    elif dbfs >= release_threshold:
-                        runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
-                        runtime["vad_silence_start_ts"] = 0.0
-                    else:
-                        silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
-                        if silence_start_ts <= 0.0:
-                            silence_start_ts = now
-                            runtime["vad_silence_start_ts"] = silence_start_ts
-                        silence_elapsed = max(0.0, now - silence_start_ts)
-                        speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
-                        if speech_chunks >= min_speech_chunks and silence_elapsed >= silence_target_s:
-                            should_finalize = True
-                            finalize_details = {
-                                "speech_chunks": speech_chunks,
-                                "silence_elapsed": silence_elapsed,
-                                "dbfs": float(dbfs),
-                                "trigger_threshold": float(trigger_threshold),
-                                "release_threshold": float(release_threshold),
-                                "noise_floor_dbfs": float(floor),
-                                "peak_dbfs": float(peak),
-                            }
+                        else:
+                            silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+                            if silence_start_ts <= 0.0:
+                                silence_start_ts = now
+                                runtime["vad_silence_start_ts"] = silence_start_ts
+                            silence_elapsed = max(0.0, now - silence_start_ts)
+                            speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+                            if speech_chunks >= min_speech_chunks and silence_elapsed >= silence_target_s:
+                                should_finalize = True
+                                finalize_details = {
+                                    "speech_chunks": speech_chunks,
+                                    "silence_elapsed": silence_elapsed,
+                                    "dbfs": float(dbfs),
+                                    "trigger_threshold": float(trigger_threshold),
+                                    "release_threshold": float(release_threshold),
+                                    "noise_floor_dbfs": float(floor),
+                                    "peak_dbfs": float(peak),
+                                }
             if chunks in {1, 5, 10}:
                 dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
                 trigger_text = "-" if trigger_threshold is None else f"{trigger_threshold:.1f}"
@@ -4059,6 +4080,147 @@ async def _esphome_subscribe_voice_assistant(
                 ("VOICE_ASSISTANT_ERROR", "ERROR"),
                 {"code": "tater_audio_ingest", "message": str(exc)},
             )
+
+    def _schedule_udp_audio_ingest(data: bytes) -> None:
+        packet = bytes(data or b"")
+        if not packet:
+            return
+        asyncio.create_task(_ingest_audio_chunk(packet))
+
+    async def _handle_start(
+        conversation_id: str,
+        _flags: int,
+        audio_settings: Any,
+        wake_word_phrase: Optional[str],
+    ) -> Optional[int]:
+        if WYOMING_IMPORT_ERROR:
+            msg = (
+                "Wyoming dependency is unavailable in Voice Core runtime. "
+                f"Import error: {WYOMING_IMPORT_ERROR}"
+            )
+            logger.warning("[native-voice] %s selector=%s", msg, token)
+            await _compat_set_error(token, msg)
+            await _compat_emit_event(
+                token,
+                "esphome_pipeline_unavailable",
+                {"reason": "wyoming_unavailable"},
+            )
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "wyoming_unavailable", "message": msg},
+            )
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
+
+        if _text(runtime.get("session_id")):
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=True,
+                    reason="new_session_started",
+                )
+
+        audio_format = _esphome_audio_settings_format(audio_settings)
+        session = await _native_create_session(
+            VoiceNativeSessionStartIn(
+                satellite_selector=token,
+                wake_word=_text(wake_word_phrase),
+                sample_rate_hz=int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
+                sample_width_bytes=int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
+                channels=int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
+                context={
+                    "esphome_conversation_id": _text(conversation_id),
+                    "source": "esphome_native",
+                },
+            )
+        )
+        session_id = _text(session.get("id"))
+        udp_port = 0
+        if not api_audio_supported:
+            try:
+                udp_port = await _esphome_start_udp_server(
+                    token,
+                    runtime,
+                    _schedule_udp_audio_ingest,
+                )
+            except Exception as exc:
+                msg = f"Failed to start UDP audio bridge: {exc}"
+                logger.warning("[native-voice] %s selector=%s", msg, token)
+                await _compat_set_error(token, msg)
+                await _native_mark_session_aborted(session_id, "udp_bridge_start_failed")
+                await _esphome_send_event(
+                    client,
+                    module,
+                    ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                    {"code": "udp_bridge_start_failed", "message": msg},
+                )
+                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+                return None
+
+        lock = _runtime_lock()
+        async with lock:
+            _esphome_cancel_watchdog(runtime)
+            _esphome_cancel_announcement_wait(runtime)
+            if api_audio_supported:
+                _esphome_close_udp_locked(runtime)
+            runtime["session_id"] = session_id
+            runtime["conversation_id"] = _text(conversation_id)
+            runtime["audio_format"] = audio_format
+            runtime["audio_chunks"] = 0
+            runtime["audio_bytes"] = 0
+            runtime["session_start_ts"] = _native_now()
+            runtime["last_audio_ts"] = 0.0
+            runtime["vad_voice_seen"] = False
+            runtime["vad_speech_chunks"] = 0
+            runtime["vad_silence_start_ts"] = 0.0
+            runtime["vad_last_dbfs"] = None
+            runtime["vad_noise_floor_dbfs"] = None
+            runtime["vad_peak_dbfs"] = None
+            runtime["vad_dynamic_trigger_dbfs"] = None
+            runtime["vad_dynamic_release_dbfs"] = None
+            runtime["vad_start_sent"] = False
+            runtime["api_audio_supported"] = bool(api_audio_supported)
+            if not api_audio_supported:
+                runtime["udp_port"] = int(udp_port)
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_announcement_session_id"] = ""
+            runtime["watchdog_task"] = asyncio.create_task(
+                _esphome_session_watchdog(token, client, module, session_id)
+            )
+
+        await _compat_emit_event(
+            token,
+            "esphome_session_started",
+            {
+                "session_id": session_id,
+                "conversation_id": _text(conversation_id),
+                "wake_word": _text(wake_word_phrase),
+                "audio_format": audio_format,
+            },
+        )
+        logger.info(
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s rate=%s width=%s ch=%s",
+            token,
+            _text(conversation_id),
+            session_id,
+            _text(wake_word_phrase),
+            int(audio_format.get("rate") or 0),
+            int(audio_format.get("width") or 0),
+            int(audio_format.get("channels") or 0),
+        )
+        _native_debug(
+            f"esphome session start flags selector={token} flags={int(_flags or 0)} transport={'api_audio' if api_audio_supported else f'udp:{udp_port}'}"
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
+        return int(udp_port) if not api_audio_supported else 0
+
+    async def _handle_audio(data: bytes) -> None:
+        await _ingest_audio_chunk(bytes(data or b""))
 
     async def _handle_stop(abort: bool) -> None:
         lock = runtime.get("lock")
@@ -4236,6 +4398,8 @@ async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
         else:
             with contextlib.suppress(Exception):
                 await _native_mark_session_aborted(_text(runtime.get("session_id")), _text(reason) or "disconnect")
+    if isinstance(runtime, dict):
+        _esphome_close_udp_locked(runtime)
     _esphome_voice_runtime.pop(token, None)
 
     if callable(unsubscribe):
@@ -4271,6 +4435,8 @@ async def _esphome_client_stopped(selector: str, *, expected_disconnect: bool) -
                 _text(runtime.get("session_id")),
                 "expected_disconnect" if expected_disconnect else "connection_lost",
             )
+    if isinstance(runtime, dict):
+        _esphome_close_udp_locked(runtime)
     _esphome_voice_runtime.pop(token, None)
 
     async with _esphome_native_lock:
@@ -5705,6 +5871,10 @@ async def _native_process_session(
     if not token:
         raise HTTPException(status_code=400, detail="session id is required.")
 
+    selector = ""
+    transcript = ""
+    response_text = ""
+    public_session: Dict[str, Any] = {}
     async with _native_voice_sessions_lock:
         await _native_gc_sessions_locked()
         session = _native_voice_sessions.get(token)
@@ -5725,88 +5895,108 @@ async def _native_process_session(
         area_id = _text(session.get("area_id"))
         user_id = _text(session.get("user_id"))
         conv_session_id = token
+        transcript = _text(text_override) or _text(session.get("transcript"))
 
     if selector:
         await _compat_emit_pipeline_state(selector, session_id=token, state=VOICE_STATE_THINKING)
 
-    transcript = _text(text_override) or _text(session.get("transcript"))
-    if not transcript:
-        transcript = await _native_wyoming_transcribe(
-            audio_bytes=audio_bytes,
-            rate=int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
-            width=int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
-            channels=int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
-            language=language,
+    try:
+        if not transcript:
+            transcript = await _native_wyoming_transcribe(
+                audio_bytes=audio_bytes,
+                rate=int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
+                width=int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
+                channels=int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
+                language=language,
+            )
+        transcript = _text(transcript)
+        if not transcript:
+            raise NoTranscriptError("No transcript produced from audio.")
+        _native_debug(
+            f"hydra turn start selector={selector} session_id={token} transcript_len={len(transcript)}"
         )
-    transcript = _text(transcript)
-    if not transcript:
-        raise RuntimeError("No transcript produced from audio.")
-    _native_debug(
-        f"hydra turn start selector={selector} session_id={token} transcript_len={len(transcript)}"
-    )
 
-    response_text, _, merged_ctx = await _run_homeassistant_text_turn(
-        text_in=transcript,
-        user_id=user_id or None,
-        device_id=device_id or None,
-        area_id=area_id or None,
-        session_id=conv_session_id,
-        incoming_context=context,
-        allow_followup=False,
-    )
-    _native_debug(
-        f"hydra turn result selector={selector} session_id={token} response_len={len(_text(response_text))}"
-    )
+        response_text, _, merged_ctx = await _run_homeassistant_text_turn(
+            text_in=transcript,
+            user_id=user_id or None,
+            device_id=device_id or None,
+            area_id=area_id or None,
+            session_id=conv_session_id,
+            incoming_context=context,
+            allow_followup=False,
+        )
+        _native_debug(
+            f"hydra turn result selector={selector} session_id={token} response_len={len(_text(response_text))}"
+        )
 
-    async with _native_voice_sessions_lock:
-        session = _native_voice_sessions.get(token)
-        if isinstance(session, dict):
-            _native_session_set_state(session, VOICE_STATE_SPEAKING)
-            session["transcript"] = transcript
-            session["response_text"] = response_text
-            session["context"] = merged_ctx if isinstance(merged_ctx, dict) else context
+        async with _native_voice_sessions_lock:
+            session = _native_voice_sessions.get(token)
+            if isinstance(session, dict):
+                _native_session_set_state(session, VOICE_STATE_SPEAKING)
+                session["transcript"] = transcript
+                session["response_text"] = response_text
+                session["context"] = merged_ctx if isinstance(merged_ctx, dict) else context
+                selector = _text(session.get("satellite_selector")) or selector
+
+        if selector:
+            await _compat_emit_pipeline_state(selector, session_id=token, state=VOICE_STATE_SPEAKING)
+
+        tts_bytes, tts_format = await _native_wyoming_synthesize(response_text)
+        tts_b64 = base64.b64encode(tts_bytes).decode("ascii") if tts_bytes else ""
+
+        async with _native_voice_sessions_lock:
+            session = _native_voice_sessions.get(token)
+            if not isinstance(session, dict):
+                raise HTTPException(status_code=404, detail="Native voice session expired during processing.")
+            session["tts_audio_bytes"] = tts_bytes
+            session["tts_audio_bytes_len"] = len(tts_bytes)
+            session["tts_audio_format"] = tts_format
+            session["processing"] = False
+            session["error"] = ""
+            session["expires_ts"] = _native_now() + _native_session_ttl_s()
+            _native_session_set_state(session, VOICE_STATE_IDLE)
             selector = _text(session.get("satellite_selector")) or selector
+            public_session = _native_public_session(session)
 
-    if selector:
-        await _compat_emit_pipeline_state(selector, session_id=token, state=VOICE_STATE_SPEAKING)
+        if selector:
+            await _compat_emit_pipeline_state(selector, session_id=token, state=VOICE_STATE_IDLE)
+            await _compat_emit_event(
+                selector,
+                "session_result",
+                {
+                    "session_id": token,
+                    "transcript": transcript,
+                    "response_text": response_text,
+                    "tts_audio_bytes": len(tts_bytes),
+                    "tts_audio_format": tts_format,
+                },
+            )
 
-    tts_bytes, tts_format = await _native_wyoming_synthesize(response_text)
-    tts_b64 = base64.b64encode(tts_bytes).decode("ascii") if tts_bytes else ""
-
-    async with _native_voice_sessions_lock:
-        session = _native_voice_sessions.get(token)
-        if not isinstance(session, dict):
-            raise HTTPException(status_code=404, detail="Native voice session expired during processing.")
-        session["tts_audio_bytes"] = tts_bytes
-        session["tts_audio_bytes_len"] = len(tts_bytes)
-        session["tts_audio_format"] = tts_format
-        session["processing"] = False
-        session["expires_ts"] = _native_now() + _native_session_ttl_s()
-        _native_session_set_state(session, VOICE_STATE_IDLE)
-        selector = _text(session.get("satellite_selector")) or selector
-        public_session = _native_public_session(session)
-
-    if selector:
-        await _compat_emit_pipeline_state(selector, session_id=token, state=VOICE_STATE_IDLE)
-        await _compat_emit_event(
-            selector,
-            "session_result",
-            {
-                "session_id": token,
-                "transcript": transcript,
-                "response_text": response_text,
-                "tts_audio_bytes": len(tts_bytes),
-                "tts_audio_format": tts_format,
-            },
-        )
-
-    return {
-        "session": public_session,
-        "transcript": transcript,
-        "response_text": response_text,
-        "tts_audio_base64": tts_b64,
-        "tts_audio_format": tts_format,
-    }
+        return {
+            "session": public_session,
+            "transcript": transcript,
+            "response_text": response_text,
+            "tts_audio_base64": tts_b64,
+            "tts_audio_format": tts_format,
+        }
+    except Exception as exc:
+        err = _text(exc) or exc.__class__.__name__
+        async with _native_voice_sessions_lock:
+            session = _native_voice_sessions.get(token)
+            if isinstance(session, dict):
+                session["processing"] = False
+                session["error"] = err
+                session["expires_ts"] = _native_now() + _native_session_ttl_s()
+                _native_session_set_state(session, VOICE_STATE_IDLE)
+                selector = _text(session.get("satellite_selector")) or selector
+        if selector:
+            await _compat_emit_pipeline_state(
+                selector,
+                session_id=token,
+                state=VOICE_STATE_IDLE,
+                extra={"error": err},
+            )
+        raise
 
 
 def _native_runtime_status() -> Dict[str, Any]:
