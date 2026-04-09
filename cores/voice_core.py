@@ -10,6 +10,7 @@ import base64
 import contextlib
 import inspect
 import importlib
+import socket
 from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -45,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 
 load_dotenv()
 
@@ -95,6 +96,7 @@ DEFAULT_NATIVE_WYOMING_TIMEOUT_SECONDS = 45
 DEFAULT_COMPAT_EVENT_BACKLOG = 200
 DEFAULT_COMPAT_TCP_HOST = "0.0.0.0"
 DEFAULT_COMPAT_TCP_PORT = 9766
+DEFAULT_VOICE_CORE_BIND_PORT = 8797
 DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
@@ -109,10 +111,10 @@ CORE_SETTINGS = {
     "category": "Voice Core Settings",
     "required": {
         "bind_port": {
-            "label": "Legacy HA Bridge Port",
+            "label": "Voice Core API Port",
             "type": "number",
-            "default": 8787,
-            "description": "TCP port for the existing Home Assistant conversation bridge endpoint.",
+            "default": DEFAULT_VOICE_CORE_BIND_PORT,
+            "description": "TCP port for the Voice Core API service.",
         },
         "API_AUTH_ENABLED": {
             "label": "Require API Key",
@@ -149,8 +151,8 @@ CORE_SETTINGS = {
             "label": "Voice Backend Mode",
             "type": "select",
             "options": VOICE_BACKEND_MODE_OPTIONS,
-            "default": VOICE_BACKEND_MODE_HA,
-            "description": "Use Home Assistant bridge mode, or run Tater in native HA-compatible voice pipeline mode.",
+            "default": VOICE_BACKEND_MODE_NATIVE,
+            "description": "Run in native HA-compatible voice pipeline mode, or legacy Home Assistant bridge mode.",
         },
         "VOICE_DISCOVERY_ENABLED": {
             "label": "Enable Satellite Discovery",
@@ -541,7 +543,7 @@ def _voice_backend_mode() -> str:
     mode = _lower(_portal_settings().get("VOICE_BACKEND_MODE"))
     if mode in VOICE_BACKEND_MODE_OPTIONS:
         return mode
-    return VOICE_BACKEND_MODE_HA
+    return VOICE_BACKEND_MODE_NATIVE
 
 
 def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
@@ -3942,7 +3944,7 @@ def _native_runtime_status() -> Dict[str, Any]:
     }
 
 # -------------------- App + LLM client --------------------
-app = FastAPI(title="Tater Home Assistant Bridge", version="2.0")  # stable conv_key for continued chat
+app = FastAPI(title="Tater Voice Core", version="2.0")  # stable conv_key for continued chat
 
 _llm = None
 
@@ -4382,10 +4384,42 @@ def run(stop_event: Optional[threading.Event] = None):
     settings = _voice_core_settings()
     raw_port = settings.get("bind_port")
     try:
-        port = int(raw_port) if raw_port is not None else 8787
+        port = int(raw_port) if raw_port is not None else DEFAULT_VOICE_CORE_BIND_PORT
     except (TypeError, ValueError):
-        logger.warning(f"[Voice Core] Invalid bind_port value '{raw_port}', defaulting to 8787")
-        port = 8787
+        logger.warning(
+            f"[Voice Core] Invalid bind_port value '{raw_port}', defaulting to {DEFAULT_VOICE_CORE_BIND_PORT}"
+        )
+        port = DEFAULT_VOICE_CORE_BIND_PORT
+
+    def _port_available(host: str, candidate: int) -> bool:
+        with contextlib.suppress(Exception):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((host, int(candidate)))
+                return True
+        return False
+
+    requested_port = int(port)
+    if not _port_available(BIND_HOST, requested_port):
+        fallback_port = None
+        for candidate in range(DEFAULT_VOICE_CORE_BIND_PORT, DEFAULT_VOICE_CORE_BIND_PORT + 40):
+            if candidate == requested_port:
+                continue
+            if _port_available(BIND_HOST, candidate):
+                fallback_port = candidate
+                break
+        if fallback_port is None:
+            logger.error(
+                "[Voice Core] Requested port %s is unavailable and no fallback port was found.",
+                requested_port,
+            )
+            return
+        logger.warning(
+            "[Voice Core] Port %s is already in use; falling back to %s.",
+            requested_port,
+            fallback_port,
+        )
+        port = int(fallback_port)
 
     config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
