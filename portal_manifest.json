@@ -101,7 +101,7 @@
         "learning"
       ],
       "entry": "portals/moltbook_portal.py",
-      "sha256": "35360fd22443dcaec65e62680e6dd69e13cf29e32904c4b662d1d80da5e3ec4e"
+      "sha256": "2c5be31e868cfc1d877901268c75ba9658d28c296cc565ba35fac852b956042c"
     },
     {
       "id": "telegram",
