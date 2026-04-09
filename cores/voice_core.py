@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.34"
+__version__ = "2.0.35"
 
 load_dotenv()
 
@@ -131,6 +131,7 @@ DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.30
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
+DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 7.0
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
@@ -2750,6 +2751,14 @@ def _esphome_server_vad_release_margin_db() -> float:
     return min(20.0, max(1.0, float(value)))
 
 
+def _esphome_server_vad_strong_margin_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB,
+    )
+    return min(20.0, max(1.0, float(value)))
+
+
 def _esphome_server_vad_max_release_above_floor_db() -> float:
     value = _get_float_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB",
@@ -3574,6 +3583,8 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_soft_speech_chunks": 0,
             "vad_speech_chunks": 0,
             "vad_speech_seconds": 0.0,
+            "vad_last_strong_speech_ts": 0.0,
+            "vad_strong_streak": 0,
             "vad_silence_start_ts": 0.0,
             "vad_last_dbfs": None,
             "vad_noise_floor_dbfs": None,
@@ -3734,6 +3745,8 @@ async def _esphome_finalize_voice_session(
         runtime["vad_soft_speech_chunks"] = 0
         runtime["vad_speech_chunks"] = 0
         runtime["vad_speech_seconds"] = 0.0
+        runtime["vad_last_strong_speech_ts"] = 0.0
+        runtime["vad_strong_streak"] = 0
         runtime["vad_silence_start_ts"] = 0.0
         runtime["vad_last_dbfs"] = None
         runtime["vad_noise_floor_dbfs"] = None
@@ -3991,6 +4004,7 @@ async def _esphome_subscribe_voice_assistant(
             dbfs: Optional[float] = None
             trigger_threshold: Optional[float] = None
             release_threshold: Optional[float] = None
+            strong_threshold: Optional[float] = None
             emit_vad_start = False
             async with lock:
                 now = _native_monotonic()
@@ -4011,6 +4025,7 @@ async def _esphome_subscribe_voice_assistant(
                     drop_db = _esphome_server_vad_drop_db()
                     trigger_margin = _esphome_server_vad_trigger_margin_db()
                     release_margin = _esphome_server_vad_release_margin_db()
+                    strong_margin = _esphome_server_vad_strong_margin_db()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
                     silence_target_s = _esphome_server_vad_silence_s()
@@ -4041,6 +4056,7 @@ async def _esphome_subscribe_voice_assistant(
                         release_lower = float(floor) + 0.5
                         release_threshold = min(float(release_raw), float(release_upper), float(release_floor_cap))
                         release_threshold = max(float(release_threshold), float(release_lower))
+                        strong_threshold = max(float(trigger_threshold) + float(strong_margin), float(trigger_threshold) + 1.0)
                         runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
                         runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
@@ -4061,53 +4077,73 @@ async def _esphome_subscribe_voice_assistant(
 
                             if start_detected:
                                 runtime["vad_voice_seen"] = True
-                                runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
-                                runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
-                                runtime["vad_silence_start_ts"] = 0.0
+                                runtime["vad_silence_start_ts"] = now
+                                runtime["vad_last_strong_speech_ts"] = 0.0
+                                runtime["vad_strong_streak"] = 0
+                                if strong_threshold is not None and dbfs >= float(strong_threshold):
+                                    streak = int(runtime.get("vad_strong_streak") or 0) + 1
+                                    runtime["vad_strong_streak"] = streak
+                                    if streak >= 2:
+                                        runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                                        runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
+                                        runtime["vad_last_strong_speech_ts"] = now
+                                        runtime["vad_silence_start_ts"] = 0.0
                                 if not bool(runtime.get("vad_start_sent")):
                                     runtime["vad_start_sent"] = True
                                     emit_vad_start = True
-                        elif dbfs >= release_threshold:
-                            runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
-                            runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
-                            runtime["vad_silence_start_ts"] = 0.0
                         else:
-                            silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
-                            if silence_start_ts <= 0.0:
-                                silence_start_ts = now
-                                runtime["vad_silence_start_ts"] = silence_start_ts
-                            silence_elapsed = max(0.0, now - silence_start_ts)
-                            speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
-                            speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
-                            if (
-                                silence_elapsed >= silence_target_s
-                                and (speech_chunks >= min_speech_chunks or speech_seconds >= min_speech_seconds)
-                            ):
-                                should_finalize = True
-                                finalize_details = {
-                                    "speech_chunks": speech_chunks,
-                                    "speech_seconds": speech_seconds,
-                                    "silence_elapsed": silence_elapsed,
-                                    "dbfs": float(dbfs),
-                                    "trigger_threshold": float(trigger_threshold),
-                                    "release_threshold": float(release_threshold),
-                                    "noise_floor_dbfs": float(floor),
-                                    "peak_dbfs": float(peak),
-                                }
+                            if strong_threshold is not None and dbfs >= float(strong_threshold):
+                                streak = int(runtime.get("vad_strong_streak") or 0) + 1
+                                runtime["vad_strong_streak"] = streak
+                                if streak >= 2:
+                                    runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                                    runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
+                                    runtime["vad_last_strong_speech_ts"] = now
+                                    runtime["vad_silence_start_ts"] = 0.0
+                            else:
+                                runtime["vad_strong_streak"] = 0
+                                silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+                                if silence_start_ts <= 0.0:
+                                    silence_start_ts = now
+                                    runtime["vad_silence_start_ts"] = silence_start_ts
+                                last_strong_ts = float(runtime.get("vad_last_strong_speech_ts") or 0.0)
+                                silence_anchor = last_strong_ts if last_strong_ts > 0.0 else silence_start_ts
+                                silence_elapsed = max(0.0, now - silence_anchor)
+                                speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+                                speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+                                if (
+                                    silence_elapsed >= silence_target_s
+                                    and (speech_chunks >= min_speech_chunks or speech_seconds >= min_speech_seconds)
+                                ):
+                                    should_finalize = True
+                                    finalize_details = {
+                                        "speech_chunks": speech_chunks,
+                                        "speech_seconds": speech_seconds,
+                                        "silence_elapsed": silence_elapsed,
+                                        "dbfs": float(dbfs),
+                                        "trigger_threshold": float(trigger_threshold),
+                                        "release_threshold": float(release_threshold),
+                                        "strong_threshold": float(strong_threshold) if strong_threshold is not None else 0.0,
+                                        "noise_floor_dbfs": float(floor),
+                                        "peak_dbfs": float(peak),
+                                    }
             if chunks in {1, 5, 10} or (chunks > 0 and (chunks % 50 == 0)):
                 dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
                 trigger_text = "-" if trigger_threshold is None else f"{trigger_threshold:.1f}"
                 release_text = "-" if release_threshold is None else f"{release_threshold:.1f}"
+                strong_text = "-" if strong_threshold is None else f"{strong_threshold:.1f}"
                 floor_text = "-"
                 peak_text = "-"
                 silence_text = "-"
                 speech_text = "0.00"
+                strong_streak = 0
                 voice_seen = False
                 async with lock:
                     floor_val = runtime.get("vad_noise_floor_dbfs")
                     peak_val = runtime.get("vad_peak_dbfs")
                     silence_val = runtime.get("vad_silence_start_ts")
                     speech_val = runtime.get("vad_speech_seconds")
+                    strong_streak = int(runtime.get("vad_strong_streak") or 0)
                     voice_seen = bool(runtime.get("vad_voice_seen"))
                 if isinstance(floor_val, (int, float)):
                     floor_text = f"{float(floor_val):.1f}"
@@ -4119,9 +4155,9 @@ async def _esphome_subscribe_voice_assistant(
                     speech_text = f"{max(0.0, float(speech_val)):.2f}"
                 _native_debug(
                     f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} "
-                    f"dbfs={dbfs_text} trigger={trigger_text} release={release_text} floor={floor_text} "
+                    f"dbfs={dbfs_text} trigger={trigger_text} release={release_text} strong={strong_text} floor={floor_text} "
                     f"peak={peak_text} silence_s={silence_text} speech_s={speech_text} "
-                    f"voice_seen={str(voice_seen).lower()}"
+                    f"streak={strong_streak} voice_seen={str(voice_seen).lower()}"
                 )
             if emit_vad_start:
                 sent = await _esphome_send_event(
@@ -4135,7 +4171,7 @@ async def _esphome_subscribe_voice_assistant(
                 )
             if should_finalize:
                 logger.info(
-                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f floor=%.1f peak=%.1f",
+                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
                     token,
                     session_id,
                     float(finalize_details.get("silence_elapsed") or 0.0),
@@ -4144,6 +4180,7 @@ async def _esphome_subscribe_voice_assistant(
                     float(finalize_details.get("dbfs") or 0.0),
                     float(finalize_details.get("trigger_threshold") or 0.0),
                     float(finalize_details.get("release_threshold") or 0.0),
+                    float(finalize_details.get("strong_threshold") or 0.0),
                     float(finalize_details.get("noise_floor_dbfs") or 0.0),
                     float(finalize_details.get("peak_dbfs") or 0.0),
                 )
@@ -4286,6 +4323,8 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_soft_speech_chunks"] = 0
             runtime["vad_speech_chunks"] = 0
             runtime["vad_speech_seconds"] = 0.0
+            runtime["vad_last_strong_speech_ts"] = 0.0
+            runtime["vad_strong_streak"] = 0
             runtime["vad_silence_start_ts"] = 0.0
             runtime["vad_last_dbfs"] = None
             runtime["vad_noise_floor_dbfs"] = None
