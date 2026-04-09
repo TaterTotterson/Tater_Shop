@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.22"
+__version__ = "2.0.23"
 
 load_dotenv()
 
@@ -120,16 +120,20 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
-DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
+DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.1
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.95
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.65
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
+DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
+DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS = -52.0
+DEFAULT_ESPHOME_TTS_TRIM_LEAD_MS = 40
+DEFAULT_ESPHOME_TTS_TRIM_TAIL_MS = 120
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -3056,8 +3060,83 @@ def _esphome_selector_host(selector: str) -> str:
     return ""
 
 
+def _esphome_trim_tts_pcm(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> bytes:
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return b""
+    if not _get_bool_platform_setting("VOICE_ESPHOME_TTS_TRIM_ENABLED", DEFAULT_ESPHOME_TTS_TRIM_ENABLED):
+        return data
+
+    fmt = audio_format if isinstance(audio_format, dict) else {}
+    rate = int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if width < 1 or width > 4:
+        return data
+    if channels < 1:
+        return data
+
+    frame_bytes = width * channels
+    if frame_bytes <= 0:
+        return data
+    usable = len(data) - (len(data) % frame_bytes)
+    if usable <= 0:
+        return data
+    if usable != len(data):
+        data = data[:usable]
+
+    window_ms = 20
+    window_frames = max(1, int((rate * window_ms) / 1000))
+    window_bytes = max(frame_bytes, window_frames * frame_bytes)
+    total_windows = max(1, len(data) // window_bytes)
+    if total_windows <= 1:
+        return data
+
+    threshold_dbfs = _get_float_platform_setting(
+        "VOICE_ESPHOME_TTS_TRIM_THRESHOLD_DBFS",
+        DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS,
+    )
+    full_scale = float((1 << ((8 * width) - 1)) - 1)
+    if full_scale <= 0.0:
+        return data
+    normalized = min(1.0, max(10.0 ** (float(threshold_dbfs) / 20.0), 1e-6))
+    threshold_rms = max(1.0, full_scale * normalized)
+
+    lead_ms = max(0.0, _get_float_platform_setting("VOICE_ESPHOME_TTS_TRIM_LEAD_MS", DEFAULT_ESPHOME_TTS_TRIM_LEAD_MS))
+    tail_ms = max(0.0, _get_float_platform_setting("VOICE_ESPHOME_TTS_TRIM_TAIL_MS", DEFAULT_ESPHOME_TTS_TRIM_TAIL_MS))
+    keep_lead_windows = int((lead_ms + (window_ms - 1)) // window_ms)
+    keep_tail_windows = int((tail_ms + (window_ms - 1)) // window_ms)
+
+    active_first: Optional[int] = None
+    active_last: Optional[int] = None
+    for idx in range(total_windows):
+        start = idx * window_bytes
+        end = min(len(data), start + window_bytes)
+        chunk = data[start:end]
+        if not chunk:
+            continue
+        with contextlib.suppress(Exception):
+            rms = float(audioop.rms(chunk, width))
+            if rms >= threshold_rms:
+                if active_first is None:
+                    active_first = idx
+                active_last = idx
+                continue
+    if active_first is None or active_last is None:
+        return data
+
+    start_window = max(0, int(active_first) - keep_lead_windows)
+    end_window = min(total_windows, int(active_last) + 1 + keep_tail_windows)
+    start_offset = start_window * window_bytes
+    end_offset = min(len(data), end_window * window_bytes)
+    if start_offset <= 0 and end_offset >= len(data):
+        return data
+    trimmed = data[start_offset:end_offset]
+    return trimmed if trimmed else data
+
+
 def _esphome_pcm_to_wav(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> Tuple[bytes, Dict[str, int]]:
-    pcm = bytes(audio_bytes or b"")
+    pcm = _esphome_trim_tts_pcm(audio_bytes, audio_format)
     if not pcm:
         return b"", {
             "rate": int(DEFAULT_VOICE_SAMPLE_RATE_HZ),
@@ -3154,6 +3233,19 @@ def _esphome_fetch_tts_url(stream_id: str) -> Optional[Dict[str, Any]]:
         if not isinstance(row, dict):
             return None
         return dict(row)
+
+
+async def _esphome_selector_speaker_supported(selector: str) -> bool:
+    token = _text(selector)
+    if not token:
+        return True
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+    if isinstance(row, dict):
+        value = row.get("voice_speaker_supported")
+        if isinstance(value, bool):
+            return value
+    return True
 
 
 def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
@@ -3348,9 +3440,17 @@ async def _esphome_finalize_voice_session(
         tts_b64 = _text(result.get("tts_audio_base64"))
         tts_audio = base64.b64decode(tts_b64) if tts_b64 else b""
         tts_format = result.get("tts_audio_format") if isinstance(result.get("tts_audio_format"), dict) else {}
-        tts_url = _esphome_store_tts_url(token, session_id, tts_audio, tts_format)
-        if not tts_url:
-            tts_url = "voice-assistant://stream"
+        speaker_supported = await _esphome_selector_speaker_supported(token)
+        tts_mode = "stream" if speaker_supported else "url"
+        tts_url = "voice-assistant://stream"
+        if not speaker_supported:
+            prepared_url = _esphome_store_tts_url(token, session_id, tts_audio, tts_format)
+            if prepared_url:
+                tts_url = prepared_url
+            else:
+                # Fallback when URL streaming could not be prepared; continue with API audio stream.
+                speaker_supported = True
+                tts_mode = "stream_fallback"
 
         await _esphome_send_event(
             client,
@@ -3373,32 +3473,34 @@ async def _esphome_finalize_voice_session(
                 "continue_conversation": "0",
             },
         )
-        # Matches ESPHome/Assist event flow for streamed local speaker output.
-        await _esphome_send_event(
-            client,
-            module,
-            ("VOICE_ASSISTANT_INTENT_PROGRESS", "INTENT_PROGRESS"),
-            {"tts_start_streaming": "1"},
-        )
         await _esphome_send_event(
             client,
             module,
             ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
             {"text": response_text},
         )
-        await _esphome_send_event(
-            client,
-            module,
-            ("VOICE_ASSISTANT_TTS_STREAM_START", "TTS_STREAM_START"),
-            None,
-        )
-        tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
-        await _esphome_send_event(
-            client,
-            module,
-            ("VOICE_ASSISTANT_TTS_STREAM_END", "TTS_STREAM_END"),
-            None,
-        )
+        tts_chunks = 0
+        if speaker_supported:
+            # Matches ESPHome/Assist event flow for streamed local speaker output.
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_INTENT_PROGRESS", "INTENT_PROGRESS"),
+                {"tts_start_streaming": "1"},
+            )
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_TTS_STREAM_START", "TTS_STREAM_START"),
+                None,
+            )
+            tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_TTS_STREAM_END", "TTS_STREAM_END"),
+                None,
+            )
         await _esphome_send_event(
             client,
             module,
@@ -3417,16 +3519,18 @@ async def _esphome_finalize_voice_session(
                 "tts_audio_bytes": len(tts_audio),
                 "tts_audio_chunks": int(tts_chunks),
                 "tts_url": tts_url,
+                "tts_mode": tts_mode,
             },
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_url=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_mode=%s tts_url=%s",
             token,
             session_id,
             len(transcript),
             len(response_text),
             len(tts_audio),
             int(tts_chunks),
+            tts_mode,
             tts_url,
         )
     except Exception as exc:
@@ -4134,6 +4238,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
                 },
             }
         )
@@ -4150,6 +4255,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
                 },
             },
         )
@@ -4168,6 +4274,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
                     "last_success_ts": _native_now(),
                     "last_error": "",
                     "source": source,

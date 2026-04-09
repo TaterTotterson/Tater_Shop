@@ -55,7 +55,7 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.1.2'
+    version = '2.1.3'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
@@ -998,6 +998,9 @@ class HALightsPlugin(ToolVerba):
         )
 
     async def handle_homeassistant(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_voice_core(self, args, llm_client):
         return await self._handle(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
