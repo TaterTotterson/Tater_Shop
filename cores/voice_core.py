@@ -11,7 +11,7 @@ import contextlib
 import inspect
 import importlib
 import socket
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.10"
+__version__ = "2.0.12"
 
 load_dotenv()
 
@@ -100,6 +100,7 @@ DEFAULT_VOICE_CORE_BIND_PORT = 8797
 DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
+DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
 
 VOICE_STATE_IDLE = "idle"
 VOICE_STATE_LISTENING = "listening"
@@ -121,7 +122,7 @@ CORE_SETTINGS = {
             "type": "select",
             "options": ["true", "false"],
             "default": "false",
-            "description": "Require X-Tater-Token on all Home Assistant portal API endpoints.",
+            "description": "Require X-Tater-Token on Voice Core API endpoints.",
         },
         "API_AUTH_KEY": {
             "label": "API Key",
@@ -129,49 +130,11 @@ CORE_SETTINGS = {
             "default": "",
             "description": "Shared API key expected in the X-Tater-Token header when auth is enabled.",
         },
-
-        # --- TTL control ---
-        "SESSION_TTL_SECONDS": {
-            "label": "Session TTL",
-            "type": "select",
-            "options": ["5m", "30m", "1h", "2h", "6h", "24h"],
-            "default": "2h",
-            "description": "How long to keep a voice session’s history alive (5m–24h).",
-        },
-
-        # --- Continued chat toggle ---
-        "CONTINUED_CHAT_ENABLED": {
-            "label": "Continued chat (auto re-open mic)",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "false",
-            "description": "If enabled, Tater automatically re-opens the Assist satellite mic when it ends with a question.",
-        },
-        "VOICE_BACKEND_MODE": {
-            "label": "Voice Backend Mode",
-            "type": "select",
-            "options": VOICE_BACKEND_MODE_OPTIONS,
-            "default": VOICE_BACKEND_MODE_NATIVE,
-            "description": "Run in native HA-compatible voice pipeline mode, or legacy Home Assistant bridge mode.",
-        },
-        "VOICE_DISCOVERY_ENABLED": {
-            "label": "Enable Satellite Discovery",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Allow periodic local network discovery for ESPHome/Satellite devices.",
-        },
-        "VOICE_DISCOVERY_SCAN_SECONDS": {
-            "label": "Discovery Scan Interval (sec)",
-            "type": "number",
-            "default": DEFAULT_VOICE_DISCOVERY_SCAN_SECONDS,
-            "description": "How often to refresh the discovered-satellite cache.",
-        },
         "VOICE_DISCOVERY_MDNS_TIMEOUT_S": {
             "label": "mDNS Discovery Window (sec)",
             "type": "number",
             "default": DEFAULT_VOICE_DISCOVERY_MDNS_TIMEOUT_S,
-            "description": "How long each discovery run listens for ESPHome mDNS service announcements.",
+            "description": "How long each manual discovery run listens for ESPHome mDNS service announcements.",
         },
         "VOICE_DISCOVERY_EXCLUDE_HA_ASSIST": {
             "label": "Exclude HA-Connected Assist Satellites",
@@ -179,37 +142,6 @@ CORE_SETTINGS = {
             "options": ["true", "false"],
             "default": "true",
             "description": "Hide discovered satellites that appear to already be connected as Home Assistant Assist satellites.",
-        },
-        "VOICE_SATELLITE_TARGETS": {
-            "label": "Adopted Satellites",
-            "type": "string",
-            "default": "[]",
-            "description": "Selected satellite selectors used by the native voice backend.",
-        },
-        "VOICE_MANUAL_TARGETS": {
-            "label": "Manual Satellite Hosts",
-            "type": "string",
-            "default": "",
-            "description": "Optional manual host/IP entries (comma or newline separated) for satellites not discovered automatically.",
-        },
-        "VOICE_SENSOR_ENTITY_IDS": {
-            "label": "Voice Context Sensors",
-            "type": "string",
-            "default": "[]",
-            "description": "Sensor entities that should be available for voice context and diagnostics.",
-        },
-        "VOICE_EOU_MODE": {
-            "label": "End-of-Utterance Mode",
-            "type": "select",
-            "options": ["device", "server_vad", "hybrid"],
-            "default": "device",
-            "description": "How utterance completion is detected: rely on device signals, server VAD, or both.",
-        },
-        "VOICE_STREAM_SAMPLE_RATE_HZ": {
-            "label": "Audio Sample Rate (Hz)",
-            "type": "number",
-            "default": DEFAULT_VOICE_SAMPLE_RATE_HZ,
-            "description": "Preferred sample rate for STT streaming and TTS playback hand-off.",
         },
         "VOICE_WYOMING_STT_HOST": {
             "label": "Wyoming STT Host",
@@ -260,65 +192,6 @@ CORE_SETTINGS = {
             "default": DEFAULT_NATIVE_WYOMING_TIMEOUT_SECONDS,
             "description": "Timeout for Wyoming STT/TTS request-response operations.",
         },
-        "VOICE_COMPAT_ENABLED": {
-            "label": "Compatibility Bridge Enabled",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Enable HTTP compatibility bridge endpoints for satellite adapter transports.",
-        },
-        "VOICE_COMPAT_REQUIRE_ADOPTED": {
-            "label": "Require Adopted Satellites",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "false",
-            "description": "If enabled, compatibility bridge rejects selectors not present in adopted satellites.",
-        },
-        "VOICE_COMPAT_EVENT_BACKLOG": {
-            "label": "Compat Event Backlog",
-            "type": "number",
-            "default": DEFAULT_COMPAT_EVENT_BACKLOG,
-            "description": "Maximum queued bridge events to retain per selector.",
-        },
-        "VOICE_COMPAT_TCP_ENABLED": {
-            "label": "Compat Adapter TCP Server",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "false",
-            "description": "Enable JSONL TCP adapter transport for external satellite bridge clients.",
-        },
-        "VOICE_COMPAT_TCP_HOST": {
-            "label": "Compat Adapter TCP Host",
-            "type": "string",
-            "default": DEFAULT_COMPAT_TCP_HOST,
-            "description": "Bind host for the compatibility adapter TCP server.",
-        },
-        "VOICE_COMPAT_TCP_PORT": {
-            "label": "Compat Adapter TCP Port",
-            "type": "number",
-            "default": DEFAULT_COMPAT_TCP_PORT,
-            "description": "Bind port for the compatibility adapter TCP server.",
-        },
-        "VOICE_COMPAT_TCP_REQUIRE_TOKEN": {
-            "label": "Compat Adapter Require Token",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Require auth token before adapter clients can call bridge actions.",
-        },
-        "VOICE_COMPAT_TCP_TOKEN": {
-            "label": "Compat Adapter Token",
-            "type": "password",
-            "default": "",
-            "description": "Optional dedicated token for adapter clients (falls back to API key if empty).",
-        },
-        "VOICE_ESPHOME_NATIVE_ENABLED": {
-            "label": "ESPHome Native Adapter",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "false",
-            "description": "Enable direct ESPHome API adapter loop (requires aioesphomeapi dependency).",
-        },
         "VOICE_ESPHOME_API_PORT": {
             "label": "ESPHome API Port",
             "type": "number",
@@ -349,60 +222,23 @@ CORE_SETTINGS = {
             "default": DEFAULT_ESPHOME_RETRY_SECONDS,
             "description": "Retry delay between ESPHome connection attempts.",
         },
-        "VOICE_ESPHOME_AUTO_TARGET_MANUAL": {
-            "label": "ESPHome Auto-target Manual Hosts",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Include manual satellite host targets in ESPHome native connection attempts.",
-        },
-
-        # --- Follow-up behavior ---
-        "FOLLOWUP_IDLE_TIMEOUT_S": {
-            "label": "Follow-up idle wait (seconds)",
-            "type": "number",
-            "default": int(DEFAULT_FOLLOWUP_IDLE_TIMEOUT_S),
-            "description": "How long to wait for the satellite to return to idle before re-opening the mic.",
-        },
-
-        # --- Assist satellite resolution ---
         "SATELLITE_MAP_CACHE_TTL_S": {
             "label": "Assist satellite map cache TTL (seconds)",
             "type": "number",
             "default": DEFAULT_SATELLITE_MAP_CACHE_TTL_S,
             "description": "How long to cache the device_id→assist_satellite mapping (registry lookups).",
         },
-
-        # --- Existing Voice PE ring fields (optional) ---
-        "VOICE_PE_ENTITY_1": {
-            "label": "Voice PE entity #1",
-            "type": "string",
-            "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
+        "VOICE_NATIVE_SESSION_TTL_S": {
+            "label": "Native Session TTL (sec)",
+            "type": "number",
+            "default": DEFAULT_VOICE_SESSION_TTL_SECONDS,
+            "description": "How long native voice session objects remain queryable after creation.",
         },
-        "VOICE_PE_ENTITY_2": {
-            "label": "Voice PE entity #2",
-            "type": "string",
-            "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
-        },
-        "VOICE_PE_ENTITY_3": {
-            "label": "Voice PE entity #3",
-            "type": "string",
-            "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
-        },
-        "VOICE_PE_ENTITY_4": {
-            "label": "Voice PE entity #4",
-            "type": "string",
-            "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
-        },
-        "VOICE_PE_ENTITY_5": {
-            "label": "Voice PE entity #5",
-            "type": "string",
-            "default": "",
-            "description": "Entity ID of a Voice PE light/LED (e.g., light.voice_pe_office)",
+        "VOICE_NATIVE_MAX_AUDIO_BYTES": {
+            "label": "Native Max Audio Bytes",
+            "type": "number",
+            "default": DEFAULT_NATIVE_MAX_AUDIO_BYTES,
+            "description": "Maximum buffered audio size per native voice session before ingestion is rejected.",
         },
     }
 }
@@ -558,11 +394,8 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
     tts_port = _get_int_platform_setting("VOICE_WYOMING_TTS_PORT", DEFAULT_WYOMING_TTS_PORT)
     return {
         "backend_mode": _voice_backend_mode(),
-        "discovery_enabled": _get_bool_platform_setting("VOICE_DISCOVERY_ENABLED", True),
-        "discovery_scan_seconds": _get_int_platform_setting(
-            "VOICE_DISCOVERY_SCAN_SECONDS",
-            DEFAULT_VOICE_DISCOVERY_SCAN_SECONDS,
-        ),
+        "discovery_enabled": False,
+        "discovery_scan_seconds": 0,
         "discovery_exclude_ha_assist": _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
         "satellite_targets": _parse_json_string_list(settings.get("VOICE_SATELLITE_TARGETS")),
         "manual_targets": _normalize_csv_or_lines(settings.get("VOICE_MANUAL_TARGETS")),
@@ -1486,6 +1319,14 @@ def _upsert_voice_satellite(row: Dict[str, Any]) -> Dict[str, Any]:
                 next_meta = value if isinstance(value, dict) else {}
                 updated["metadata"] = {**base_meta, **next_meta}
                 continue
+            if key == "source":
+                incoming_source = _lower(value)
+                existing_source = _lower(existing.get("source"))
+                existing_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+                if existing_source == "esphome_native" and incoming_source in {"mdns_esphome", "manual", ""}:
+                    continue
+                if incoming_source == "mdns_esphome" and bool(existing_meta.get("esphome_selected")):
+                    continue
             if value in ("", None) and key != "last_seen_ts":
                 continue
             updated[key] = value
@@ -1512,6 +1353,50 @@ def _remove_voice_satellite(selector: str) -> bool:
         return False
     _save_voice_satellite_registry(kept)
     return True
+
+
+def _set_satellite_esphome_selected(selector: str, selected: bool) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        return {}
+    row = _voice_core_find_satellite(token)
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    next_row = dict(row) if isinstance(row, dict) else {"selector": token}
+    next_meta = dict(metadata)
+    next_meta["esphome_selected"] = bool(selected)
+    next_row["metadata"] = next_meta
+    return _upsert_voice_satellite(next_row)
+
+
+def _clear_legacy_esphome_selected_flags() -> int:
+    rows = _load_voice_satellite_registry()
+    if not rows:
+        return 0
+
+    changed = 0
+    next_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            next_rows.append(row)
+            continue
+        source = _lower(row.get("source"))
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if source in {"esphome_native"}:
+            next_rows.append(row)
+            continue
+        if not bool(metadata.get("esphome_selected")):
+            next_rows.append(row)
+            continue
+        updated = dict(row)
+        next_meta = dict(metadata)
+        next_meta.pop("esphome_selected", None)
+        updated["metadata"] = next_meta
+        next_rows.append(updated)
+        changed += 1
+
+    if changed:
+        _save_voice_satellite_registry(next_rows)
+    return changed
 
 
 def _voice_satellite_option_rows(*, current_values: List[str]) -> List[Dict[str, str]]:
@@ -1825,17 +1710,24 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "run_label": "Discover / Refresh",
             "fields": [
                 {
-                    "key": "discovery_enabled",
-                    "label": "Discovery loop enabled",
+                    "key": "discovery_mode",
+                    "label": "Discovery mode",
                     "type": "text",
-                    "value": "yes" if bool(runtime_status.get("discovery_enabled")) else "no",
+                    "value": "manual-only (scan on demand)",
                     "read_only": True,
                 },
                 {
-                    "key": "discovery_interval",
-                    "label": "Discovery interval (sec)",
+                    "key": "mdns_window",
+                    "label": "mDNS window (sec)",
                     "type": "text",
-                    "value": str(runtime_status.get("discovery_scan_seconds") or ""),
+                    "value": str(_native_discovery_mdns_timeout_s()),
+                    "read_only": True,
+                },
+                {
+                    "key": "exclude_ha",
+                    "label": "Exclude HA-connected satellites",
+                    "type": "text",
+                    "value": "yes" if _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True) else "no",
                     "read_only": True,
                 },
             ],
@@ -1875,14 +1767,16 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         sensor_ids = [str(item).strip() for item in sensor_rows if str(item).strip()]
         client = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
         connected = bool(client.get("connected"))
+        selected = bool(metadata.get("esphome_selected"))
         run_action = ""
         run_label = ""
-        if connected:
+        if selected:
             run_action = "voice_satellite_disconnect"
             run_label = "Disconnect"
         elif host:
             run_action = "voice_satellite_connect"
             run_label = "Connect"
+        connection_label = "connected" if connected else "selected (reconnecting)" if selected else "disconnected"
 
         item_forms.append(
             {
@@ -1904,7 +1798,8 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     {"key": "host", "label": "Host", "type": "text", "value": host or "-", "read_only": True},
                     {"key": "entity_id", "label": "Entity ID", "type": "text", "value": _text(row.get("entity_id")) or "-", "read_only": True},
                     {"key": "satellite_id", "label": "Satellite ID", "type": "text", "value": _text(row.get("satellite_id")) or "-", "read_only": True},
-                    {"key": "connection", "label": "ESPHome Connection", "type": "text", "value": "connected" if connected else "disconnected", "read_only": True},
+                    {"key": "connection", "label": "ESPHome Connection", "type": "text", "value": connection_label, "read_only": True},
+                    {"key": "selected", "label": "Selected", "type": "text", "value": "yes" if selected else "no", "read_only": True},
                     {"key": "sensors", "label": "Sensors", "type": "textarea", "value": "\n".join(sensor_ids) if sensor_ids else "-", "read_only": True},
                 ],
             }
@@ -2332,6 +2227,7 @@ _esphome_native_stats: Dict[str, Any] = {
     "last_success_ts": 0.0,
     "last_error": "",
 }
+_esphome_voice_runtime: Dict[str, Dict[str, Any]] = {}
 
 
 def _compat_bridge_enabled() -> bool:
@@ -2546,6 +2442,402 @@ def _esphome_import() -> Tuple[Optional[Any], str]:
         return None, str(exc)
 
 
+def _esphome_module_attr(module: Any, name: str) -> Any:
+    if module is not None:
+        value = getattr(module, name, None)
+        if value is not None:
+            return value
+        sub_model = getattr(module, "model", None)
+        if sub_model is not None:
+            value = getattr(sub_model, name, None)
+            if value is not None:
+                return value
+    with contextlib.suppress(Exception):
+        model_module = importlib.import_module("aioesphomeapi.model")
+        value = getattr(model_module, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _esphome_event_type_value(module: Any, *candidates: str) -> Any:
+    enum_cls = _esphome_module_attr(module, "VoiceAssistantEventType")
+    if enum_cls is None:
+        return None
+    for candidate in candidates:
+        token = _text(candidate)
+        if not token:
+            continue
+        direct = getattr(enum_cls, token, None)
+        if direct is not None:
+            return direct
+    wanted = {_lower(item) for item in candidates if _text(item)}
+    for attr_name in dir(enum_cls):
+        if _lower(attr_name) in wanted:
+            return getattr(enum_cls, attr_name, None)
+    return None
+
+
+def _esphome_payload_strings(data: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    payload = data if isinstance(data, dict) else {}
+    out: Dict[str, str] = {}
+    for key, value in payload.items():
+        token = _text(key)
+        if not token:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            out[token] = "1" if value else "0"
+            continue
+        out[token] = str(value)
+    return out
+
+
+def _esphome_audio_settings_format(audio_settings: Any) -> Dict[str, int]:
+    base = {
+        "rate": int(DEFAULT_VOICE_SAMPLE_RATE_HZ),
+        "width": int(DEFAULT_VOICE_SAMPLE_WIDTH),
+        "channels": int(DEFAULT_VOICE_CHANNELS),
+    }
+    source = audio_settings if audio_settings is not None else {}
+
+    def _read_int(candidates: List[str], default: int) -> int:
+        for candidate in candidates:
+            value = None
+            if isinstance(source, dict):
+                value = source.get(candidate)
+            else:
+                value = getattr(source, candidate, None)
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed > 0:
+                return parsed
+        return int(default)
+
+    return {
+        "rate": _read_int(["rate", "sample_rate", "sample_rate_hz"], base["rate"]),
+        "width": _read_int(["width", "sample_width", "sample_width_bytes"], base["width"]),
+        "channels": _read_int(["channels", "num_channels"], base["channels"]),
+    }
+
+
+async def _esphome_client_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        raise RuntimeError(f"ESPHome client missing method: {method_name}")
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _esphome_send_event(
+    client: Any,
+    module: Any,
+    event_candidates: Tuple[str, ...],
+    data: Optional[Dict[str, Any]] = None,
+) -> bool:
+    event_type = _esphome_event_type_value(module, *event_candidates)
+    if event_type is None:
+        _native_debug(f"esphome event unavailable candidates={event_candidates}")
+        return False
+    payload = _esphome_payload_strings(data)
+    try:
+        await _esphome_client_call(
+            client,
+            "send_voice_assistant_event",
+            event_type,
+            payload if payload else None,
+        )
+        return True
+    except Exception as exc:
+        _native_debug(
+            f"esphome event send failed candidates={event_candidates} error={exc}"
+        )
+        return False
+
+
+async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size: int = DEFAULT_ESPHOME_TTS_CHUNK_BYTES) -> None:
+    data = bytes(tts_audio or b"")
+    if not data:
+        return
+    size = max(512, int(chunk_size))
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset: offset + size]
+        offset += len(chunk)
+        await _esphome_client_call(client, "send_voice_assistant_audio", chunk)
+
+
+def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    row = _esphome_voice_runtime.get(token)
+    if not isinstance(row, dict):
+        row = {
+            "session_id": "",
+            "conversation_id": "",
+            "audio_format": {
+                "rate": int(DEFAULT_VOICE_SAMPLE_RATE_HZ),
+                "width": int(DEFAULT_VOICE_SAMPLE_WIDTH),
+                "channels": int(DEFAULT_VOICE_CHANNELS),
+            },
+            "lock": asyncio.Lock(),
+        }
+        _esphome_voice_runtime[token] = row
+    lock = row.get("lock")
+    if lock is None or not hasattr(lock, "acquire"):
+        row["lock"] = asyncio.Lock()
+    return row
+
+
+async def _native_mark_session_aborted(session_id: str, reason: str) -> None:
+    token = _text(session_id)
+    if not token:
+        return
+    async with _native_voice_sessions_lock:
+        session = _native_voice_sessions.get(token)
+        if not isinstance(session, dict):
+            return
+        session["processing"] = False
+        session["error"] = _text(reason) or "aborted"
+        session["expires_ts"] = _native_now() + _native_session_ttl_s()
+        _native_session_set_state(session, VOICE_STATE_IDLE)
+
+
+async def _esphome_finalize_voice_session(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    abort: bool,
+    reason: str = "",
+) -> None:
+    token = _text(selector)
+    if not token:
+        return
+    runtime = _esphome_voice_runtime_state(token)
+    lock = runtime.get("lock")
+    if lock is None or not hasattr(lock, "acquire"):
+        runtime["lock"] = asyncio.Lock()
+        lock = runtime["lock"]
+
+    async with lock:
+        session_id = _text(runtime.get("session_id"))
+        conversation_id = _text(runtime.get("conversation_id"))
+        runtime["session_id"] = ""
+        runtime["conversation_id"] = ""
+
+    if not session_id:
+        return
+
+    if abort:
+        await _native_mark_session_aborted(session_id, reason or "device_stopped")
+        await _compat_emit_event(
+            token,
+            "esphome_session_aborted",
+            {"session_id": session_id, "reason": _text(reason) or "device_stopped"},
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        return
+
+    try:
+        await _native_append_audio_chunk(
+            session_id,
+            VoiceNativeSessionAudioIn(audio_base64="", final_chunk=True),
+        )
+        result = await _native_process_session(session_id)
+        transcript = _text(result.get("transcript"))
+        response_text = _text(result.get("response_text"))
+        tts_b64 = _text(result.get("tts_audio_base64"))
+        tts_audio = base64.b64decode(tts_b64) if tts_b64 else b""
+
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_STT_END", "STT_END"),
+            {"text": transcript},
+        )
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_INTENT_START", "INTENT_START"),
+            None,
+        )
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_INTENT_END", "INTENT_END"),
+            {
+                "conversation_id": conversation_id or session_id,
+                "continue_conversation": "0",
+            },
+        )
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
+            {"text": response_text},
+        )
+        await _esphome_stream_tts_audio(client, tts_audio)
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
+            {"text": response_text},
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        await _compat_emit_event(
+            token,
+            "esphome_session_result",
+            {
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "transcript": transcript,
+                "response_text": response_text,
+                "tts_audio_bytes": len(tts_audio),
+            },
+        )
+    except Exception as exc:
+        msg = str(exc)
+        await _compat_set_error(token, msg)
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_ERROR", "ERROR"),
+            {"code": "tater_pipeline_error", "message": msg},
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        raise
+
+
+async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module: Any) -> Callable[[], None]:
+    subscribe = getattr(client, "subscribe_voice_assistant", None)
+    if not callable(subscribe):
+        raise RuntimeError("ESPHome client does not support subscribe_voice_assistant()")
+
+    token = _text(selector)
+    if not token:
+        raise RuntimeError("selector is required")
+
+    runtime = _esphome_voice_runtime_state(token)
+
+    async def _handle_start(
+        conversation_id: str,
+        _flags: int,
+        audio_settings: Any,
+        wake_word_phrase: Optional[str],
+    ) -> int:
+        if _text(runtime.get("session_id")):
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=True,
+                    reason="new_session_started",
+                )
+
+        audio_format = _esphome_audio_settings_format(audio_settings)
+        session = await _native_create_session(
+            VoiceNativeSessionStartIn(
+                satellite_selector=token,
+                wake_word=_text(wake_word_phrase),
+                sample_rate_hz=int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
+                sample_width_bytes=int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
+                channels=int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
+                context={
+                    "esphome_conversation_id": _text(conversation_id),
+                    "source": "esphome_native",
+                },
+            )
+        )
+        session_id = _text(session.get("id"))
+        lock = runtime.get("lock")
+        if lock is None or not hasattr(lock, "acquire"):
+            runtime["lock"] = asyncio.Lock()
+            lock = runtime["lock"]
+        async with lock:
+            runtime["session_id"] = session_id
+            runtime["conversation_id"] = _text(conversation_id)
+            runtime["audio_format"] = audio_format
+
+        await _compat_emit_event(
+            token,
+            "esphome_session_started",
+            {
+                "session_id": session_id,
+                "conversation_id": _text(conversation_id),
+                "wake_word": _text(wake_word_phrase),
+                "audio_format": audio_format,
+            },
+        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
+        return 0
+
+    async def _handle_audio(data: bytes) -> None:
+        lock = runtime.get("lock")
+        if lock is None or not hasattr(lock, "acquire"):
+            runtime["lock"] = asyncio.Lock()
+            lock = runtime["lock"]
+        async with lock:
+            session_id = _text(runtime.get("session_id"))
+        if not session_id:
+            return
+        audio_bytes = bytes(data or b"")
+        if not audio_bytes:
+            return
+        try:
+            await _native_append_audio_chunk(
+                session_id,
+                VoiceNativeSessionAudioIn(
+                    audio_base64=base64.b64encode(audio_bytes).decode("ascii"),
+                    final_chunk=False,
+                ),
+            )
+        except Exception as exc:
+            await _compat_set_error(token, str(exc))
+            await _esphome_send_event(
+                client,
+                module,
+                ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                {"code": "tater_audio_ingest", "message": str(exc)},
+            )
+
+    async def _handle_stop(abort: bool) -> None:
+        with contextlib.suppress(Exception):
+            await _esphome_finalize_voice_session(
+                token,
+                client,
+                module,
+                abort=bool(abort),
+                reason="device_stop" if abort else "",
+            )
+
+    try:
+        unsub = subscribe(
+            handle_start=_handle_start,
+            handle_stop=_handle_stop,
+            handle_audio=_handle_audio,
+        )
+    except TypeError:
+        unsub = subscribe(
+            handle_start=_handle_start,
+            handle_stop=_handle_stop,
+            handle_audio=_handle_audio,
+            handle_announcement_finished=None,
+        )
+
+    if inspect.isawaitable(unsub):
+        unsub = await unsub
+    if not callable(unsub):
+        raise RuntimeError("ESPHome subscribe_voice_assistant did not return an unsubscribe callback")
+    return unsub
+
+
 def _esphome_target_map() -> Dict[str, str]:
     registry = _load_voice_satellite_registry()
     by_selector: Dict[str, str] = {}
@@ -2556,7 +2848,9 @@ def _esphome_target_map() -> Dict[str, str]:
             host = _lower(selector.split(":", 1)[1])
         if not selector or not host:
             continue
-        by_selector[selector] = host
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if bool(metadata.get("esphome_selected")):
+            by_selector[selector] = host
 
     return by_selector
 
@@ -2627,11 +2921,35 @@ async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
     async with _esphome_native_lock:
         row = _esphome_native_clients.get(token)
         client = row.get("client") if isinstance(row, dict) else None
+        unsubscribe = row.get("unsubscribe") if isinstance(row, dict) else None
         was_connected = bool(row.get("connected", False)) if isinstance(row, dict) else False
         if isinstance(row, dict):
             row["connected"] = False
+            row["client"] = None
+            row["unsubscribe"] = None
             row["last_disconnect_ts"] = _native_now()
             row["last_error"] = _text(reason)
+
+    runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
+    if isinstance(runtime, dict) and _text(runtime.get("session_id")):
+        module, _ = _esphome_import()
+        if module is not None and client is not None:
+            with contextlib.suppress(Exception):
+                await _esphome_finalize_voice_session(
+                    token,
+                    client,
+                    module,
+                    abort=True,
+                    reason=_text(reason) or "disconnect",
+                )
+        else:
+            with contextlib.suppress(Exception):
+                await _native_mark_session_aborted(_text(runtime.get("session_id")), _text(reason) or "disconnect")
+    _esphome_voice_runtime.pop(token, None)
+
+    if callable(unsubscribe):
+        with contextlib.suppress(Exception):
+            unsubscribe()
 
     disconnect_fn = getattr(client, "disconnect", None)
     if callable(disconnect_fn):
@@ -2647,6 +2965,46 @@ async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
 
     await _compat_set_connected(token, connected=False, info={"reason": _text(reason) or "esphome_disconnect"})
     await _compat_emit_event(token, "esphome_disconnected", {"reason": _text(reason)})
+
+
+async def _esphome_client_stopped(selector: str, *, expected_disconnect: bool) -> None:
+    token = _text(selector)
+    if not token:
+        return
+    was_connected = False
+    runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
+    if isinstance(runtime, dict) and _text(runtime.get("session_id")):
+        with contextlib.suppress(Exception):
+            await _native_mark_session_aborted(
+                _text(runtime.get("session_id")),
+                "expected_disconnect" if expected_disconnect else "connection_lost",
+            )
+    _esphome_voice_runtime.pop(token, None)
+
+    async with _esphome_native_lock:
+        row = _esphome_native_clients.get(token)
+        if isinstance(row, dict):
+            was_connected = bool(row.get("connected", False)) or row.get("client") is not None
+            row["connected"] = False
+            row["client"] = None
+            row["unsubscribe"] = None
+            row["last_disconnect_ts"] = _native_now()
+            if not expected_disconnect:
+                row["last_error"] = "connection_lost"
+
+    if expected_disconnect and not was_connected:
+        return
+
+    await _compat_set_connected(
+        token,
+        connected=False,
+        info={"reason": "expected_disconnect" if expected_disconnect else "connection_lost"},
+    )
+    await _compat_emit_event(
+        token,
+        "esphome_disconnected",
+        {"reason": "expected_disconnect" if expected_disconnect else "connection_lost"},
+    )
 
 
 async def _esphome_build_client(module: Any, *, host: str, port: int) -> Any:
@@ -2742,6 +3100,10 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
             sig = inspect.signature(connect_fn)
             if "login" in sig.parameters:
                 kwargs["login"] = True
+            if "on_stop" in sig.parameters:
+                async def _on_stop(expected_disconnect: bool) -> None:
+                    await _esphome_client_stopped(token, expected_disconnect=bool(expected_disconnect))
+                kwargs["on_stop"] = _on_stop
 
         result = connect_fn(**kwargs) if kwargs else connect_fn()
         if inspect.isawaitable(result):
@@ -2756,12 +3118,26 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "ESPHome API connection could not be verified. "
                 f"Details: {verify_reason}"
             )
+        unsubscribe = await _esphome_subscribe_voice_assistant(token, client, module)
+
+        device_name = token
+        with contextlib.suppress(Exception):
+            info = await _esphome_client_call(client, "device_info")
+            name_fields = (
+                getattr(info, "friendly_name", None),
+                getattr(info, "name", None),
+            )
+            for candidate in name_fields:
+                label = _text(candidate)
+                if label:
+                    device_name = label
+                    break
 
         _upsert_voice_satellite(
             {
                 "selector": token,
                 "host": host_token,
-                "name": token,
+                "name": device_name,
                 "source": "esphome_native",
                 "metadata": {"esphome_port": connect_port},
             }
@@ -2786,6 +3162,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "host": host_token,
                     "port": connect_port,
                     "client": client,
+                    "unsubscribe": unsubscribe,
                     "connected": True,
                     "last_success_ts": _native_now(),
                     "last_error": "",
@@ -2796,6 +3173,10 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
             return dict(row)
 
     except Exception as exc:
+        unsubscribe_cb = locals().get("unsubscribe")
+        if callable(unsubscribe_cb):
+            with contextlib.suppress(Exception):
+                unsubscribe_cb()
         client_obj = locals().get("client")
         disconnect_fn = getattr(client_obj, "disconnect", None)
         if callable(disconnect_fn):
@@ -2900,15 +3281,20 @@ async def _esphome_native_loop() -> None:
 
 def _esphome_native_status() -> Dict[str, Any]:
     module, import_error = _esphome_import()
+    targets = _esphome_target_map()
     clients: Dict[str, Any] = {}
     for selector, row in _esphome_native_clients.items():
         if not isinstance(row, dict):
             continue
+        runtime = _esphome_voice_runtime.get(selector) if isinstance(_esphome_voice_runtime, dict) else {}
         clients[selector] = {
             "selector": _text(row.get("selector") or selector),
             "host": _text(row.get("host")),
             "port": int(row.get("port") or _esphome_api_port()),
             "connected": bool(row.get("connected", False)),
+            "selected": selector in targets,
+            "voice_subscribed": bool(row.get("unsubscribe")),
+            "active_session_id": _text(runtime.get("session_id")) if isinstance(runtime, dict) else "",
             "last_attempt_ts": float(row.get("last_attempt_ts") or 0.0),
             "last_success_ts": float(row.get("last_success_ts") or 0.0),
             "last_disconnect_ts": float(row.get("last_disconnect_ts") or 0.0),
@@ -2926,7 +3312,7 @@ def _esphome_native_status() -> Dict[str, Any]:
         "auto_target_manual": _esphome_auto_target_manual(),
         "password_set": bool(_esphome_password()),
         "noise_psk_set": bool(_esphome_noise_psk()),
-        "targets": _esphome_target_map(),
+        "targets": targets,
         "clients": clients,
         "stats": dict(_esphome_native_stats),
     }
@@ -4001,8 +4387,8 @@ def _native_runtime_status() -> Dict[str, Any]:
             active_count += 1
     return {
         "backend_mode": _voice_backend_mode(),
-        "discovery_enabled": _get_bool_platform_setting("VOICE_DISCOVERY_ENABLED", True),
-        "discovery_task_running": bool(_native_voice_discovery_task and not _native_voice_discovery_task.done()),
+        "discovery_enabled": False,
+        "discovery_task_running": False,
         "discovery": discovery,
         "sessions_total": sessions_count,
         "sessions_active": active_count,
@@ -4038,10 +4424,10 @@ async def _on_startup():
     global _llm, _native_voice_discovery_task, _esphome_native_task
     _llm = get_llm_client_from_env()
     logger.info(
-        "[voice_core] startup version=%s backend=%s discovery_enabled=%s exclude_ha_assist=%s esphome_native=%s",
+        "[voice_core] startup version=%s backend=%s discovery_mode=%s exclude_ha_assist=%s esphome_native=%s",
         __version__,
         _voice_backend_mode(),
-        _get_bool_platform_setting("VOICE_DISCOVERY_ENABLED", True),
+        "manual_only",
         _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
         _esphome_native_enabled(),
     )
@@ -4050,6 +4436,11 @@ async def _on_startup():
         _native_debug("startup cleared legacy blocked satellite cache")
     except Exception:
         pass
+    cleared = 0
+    with contextlib.suppress(Exception):
+        cleared = _clear_legacy_esphome_selected_flags()
+    if cleared:
+        logger.info("[voice_core] cleared stale esphome_selected flags for %s satellites", cleared)
     # Discovery is manual-only: run when user clicks Discover / Refresh.
     _native_voice_discovery_task = None
     if _esphome_native_task is None or _esphome_native_task.done():
@@ -4147,6 +4538,8 @@ async def voice_satellite_remove(payload: VoiceSatelliteRemoveIn, x_tater_token:
 async def voice_satellite_refresh(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
     counts = await _native_discover_satellites_once(force_ha_refresh=True)
+    with contextlib.suppress(Exception):
+        await _esphome_reconcile_once(force=True)
     logger.info("[voice_core] manual satellite refresh counts=%s", counts)
     return {
         "ok": True,
@@ -4354,6 +4747,7 @@ async def voice_esphome_connect(payload: VoiceESPHomeConnectIn, x_tater_token: O
         port=int(payload.port) if payload.port else None,
         source="manual_endpoint",
     )
+    _set_satellite_esphome_selected(selector, True)
     return {"status": _esphome_native_status()}
 
 
@@ -4361,6 +4755,7 @@ async def voice_esphome_connect(payload: VoiceESPHomeConnectIn, x_tater_token: O
 async def voice_esphome_disconnect(payload: VoiceESPHomeDisconnectIn, x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
     selector = await _compat_require_selector(payload.selector)
+    _set_satellite_esphome_selected(selector, False)
     await _esphome_disconnect_selector(selector, reason="manual_endpoint")
     return {"status": _esphome_native_status()}
 
