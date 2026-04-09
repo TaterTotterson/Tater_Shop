@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.4"
+__version__ = "2.0.5"
 
 load_dotenv()
 
@@ -172,6 +172,13 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_VOICE_DISCOVERY_MDNS_TIMEOUT_S,
             "description": "How long each discovery run listens for ESPHome mDNS service announcements.",
+        },
+        "VOICE_DISCOVERY_EXCLUDE_HA_ASSIST": {
+            "label": "Exclude HA-Connected Assist Satellites",
+            "type": "select",
+            "options": ["true", "false"],
+            "default": "true",
+            "description": "Hide discovered satellites that appear to already be connected as Home Assistant Assist satellites.",
         },
         "VOICE_SATELLITE_TARGETS": {
             "label": "Adopted Satellites",
@@ -559,6 +566,7 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
             "VOICE_DISCOVERY_SCAN_SECONDS",
             DEFAULT_VOICE_DISCOVERY_SCAN_SECONDS,
         ),
+        "discovery_exclude_ha_assist": _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
         "satellite_targets": _parse_json_string_list(settings.get("VOICE_SATELLITE_TARGETS")),
         "manual_targets": _normalize_csv_or_lines(settings.get("VOICE_MANUAL_TARGETS")),
         "sensor_entity_ids": _parse_json_string_list(settings.get("VOICE_SENSOR_ENTITY_IDS")),
@@ -1279,6 +1287,101 @@ def _save_satellite_map_to_redis(m: Dict[str, str]) -> None:
         pass
 
 
+def _ha_token_available() -> bool:
+    try:
+        shared = redis_client.hgetall("homeassistant_settings") or {}
+    except Exception:
+        shared = {}
+    token = _text(shared.get("HA_TOKEN"))
+    if token:
+        return True
+    try:
+        legacy = (
+            redis_client.hgetall("verba_settings: Home Assistant")
+            or redis_client.hgetall("verba_settings:Home Assistant")
+            or {}
+        )
+    except Exception:
+        legacy = {}
+    return bool(_text(legacy.get("HA_TOKEN")))
+
+
+def _name_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _lower(value))
+
+
+def _name_tokens_match(a: str, b: str) -> bool:
+    left = _name_token(a)
+    right = _name_token(b)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if len(left) >= 8 and right.startswith(left):
+        return True
+    if len(right) >= 8 and left.startswith(right):
+        return True
+    return False
+
+
+def _entity_core_name(entity_id: Any) -> str:
+    token = _lower(entity_id)
+    if token.startswith("assist_satellite."):
+        token = token.split(".", 1)[1]
+    if token.endswith("_assist_satellite"):
+        token = token[: -len("_assist_satellite")]
+    return token
+
+
+def _ha_assist_name_candidates(entity_id: Any) -> List[str]:
+    entity = _lower(entity_id)
+    core = _entity_core_name(entity_id)
+    out: List[str] = []
+    for raw in (entity, core, entity.replace("_", "-"), core.replace("_", "-")):
+        token = _text(raw)
+        if not token:
+            continue
+        out.append(token)
+    return out
+
+
+async def _ha_assist_entity_ids_for_discovery(*, force_refresh: bool) -> List[str]:
+    if not _ha_token_available():
+        return []
+
+    if force_refresh:
+        try:
+            fresh = await _fetch_satellite_map_from_ha()
+            if fresh:
+                _save_satellite_map_to_redis(fresh)
+                _native_debug(f"discovery ha-assist refresh entries={len(fresh)}")
+                return sorted({_lower(v) for v in fresh.values() if _text(v)})
+        except Exception as exc:
+            _native_debug(f"discovery ha-assist refresh failed: {exc}")
+
+    cached, ok = _load_satellite_map_from_redis()
+    if ok:
+        return sorted({_lower(v) for v in cached.values() if _text(v)})
+    return []
+
+
+def _mdns_row_matches_ha_assist(row: Dict[str, Any], ha_entity_ids: List[str]) -> Tuple[bool, str]:
+    if not isinstance(row, dict) or not ha_entity_ids:
+        return False, ""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    node_name = _text(row.get("name"))
+    service_name = _text(metadata.get("mdns_service")).split(".", 1)[0]
+    source_tokens = [node_name, service_name]
+    for source in source_tokens:
+        if not source:
+            continue
+        for entity_id in ha_entity_ids:
+            for candidate in _ha_assist_name_candidates(entity_id):
+                if _name_tokens_match(source, candidate):
+                    return True, f"{source}~{candidate}"
+    return False, ""
+
+
 def _selector_from_satellite_row(row: Dict[str, Any]) -> str:
     satellite_id = _text(row.get("satellite_id") or row.get("device_id"))
     if satellite_id:
@@ -1660,6 +1763,7 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "VOICE_DISCOVERY_ENABLED",
                 "VOICE_DISCOVERY_SCAN_SECONDS",
                 "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
+                "VOICE_DISCOVERY_EXCLUDE_HA_ASSIST",
                 "VOICE_SATELLITE_TARGETS",
                 "VOICE_MANUAL_TARGETS",
                 "VOICE_SENSOR_ENTITY_IDS",
@@ -1782,6 +1886,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 f"Last run: {_voice_core_format_timestamp(discovery.get('last_run_ts'))} • "
                 f"manual={int(last_counts.get('manual') or 0)} "
                 f"mdns={int(last_counts.get('mdns_esphome') or 0)} "
+                f"excluded_ha={int(last_counts.get('excluded_ha') or 0)} "
                 f"blocked={int(last_counts.get('blocked') or 0)}"
             ),
             "run_action": "voice_refresh_satellites",
@@ -2575,6 +2680,42 @@ def _esphome_client_connected(client: Any, fallback: bool = False) -> bool:
     return fallback
 
 
+async def _esphome_call_client_method(client: Any, method_name: str, *, timeout: float) -> Tuple[bool, str]:
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        return False, "unavailable"
+    try:
+        result = method()
+    except TypeError:
+        return False, "signature_mismatch"
+    except Exception as exc:
+        return False, f"error:{exc}"
+    try:
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=timeout)
+    except Exception as exc:
+        return False, f"error:{exc}"
+    return True, "ok"
+
+
+async def _esphome_verify_connection(client: Any, *, timeout: float) -> Tuple[bool, str]:
+    if client is None:
+        return False, "missing_client"
+
+    marker_before = _esphome_client_connected(client, fallback=False)
+    ping_ok, ping_reason = await _esphome_call_client_method(client, "ping", timeout=timeout)
+    info_ok, info_reason = await _esphome_call_client_method(client, "device_info", timeout=timeout)
+    marker_after = _esphome_client_connected(client, fallback=False)
+
+    if marker_before or marker_after or ping_ok or info_ok:
+        details = (
+            f"marker_before={marker_before} marker_after={marker_after} "
+            f"ping={ping_reason} device_info={info_reason}"
+        )
+        return True, details
+    return False, f"marker_before={marker_before} ping={ping_reason} device_info={info_reason}"
+
+
 async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
     token = _text(selector)
     if not token:
@@ -2669,6 +2810,9 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
     timeout = _esphome_connect_timeout_s()
     connect_port = int(port or _esphome_api_port())
     now = _native_now()
+    _native_debug(
+        f"esphome connect attempt selector={token} host={host_token} port={connect_port} source={source}"
+    )
 
     async with _esphome_native_lock:
         row = _esphome_native_clients.get(token) or {}
@@ -2699,6 +2843,16 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
         result = connect_fn(**kwargs) if kwargs else connect_fn()
         if inspect.isawaitable(result):
             await asyncio.wait_for(result, timeout=timeout)
+        await asyncio.sleep(0.2)
+        verified, verify_reason = await _esphome_verify_connection(client, timeout=max(1.0, timeout))
+        _native_debug(
+            f"esphome connect verification selector={token} verified={verified} details={verify_reason}"
+        )
+        if not verified:
+            raise RuntimeError(
+                "ESPHome API connection could not be verified. "
+                f"Details: {verify_reason}"
+            )
 
         _upsert_voice_satellite(
             {
@@ -2716,7 +2870,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "transport": "esphome_native",
                 "protocol": "esphome_api",
                 "host": host_token,
-                "metadata": {"port": connect_port},
+                "metadata": {"port": connect_port, "verify": verify_reason},
             },
         )
         await _compat_emit_event(token, "esphome_connected", {"host": host_token, "port": connect_port})
@@ -2739,9 +2893,17 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
             return dict(row)
 
     except Exception as exc:
+        client_obj = locals().get("client")
+        disconnect_fn = getattr(client_obj, "disconnect", None)
+        if callable(disconnect_fn):
+            with contextlib.suppress(Exception):
+                result = disconnect_fn()
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=max(1.0, timeout))
         msg = str(exc)
         lower_msg = _lower(msg)
         display_msg = msg
+        _native_debug(f"esphome connect failed selector={token} host={host_token} error={msg}")
         if "requires encryption" in lower_msg:
             display_msg = (
                 "ESPHome API requires encryption (noise_psk). "
@@ -2785,6 +2947,7 @@ async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
 
     targets = _esphome_target_map()
     retry_seconds = _esphome_retry_seconds()
+    _native_debug(f"esphome reconcile force={force} targets={len(targets)} retry_s={retry_seconds}")
 
     async with _esphome_native_lock:
         snapshot = {k: dict(v) for k, v in _esphome_native_clients.items()}
@@ -2804,6 +2967,9 @@ async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
             continue
         last_attempt = float(row.get("last_attempt_ts") or 0.0)
         if (not force) and ((now - last_attempt) < retry_seconds):
+            _native_debug(
+                f"esphome reconcile backoff selector={selector} wait_left={max(0, int(retry_seconds - (now - last_attempt)))}"
+            )
             continue
         try:
             await _esphome_connect_selector(selector, host=host, source="reconcile")
@@ -2811,6 +2977,7 @@ async def _esphome_reconcile_once(*, force: bool = False) -> Dict[str, Any]:
             _esphome_native_stats["last_error"] = ""
         except Exception as exc:
             _esphome_native_stats["last_error"] = str(exc)
+            _native_debug(f"esphome reconcile connect_failed selector={selector} host={host} error={exc}")
 
     return _esphome_native_status()
 
@@ -3690,6 +3857,7 @@ def _native_discover_satellites_mdns_sync(scan_seconds: float) -> List[Dict[str,
 
         with lock:
             discovered[selector] = row
+        _native_debug(f"discovery mdns candidate selector={selector} name={node_name} host={host}")
 
     zeroconf = Zeroconf()
     browsers = []
@@ -3720,18 +3888,43 @@ async def _native_discover_satellites_mdns() -> List[Dict[str, Any]]:
 
 async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) -> Dict[str, Any]:
     now = _native_now()
-    counts = {"manual": 0, "mdns_esphome": 0, "blocked": 0}
+    counts = {"manual": 0, "mdns_esphome": 0, "blocked": 0, "excluded_ha": 0}
     blocked = _load_voice_satellite_blocked_selectors()
+    exclude_ha_assist = _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True)
+    ha_entity_ids: List[str] = []
+    if exclude_ha_assist:
+        ha_entity_ids = await _ha_assist_entity_ids_for_discovery(force_refresh=bool(force_ha_refresh))
+        _native_debug(f"discovery ha_assist_entities={len(ha_entity_ids)} force_refresh={bool(force_ha_refresh)}")
+
     current_rows = _load_voice_satellite_registry()
     filtered_rows = [row for row in current_rows if _lower((row or {}).get("source")) != "homeassistant_registry"]
     if len(filtered_rows) != len(current_rows):
         _save_voice_satellite_registry(filtered_rows)
+        _native_debug(f"discovery pruned legacy_ha_rows={len(current_rows) - len(filtered_rows)}")
+    if exclude_ha_assist and ha_entity_ids:
+        kept_rows: List[Dict[str, Any]] = []
+        removed = 0
+        for row in filtered_rows:
+            source = _lower((row or {}).get("source"))
+            if source == "mdns_esphome":
+                matched, reason = _mdns_row_matches_ha_assist(row if isinstance(row, dict) else {}, ha_entity_ids)
+                if matched:
+                    removed += 1
+                    _native_debug(
+                        f"discovery purged_existing_mDNS selector={_text((row or {}).get('selector'))} reason={reason}"
+                    )
+                    continue
+            kept_rows.append(row)
+        if removed:
+            counts["excluded_ha"] += removed
+            _save_voice_satellite_registry(kept_rows)
 
     manual_targets = _normalize_csv_or_lines(_portal_settings().get("VOICE_MANUAL_TARGETS"))
     for host in manual_targets:
         selector = f"host:{_lower(host)}"
         if selector in blocked:
             counts["blocked"] += 1
+            _native_debug(f"discovery manual blocked selector={selector}")
             continue
         _upsert_voice_satellite(
             {
@@ -3750,7 +3943,14 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
             continue
         if selector in blocked:
             counts["blocked"] += 1
+            _native_debug(f"discovery mdns blocked selector={selector}")
             continue
+        if exclude_ha_assist:
+            matched, reason = _mdns_row_matches_ha_assist(row if isinstance(row, dict) else {}, ha_entity_ids)
+            if matched:
+                counts["excluded_ha"] += 1
+                _native_debug(f"discovery mdns excluded_ha selector={selector} reason={reason}")
+                continue
         _upsert_voice_satellite(row if isinstance(row, dict) else {})
         counts["mdns_esphome"] += 1
 
@@ -3759,6 +3959,13 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
     _native_voice_discovery_state["last_success_ts"] = now
     _native_voice_discovery_state["last_error"] = ""
     _native_voice_discovery_state["last_counts"] = counts
+    _native_debug(
+        "discovery summary "
+        f"manual={counts.get('manual', 0)} "
+        f"mdns={counts.get('mdns_esphome', 0)} "
+        f"excluded_ha={counts.get('excluded_ha', 0)} "
+        f"blocked={counts.get('blocked', 0)}"
+    )
     return counts
 
 
@@ -3952,6 +4159,14 @@ _llm = None
 async def _on_startup():
     global _llm, _native_voice_discovery_task, _esphome_native_task
     _llm = get_llm_client_from_env()
+    logger.info(
+        "[voice_core] startup version=%s backend=%s discovery_enabled=%s exclude_ha_assist=%s esphome_native=%s",
+        __version__,
+        _voice_backend_mode(),
+        _get_bool_platform_setting("VOICE_DISCOVERY_ENABLED", True),
+        _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
+        _esphome_native_enabled(),
+    )
     if _native_voice_discovery_task is None or _native_voice_discovery_task.done():
         _native_voice_discovery_task = asyncio.create_task(_native_discovery_loop())
     if _esphome_native_task is None or _esphome_native_task.done():
@@ -4057,6 +4272,7 @@ async def voice_satellite_remove(payload: VoiceSatelliteRemoveIn, x_tater_token:
 async def voice_satellite_refresh(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
     counts = await _native_discover_satellites_once(force_ha_refresh=True)
+    logger.info("[voice_core] manual satellite refresh counts=%s", counts)
     return {
         "ok": True,
         "refreshed": int(sum(int(v) for v in counts.values())),
@@ -4251,6 +4467,12 @@ async def voice_esphome_connect(payload: VoiceESPHomeConnectIn, x_tater_token: O
         host = _lower(selector.split(":", 1)[1])
     if not host:
         raise HTTPException(status_code=400, detail="No host resolved for selector. Provide host or configure manual/adopted host.")
+    logger.info(
+        "[voice_core] manual esphome connect selector=%s host=%s port=%s",
+        selector,
+        host,
+        int(payload.port) if payload.port else _esphome_api_port(),
+    )
     await _esphome_connect_selector(
         selector,
         host=host,
