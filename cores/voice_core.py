@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.23"
+__version__ = "2.0.24"
 
 load_dotenv()
 
@@ -120,13 +120,13 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
-DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.1
+DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 0.8
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.65
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.45
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
-DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
+DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
@@ -3012,6 +3012,102 @@ async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size
     return chunks
 
 
+def _esphome_estimate_pcm_duration_s(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> float:
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return 0.0
+    fmt = audio_format if isinstance(audio_format, dict) else {}
+    rate = int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if rate <= 0 or width <= 0 or channels <= 0:
+        return 0.0
+    frame_bytes = width * channels
+    if frame_bytes <= 0:
+        return 0.0
+    return float(len(data)) / float(rate * frame_bytes)
+
+
+def _esphome_url_run_end_timeout_s(audio_bytes: bytes, audio_format: Optional[Dict[str, Any]]) -> float:
+    estimate = _esphome_estimate_pcm_duration_s(audio_bytes, audio_format)
+    return max(1.5, min(30.0, float(estimate) + 1.0))
+
+
+def _esphome_cancel_announcement_wait(runtime: Dict[str, Any]) -> None:
+    task = runtime.get("announcement_task")
+    if isinstance(task, asyncio.Task):
+        if task is asyncio.current_task():
+            runtime["announcement_task"] = None
+            return
+        task.cancel()
+    runtime["announcement_task"] = None
+
+
+async def _esphome_finalize_after_announcement(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    reason: str,
+) -> bool:
+    token = _text(selector)
+    if not token:
+        return False
+    runtime = _esphome_voice_runtime_state(token)
+    lock = runtime.get("lock")
+    if lock is None or not hasattr(lock, "acquire"):
+        runtime["lock"] = asyncio.Lock()
+        lock = runtime["lock"]
+    async with lock:
+        waiting = bool(runtime.get("awaiting_announcement"))
+        session_id = _text(runtime.get("awaiting_announcement_session_id"))
+        if not waiting:
+            return False
+        runtime["awaiting_announcement"] = False
+        runtime["awaiting_announcement_session_id"] = ""
+        _esphome_cancel_announcement_wait(runtime)
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+    _native_debug(
+        f"esphome announcement finalize selector={token} session_id={session_id} reason={reason}"
+    )
+    return True
+
+
+def _esphome_schedule_announcement_timeout(
+    selector: str,
+    client: Any,
+    module: Any,
+    timeout_s: float,
+) -> None:
+    token = _text(selector)
+    if not token:
+        return
+    runtime = _esphome_voice_runtime_state(token)
+
+    async def _timer() -> None:
+        try:
+            await asyncio.sleep(max(0.2, float(timeout_s)))
+            completed = await _esphome_finalize_after_announcement(
+                token,
+                client,
+                module,
+                reason="announcement_timeout",
+            )
+            if completed:
+                logger.info(
+                    "[native-voice] announcement timeout finalize selector=%s timeout_s=%.2f",
+                    token,
+                    float(timeout_s),
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"esphome announcement timeout task failed selector={token} error={exc}")
+
+    task = asyncio.create_task(_timer())
+    runtime["announcement_task"] = task
+
+
 def _esphome_tts_url_ttl_s() -> float:
     value = _get_float_platform_setting("VOICE_ESPHOME_TTS_URL_TTL_S", DEFAULT_ESPHOME_TTS_URL_TTL_S)
     return max(30.0, min(900.0, float(value)))
@@ -3273,6 +3369,9 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_dynamic_trigger_dbfs": None,
             "vad_dynamic_release_dbfs": None,
             "vad_start_sent": False,
+            "awaiting_announcement": False,
+            "awaiting_announcement_session_id": "",
+            "announcement_task": None,
             "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
@@ -3386,6 +3485,7 @@ async def _esphome_finalize_voice_session(
 
     async with lock:
         _esphome_cancel_watchdog(runtime)
+        _esphome_cancel_announcement_wait(runtime)
         session_id = _text(runtime.get("session_id"))
         conversation_id = _text(runtime.get("conversation_id"))
         runtime["session_id"] = ""
@@ -3401,6 +3501,8 @@ async def _esphome_finalize_voice_session(
         runtime["vad_dynamic_trigger_dbfs"] = None
         runtime["vad_dynamic_release_dbfs"] = None
         runtime["vad_start_sent"] = False
+        runtime["awaiting_announcement"] = False
+        runtime["awaiting_announcement_session_id"] = ""
 
     if not session_id:
         return
@@ -3451,6 +3553,8 @@ async def _esphome_finalize_voice_session(
                 # Fallback when URL streaming could not be prepared; continue with API audio stream.
                 speaker_supported = True
                 tts_mode = "stream_fallback"
+        wait_for_announcement = (not speaker_supported) and tts_url.startswith(("http://", "https://"))
+        run_end_timeout_s = _esphome_url_run_end_timeout_s(tts_audio, tts_format) if wait_for_announcement else 0.0
 
         await _esphome_send_event(
             client,
@@ -3507,7 +3611,22 @@ async def _esphome_finalize_voice_session(
             ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
             {"url": tts_url},
         )
-        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+        if wait_for_announcement:
+            async with lock:
+                runtime["awaiting_announcement"] = True
+                runtime["awaiting_announcement_session_id"] = session_id
+                _esphome_cancel_announcement_wait(runtime)
+                _esphome_schedule_announcement_timeout(
+                    token,
+                    client,
+                    module,
+                    timeout_s=run_end_timeout_s,
+                )
+            _native_debug(
+                f"esphome awaiting announcement_finished selector={token} session_id={session_id} timeout_s={run_end_timeout_s:.2f}"
+            )
+        else:
+            await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
         await _compat_emit_event(
             token,
             "esphome_session_result",
@@ -3520,10 +3639,11 @@ async def _esphome_finalize_voice_session(
                 "tts_audio_chunks": int(tts_chunks),
                 "tts_url": tts_url,
                 "tts_mode": tts_mode,
+                "run_end_mode": "announcement" if wait_for_announcement else "immediate",
             },
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_mode=%s tts_url=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_mode=%s run_end_mode=%s tts_url=%s",
             token,
             session_id,
             len(transcript),
@@ -3531,6 +3651,7 @@ async def _esphome_finalize_voice_session(
             len(tts_audio),
             int(tts_chunks),
             tts_mode,
+            "announcement" if wait_for_announcement else "immediate",
             tts_url,
         )
     except Exception as exc:
@@ -3641,6 +3762,7 @@ async def _esphome_subscribe_voice_assistant(
             lock = runtime["lock"]
         async with lock:
             _esphome_cancel_watchdog(runtime)
+            _esphome_cancel_announcement_wait(runtime)
             runtime["session_id"] = session_id
             runtime["conversation_id"] = _text(conversation_id)
             runtime["audio_format"] = audio_format
@@ -3657,6 +3779,8 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_dynamic_trigger_dbfs"] = None
             runtime["vad_dynamic_release_dbfs"] = None
             runtime["vad_start_sent"] = False
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_announcement_session_id"] = ""
             runtime["watchdog_task"] = asyncio.create_task(
                 _esphome_session_watchdog(token, client, module, session_id)
             )
@@ -3869,6 +3993,9 @@ async def _esphome_subscribe_voice_assistant(
             chunks = int(runtime.get("audio_chunks") or 0)
             total = int(runtime.get("audio_bytes") or 0)
             _esphome_cancel_watchdog(runtime)
+            _esphome_cancel_announcement_wait(runtime)
+            runtime["awaiting_announcement"] = False
+            runtime["awaiting_announcement_session_id"] = ""
         logger.info(
             "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
             token,
@@ -3886,19 +4013,36 @@ async def _esphome_subscribe_voice_assistant(
                 reason="device_stop" if abort else "",
             )
 
+    async def _handle_announcement_finished(*_args: Any, **_kwargs: Any) -> None:
+        completed = await _esphome_finalize_after_announcement(
+            token,
+            client,
+            module,
+            reason="announcement_finished",
+        )
+        if completed:
+            logger.info("[native-voice] announcement finished selector=%s", token)
+
+    subscribe_kwargs: Dict[str, Any] = {
+        "handle_start": _handle_start,
+        "handle_stop": _handle_stop,
+    }
+    with contextlib.suppress(Exception):
+        sig = inspect.signature(subscribe)
+        if "handle_audio" in sig.parameters:
+            subscribe_kwargs["handle_audio"] = _handle_audio if api_audio_supported else None
+        if "handle_announcement_finished" in sig.parameters:
+            subscribe_kwargs["handle_announcement_finished"] = _handle_announcement_finished
+    if "handle_audio" not in subscribe_kwargs:
+        subscribe_kwargs["handle_audio"] = _handle_audio if api_audio_supported else None
+
     try:
-        unsub = subscribe(
-            handle_start=_handle_start,
-            handle_stop=_handle_stop,
-            handle_audio=_handle_audio if api_audio_supported else None,
-        )
+        unsub = subscribe(**subscribe_kwargs)
     except TypeError:
-        unsub = subscribe(
-            handle_start=_handle_start,
-            handle_stop=_handle_stop,
-            handle_audio=_handle_audio,
-            handle_announcement_finished=None,
-        )
+        # Backward-compatible fallback for older/newer aioesphomeapi signatures.
+        fallback_kwargs = dict(subscribe_kwargs)
+        fallback_kwargs.pop("handle_announcement_finished", None)
+        unsub = subscribe(**fallback_kwargs)
 
     if inspect.isawaitable(unsub):
         unsub = await unsub
