@@ -35,12 +35,24 @@ try:
     from wyoming.tts import Synthesize
     from wyoming.audio import AudioStart as WyomingAudioStart, AudioChunk as WyomingAudioChunk, AudioStop as WyomingAudioStop
     from wyoming.error import Error as WyomingError
+    try:
+        from wyoming.tts import SynthesizeVoice  # optional in older wyoming packages
+    except Exception:
+        SynthesizeVoice = None
+    try:
+        from wyoming.info import Describe, Info  # optional for voice catalog discovery
+    except Exception:
+        Describe = None
+        Info = None
     WYOMING_IMPORT_ERROR: Optional[str] = None
 except Exception as exc:  # pragma: no cover - import guard for deployments without wyoming package
     AsyncTcpClient = None
     Transcribe = None
     Transcript = None
     Synthesize = None
+    SynthesizeVoice = None
+    Describe = None
+    Info = None
     WyomingAudioStart = None
     WyomingAudioChunk = None
     WyomingAudioStop = None
@@ -48,7 +60,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.17"
+__version__ = "2.0.19"
 
 load_dotenv()
 
@@ -75,6 +87,8 @@ DEFAULT_SATELLITE_MAP_CACHE_TTL_S = 3600  # 1h
 REDIS_SATELLITE_MAP_KEY = "tater:ha:assist_satellite_map:v2"  # json map: device_id -> entity_id
 REDIS_VOICE_SATELLITE_REGISTRY_KEY = "tater:voice:satellites:registry:v1"
 REDIS_VOICE_SATELLITE_BLOCKED_KEY = "tater:voice:satellites:blocked:v1"
+REDIS_WYOMING_TTS_VOICES_KEY = "tater:voice:wyoming:tts_voices:v1"
+REDIS_WYOMING_TTS_VOICES_META_KEY = "tater:voice:wyoming:tts_voices:meta:v1"
 VOICE_CORE_SETTINGS_HASH_KEY = "voice_core_settings"
 VOICE_CORE_LEGACY_SETTINGS_HASH_KEYS = ("homeassistant_portal_settings",)
 
@@ -89,6 +103,7 @@ DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
 DEFAULT_WYOMING_STT_PORT = 10300
 DEFAULT_WYOMING_TTS_HOST = "127.0.0.1"
 DEFAULT_WYOMING_TTS_PORT = 10200
+DEFAULT_WYOMING_TTS_VOICE = ""
 DEFAULT_VOICE_SAMPLE_RATE_HZ = 16000
 DEFAULT_VOICE_SAMPLE_WIDTH = 2
 DEFAULT_VOICE_CHANNELS = 1
@@ -167,6 +182,13 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_WYOMING_TTS_PORT,
             "description": "TCP port for Wyoming TTS.",
+        },
+        "VOICE_WYOMING_TTS_VOICE": {
+            "label": "Wyoming TTS Voice",
+            "type": "select",
+            "options": [],
+            "default": DEFAULT_WYOMING_TTS_VOICE,
+            "description": "Voice to request from Wyoming TTS. Use Refresh TTS Voices to load available voices from Piper.",
         },
         "VOICE_NATIVE_DEBUG": {
             "label": "Native Voice Debug Logs",
@@ -383,6 +405,164 @@ def _coerce_webui_multiselect_json(raw: Any) -> Optional[str]:
     return json.dumps(values, ensure_ascii=False)
 
 
+def _json_dumps_compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _wyoming_tts_voice_selection(raw: Any) -> Dict[str, str]:
+    token = _text(raw)
+    if not token:
+        return {}
+
+    parsed: Any = None
+    with contextlib.suppress(Exception):
+        parsed = json.loads(token)
+    if isinstance(parsed, dict):
+        out: Dict[str, str] = {}
+        for key in ("name", "language", "speaker"):
+            value = _text(parsed.get(key))
+            if value:
+                out[key] = value
+        return out
+
+    if "::" in token:
+        name, speaker = token.split("::", 1)
+        name = _text(name)
+        speaker = _text(speaker)
+        out = {}
+        if name:
+            out["name"] = name
+        if speaker:
+            out["speaker"] = speaker
+        return out
+
+    return {"name": token}
+
+
+def _wyoming_tts_voice_selection_value(selection: Dict[str, Any]) -> str:
+    normalized: Dict[str, str] = {}
+    for key in ("name", "language", "speaker"):
+        value = _text((selection or {}).get(key))
+        if value:
+            normalized[key] = value
+    if not normalized:
+        return ""
+    return _json_dumps_compact(normalized)
+
+
+def _wyoming_tts_voice_selection_label(selection: Dict[str, Any]) -> str:
+    voice_name = _text((selection or {}).get("name"))
+    language = _text((selection or {}).get("language"))
+    speaker = _text((selection or {}).get("speaker"))
+    if voice_name and speaker:
+        return f"{voice_name} ({speaker})"
+    if voice_name:
+        return voice_name
+    if language and speaker:
+        return f"{language} ({speaker})"
+    if language:
+        return language
+    return "Default"
+
+
+def _load_wyoming_tts_voice_catalog() -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    global _wyoming_tts_voice_catalog_mem, _wyoming_tts_voice_catalog_meta_mem
+    try:
+        raw_rows = redis_client.get(REDIS_WYOMING_TTS_VOICES_KEY)
+        raw_meta = redis_client.hgetall(REDIS_WYOMING_TTS_VOICES_META_KEY) or {}
+    except Exception:
+        return list(_wyoming_tts_voice_catalog_mem), dict(_wyoming_tts_voice_catalog_meta_mem)
+
+    rows: List[Dict[str, str]] = []
+    try:
+        parsed = json.loads(raw_rows) if raw_rows else []
+    except Exception:
+        parsed = []
+    if isinstance(parsed, list):
+        for row in parsed:
+            if not isinstance(row, dict):
+                continue
+            value = _text(row.get("value"))
+            label = _text(row.get("label"))
+            if not value:
+                continue
+            rows.append({"value": value, "label": label or value})
+
+    meta: Dict[str, Any] = dict(_wyoming_tts_voice_catalog_meta_mem)
+    if isinstance(raw_meta, dict):
+        meta["host"] = _text(raw_meta.get("host"))
+        with contextlib.suppress(Exception):
+            meta["port"] = int(raw_meta.get("port") or 0)
+        with contextlib.suppress(Exception):
+            meta["count"] = int(raw_meta.get("count") or len(rows))
+        with contextlib.suppress(Exception):
+            meta["last_refresh_ts"] = float(raw_meta.get("last_refresh_ts") or 0.0)
+        meta["last_error"] = _text(raw_meta.get("last_error"))
+
+    _wyoming_tts_voice_catalog_mem = list(rows)
+    _wyoming_tts_voice_catalog_meta_mem = dict(meta)
+    return rows, meta
+
+
+def _save_wyoming_tts_voice_catalog(rows: List[Dict[str, str]], *, host: str, port: int, error: str = "") -> None:
+    global _wyoming_tts_voice_catalog_mem, _wyoming_tts_voice_catalog_meta_mem
+    clean_rows: List[Dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value = _text(row.get("value"))
+        label = _text(row.get("label")) or value
+        if not value:
+            continue
+        clean_rows.append({"value": value, "label": label})
+
+    now = _native_now()
+    meta = {
+        "host": _text(host),
+        "port": int(port or 0),
+        "count": len(clean_rows),
+        "last_refresh_ts": now,
+        "last_error": _text(error),
+    }
+    _wyoming_tts_voice_catalog_mem = list(clean_rows)
+    _wyoming_tts_voice_catalog_meta_mem = dict(meta)
+
+    with contextlib.suppress(Exception):
+        redis_client.set(REDIS_WYOMING_TTS_VOICES_KEY, _json_dumps_compact(clean_rows))
+        redis_client.hset(
+            REDIS_WYOMING_TTS_VOICES_META_KEY,
+            mapping={
+                "host": meta["host"],
+                "port": str(meta["port"]),
+                "count": str(meta["count"]),
+                "last_refresh_ts": str(meta["last_refresh_ts"]),
+                "last_error": meta["last_error"],
+            },
+        )
+
+
+def _wyoming_tts_voice_option_rows(*, current_value: Any) -> List[Dict[str, str]]:
+    rows, _meta = _load_wyoming_tts_voice_catalog()
+    options: List[Dict[str, str]] = [{"value": "", "label": "Default (service default voice)"}]
+    seen = {""}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value = _text(row.get("value"))
+        label = _text(row.get("label")) or value
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        options.append({"value": value, "label": label})
+
+    current_token = _text(current_value)
+    if current_token and current_token not in seen:
+        selection = _wyoming_tts_voice_selection(current_token)
+        label = _wyoming_tts_voice_selection_label(selection) if selection else current_token
+        options.append({"value": current_token, "label": f"{label} (saved)"})
+
+    return options
+
 def _voice_backend_mode() -> str:
     return VOICE_BACKEND_MODE_NATIVE
 
@@ -393,6 +573,7 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
     tts_host = _text(settings.get("VOICE_WYOMING_TTS_HOST")) or DEFAULT_WYOMING_TTS_HOST
     stt_port = _get_int_platform_setting("VOICE_WYOMING_STT_PORT", DEFAULT_WYOMING_STT_PORT)
     tts_port = _get_int_platform_setting("VOICE_WYOMING_TTS_PORT", DEFAULT_WYOMING_TTS_PORT)
+    tts_voice = _text(settings.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE
     return {
         "backend_mode": _voice_backend_mode(),
         "discovery_enabled": False,
@@ -441,6 +622,7 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
             "host": tts_host,
             "port": tts_port,
             "uri": f"tcp://{tts_host}:{tts_port}",
+            "voice": tts_voice,
         },
         "debug": _get_bool_platform_setting("VOICE_NATIVE_DEBUG", False),
     }
@@ -634,6 +816,89 @@ class VoiceESPHomeStatusOut(BaseModel):
 def get_plugin_enabled(plugin_name: str) -> bool:
     enabled = redis_client.hget("verba_enabled", plugin_name)
     return bool(enabled and enabled.lower() == "true")
+
+
+def _voice_core_platform_tokens(raw: Any) -> List[str]:
+    items: List[str] = []
+    if isinstance(raw, str):
+        items = [part.strip() for part in re.split(r"[,\s]+", raw) if part.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(item).strip() for item in raw if str(item).strip()]
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        token = _lower(item)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _voice_core_adapted_platforms(plugin: Any) -> List[str]:
+    raw_platforms = _voice_core_platform_tokens(getattr(plugin, "platforms", []) or [])
+    if not raw_platforms:
+        return []
+    normalized = set(raw_platforms)
+    out = list(raw_platforms)
+
+    # Voice Core uses the Home Assistant Hydra platform semantics today.
+    # We accept explicit voice_core plugins by mapping them into homeassistant execution.
+    if "voice_core" in normalized and "homeassistant" not in normalized:
+        out.append("homeassistant")
+        normalized.add("homeassistant")
+
+    # Also advertise voice_core when a plugin already supports HA/both, so the
+    # capability is visible for future platform migration.
+    if (
+        "voice_core" not in normalized
+        and normalized.intersection({"homeassistant", "both", "all", "any", "*"})
+    ):
+        out.append("voice_core")
+    return out
+
+
+class _VoiceCoreVerbaAdapter:
+    def __init__(self, plugin: Any):
+        self._plugin = plugin
+        self.platforms = _voice_core_adapted_platforms(plugin)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._plugin, name)
+
+    async def _invoke_best_handler(self, *args: Any, **kwargs: Any) -> Any:
+        handlers = (
+            getattr(self._plugin, "handle_voice_core", None),
+            getattr(self._plugin, "handle_homeassistant", None),
+        )
+        for handler in handlers:
+            if not callable(handler):
+                continue
+            result = handler(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        plugin_name = _text(getattr(self._plugin, "name", "")) or self._plugin.__class__.__name__
+        raise RuntimeError(
+            f"Plugin `{plugin_name}` does not implement handle_voice_core or handle_homeassistant."
+        )
+
+    async def handle_homeassistant(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._invoke_best_handler(*args, **kwargs)
+
+    async def handle_voice_core(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._invoke_best_handler(*args, **kwargs)
+
+
+def _voice_core_registry_snapshot() -> Dict[str, Any]:
+    base = dict(pr.get_verba_registry_snapshot() or {})
+    adapted: Dict[str, Any] = {}
+    for plugin_id, plugin in base.items():
+        key = _text(plugin_id)
+        if not key or plugin is None:
+            continue
+        adapted[key] = _VoiceCoreVerbaAdapter(plugin)
+    return adapted
 
 # -------------------- Stable conversation key (CRITICAL for continued chat) --------------------
 def _conv_key_from_fields(
@@ -886,11 +1151,12 @@ async def _run_homeassistant_text_turn(
     if not messages_list or messages_list[-1].get("role") != "user":
         messages_list.append({"role": "user", "content": user_text})
 
-    merged_registry = dict(pr.get_verba_registry_snapshot() or {})
+    merged_registry = _voice_core_registry_snapshot()
     merged_enabled = get_plugin_enabled
 
     origin = {
         "platform": "homeassistant",
+        "entrypoint": "voice_core",
         "user": user_id,
         "user_id": user_id,
         "session_id": session_id,
@@ -1561,6 +1827,7 @@ def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
         "VOICE_WYOMING_STT_PORT",
         "VOICE_WYOMING_TTS_HOST",
         "VOICE_WYOMING_TTS_PORT",
+        "VOICE_WYOMING_TTS_VOICE",
         "VOICE_NATIVE_WYOMING_TIMEOUT_S",
         "VOICE_NATIVE_SESSION_TTL_S",
         "VOICE_NATIVE_MAX_AUDIO_BYTES",
@@ -1589,7 +1856,22 @@ def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "default": default_value,
             }
         )
-    return webui_settings_fields(fields=fields, current_settings=current)
+    fields = webui_settings_fields(fields=fields, current_settings=current)
+    for item in fields:
+        if not isinstance(item, dict):
+            continue
+        if _text(item.get("key")) != "VOICE_WYOMING_TTS_VOICE":
+            continue
+        item["type"] = "select"
+        current_value = _text(item.get("value"))
+        item["options"] = _wyoming_tts_voice_option_rows(current_value=current_value)
+        if current_value == "":
+            item["value"] = ""
+        item["description"] = (
+            f"{_text(item.get('description'))} "
+            "Pick Default to use Piper's default voice."
+        ).strip()
+    return fields
 
 
 def _voice_core_format_timestamp(ts: Any) -> str:
@@ -1624,6 +1906,7 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "VOICE_WYOMING_STT_PORT",
                 "VOICE_WYOMING_TTS_HOST",
                 "VOICE_WYOMING_TTS_PORT",
+                "VOICE_WYOMING_TTS_VOICE",
                 "VOICE_NATIVE_WYOMING_TIMEOUT_S",
                 "VOICE_NATIVE_SESSION_TTL_S",
                 "VOICE_NATIVE_MAX_AUDIO_BYTES",
@@ -1674,6 +1957,11 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     satellites = sorted(satellites, key=lambda row: _lower(row.get("name") or row.get("selector")))
     discovery = runtime_status.get("discovery") if isinstance(runtime_status.get("discovery"), dict) else {}
     last_counts = discovery.get("last_counts") if isinstance(discovery.get("last_counts"), dict) else {}
+    _voice_rows, voice_meta = _load_wyoming_tts_voice_catalog()
+    selected_tts_voice = _wyoming_tts_voice_selection(current.get("VOICE_WYOMING_TTS_VOICE"))
+    selected_tts_voice_label = _wyoming_tts_voice_selection_label(selected_tts_voice) if selected_tts_voice else "Default"
+    tts_voice_count = int(voice_meta.get("count") or 0)
+    tts_voice_error = _text(voice_meta.get("last_error"))
 
     settings_item = {
         "id": "voice_pipeline_settings",
@@ -1691,6 +1979,37 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
 
     item_forms: List[Dict[str, Any]] = [
         settings_item,
+        {
+            "id": "wyoming_tts_voice_refresh",
+            "group": "settings",
+            "title": "Refresh Wyoming TTS Voices",
+            "subtitle": (
+                f"Selected: {selected_tts_voice_label} • "
+                f"cached voices: {tts_voice_count} • "
+                f"last refresh: {_voice_core_format_timestamp(voice_meta.get('last_refresh_ts'))}"
+            ),
+            "run_action": "voice_refresh_tts_voices",
+            "run_label": "Refresh TTS Voices",
+            "fields": [
+                {
+                    "key": "tts_endpoint",
+                    "label": "TTS endpoint",
+                    "type": "text",
+                    "value": (
+                        f"{_text(current.get('VOICE_WYOMING_TTS_HOST')) or DEFAULT_WYOMING_TTS_HOST}:"
+                        f"{_text(current.get('VOICE_WYOMING_TTS_PORT')) or DEFAULT_WYOMING_TTS_PORT}"
+                    ),
+                    "read_only": True,
+                },
+                {
+                    "key": "last_error",
+                    "label": "Last refresh error",
+                    "type": "text",
+                    "value": tts_voice_error or "-",
+                    "read_only": True,
+                },
+            ],
+        },
         {
             "id": "satellite_discovery_refresh",
             "group": "satellites",
@@ -1938,6 +2257,17 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         counts_map = counts if isinstance(counts, dict) else {}
         refreshed = int(sum(int(v) for v in counts_map.values())) if counts_map else int(result.get("refreshed") or 0)
         return {"ok": True, "message": f"Satellite discovery refreshed ({refreshed} entries)."}
+
+    if action_name == "voice_refresh_tts_voices":
+        try:
+            result = _run_async_blocking(_native_wyoming_refresh_tts_voices())
+            count = int(result.get("count") or 0) if isinstance(result, dict) else 0
+            host = _text((result or {}).get("host"))
+            port = int((result or {}).get("port") or 0)
+            endpoint = f"{host}:{port}" if host else "configured endpoint"
+            return {"ok": True, "message": f"Loaded {count} Wyoming TTS voices from {endpoint}."}
+        except Exception as exc:
+            raise ValueError(f"Failed to refresh Wyoming TTS voices: {exc}") from exc
 
     if action_name == "voice_esphome_reconcile":
         _run_async_blocking(voice_esphome_reconcile(x_tater_token=request_token))
@@ -2193,6 +2523,14 @@ _esphome_native_stats: Dict[str, Any] = {
     "last_error": "",
 }
 _esphome_voice_runtime: Dict[str, Dict[str, Any]] = {}
+_wyoming_tts_voice_catalog_mem: List[Dict[str, str]] = []
+_wyoming_tts_voice_catalog_meta_mem: Dict[str, Any] = {
+    "host": "",
+    "port": 0,
+    "count": 0,
+    "last_refresh_ts": 0.0,
+    "last_error": "",
+}
 
 
 def _compat_bridge_enabled() -> bool:
@@ -2622,16 +2960,19 @@ async def _esphome_send_event(
         return False
 
 
-async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size: int = DEFAULT_ESPHOME_TTS_CHUNK_BYTES) -> None:
+async def _esphome_stream_tts_audio(client: Any, tts_audio: bytes, *, chunk_size: int = DEFAULT_ESPHOME_TTS_CHUNK_BYTES) -> int:
     data = bytes(tts_audio or b"")
     if not data:
-        return
+        return 0
     size = max(512, int(chunk_size))
     offset = 0
+    chunks = 0
     while offset < len(data):
         chunk = data[offset: offset + size]
         offset += len(chunk)
         await _esphome_client_call(client, "send_voice_assistant_audio", chunk)
+        chunks += 1
+    return chunks
 
 
 def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
@@ -2835,7 +3176,7 @@ async def _esphome_finalize_voice_session(
             ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
             {"text": response_text},
         )
-        await _esphome_stream_tts_audio(client, tts_audio)
+        tts_chunks = await _esphome_stream_tts_audio(client, tts_audio)
         await _esphome_send_event(
             client,
             module,
@@ -2852,15 +3193,17 @@ async def _esphome_finalize_voice_session(
                 "transcript": transcript,
                 "response_text": response_text,
                 "tts_audio_bytes": len(tts_audio),
+                "tts_audio_chunks": int(tts_chunks),
             },
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s",
             token,
             session_id,
             len(transcript),
             len(response_text),
             len(tts_audio),
+            int(tts_chunks),
         )
     except Exception as exc:
         msg = str(exc)
@@ -4273,6 +4616,111 @@ async def _native_append_audio_chunk(session_id: str, chunk: VoiceNativeSessionA
     return public
 
 
+def _native_wyoming_tts_endpoint() -> Tuple[str, int]:
+    cfg = _voice_pipeline_config_snapshot()
+    tts = cfg.get("wyoming_tts") if isinstance(cfg.get("wyoming_tts"), dict) else {}
+    host = _text(tts.get("host")) or DEFAULT_WYOMING_TTS_HOST
+    port = int(tts.get("port") or DEFAULT_WYOMING_TTS_PORT)
+    return host, port
+
+
+async def _native_wyoming_refresh_tts_voices() -> Dict[str, Any]:
+    if AsyncTcpClient is None or Describe is None or Info is None:
+        raise RuntimeError(f"Wyoming client dependency is unavailable: {WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    host, port = _native_wyoming_tts_endpoint()
+    timeout = _native_wyoming_timeout_s()
+    _native_debug(f"TTS describe {host}:{port}")
+
+    voices: List[Dict[str, str]] = []
+    seen_values: set[str] = set()
+    info_obj: Any = None
+    try:
+        async with AsyncTcpClient(host, port) as client:
+            await asyncio.wait_for(client.write_event(Describe().event()), timeout=timeout)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                left = max(0.1, deadline - time.monotonic())
+                event = await asyncio.wait_for(client.read_event(), timeout=left)
+                if event is None:
+                    break
+                if WyomingError is not None and WyomingError.is_type(event.type):
+                    err = WyomingError.from_event(event)
+                    raise RuntimeError(f"Wyoming TTS describe error: {err.text} ({err.code or 'unknown'})")
+                if Info.is_type(event.type):
+                    info_obj = Info.from_event(event)
+                    break
+    except Exception as exc:
+        existing_rows, _meta = _load_wyoming_tts_voice_catalog()
+        _save_wyoming_tts_voice_catalog(existing_rows, host=host, port=port, error=str(exc))
+        raise
+
+    if info_obj is None:
+        msg = "Wyoming TTS did not return info after describe."
+        existing_rows, _meta = _load_wyoming_tts_voice_catalog()
+        _save_wyoming_tts_voice_catalog(existing_rows, host=host, port=port, error=msg)
+        raise RuntimeError(msg)
+
+    tts_programs = getattr(info_obj, "tts", None)
+    if not isinstance(tts_programs, list):
+        tts_programs = []
+    for program in tts_programs:
+        program_name = _text(getattr(program, "name", None))
+        voice_rows = getattr(program, "voices", None)
+        if not isinstance(voice_rows, list):
+            continue
+        for voice in voice_rows:
+            voice_name = _text(getattr(voice, "name", None))
+            languages_obj = getattr(voice, "languages", None)
+            languages: List[str] = []
+            if isinstance(languages_obj, list):
+                languages = [_text(item) for item in languages_obj if _text(item)]
+            language_summary = ", ".join(languages[:2])
+            speakers = getattr(voice, "speakers", None)
+            speaker_rows = speakers if isinstance(speakers, list) else []
+            if speaker_rows:
+                for speaker_row in speaker_rows:
+                    speaker_name = _text(getattr(speaker_row, "name", None))
+                    selection: Dict[str, str] = {}
+                    if voice_name:
+                        selection["name"] = voice_name
+                    elif languages:
+                        selection["language"] = languages[0]
+                    if speaker_name:
+                        selection["speaker"] = speaker_name
+                    value = _wyoming_tts_voice_selection_value(selection)
+                    if not value or value in seen_values:
+                        continue
+                    seen_values.add(value)
+                    label = _wyoming_tts_voice_selection_label(selection)
+                    if language_summary:
+                        label = f"{label} • {language_summary}"
+                    if program_name:
+                        label = f"{label} • {program_name}"
+                    voices.append({"value": value, "label": label})
+                continue
+
+            selection = {}
+            if voice_name:
+                selection["name"] = voice_name
+            elif languages:
+                selection["language"] = languages[0]
+            value = _wyoming_tts_voice_selection_value(selection)
+            if not value or value in seen_values:
+                continue
+            seen_values.add(value)
+            label = _wyoming_tts_voice_selection_label(selection)
+            if language_summary:
+                label = f"{label} • {language_summary}"
+            if program_name:
+                label = f"{label} • {program_name}"
+            voices.append({"value": value, "label": label})
+
+    voices = sorted(voices, key=lambda row: _lower(row.get("label")))
+    _save_wyoming_tts_voice_catalog(voices, host=host, port=port, error="")
+    return {"host": host, "port": port, "voices": voices, "count": len(voices)}
+
+
 async def _native_wyoming_transcribe(
     *,
     audio_bytes: bytes,
@@ -4359,17 +4807,34 @@ async def _native_wyoming_synthesize(text: str) -> Tuple[bytes, Dict[str, Any]]:
     tts = cfg.get("wyoming_tts") if isinstance(cfg.get("wyoming_tts"), dict) else {}
     host = _text(tts.get("host")) or DEFAULT_WYOMING_TTS_HOST
     port = int(tts.get("port") or DEFAULT_WYOMING_TTS_PORT)
+    selected_voice = _wyoming_tts_voice_selection(tts.get("voice"))
+    selected_voice_label = _wyoming_tts_voice_selection_label(selected_voice) if selected_voice else "default"
     timeout = _native_wyoming_timeout_s()
 
-    _native_debug(f"TTS connect {host}:{port} text_len={len(prompt)}")
+    _native_debug(f"TTS connect {host}:{port} text_len={len(prompt)} voice={selected_voice_label}")
 
     audio_out = bytearray()
     audio_format: Dict[str, Any] = {}
     saw_audio_start = False
     saw_audio_stop = False
 
+    synth_event = None
+    if selected_voice and SynthesizeVoice is not None:
+        voice_obj = SynthesizeVoice(
+            name=_text(selected_voice.get("name")) or None,
+            language=_text(selected_voice.get("language")) or None,
+            speaker=_text(selected_voice.get("speaker")) or None,
+        )
+        synth_event = Synthesize(text=prompt, voice=voice_obj).event()
+    elif selected_voice:
+        # Backward compatibility if SynthesizeVoice is unavailable in runtime package.
+        with contextlib.suppress(Exception):
+            synth_event = Synthesize(text=prompt, voice=selected_voice).event()
+    if synth_event is None:
+        synth_event = Synthesize(text=prompt).event()
+
     async with AsyncTcpClient(host, port) as client:
-        await asyncio.wait_for(client.write_event(Synthesize(text=prompt).event()), timeout=timeout)
+        await asyncio.wait_for(client.write_event(synth_event), timeout=timeout)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             left = max(0.1, deadline - time.monotonic())
@@ -4637,6 +5102,9 @@ async def _native_process_session(
     transcript = _text(transcript)
     if not transcript:
         raise RuntimeError("No transcript produced from audio.")
+    _native_debug(
+        f"hydra turn start selector={selector} session_id={token} transcript_len={len(transcript)}"
+    )
 
     response_text, _, merged_ctx = await _run_homeassistant_text_turn(
         text_in=transcript,
@@ -4646,6 +5114,9 @@ async def _native_process_session(
         session_id=conv_session_id,
         incoming_context=context,
         allow_followup=False,
+    )
+    _native_debug(
+        f"hydra turn result selector={selector} session_id={token} response_len={len(_text(response_text))}"
     )
 
     async with _native_voice_sessions_lock:
@@ -4885,6 +5356,20 @@ async def voice_satellite_refresh(x_tater_token: Optional[str] = Header(None)):
         "satellites": _load_voice_satellite_registry(),
         "status": _native_runtime_status(),
     }
+
+
+@app.get("/tater-ha/v1/voice/wyoming/tts/voices")
+async def voice_wyoming_tts_voices(x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
+    voices, meta = _load_wyoming_tts_voice_catalog()
+    return {"ok": True, "voices": voices, "meta": meta}
+
+
+@app.post("/tater-ha/v1/voice/wyoming/tts/voices/refresh")
+async def voice_wyoming_tts_voices_refresh(x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
+    result = await _native_wyoming_refresh_tts_voices()
+    return {"ok": True, **result}
 
 
 @app.get("/tater-ha/v1/voice/native/status", response_model=VoiceNativeStatusOut)
