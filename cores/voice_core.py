@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.7"
+__version__ = "2.0.8"
 
 load_dotenv()
 
@@ -1185,9 +1185,7 @@ _satellite_refresh_lock = asyncio.Lock()
 _satellite_map_mem: Dict[str, str] = {}
 _satellite_map_mem_ts: float = 0.0
 _voice_satellite_registry_mem: List[Dict[str, Any]] = []
-_voice_satellite_blocked_mem: set[str] = set()
 _voice_satellite_registry_redis_warned = False
-_voice_satellite_blocked_redis_warned = False
 
 async def _ha_ws_call(session: aiohttp.ClientSession, ws: aiohttp.ClientWebSocketResponse, msg: dict, expect_id: int, timeout: float = 20.0) -> Any:
     await ws.send_json(msg)
@@ -1468,57 +1466,6 @@ def _save_voice_satellite_registry(rows: List[Dict[str, Any]]) -> None:
             logger.warning("[voice_core] satellite registry redis unavailable; using in-memory fallback: %s", exc)
 
 
-def _load_voice_satellite_blocked_selectors() -> set[str]:
-    global _voice_satellite_blocked_mem, _voice_satellite_blocked_redis_warned
-    try:
-        raw = redis_client.get(REDIS_VOICE_SATELLITE_BLOCKED_KEY)
-        if not raw:
-            return set(_voice_satellite_blocked_mem)
-        payload = json.loads(raw)
-    except Exception as exc:
-        if not _voice_satellite_blocked_redis_warned:
-            _voice_satellite_blocked_redis_warned = True
-            logger.warning("[voice_core] satellite blocked-set redis unavailable; using in-memory fallback: %s", exc)
-        return set(_voice_satellite_blocked_mem)
-
-    if not isinstance(payload, list):
-        return set(_voice_satellite_blocked_mem)
-    parsed = {_text(item) for item in payload if _text(item)}
-    _voice_satellite_blocked_mem = set(parsed)
-    return parsed
-
-
-def _save_voice_satellite_blocked_selectors(rows: set[str]) -> None:
-    global _voice_satellite_blocked_mem, _voice_satellite_blocked_redis_warned
-    clean = sorted({_text(item) for item in rows if _text(item)})
-    _voice_satellite_blocked_mem = set(clean)
-    try:
-        redis_client.set(REDIS_VOICE_SATELLITE_BLOCKED_KEY, json.dumps(clean, ensure_ascii=False))
-    except Exception as exc:
-        if not _voice_satellite_blocked_redis_warned:
-            _voice_satellite_blocked_redis_warned = True
-            logger.warning("[voice_core] satellite blocked-set redis unavailable; using in-memory fallback: %s", exc)
-
-
-def _block_voice_satellite_selector(selector: str) -> None:
-    token = _text(selector)
-    if not token:
-        return
-    blocked = _load_voice_satellite_blocked_selectors()
-    blocked.add(token)
-    _save_voice_satellite_blocked_selectors(blocked)
-
-
-def _unblock_voice_satellite_selector(selector: str) -> None:
-    token = _text(selector)
-    if not token:
-        return
-    blocked = _load_voice_satellite_blocked_selectors()
-    if token in blocked:
-        blocked.discard(token)
-        _save_voice_satellite_blocked_selectors(blocked)
-
-
 def _upsert_voice_satellite(row: Dict[str, Any]) -> Dict[str, Any]:
     incoming = _normalize_voice_satellite_row(row)
     selector = _text(incoming.get("selector"))
@@ -1568,11 +1515,10 @@ def _remove_voice_satellite(selector: str) -> bool:
 
 
 def _voice_satellite_option_rows(*, current_values: List[str]) -> List[Dict[str, str]]:
-    blocked = _load_voice_satellite_blocked_selectors()
     options_by_value: Dict[str, Dict[str, str]] = {}
     for row in _load_voice_satellite_registry():
         selector = _text(row.get("selector"))
-        if not selector or selector in blocked:
+        if not selector:
             continue
         name = _text(row.get("name"))
         entity_id = _text(row.get("entity_id"))
@@ -1841,12 +1787,10 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         for row in clients.values()
         if isinstance(row, dict) and bool(row.get("connected"))
     )
-    blocked = _load_voice_satellite_blocked_selectors()
     satellites = [
         row
         for row in _load_voice_satellite_registry()
         if _text(row.get("selector"))
-        and _text(row.get("selector")) not in blocked
         and _lower(row.get("source")) != "homeassistant_registry"
     ]
     satellites = sorted(satellites, key=lambda row: _lower(row.get("name") or row.get("selector")))
@@ -1877,8 +1821,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 f"Last run: {_voice_core_format_timestamp(discovery.get('last_run_ts'))} • "
                 f"manual={int(last_counts.get('manual') or 0)} "
                 f"mdns={int(last_counts.get('mdns_esphome') or 0)} "
-                f"excluded_ha={int(last_counts.get('excluded_ha') or 0)} "
-                f"blocked={int(last_counts.get('blocked') or 0)}"
+                f"excluded_ha={int(last_counts.get('excluded_ha') or 0)}"
             ),
             "run_action": "voice_refresh_satellites",
             "run_label": "Discover / Refresh",
@@ -3879,8 +3822,7 @@ async def _native_discover_satellites_mdns() -> List[Dict[str, Any]]:
 
 async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) -> Dict[str, Any]:
     now = _native_now()
-    counts = {"manual": 0, "mdns_esphome": 0, "blocked": 0, "excluded_ha": 0}
-    blocked = _load_voice_satellite_blocked_selectors()
+    counts = {"manual": 0, "mdns_esphome": 0, "excluded_ha": 0}
     exclude_ha_assist = _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True)
     ha_entity_ids: List[str] = []
     if exclude_ha_assist:
@@ -3913,10 +3855,6 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
     manual_targets = _normalize_csv_or_lines(_portal_settings().get("VOICE_MANUAL_TARGETS"))
     for host in manual_targets:
         selector = f"host:{_lower(host)}"
-        if selector in blocked:
-            counts["blocked"] += 1
-            _native_debug(f"discovery manual blocked selector={selector}")
-            continue
         _upsert_voice_satellite(
             {
                 "selector": selector,
@@ -3931,10 +3869,6 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
     for row in await _native_discover_satellites_mdns():
         selector = _text((row or {}).get("selector"))
         if not selector:
-            continue
-        if selector in blocked:
-            counts["blocked"] += 1
-            _native_debug(f"discovery mdns blocked selector={selector}")
             continue
         if exclude_ha_assist:
             matched, reason = _mdns_row_matches_ha_assist(row if isinstance(row, dict) else {}, ha_entity_ids)
@@ -3954,8 +3888,7 @@ async def _native_discover_satellites_once(*, force_ha_refresh: bool = False) ->
         "discovery summary "
         f"manual={counts.get('manual', 0)} "
         f"mdns={counts.get('mdns_esphome', 0)} "
-        f"excluded_ha={counts.get('excluded_ha', 0)} "
-        f"blocked={counts.get('blocked', 0)}"
+        f"excluded_ha={counts.get('excluded_ha', 0)}"
     )
     return counts
 
@@ -4158,6 +4091,11 @@ async def _on_startup():
         _get_bool_platform_setting("VOICE_DISCOVERY_EXCLUDE_HA_ASSIST", True),
         _esphome_native_enabled(),
     )
+    try:
+        redis_client.delete(REDIS_VOICE_SATELLITE_BLOCKED_KEY)
+        _native_debug("startup cleared legacy blocked satellite cache")
+    except Exception:
+        pass
     if _native_voice_discovery_task is None or _native_voice_discovery_task.done():
         _native_voice_discovery_task = asyncio.create_task(_native_discovery_loop())
     if _esphome_native_task is None or _esphome_native_task.done():
@@ -4203,12 +4141,10 @@ async def voice_config(x_tater_token: Optional[str] = Header(None)):
 @app.get("/tater-ha/v1/voice/satellites", response_model=VoiceSatellitesOut)
 async def voice_satellites(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
-    blocked = _load_voice_satellite_blocked_selectors()
     rows = [
         row
         for row in _load_voice_satellite_registry()
-        if _text(row.get("selector")) not in blocked
-        and _lower(row.get("source")) != "homeassistant_registry"
+        if _lower(row.get("source")) != "homeassistant_registry"
     ]
     rows = sorted(rows, key=lambda row: _lower(row.get("name") or row.get("selector")))
     return {"satellites": rows}
@@ -4232,7 +4168,6 @@ async def voice_satellite_adopt(payload: VoiceSatelliteAdoptIn, x_tater_token: O
     if not host and selector.startswith("host:"):
         host = _lower(selector.split(":", 1)[1])
 
-    _unblock_voice_satellite_selector(selector)
     saved = _upsert_voice_satellite(
         {
             "selector": selector,
@@ -4254,9 +4189,8 @@ async def voice_satellite_remove(payload: VoiceSatelliteRemoveIn, x_tater_token:
     selector = _text(payload.selector)
     if not selector:
         raise HTTPException(status_code=400, detail="selector is required.")
-    _block_voice_satellite_selector(selector)
     removed = _remove_voice_satellite(selector)
-    return {"ok": True, "selector": selector, "removed": bool(removed), "blocked": True}
+    return {"ok": True, "selector": selector, "removed": bool(removed)}
 
 
 @app.post("/tater-ha/v1/voice/satellites/refresh")
