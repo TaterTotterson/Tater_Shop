@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.44"
+__version__ = "2.0.46"
 
 load_dotenv()
 
@@ -125,7 +125,7 @@ DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 15.0
 DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.40
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
@@ -133,6 +133,7 @@ DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
 DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS = 3
+DEFAULT_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S = 0.30
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
@@ -2768,6 +2769,14 @@ def _esphome_server_vad_strong_streak_chunks() -> int:
     return min(30, max(2, int(value)))
 
 
+def _esphome_server_vad_tail_cutoff_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S",
+        DEFAULT_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S,
+    )
+    return min(1.5, max(0.15, float(value)))
+
+
 def _esphome_server_vad_max_release_above_floor_db() -> float:
     value = _get_float_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB",
@@ -4036,6 +4045,7 @@ async def _esphome_subscribe_voice_assistant(
                     release_margin = _esphome_server_vad_release_margin_db()
                     strong_margin = _esphome_server_vad_strong_margin_db()
                     strong_streak_chunks = _esphome_server_vad_strong_streak_chunks()
+                    tail_cutoff_s = _esphome_server_vad_tail_cutoff_s()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
                     silence_target_s = _esphome_server_vad_silence_s()
@@ -4119,17 +4129,27 @@ async def _esphome_subscribe_voice_assistant(
                                 last_strong_ts = float(runtime.get("vad_last_strong_speech_ts") or 0.0)
                                 silence_anchor = last_strong_ts if last_strong_ts > 0.0 else silence_start_ts
                                 silence_elapsed = max(0.0, now - silence_anchor)
+                                tail_elapsed = max(0.0, now - last_strong_ts) if last_strong_ts > 0.0 else 0.0
                                 speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
                                 speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+                                min_speech_met = (
+                                    speech_chunks >= min_speech_chunks
+                                    or speech_seconds >= min_speech_seconds
+                                )
+                                silence_hit = silence_elapsed >= silence_target_s
+                                tail_hit = last_strong_ts > 0.0 and tail_elapsed >= tail_cutoff_s
                                 if (
-                                    silence_elapsed >= silence_target_s
-                                    and (speech_chunks >= min_speech_chunks or speech_seconds >= min_speech_seconds)
+                                    min_speech_met
+                                    and (silence_hit or tail_hit)
                                 ):
                                     should_finalize = True
                                     finalize_details = {
                                         "speech_chunks": speech_chunks,
                                         "speech_seconds": speech_seconds,
                                         "silence_elapsed": silence_elapsed,
+                                        "tail_elapsed": tail_elapsed,
+                                        "tail_cutoff_s": tail_cutoff_s,
+                                        "finalize_mode": "tail_cutoff" if tail_hit and not silence_hit else "silence",
                                         "dbfs": float(dbfs),
                                         "trigger_threshold": float(trigger_threshold),
                                         "release_threshold": float(release_threshold),
@@ -4181,10 +4201,12 @@ async def _esphome_subscribe_voice_assistant(
                 )
             if should_finalize:
                 logger.info(
-                    "[native-voice] server_vad finalize selector=%s session_id=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
+                    "[native-voice] server_vad finalize selector=%s session_id=%s mode=%s silence_s=%.2f tail_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
                     token,
                     session_id,
+                    _text(finalize_details.get("finalize_mode")) or "silence",
                     float(finalize_details.get("silence_elapsed") or 0.0),
+                    float(finalize_details.get("tail_elapsed") or 0.0),
                     int(finalize_details.get("speech_chunks") or 0),
                     float(finalize_details.get("speech_seconds") or 0.0),
                     float(finalize_details.get("dbfs") or 0.0),
@@ -4378,7 +4400,8 @@ async def _esphome_subscribe_voice_assistant(
             "esphome watchdog config "
             f"selector={token} idle_timeout_s={max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)):.2f} "
             f"max_listen_s={max(max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)) + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS)):.2f} "
-            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f}"
+            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f} "
+            f"tail_cutoff_s={_esphome_server_vad_tail_cutoff_s():.2f}"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
