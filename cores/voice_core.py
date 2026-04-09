@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.30"
+__version__ = "2.0.31"
 
 load_dotenv()
 
@@ -124,12 +124,13 @@ DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.95
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.80
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 3.0
-DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.35
+DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
+DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
@@ -2742,6 +2743,14 @@ def _esphome_server_vad_release_margin_db() -> float:
     return min(20.0, max(1.0, float(value)))
 
 
+def _esphome_server_vad_max_release_above_floor_db() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB",
+        DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB,
+    )
+    return min(20.0, max(2.0, float(value)))
+
+
 def _esphome_server_vad_min_speech_chunks() -> int:
     value = _get_int_platform_setting(
         "VOICE_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS",
@@ -3977,6 +3986,10 @@ async def _esphome_subscribe_voice_assistant(
                             float(floor) + float(release_margin),
                             float(peak) - float(drop_db),
                         )
+                        # Prevent short wake beeps/loud transients from forcing an overly-high
+                        # release threshold that keeps listening open too long.
+                        release_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
+                        release_threshold = min(float(release_threshold), float(release_cap))
                         runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
                         runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
