@@ -11,10 +11,12 @@ import contextlib
 import inspect
 import importlib
 import socket
+import sys
 import math
 import audioop
 import io
 import wave
+import array
 from typing import Optional, Dict, Any, List, Tuple, Callable, cast
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
@@ -61,8 +63,25 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WyomingError = None
     WYOMING_IMPORT_ERROR = str(exc)
 
+try:
+    import webrtcvad as _webrtcvad
+    WEBRTCVAD_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    _webrtcvad = None
+    WEBRTCVAD_IMPORT_ERROR = str(exc)
+
+try:
+    import torch  # type: ignore
+    from silero_vad import load_silero_vad, VADIterator  # type: ignore
+    SILERO_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    torch = None  # type: ignore
+    load_silero_vad = None  # type: ignore
+    VADIterator = None  # type: ignore
+    SILERO_IMPORT_ERROR = str(exc)
+
 from dotenv import load_dotenv
-__version__ = "2.0.46"
+__version__ = "2.0.48"
 
 load_dotenv()
 
@@ -124,6 +143,9 @@ DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 15.0
 DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
+DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
+DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 2
+DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
 DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
@@ -131,9 +153,8 @@ DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
-DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 18.0
-DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS = 3
-DEFAULT_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S = 0.30
+DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 24.0
+DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
 DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
@@ -230,6 +251,25 @@ CORE_SETTINGS = {
             "type": "number",
             "default": DEFAULT_ESPHOME_CONNECT_TIMEOUT_S,
             "description": "Timeout when opening ESPHome native API connections.",
+        },
+        "VOICE_ESPHOME_SERVER_VAD_BACKEND": {
+            "label": "ESPHome VAD Backend",
+            "type": "select",
+            "options": ["energy", "webrtc", "silero"],
+            "default": DEFAULT_ESPHOME_SERVER_VAD_BACKEND,
+            "description": "Voice activity detector backend used to end utterances: energy (built-in), webrtc, or silero.",
+        },
+        "VOICE_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS": {
+            "label": "WebRTC VAD Aggressiveness",
+            "type": "number",
+            "default": DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS,
+            "description": "WebRTC sensitivity from 0 (least aggressive) to 3 (most aggressive).",
+        },
+        "VOICE_ESPHOME_SILERO_VAD_THRESHOLD": {
+            "label": "Silero VAD Threshold",
+            "type": "number",
+            "default": DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD,
+            "description": "Speech probability threshold for Silero VAD (0.0 - 1.0).",
         },
         "VOICE_ESPHOME_RETRY_SECONDS": {
             "label": "ESPHome Retry Interval (sec)",
@@ -587,6 +627,9 @@ def _voice_pipeline_config_snapshot() -> Dict[str, Any]:
         "esphome_auto_target_manual": _get_bool_platform_setting("VOICE_ESPHOME_AUTO_TARGET_MANUAL", True),
         "esphome_password_set": bool(_text(settings.get("VOICE_ESPHOME_PASSWORD"))),
         "esphome_noise_psk_set": bool(_text(settings.get("VOICE_ESPHOME_NOISE_PSK"))),
+        "esphome_vad_backend": _esphome_server_vad_backend(),
+        "esphome_webrtc_vad_available": WEBRTCVAD_IMPORT_ERROR is None,
+        "esphome_silero_vad_available": SILERO_IMPORT_ERROR is None,
         "wyoming_stt": {
             "host": stt_host,
             "port": stt_port,
@@ -1810,6 +1853,9 @@ def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
         "VOICE_ESPHOME_PASSWORD",
         "VOICE_ESPHOME_NOISE_PSK",
         "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
+        "VOICE_ESPHOME_SERVER_VAD_BACKEND",
+        "VOICE_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS",
+        "VOICE_ESPHOME_SILERO_VAD_THRESHOLD",
     }
     fields: List[Dict[str, Any]] = []
     for setting_key, setting_meta in required_map.items():
@@ -1834,17 +1880,36 @@ def _voice_core_setting_fields(current: Dict[str, Any]) -> List[Dict[str, Any]]:
     for item in fields:
         if not isinstance(item, dict):
             continue
-        if _text(item.get("key")) != "VOICE_WYOMING_TTS_VOICE":
+        key = _text(item.get("key"))
+        if key == "VOICE_WYOMING_TTS_VOICE":
+            item["type"] = "select"
+            current_value = _text(item.get("value"))
+            item["options"] = _wyoming_tts_voice_option_rows(current_value=current_value)
+            if current_value == "":
+                item["value"] = ""
+            item["description"] = (
+                f"{_text(item.get('description'))} "
+                "Pick Default to use Piper's default voice."
+            ).strip()
             continue
-        item["type"] = "select"
-        current_value = _text(item.get("value"))
-        item["options"] = _wyoming_tts_voice_option_rows(current_value=current_value)
-        if current_value == "":
-            item["value"] = ""
-        item["description"] = (
-            f"{_text(item.get('description'))} "
-            "Pick Default to use Piper's default voice."
-        ).strip()
+        if key == "VOICE_ESPHOME_SERVER_VAD_BACKEND":
+            item["description"] = (
+                f"{_text(item.get('description'))} "
+                f"WebRTC available: {'yes' if WEBRTCVAD_IMPORT_ERROR is None else 'no'}; "
+                f"Silero available: {'yes' if SILERO_IMPORT_ERROR is None else 'no'}."
+            ).strip()
+            continue
+        if key == "VOICE_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS":
+            item["description"] = (
+                f"{_text(item.get('description'))} "
+                "Only used when VAD backend is set to webrtc."
+            ).strip()
+            continue
+        if key == "VOICE_ESPHOME_SILERO_VAD_THRESHOLD":
+            item["description"] = (
+                f"{_text(item.get('description'))} "
+                "Only used when VAD backend is set to silero."
+            ).strip()
     return fields
 
 
@@ -1894,6 +1959,9 @@ def _voice_core_settings_sections(field_map: Dict[str, Dict[str, Any]]) -> List[
                 "VOICE_ESPHOME_PASSWORD",
                 "VOICE_ESPHOME_NOISE_PSK",
                 "VOICE_ESPHOME_CONNECT_TIMEOUT_S",
+                "VOICE_ESPHOME_SERVER_VAD_BACKEND",
+                "VOICE_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS",
+                "VOICE_ESPHOME_SILERO_VAD_THRESHOLD",
             ],
         ),
     ]
@@ -2510,6 +2578,10 @@ _wyoming_tts_voice_catalog_meta_mem: Dict[str, Any] = {
     "last_refresh_ts": 0.0,
     "last_error": "",
 }
+_vad_warn_once_cache: set[str] = set()
+_silero_model_lock = threading.Lock()
+_silero_model_obj: Any = None
+_silero_model_error: str = ""
 
 
 def _compat_bridge_enabled() -> bool:
@@ -2709,6 +2781,29 @@ def _esphome_no_voice_timeout_s() -> float:
     return max(3.0, min(20.0, float(value)))
 
 
+def _esphome_server_vad_backend() -> str:
+    token = _lower(_portal_settings().get("VOICE_ESPHOME_SERVER_VAD_BACKEND")) or DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+    if token in {"energy", "webrtc", "silero"}:
+        return token
+    return DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+
+
+def _esphome_webrtc_vad_aggressiveness() -> int:
+    value = _get_int_platform_setting(
+        "VOICE_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS",
+        DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS,
+    )
+    return min(3, max(0, int(value)))
+
+
+def _esphome_silero_vad_threshold() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SILERO_VAD_THRESHOLD",
+        DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD,
+    )
+    return min(0.95, max(0.05, float(value)))
+
+
 def _esphome_server_vad_enabled() -> bool:
     return _get_bool_platform_setting("VOICE_ESPHOME_SERVER_VAD_ENABLED", DEFAULT_ESPHOME_SERVER_VAD_ENABLED)
 
@@ -2767,14 +2862,6 @@ def _esphome_server_vad_strong_streak_chunks() -> int:
         DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS,
     )
     return min(30, max(2, int(value)))
-
-
-def _esphome_server_vad_tail_cutoff_s() -> float:
-    value = _get_float_platform_setting(
-        "VOICE_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S",
-        DEFAULT_ESPHOME_SERVER_VAD_TAIL_CUTOFF_S,
-    )
-    return min(1.5, max(0.15, float(value)))
 
 
 def _esphome_server_vad_max_release_above_floor_db() -> float:
@@ -2938,6 +3025,325 @@ def _esphome_chunk_seconds(audio_bytes: bytes, audio_format: Dict[str, Any]) -> 
     frame_bytes = max(1, width * channels)
     samples = len(data) / float(frame_bytes)
     return max(0.0, samples / float(max(1, rate)))
+
+
+def _esphome_vad_warn_once(key: str, message: str) -> None:
+    token = _text(key)
+    if not token:
+        logger.warning("%s", message)
+        return
+    if token in _vad_warn_once_cache:
+        return
+    _vad_warn_once_cache.add(token)
+    logger.warning("%s", message)
+
+
+def _esphome_resolve_vad_backend(audio_format: Dict[str, Any], selector: str) -> str:
+    configured = _esphome_server_vad_backend()
+    if configured == "energy":
+        return "energy"
+
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+
+    if configured == "webrtc":
+        if _webrtcvad is None:
+            _esphome_vad_warn_once(
+                "webrtc:missing",
+                f"[native-voice] WebRTC VAD requested but unavailable ({WEBRTCVAD_IMPORT_ERROR or 'missing dependency'}); using energy backend.",
+            )
+            return "energy"
+        if width != 2 or channels != 1 or rate not in {8000, 16000, 32000, 48000}:
+            _esphome_vad_warn_once(
+                f"webrtc:format:{rate}:{width}:{channels}",
+                (
+                    f"[native-voice] WebRTC VAD requires PCM16 mono @ 8/16/32/48kHz "
+                    f"(selector={_text(selector)} got rate={rate} width={width} channels={channels}); using energy backend."
+                ),
+            )
+            return "energy"
+        return "webrtc"
+
+    if configured == "silero":
+        if torch is None or load_silero_vad is None or VADIterator is None:
+            _esphome_vad_warn_once(
+                "silero:missing",
+                f"[native-voice] Silero VAD requested but unavailable ({SILERO_IMPORT_ERROR or 'missing dependency'}); using energy backend.",
+            )
+            return "energy"
+        if width != 2 or channels != 1 or rate != 16000:
+            _esphome_vad_warn_once(
+                f"silero:format:{rate}:{width}:{channels}",
+                (
+                    f"[native-voice] Silero VAD requires PCM16 mono @ 16kHz "
+                    f"(selector={_text(selector)} got rate={rate} width={width} channels={channels}); using energy backend."
+                ),
+            )
+            return "energy"
+        return "silero"
+
+    return "energy"
+
+
+def _esphome_vad_apply_binary(
+    runtime: Dict[str, Any],
+    *,
+    now: float,
+    chunk_seconds: float,
+    is_speech: bool,
+    silence_target_s: float,
+    min_speech_chunks: int,
+    min_speech_seconds: float,
+    backend: str,
+    dbfs: Optional[float],
+) -> Tuple[bool, bool, Dict[str, Any]]:
+    emit_vad_start = False
+    should_finalize = False
+    finalize_details: Dict[str, Any] = {}
+
+    if bool(is_speech):
+        runtime["vad_voice_seen"] = True
+        runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+        runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + max(0.0, float(chunk_seconds))
+        runtime["vad_last_strong_speech_ts"] = now
+        runtime["vad_silence_start_ts"] = 0.0
+        if not bool(runtime.get("vad_start_sent")):
+            runtime["vad_start_sent"] = True
+            emit_vad_start = True
+        return emit_vad_start, should_finalize, finalize_details
+
+    if not bool(runtime.get("vad_voice_seen")):
+        return emit_vad_start, should_finalize, finalize_details
+
+    silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+    if silence_start_ts <= 0.0:
+        silence_start_ts = now
+        runtime["vad_silence_start_ts"] = silence_start_ts
+
+    last_speech_ts = float(runtime.get("vad_last_strong_speech_ts") or 0.0)
+    silence_anchor = last_speech_ts if last_speech_ts > 0.0 else silence_start_ts
+    silence_elapsed = max(0.0, now - silence_anchor)
+    speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+    speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+    min_speech_met = speech_chunks >= int(min_speech_chunks) or speech_seconds >= float(min_speech_seconds)
+    if min_speech_met and silence_elapsed >= float(silence_target_s):
+        should_finalize = True
+        finalize_details = {
+            "backend": _text(backend) or "energy",
+            "speech_chunks": speech_chunks,
+            "speech_seconds": speech_seconds,
+            "silence_elapsed": silence_elapsed,
+            "dbfs": float(dbfs) if isinstance(dbfs, (int, float)) else 0.0,
+            "trigger_threshold": 0.0,
+            "release_threshold": 0.0,
+            "strong_threshold": 0.0,
+            "noise_floor_dbfs": 0.0,
+            "peak_dbfs": 0.0,
+        }
+
+    return emit_vad_start, should_finalize, finalize_details
+
+
+def _silero_model_get() -> Tuple[Optional[Any], str]:
+    global _silero_model_obj, _silero_model_error
+    if torch is None or load_silero_vad is None or VADIterator is None:
+        return None, _text(SILERO_IMPORT_ERROR) or "silero_vad dependency unavailable"
+    if _silero_model_obj is not None:
+        return _silero_model_obj, ""
+    with _silero_model_lock:
+        if _silero_model_obj is not None:
+            return _silero_model_obj, ""
+        if _silero_model_error:
+            return None, _silero_model_error
+        try:
+            _silero_model_obj = load_silero_vad()
+        except Exception as exc:
+            _silero_model_error = _text(exc) or exc.__class__.__name__
+            return None, _silero_model_error
+    return _silero_model_obj, ""
+
+
+def _silero_vad_iterator_create(*, sampling_rate: int, threshold: float) -> Any:
+    model, err = _silero_model_get()
+    if model is None:
+        raise RuntimeError(err or "silero model unavailable")
+    kwargs: Dict[str, Any] = {"sampling_rate": int(sampling_rate), "threshold": float(threshold)}
+    try:
+        return VADIterator(model, **kwargs)
+    except TypeError:
+        kwargs.pop("threshold", None)
+        iterator = VADIterator(model, **kwargs)
+        with contextlib.suppress(Exception):
+            setattr(iterator, "threshold", float(threshold))
+        return iterator
+
+
+def _esphome_webrtc_vad_process_chunk(
+    runtime: Dict[str, Any],
+    *,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    now: float,
+    silence_target_s: float,
+    min_speech_chunks: int,
+    min_speech_seconds: float,
+    dbfs: Optional[float],
+) -> Tuple[bool, bool, Dict[str, Any]]:
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+    frame_ms = 30
+    frame_bytes = int((rate * frame_ms / 1000) * width * channels)
+    if frame_bytes <= 0:
+        return False, False, {}
+
+    vad_obj = runtime.get("webrtc_vad")
+    if vad_obj is None:
+        vad_obj = _webrtcvad.Vad(_esphome_webrtc_vad_aggressiveness()) if _webrtcvad is not None else None
+        runtime["webrtc_vad"] = vad_obj
+    if vad_obj is None:
+        return False, False, {}
+
+    frame_buffer = runtime.get("webrtc_frame_buffer")
+    if not isinstance(frame_buffer, bytearray):
+        frame_buffer = bytearray()
+        runtime["webrtc_frame_buffer"] = frame_buffer
+    frame_buffer.extend(bytes(audio_bytes or b""))
+
+    emit_any_start = False
+    should_finalize = False
+    finalize_details: Dict[str, Any] = {}
+    frame_seconds = float(frame_ms) / 1000.0
+
+    while len(frame_buffer) >= frame_bytes:
+        frame = bytes(frame_buffer[:frame_bytes])
+        del frame_buffer[:frame_bytes]
+        speech = False
+        with contextlib.suppress(Exception):
+            speech = bool(vad_obj.is_speech(frame, rate))
+        emit_start, frame_finalize, details = _esphome_vad_apply_binary(
+            runtime,
+            now=now,
+            chunk_seconds=frame_seconds,
+            is_speech=bool(speech),
+            silence_target_s=silence_target_s,
+            min_speech_chunks=min_speech_chunks,
+            min_speech_seconds=min_speech_seconds,
+            backend="webrtc",
+            dbfs=dbfs,
+        )
+        emit_any_start = emit_any_start or emit_start
+        if frame_finalize:
+            should_finalize = True
+            finalize_details = details
+            break
+
+    return emit_any_start, should_finalize, finalize_details
+
+
+def _esphome_silero_vad_process_chunk(
+    runtime: Dict[str, Any],
+    *,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    now: float,
+    silence_target_s: float,
+    min_speech_chunks: int,
+    min_speech_seconds: float,
+    dbfs: Optional[float],
+) -> Tuple[bool, bool, Dict[str, Any]]:
+    rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if rate != 16000 or width != 2 or channels != 1:
+        return False, False, {}
+
+    iterator = runtime.get("silero_iterator")
+    if iterator is None:
+        iterator = _silero_vad_iterator_create(
+            sampling_rate=rate,
+            threshold=_esphome_silero_vad_threshold(),
+        )
+        runtime["silero_iterator"] = iterator
+    speaking = bool(runtime.get("silero_speaking"))
+
+    frame_samples = 512
+    frame_bytes = frame_samples * width * channels
+    if frame_bytes <= 0:
+        return False, False, {}
+    frame_buffer = runtime.get("silero_frame_buffer")
+    if not isinstance(frame_buffer, bytearray):
+        frame_buffer = bytearray()
+        runtime["silero_frame_buffer"] = frame_buffer
+    frame_buffer.extend(bytes(audio_bytes or b""))
+
+    emit_any_start = False
+    should_finalize = False
+    finalize_details: Dict[str, Any] = {}
+    frame_seconds = float(frame_samples) / float(rate)
+    threshold = _esphome_silero_vad_threshold()
+
+    while len(frame_buffer) >= frame_bytes:
+        frame = bytes(frame_buffer[:frame_bytes])
+        del frame_buffer[:frame_bytes]
+
+        samples = array.array("h")
+        samples.frombytes(frame)
+        if getattr(samples, "itemsize", 2) != 2:
+            continue
+        if sys.byteorder != "little":
+            samples.byteswap()
+
+        tensor = torch.tensor(list(samples), dtype=torch.float32) / 32768.0  # type: ignore[attr-defined]
+        event: Any = None
+        with contextlib.suppress(TypeError):
+            event = iterator(tensor, return_seconds=False)
+        if event is None:
+            with contextlib.suppress(Exception):
+                event = iterator(tensor)
+
+        is_speech = bool(speaking)
+        if isinstance(event, dict):
+            if "start" in event:
+                speaking = True
+                is_speech = True
+            elif "end" in event:
+                speaking = False
+                is_speech = False
+            elif "speech" in event:
+                is_speech = bool(event.get("speech"))
+                speaking = bool(is_speech)
+            elif "prob" in event:
+                prob = float(event.get("prob") or 0.0)
+                is_speech = prob >= threshold
+                speaking = bool(is_speech)
+        elif isinstance(event, bool):
+            is_speech = bool(event)
+            speaking = bool(event)
+        elif isinstance(event, (int, float)):
+            is_speech = float(event) >= threshold
+            speaking = bool(is_speech)
+
+        emit_start, frame_finalize, details = _esphome_vad_apply_binary(
+            runtime,
+            now=now,
+            chunk_seconds=frame_seconds,
+            is_speech=bool(is_speech),
+            silence_target_s=silence_target_s,
+            min_speech_chunks=min_speech_chunks,
+            min_speech_seconds=min_speech_seconds,
+            backend="silero",
+            dbfs=dbfs,
+        )
+        emit_any_start = emit_any_start or emit_start
+        if frame_finalize:
+            should_finalize = True
+            finalize_details = details
+            break
+
+    runtime["silero_speaking"] = bool(speaking)
+    return emit_any_start, should_finalize, finalize_details
 
 
 def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
@@ -3610,6 +4016,12 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_dynamic_trigger_dbfs": None,
             "vad_dynamic_release_dbfs": None,
             "vad_start_sent": False,
+            "vad_backend": DEFAULT_ESPHOME_SERVER_VAD_BACKEND,
+            "webrtc_vad": None,
+            "webrtc_frame_buffer": bytearray(),
+            "silero_iterator": None,
+            "silero_speaking": False,
+            "silero_frame_buffer": bytearray(),
             "api_audio_supported": True,
             "udp_transport": None,
             "udp_protocol": None,
@@ -3772,6 +4184,12 @@ async def _esphome_finalize_voice_session(
         runtime["vad_dynamic_trigger_dbfs"] = None
         runtime["vad_dynamic_release_dbfs"] = None
         runtime["vad_start_sent"] = False
+        runtime["vad_backend"] = DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+        runtime["webrtc_vad"] = None
+        runtime["webrtc_frame_buffer"] = bytearray()
+        runtime["silero_iterator"] = None
+        runtime["silero_speaking"] = False
+        runtime["silero_frame_buffer"] = bytearray()
         runtime["awaiting_announcement"] = False
         runtime["awaiting_announcement_session_id"] = ""
         if bool(abort):
@@ -4024,6 +4442,7 @@ async def _esphome_subscribe_voice_assistant(
             release_threshold: Optional[float] = None
             strong_threshold: Optional[float] = None
             emit_vad_start = False
+            vad_backend = DEFAULT_ESPHOME_SERVER_VAD_BACKEND
             async with lock:
                 now = _native_monotonic()
                 runtime["audio_chunks"] = int(runtime.get("audio_chunks") or 0) + 1
@@ -4038,68 +4457,111 @@ async def _esphome_subscribe_voice_assistant(
                 if dbfs is not None:
                     runtime["vad_last_dbfs"] = round(float(dbfs), 2)
 
-                if _esphome_server_vad_enabled() and dbfs is not None:
+                if _esphome_server_vad_enabled():
+                    vad_backend = _text(runtime.get("vad_backend")) or _esphome_resolve_vad_backend(audio_format, token)
+                    runtime["vad_backend"] = vad_backend
                     abs_floor = _esphome_server_vad_threshold_dbfs()
                     drop_db = _esphome_server_vad_drop_db()
                     trigger_margin = _esphome_server_vad_trigger_margin_db()
                     release_margin = _esphome_server_vad_release_margin_db()
                     strong_margin = _esphome_server_vad_strong_margin_db()
                     strong_streak_chunks = _esphome_server_vad_strong_streak_chunks()
-                    tail_cutoff_s = _esphome_server_vad_tail_cutoff_s()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
                     silence_target_s = _esphome_server_vad_silence_s()
                     start_ts = float(runtime.get("session_start_ts") or 0.0)
+                    if vad_backend == "webrtc":
+                        emit_vad_start, should_finalize, finalize_details = _esphome_webrtc_vad_process_chunk(
+                            runtime,
+                            audio_bytes=audio_bytes,
+                            audio_format=audio_format,
+                            now=now,
+                            silence_target_s=silence_target_s,
+                            min_speech_chunks=min_speech_chunks,
+                            min_speech_seconds=min_speech_seconds,
+                            dbfs=dbfs,
+                        )
+                    elif vad_backend == "silero":
+                        try:
+                            emit_vad_start, should_finalize, finalize_details = _esphome_silero_vad_process_chunk(
+                                runtime,
+                                audio_bytes=audio_bytes,
+                                audio_format=audio_format,
+                                now=now,
+                                silence_target_s=silence_target_s,
+                                min_speech_chunks=min_speech_chunks,
+                                min_speech_seconds=min_speech_seconds,
+                                dbfs=dbfs,
+                            )
+                        except Exception as exc:
+                            runtime["vad_backend"] = "energy"
+                            vad_backend = "energy"
+                            _esphome_vad_warn_once(
+                                "silero:runtime",
+                                f"[native-voice] Silero VAD runtime error ({_text(exc) or exc.__class__.__name__}); using energy backend.",
+                            )
+                    if vad_backend == "energy" and dbfs is not None:
+                        floor_prev = runtime.get("vad_noise_floor_dbfs")
+                        floor = float(floor_prev) if isinstance(floor_prev, (int, float)) else float(abs_floor)
+                        if (start_ts > 0.0) and ((now - start_ts) < float(DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS)):
+                            if dbfs < floor:
+                                floor = (floor * 0.85) + (float(dbfs) * 0.15)
+                            runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
+                        else:
+                            if not bool(runtime.get("vad_voice_seen")) and dbfs <= (floor + trigger_margin):
+                                floor = (floor * 0.92) + (float(dbfs) * 0.08)
+                            runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
 
-                    floor_prev = runtime.get("vad_noise_floor_dbfs")
-                    floor = float(floor_prev) if isinstance(floor_prev, (int, float)) else float(abs_floor)
-                    if (start_ts > 0.0) and ((now - start_ts) < float(DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS)):
-                        if dbfs < floor:
-                            floor = (floor * 0.85) + (float(dbfs) * 0.15)
-                        runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
-                    else:
-                        if not bool(runtime.get("vad_voice_seen")) and dbfs <= (floor + trigger_margin):
-                            floor = (floor * 0.92) + (float(dbfs) * 0.08)
-                        runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
+                            peak_prev = runtime.get("vad_peak_dbfs")
+                            peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
+                            if dbfs > peak:
+                                peak = float(dbfs)
+                            runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
-                        peak_prev = runtime.get("vad_peak_dbfs")
-                        peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
-                        if dbfs > peak:
-                            peak = float(dbfs)
-                        runtime["vad_peak_dbfs"] = round(float(peak), 2)
+                            trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
+                            release_raw = max(float(floor) + float(release_margin), float(peak) - float(drop_db))
+                            # Keep release below trigger (hysteresis) and within a sensible band above noise floor.
+                            release_upper = float(trigger_threshold) - 0.5
+                            release_floor_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
+                            release_lower = float(floor) + 0.5
+                            release_threshold = min(float(release_raw), float(release_upper), float(release_floor_cap))
+                            release_threshold = max(float(release_threshold), float(release_lower))
+                            strong_threshold = max(float(trigger_threshold) + float(strong_margin), float(trigger_threshold) + 1.0)
+                            runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
+                            runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
 
-                        trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
-                        release_raw = max(float(floor) + float(release_margin), float(peak) - float(drop_db))
-                        # Keep release below trigger (hysteresis) and within a sensible band above noise floor.
-                        release_upper = float(trigger_threshold) - 0.5
-                        release_floor_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
-                        release_lower = float(floor) + 0.5
-                        release_threshold = min(float(release_raw), float(release_upper), float(release_floor_cap))
-                        release_threshold = max(float(release_threshold), float(release_lower))
-                        strong_threshold = max(float(trigger_threshold) + float(strong_margin), float(trigger_threshold) + 1.0)
-                        runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
-                        runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
-
-                        if not bool(runtime.get("vad_voice_seen")):
-                            start_detected = False
-                            if dbfs >= trigger_threshold:
-                                start_detected = True
-                                runtime["vad_soft_speech_chunks"] = 0
-                            else:
-                                soft_trigger_threshold = max(float(abs_floor), float(trigger_threshold) - 1.0)
-                                if dbfs >= soft_trigger_threshold:
-                                    soft_chunks = int(runtime.get("vad_soft_speech_chunks") or 0) + 1
-                                    runtime["vad_soft_speech_chunks"] = soft_chunks
-                                    if soft_chunks >= max(2, min_speech_chunks - 1):
-                                        start_detected = True
-                                else:
+                            if not bool(runtime.get("vad_voice_seen")):
+                                start_detected = False
+                                if dbfs >= trigger_threshold:
+                                    start_detected = True
                                     runtime["vad_soft_speech_chunks"] = 0
+                                else:
+                                    soft_trigger_threshold = max(float(abs_floor), float(trigger_threshold) - 1.0)
+                                    if dbfs >= soft_trigger_threshold:
+                                        soft_chunks = int(runtime.get("vad_soft_speech_chunks") or 0) + 1
+                                        runtime["vad_soft_speech_chunks"] = soft_chunks
+                                        if soft_chunks >= max(2, min_speech_chunks - 1):
+                                            start_detected = True
+                                    else:
+                                        runtime["vad_soft_speech_chunks"] = 0
 
-                            if start_detected:
-                                runtime["vad_voice_seen"] = True
-                                runtime["vad_silence_start_ts"] = now
-                                runtime["vad_last_strong_speech_ts"] = 0.0
-                                runtime["vad_strong_streak"] = 0
+                                if start_detected:
+                                    runtime["vad_voice_seen"] = True
+                                    runtime["vad_silence_start_ts"] = now
+                                    runtime["vad_last_strong_speech_ts"] = 0.0
+                                    runtime["vad_strong_streak"] = 0
+                                    if strong_threshold is not None and dbfs >= float(strong_threshold):
+                                        streak = int(runtime.get("vad_strong_streak") or 0) + 1
+                                        runtime["vad_strong_streak"] = streak
+                                        if streak >= strong_streak_chunks:
+                                            runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                                            runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
+                                            runtime["vad_last_strong_speech_ts"] = now
+                                            runtime["vad_silence_start_ts"] = 0.0
+                                    if not bool(runtime.get("vad_start_sent")):
+                                        runtime["vad_start_sent"] = True
+                                        emit_vad_start = True
+                            else:
                                 if strong_threshold is not None and dbfs >= float(strong_threshold):
                                     streak = int(runtime.get("vad_strong_streak") or 0) + 1
                                     runtime["vad_strong_streak"] = streak
@@ -4108,55 +4570,35 @@ async def _esphome_subscribe_voice_assistant(
                                         runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
                                         runtime["vad_last_strong_speech_ts"] = now
                                         runtime["vad_silence_start_ts"] = 0.0
-                                if not bool(runtime.get("vad_start_sent")):
-                                    runtime["vad_start_sent"] = True
-                                    emit_vad_start = True
-                        else:
-                            if strong_threshold is not None and dbfs >= float(strong_threshold):
-                                streak = int(runtime.get("vad_strong_streak") or 0) + 1
-                                runtime["vad_strong_streak"] = streak
-                                if streak >= strong_streak_chunks:
-                                    runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
-                                    runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + float(chunk_seconds)
-                                    runtime["vad_last_strong_speech_ts"] = now
-                                    runtime["vad_silence_start_ts"] = 0.0
-                            else:
-                                runtime["vad_strong_streak"] = 0
-                                silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
-                                if silence_start_ts <= 0.0:
-                                    silence_start_ts = now
-                                    runtime["vad_silence_start_ts"] = silence_start_ts
-                                last_strong_ts = float(runtime.get("vad_last_strong_speech_ts") or 0.0)
-                                silence_anchor = last_strong_ts if last_strong_ts > 0.0 else silence_start_ts
-                                silence_elapsed = max(0.0, now - silence_anchor)
-                                tail_elapsed = max(0.0, now - last_strong_ts) if last_strong_ts > 0.0 else 0.0
-                                speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
-                                speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
-                                min_speech_met = (
-                                    speech_chunks >= min_speech_chunks
-                                    or speech_seconds >= min_speech_seconds
-                                )
-                                silence_hit = silence_elapsed >= silence_target_s
-                                tail_hit = last_strong_ts > 0.0 and tail_elapsed >= tail_cutoff_s
-                                if (
-                                    min_speech_met
-                                    and (silence_hit or tail_hit)
-                                ):
-                                    should_finalize = True
-                                    finalize_details = {
-                                        "speech_chunks": speech_chunks,
-                                        "speech_seconds": speech_seconds,
-                                        "silence_elapsed": silence_elapsed,
-                                        "tail_elapsed": tail_elapsed,
-                                        "tail_cutoff_s": tail_cutoff_s,
-                                        "finalize_mode": "tail_cutoff" if tail_hit and not silence_hit else "silence",
-                                        "dbfs": float(dbfs),
-                                        "trigger_threshold": float(trigger_threshold),
-                                        "release_threshold": float(release_threshold),
-                                        "strong_threshold": float(strong_threshold) if strong_threshold is not None else 0.0,
-                                        "noise_floor_dbfs": float(floor),
-                                        "peak_dbfs": float(peak),
-                                    }
+                                else:
+                                    runtime["vad_strong_streak"] = 0
+                                    silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+                                    if silence_start_ts <= 0.0:
+                                        silence_start_ts = now
+                                        runtime["vad_silence_start_ts"] = silence_start_ts
+                                    last_strong_ts = float(runtime.get("vad_last_strong_speech_ts") or 0.0)
+                                    silence_anchor = last_strong_ts if last_strong_ts > 0.0 else silence_start_ts
+                                    silence_elapsed = max(0.0, now - silence_anchor)
+                                    speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+                                    speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+                                    min_speech_met = speech_chunks >= min_speech_chunks or speech_seconds >= min_speech_seconds
+                                    if (
+                                        min_speech_met
+                                        and silence_elapsed >= silence_target_s
+                                    ):
+                                        should_finalize = True
+                                        finalize_details = {
+                                            "backend": "energy",
+                                            "speech_chunks": speech_chunks,
+                                            "speech_seconds": speech_seconds,
+                                            "silence_elapsed": silence_elapsed,
+                                            "dbfs": float(dbfs),
+                                            "trigger_threshold": float(trigger_threshold),
+                                            "release_threshold": float(release_threshold),
+                                            "strong_threshold": float(strong_threshold) if strong_threshold is not None else 0.0,
+                                            "noise_floor_dbfs": float(floor),
+                                            "peak_dbfs": float(peak),
+                                        }
             if chunks in {1, 5, 10} or (chunks > 0 and (chunks % 50 == 0)):
                 dbfs_text = "-" if dbfs is None else f"{dbfs:.1f}"
                 trigger_text = "-" if trigger_threshold is None else f"{trigger_threshold:.1f}"
@@ -4186,7 +4628,7 @@ async def _esphome_subscribe_voice_assistant(
                 _native_debug(
                     f"esphome audio selector={token} session_id={session_id} chunks={chunks} bytes={total} "
                     f"dbfs={dbfs_text} trigger={trigger_text} release={release_text} strong={strong_text} floor={floor_text} "
-                    f"peak={peak_text} silence_s={silence_text} speech_s={speech_text} "
+                    f"peak={peak_text} silence_s={silence_text} speech_s={speech_text} backend={vad_backend} "
                     f"streak={strong_streak} voice_seen={str(voice_seen).lower()}"
                 )
             if emit_vad_start:
@@ -4201,12 +4643,11 @@ async def _esphome_subscribe_voice_assistant(
                 )
             if should_finalize:
                 logger.info(
-                    "[native-voice] server_vad finalize selector=%s session_id=%s mode=%s silence_s=%.2f tail_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
+                    "[native-voice] server_vad finalize selector=%s session_id=%s backend=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
                     token,
                     session_id,
-                    _text(finalize_details.get("finalize_mode")) or "silence",
+                    _text(finalize_details.get("backend")) or vad_backend,
                     float(finalize_details.get("silence_elapsed") or 0.0),
-                    float(finalize_details.get("tail_elapsed") or 0.0),
                     int(finalize_details.get("speech_chunks") or 0),
                     float(finalize_details.get("speech_seconds") or 0.0),
                     float(finalize_details.get("dbfs") or 0.0),
@@ -4364,6 +4805,12 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_dynamic_trigger_dbfs"] = None
             runtime["vad_dynamic_release_dbfs"] = None
             runtime["vad_start_sent"] = False
+            runtime["vad_backend"] = _esphome_resolve_vad_backend(audio_format, token)
+            runtime["webrtc_vad"] = None
+            runtime["webrtc_frame_buffer"] = bytearray()
+            runtime["silero_iterator"] = None
+            runtime["silero_speaking"] = False
+            runtime["silero_frame_buffer"] = bytearray()
             runtime["api_audio_supported"] = bool(api_audio_supported)
             if not api_audio_supported:
                 runtime["udp_port"] = int(udp_port)
@@ -4397,11 +4844,13 @@ async def _esphome_subscribe_voice_assistant(
             f"esphome session start flags selector={token} flags={int(_flags or 0)} transport={'api_audio' if api_audio_supported else f'udp:{udp_port}'}"
         )
         _native_debug(
+            f"esphome vad backend selector={token} configured={_esphome_server_vad_backend()} effective={_text(runtime.get('vad_backend')) or 'energy'}"
+        )
+        _native_debug(
             "esphome watchdog config "
             f"selector={token} idle_timeout_s={max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)):.2f} "
             f"max_listen_s={max(max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)) + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS)):.2f} "
-            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f} "
-            f"tail_cutoff_s={_esphome_server_vad_tail_cutoff_s():.2f}"
+            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f}"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
@@ -6246,6 +6695,11 @@ def _native_runtime_status() -> Dict[str, Any]:
         "compat_tcp_token_set": bool(_compat_tcp_expected_token()),
         "esphome_native": esphome_status,
         "esphome_native_available": bool(esphome_status.get("available")),
+        "esphome_vad_backend": _esphome_server_vad_backend(),
+        "esphome_webrtc_vad_available": WEBRTCVAD_IMPORT_ERROR is None,
+        "esphome_webrtc_vad_error": WEBRTCVAD_IMPORT_ERROR or "",
+        "esphome_silero_vad_available": SILERO_IMPORT_ERROR is None,
+        "esphome_silero_vad_error": SILERO_IMPORT_ERROR or "",
     }
 
 # -------------------- App + LLM client --------------------
