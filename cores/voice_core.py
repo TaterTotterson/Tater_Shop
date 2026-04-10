@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.50"
+__version__ = "2.0.51"
 
 load_dotenv()
 
@@ -4846,6 +4846,26 @@ async def _esphome_subscribe_voice_assistant(
             int(audio_format.get("width") or 0),
             int(audio_format.get("channels") or 0),
         )
+        configured_vad_backend = _esphome_server_vad_backend()
+        effective_vad_backend = _text(runtime.get("vad_backend")) or DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+        if configured_vad_backend != effective_vad_backend:
+            logger.info(
+                "[native-voice] vad backend fallback selector=%s configured=%s effective=%s webrtc_available=%s silero_available=%s rate=%s width=%s ch=%s",
+                token,
+                configured_vad_backend,
+                effective_vad_backend,
+                WEBRTCVAD_IMPORT_ERROR is None,
+                SILERO_IMPORT_ERROR is None,
+                int(audio_format.get("rate") or 0),
+                int(audio_format.get("width") or 0),
+                int(audio_format.get("channels") or 0),
+            )
+        else:
+            logger.info(
+                "[native-voice] vad backend selector=%s backend=%s",
+                token,
+                effective_vad_backend,
+            )
         _native_debug(
             f"esphome session start flags selector={token} flags={int(_flags or 0)} transport={'api_audio' if api_audio_supported else f'udp:{udp_port}'}"
         )
