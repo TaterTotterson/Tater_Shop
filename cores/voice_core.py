@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.48"
+__version__ = "2.0.50"
 
 load_dotenv()
 
@@ -1825,7 +1825,13 @@ def webui_prepare_settings_values(*, values: Any, **_kwargs) -> Dict[str, Any]:
 def _run_async_blocking(coro: Any) -> Any:
     try:
         return asyncio.run(coro)
-    except RuntimeError:
+    except RuntimeError as exc:
+        msg = _lower(exc)
+        if (
+            "cannot be called from a running event loop" not in msg
+            and "another loop is running" not in msg
+        ):
+            raise
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(coro)
@@ -4705,7 +4711,7 @@ async def _esphome_subscribe_voice_assistant(
             return
         asyncio.create_task(_ingest_audio_chunk(packet))
 
-    async def _handle_start(
+    async def _handle_start_inner(
         conversation_id: str,
         _flags: int,
         audio_settings: Any,
@@ -4855,6 +4861,40 @@ async def _esphome_subscribe_voice_assistant(
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
         return int(udp_port) if not api_audio_supported else 0
+
+    async def _handle_start(
+        conversation_id: str,
+        _flags: int,
+        audio_settings: Any,
+        wake_word_phrase: Optional[str],
+    ) -> Optional[int]:
+        try:
+            return await _handle_start_inner(
+                conversation_id=conversation_id,
+                _flags=_flags,
+                audio_settings=audio_settings,
+                wake_word_phrase=wake_word_phrase,
+            )
+        except Exception as exc:
+            msg = _text(exc) or exc.__class__.__name__
+            logger.exception(
+                "[native-voice] esphome session start failed selector=%s conversation_id=%s error=%s",
+                token,
+                _text(conversation_id),
+                msg,
+            )
+            with contextlib.suppress(Exception):
+                await _compat_set_error(token, msg)
+            with contextlib.suppress(Exception):
+                await _esphome_send_event(
+                    client,
+                    module,
+                    ("VOICE_ASSISTANT_ERROR", "ERROR"),
+                    {"code": "esphome_start_failed", "message": msg},
+                )
+            with contextlib.suppress(Exception):
+                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
+            return None
 
     async def _handle_audio(data: bytes) -> None:
         await _ingest_audio_chunk(bytes(data or b""))
