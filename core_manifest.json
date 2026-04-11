@@ -75,7 +75,7 @@
       "id": "voice",
       "name": "Voice Core",
       "module_key": "voice_core",
-      "version": "2.0.71",
+      "version": "2.0.72",
       "min_tater_version": "59",
       "description": "Voice Core integration core for Tater.",
       "settings_category": "Voice Core Settings",
@@ -83,7 +83,7 @@
       "autostart_key": "voice_core_running",
       "tags": [],
       "entry": "cores/voice_core.py",
-      "sha256": "62b7d3b07b5954c01a3d4234dfdce64791be38aec06fd652b7ea6289526096d4"
+      "sha256": "ee49d7070ea0f97b2f8255c58184db705bec983e19bbd277b0b733890c0cef4c"
     }
   ]
 }
