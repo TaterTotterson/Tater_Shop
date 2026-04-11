@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.68"
+__version__ = "2.0.69"
 
 load_dotenv()
 
@@ -3471,29 +3471,32 @@ def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict
     }
 
 
-def _esphome_live_feature_support(flags_value: Any) -> Dict[str, Any]:
+def _esphome_request_flag_snapshot(module: Any, flags_value: Any) -> Dict[str, Any]:
+    flags = 0
     with contextlib.suppress(Exception):
         flags = int(flags_value or 0)
-        if flags > 0:
-            return {
-                "flags": int(flags),
-                "flags_known": True,
-                "api_audio_bit": int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT),
-                "speaker_bit": int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT),
-                "api_audio_known": True,
-                "speaker_known": True,
-                "api_audio_supported": bool(int(flags) & int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT)),
-                "speaker_supported": bool(int(flags) & int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT)),
-            }
+    use_vad_bit = 1
+    use_wake_word_bit = 2
+    request_enum = _esphome_module_attr(module, "VoiceAssistantRequestFlag")
+    if request_enum is not None:
+        for attr_name in ("USE_VAD", "VOICE_ASSISTANT_REQUEST_USE_VAD"):
+            with contextlib.suppress(Exception):
+                parsed = int(getattr(request_enum, attr_name))
+                if parsed > 0:
+                    use_vad_bit = parsed
+                    break
+        for attr_name in ("USE_WAKE_WORD", "VOICE_ASSISTANT_REQUEST_USE_WAKE_WORD"):
+            with contextlib.suppress(Exception):
+                parsed = int(getattr(request_enum, attr_name))
+                if parsed > 0:
+                    use_wake_word_bit = parsed
+                    break
     return {
-        "flags": 0,
-        "flags_known": False,
-        "api_audio_bit": int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT),
-        "speaker_bit": int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT),
-        "api_audio_known": False,
-        "speaker_known": False,
-        "api_audio_supported": False,
-        "speaker_supported": False,
+        "flags": int(flags),
+        "use_vad": bool(int(flags) & int(use_vad_bit)),
+        "use_wake_word": bool(int(flags) & int(use_wake_word_bit)),
+        "use_vad_bit": int(use_vad_bit),
+        "use_wake_word_bit": int(use_wake_word_bit),
     }
 
 
@@ -4785,22 +4788,17 @@ async def _esphome_subscribe_voice_assistant(
         )
         session_id = _text(session.get("id"))
         session_flags = int(_flags or 0)
-        live_features = _esphome_live_feature_support(session_flags)
+        request_flags = _esphome_request_flag_snapshot(module, session_flags)
         session_api_audio_supported = bool(api_audio_supported)
         session_speaker_supported = bool(await _esphome_selector_speaker_supported(token))
-        if bool(live_features.get("flags_known")):
-            session_api_audio_supported = bool(live_features.get("api_audio_supported"))
-            session_speaker_supported = bool(live_features.get("speaker_supported"))
-            async with _esphome_native_lock:
-                row = _esphome_native_clients.get(token)
-                if isinstance(row, dict):
-                    row["voice_feature_flags"] = int(live_features.get("flags") or 0)
-                    row["voice_feature_flags_known"] = True
-                    row["voice_api_audio_known"] = True
-                    row["voice_speaker_known"] = True
-                    row["voice_api_audio_supported"] = bool(session_api_audio_supported)
-                    row["voice_speaker_supported"] = bool(session_speaker_supported)
-                    _esphome_native_clients[token] = row
+        # `_flags` in session-start callbacks are request flags (e.g. use_vad/use_wake_word),
+        # not feature-capability bits. Transport support should come from negotiated features.
+        async with _esphome_native_lock:
+            row = _esphome_native_clients.get(token)
+            if isinstance(row, dict):
+                row["voice_api_audio_supported"] = bool(session_api_audio_supported)
+                row["voice_speaker_supported"] = bool(session_speaker_supported)
+                _esphome_native_clients[token] = row
         udp_port = 0
         if not session_api_audio_supported:
             try:
@@ -4860,7 +4858,6 @@ async def _esphome_subscribe_voice_assistant(
             runtime["silero_speaking"] = False
             runtime["silero_frame_buffer"] = bytearray()
             runtime["api_audio_supported"] = bool(session_api_audio_supported)
-            runtime["session_feature_flags"] = int(session_flags)
             runtime["speaker_supported"] = bool(session_speaker_supported)
             if not session_api_audio_supported:
                 runtime["udp_port"] = int(udp_port)
@@ -4909,7 +4906,8 @@ async def _esphome_subscribe_voice_assistant(
             )
         _native_debug(
             "esphome session start flags "
-            f"selector={token} flags={int(_flags or 0)} flags_known={bool(live_features.get('flags_known'))} "
+            f"selector={token} request_flags={int(_flags or 0)} "
+            f"use_vad={bool(request_flags.get('use_vad'))} use_wake_word={bool(request_flags.get('use_wake_word'))} "
             f"api_audio={bool(session_api_audio_supported)} speaker={bool(session_speaker_supported)} "
             f"transport={'api_audio' if session_api_audio_supported else f'udp:{udp_port}'}"
         )
