@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.52"
+__version__ = "2.0.53"
 
 load_dotenv()
 
@@ -4990,22 +4990,42 @@ async def _esphome_subscribe_voice_assistant(
         if lock is None or not hasattr(lock, "acquire"):
             runtime["lock"] = asyncio.Lock()
             lock = runtime["lock"]
+        awaiting_announcement = False
+        awaiting_announcement_session_id = ""
         async with lock:
             session_id = _text(runtime.get("session_id"))
             chunks = int(runtime.get("audio_chunks") or 0)
             total = int(runtime.get("audio_bytes") or 0)
+            awaiting_announcement = bool(runtime.get("awaiting_announcement"))
+            awaiting_announcement_session_id = _text(runtime.get("awaiting_announcement_session_id"))
             _esphome_cancel_watchdog(runtime)
-            _esphome_cancel_announcement_wait(runtime)
-            runtime["awaiting_announcement"] = False
-            runtime["awaiting_announcement_session_id"] = ""
+            if bool(abort):
+                _esphome_cancel_announcement_wait(runtime)
+                runtime["awaiting_announcement"] = False
+                runtime["awaiting_announcement_session_id"] = ""
         logger.info(
-            "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s",
+            "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s awaiting_announcement=%s",
             token,
             session_id,
             bool(abort),
             chunks,
             total,
+            awaiting_announcement,
         )
+        if (not bool(abort)) and awaiting_announcement:
+            completed = await _esphome_finalize_after_announcement(
+                token,
+                client,
+                module,
+                reason="device_stop",
+            )
+            if completed:
+                logger.info(
+                    "[native-voice] announcement finalize from stop selector=%s session_id=%s",
+                    token,
+                    awaiting_announcement_session_id,
+                )
+            return
         with contextlib.suppress(Exception):
             await _esphome_finalize_voice_session(
                 token,
