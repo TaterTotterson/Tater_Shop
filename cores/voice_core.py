@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.72"
+__version__ = "2.0.73"
 
 load_dotenv()
 
@@ -148,10 +148,10 @@ DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
 DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT = 1 << 1
 DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT = 1 << 2
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
-DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
-DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
-DEFAULT_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS = 0.9
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.25
+DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 6
+DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.30
+DEFAULT_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS = 0.75
 DEFAULT_ESPHOME_SERVER_VAD_RESET_SECONDS = 1.0
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
@@ -4349,6 +4349,7 @@ async def _esphome_finalize_voice_session(
 
     close_udp_after_finalize = not api_audio_supported
     try:
+        process_started_ts = _native_monotonic()
         # Home Assistant emits STT_VAD_END before microphone stop/awaiting-response transitions.
         with contextlib.suppress(Exception):
             await _esphome_send_event(
@@ -4362,6 +4363,7 @@ async def _esphome_finalize_voice_session(
             VoiceNativeSessionAudioIn(audio_base64="", final_chunk=True),
         )
         result = await _native_process_session(session_id)
+        process_elapsed_s = max(0.0, _native_monotonic() - process_started_ts)
         transcript = _text(result.get("transcript"))
         response_text = _text(result.get("response_text"))
         tts_b64 = _text(result.get("tts_audio_base64"))
@@ -4467,10 +4469,11 @@ async def _esphome_finalize_voice_session(
                 "tts_url": tts_url,
                 "tts_mode": tts_mode,
                 "run_end_mode": "announcement" if wait_for_announcement else "immediate",
+                "process_elapsed_s": process_elapsed_s,
             },
         )
         logger.info(
-            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_mode=%s run_end_mode=%s tts_url=%s",
+            "[native-voice] session result selector=%s session_id=%s transcript_len=%s response_len=%s tts_bytes=%s tts_chunks=%s tts_mode=%s run_end_mode=%s process_s=%.2f tts_url=%s",
             token,
             session_id,
             len(transcript),
@@ -4479,6 +4482,7 @@ async def _esphome_finalize_voice_session(
             int(tts_chunks),
             tts_mode,
             "announcement" if wait_for_announcement else "immediate",
+            process_elapsed_s,
             tts_url,
         )
     except NoTranscriptError as exc:
