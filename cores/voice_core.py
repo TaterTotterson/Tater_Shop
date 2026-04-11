@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.59"
+__version__ = "2.0.60"
 
 load_dotenv()
 
@@ -145,13 +145,13 @@ DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
 DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
-DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 2
-DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 2
+DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 1
+DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 3
 DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
 DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT = 1 << 1
 DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT = 1 << 2
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.25
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
@@ -4906,6 +4906,14 @@ async def _esphome_subscribe_voice_assistant(
         )
         _native_debug(
             f"esphome vad backend selector={token} configured={_esphome_server_vad_backend()} effective={_text(runtime.get('vad_backend')) or 'energy'}"
+        )
+        _native_debug(
+            "esphome vad tuning "
+            f"selector={token} backend={_text(runtime.get('vad_backend')) or 'energy'} "
+            f"silence_s={_esphome_server_vad_silence_s():.2f} "
+            f"start_chunks={_esphome_binary_vad_start_chunks()} stop_chunks={_esphome_binary_vad_stop_chunks()} "
+            f"min_speech_chunks={_esphome_server_vad_min_speech_chunks()} min_speech_s={_esphome_server_vad_min_speech_seconds():.2f} "
+            f"webrtc_mode={_esphome_webrtc_vad_aggressiveness()} silero_threshold={_esphome_silero_vad_threshold():.2f}"
         )
         _native_debug(
             "esphome watchdog config "
