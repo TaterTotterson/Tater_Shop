@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.54"
+__version__ = "2.0.59"
 
 load_dotenv()
 
@@ -148,6 +148,8 @@ DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
 DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 2
 DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 2
 DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
+DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT = 1 << 1
+DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT = 1 << 2
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
 DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
@@ -3397,14 +3399,22 @@ def _esphome_silero_vad_process_chunk(
 
 def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any]:
     flags = 0
-    api_audio_bit = 0
-    speaker_bit = 0
+    api_audio_bit = int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT)
+    speaker_bit = int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT)
     feature_enum = _esphome_module_attr(module, "VoiceAssistantFeature")
     if feature_enum is not None:
-        with contextlib.suppress(Exception):
-            api_audio_bit = int(getattr(feature_enum, "API_AUDIO"))
-        with contextlib.suppress(Exception):
-            speaker_bit = int(getattr(feature_enum, "SPEAKER"))
+        for attr_name in ("API_AUDIO", "FEATURE_API_AUDIO"):
+            with contextlib.suppress(Exception):
+                parsed = int(getattr(feature_enum, attr_name))
+                if parsed > 0:
+                    api_audio_bit = parsed
+                    break
+        for attr_name in ("SPEAKER", "FEATURE_SPEAKER"):
+            with contextlib.suppress(Exception):
+                parsed = int(getattr(feature_enum, attr_name))
+                if parsed > 0:
+                    speaker_bit = parsed
+                    break
 
     compat_fn = getattr(info, "voice_assistant_feature_flags_compat", None)
     if callable(compat_fn):
@@ -3426,16 +3436,25 @@ def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict
                     flags = parsed
                     break
 
-    api_audio_known = bool(api_audio_bit and flags)
-    speaker_known = bool(speaker_bit and flags)
+    flags_known = int(flags) > 0
+    api_audio_known = bool(flags_known and api_audio_bit > 0)
+    speaker_known = bool(flags_known and speaker_bit > 0)
+    if flags_known:
+        api_audio_supported = bool(int(flags) & int(api_audio_bit))
+        speaker_supported = bool(int(flags) & int(speaker_bit))
+    else:
+        # Older clients may not expose feature flags; keep permissive fallback for compatibility.
+        api_audio_supported = True
+        speaker_supported = True
     return {
         "flags": int(flags),
+        "flags_known": bool(flags_known),
         "api_audio_bit": int(api_audio_bit),
         "speaker_bit": int(speaker_bit),
         "api_audio_known": api_audio_known,
         "speaker_known": speaker_known,
-        "api_audio_supported": True if not api_audio_known else bool(api_audio_bit and (int(flags) & int(api_audio_bit))),
-        "speaker_supported": True if not speaker_known else bool(speaker_bit and (int(flags) & int(speaker_bit))),
+        "api_audio_supported": bool(api_audio_supported),
+        "speaker_supported": bool(speaker_supported),
     }
 
 
@@ -4108,78 +4127,9 @@ async def _esphome_session_watchdog(selector: str, client: Any, module: Any, ses
     if not token or not sid:
         return
 
-    idle_timeout = max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S))
-    max_listen = max(idle_timeout + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS))
-    no_voice_timeout = _esphome_no_voice_timeout_s()
-
-    while True:
-        await asyncio.sleep(0.35)
-        runtime = _esphome_voice_runtime.get(token)
-        if not isinstance(runtime, dict):
-            return
-        current_session = _text(runtime.get("session_id"))
-        if not current_session or current_session != sid:
-            return
-
-        now = _native_monotonic()
-        chunks = int(runtime.get("audio_chunks") or 0)
-        last_audio_ts = float(runtime.get("last_audio_ts") or 0.0)
-        start_ts = float(runtime.get("session_start_ts") or 0.0)
-        voice_seen = bool(runtime.get("vad_voice_seen"))
-
-        if chunks > 0 and last_audio_ts > 0.0 and (now - last_audio_ts) >= idle_timeout:
-            logger.info(
-                "[native-voice] watchdog finalize selector=%s session_id=%s reason=idle_timeout chunks=%s bytes=%s",
-                token,
-                sid,
-                chunks,
-                int(runtime.get("audio_bytes") or 0),
-            )
-            with contextlib.suppress(Exception):
-                await _esphome_finalize_voice_session(
-                    token,
-                    client,
-                    module,
-                    abort=False,
-                    reason="idle_timeout",
-                )
-            return
-
-        if chunks > 0 and (not voice_seen) and start_ts > 0.0 and (now - start_ts) >= no_voice_timeout:
-            logger.info(
-                "[native-voice] watchdog finalize selector=%s session_id=%s reason=no_voice_timeout chunks=%s bytes=%s",
-                token,
-                sid,
-                chunks,
-                int(runtime.get("audio_bytes") or 0),
-            )
-            with contextlib.suppress(Exception):
-                await _esphome_finalize_voice_session(
-                    token,
-                    client,
-                    module,
-                    abort=False,
-                    reason="no_voice_timeout",
-                )
-            return
-
-        if start_ts > 0.0 and (now - start_ts) >= max_listen:
-            logger.info(
-                "[native-voice] watchdog finalize selector=%s session_id=%s reason=max_listen_timeout chunks=%s bytes=%s",
-                token,
-                sid,
-                chunks,
-                int(runtime.get("audio_bytes") or 0),
-            )
-            with contextlib.suppress(Exception):
-                await _esphome_finalize_voice_session(
-                    token,
-                    client,
-                    module,
-                    abort=False,
-                    reason="max_listen_timeout",
-                )
-            return
+    _native_debug(
+        f"esphome watchdog disabled selector={token} session_id={sid}"
+    )
 
 
 async def _native_mark_session_aborted(session_id: str, reason: str) -> None:
@@ -4224,6 +4174,8 @@ async def _esphome_finalize_voice_session(
         runtime["conversation_id"] = ""
         runtime["session_start_ts"] = 0.0
         runtime["last_audio_ts"] = 0.0
+        runtime["audio_chunks"] = 0
+        runtime["audio_bytes"] = 0
         runtime["vad_voice_seen"] = False
         runtime["vad_soft_speech_chunks"] = 0
         runtime["vad_speech_chunks"] = 0
@@ -4511,6 +4463,7 @@ async def _esphome_subscribe_voice_assistant(
                 chunk_seconds = _esphome_chunk_seconds(audio_bytes, audio_format)
                 sample_width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
                 dbfs = _esphome_pcm_dbfs(audio_bytes, sample_width=sample_width)
+                start_ts = float(runtime.get("session_start_ts") or 0.0)
                 if dbfs is not None:
                     runtime["vad_last_dbfs"] = round(float(dbfs), 2)
 
@@ -4526,7 +4479,6 @@ async def _esphome_subscribe_voice_assistant(
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
                     silence_target_s = _esphome_server_vad_silence_s()
-                    start_ts = float(runtime.get("session_start_ts") or 0.0)
                     if vad_backend == "webrtc":
                         emit_vad_start, should_finalize, finalize_details = _esphome_webrtc_vad_process_chunk(
                             runtime,
@@ -4727,10 +4679,12 @@ async def _esphome_subscribe_voice_assistant(
                     f"esphome vad_start selector={token} session_id={session_id} sent={bool(sent)}"
                 )
             if should_finalize:
+                finalize_reason = _text(finalize_details.get("reason")) or "server_vad"
                 logger.info(
-                    "[native-voice] server_vad finalize selector=%s session_id=%s backend=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
+                    "[native-voice] server_vad finalize selector=%s session_id=%s reason=%s backend=%s silence_s=%.2f speech_chunks=%s speech_s=%.2f dbfs=%.1f trigger=%.1f release=%.1f strong=%.1f floor=%.1f peak=%.1f",
                     token,
                     session_id,
+                    finalize_reason,
                     _text(finalize_details.get("backend")) or vad_backend,
                     float(finalize_details.get("silence_elapsed") or 0.0),
                     int(finalize_details.get("speech_chunks") or 0),
@@ -4748,7 +4702,7 @@ async def _esphome_subscribe_voice_assistant(
                         client,
                         module,
                         abort=False,
-                        reason="server_vad",
+                        reason=finalize_reason,
                     )
         except HTTPException as exc:
             if int(getattr(exc, "status_code", 0) or 0) in {404, 409}:
@@ -4905,9 +4859,7 @@ async def _esphome_subscribe_voice_assistant(
                 runtime["udp_port"] = int(udp_port)
             runtime["awaiting_announcement"] = False
             runtime["awaiting_announcement_session_id"] = ""
-            runtime["watchdog_task"] = asyncio.create_task(
-                _esphome_session_watchdog(token, client, module, session_id)
-            )
+            runtime["watchdog_task"] = None
 
         await _compat_emit_event(
             token,
@@ -4957,9 +4909,7 @@ async def _esphome_subscribe_voice_assistant(
         )
         _native_debug(
             "esphome watchdog config "
-            f"selector={token} idle_timeout_s={max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)):.2f} "
-            f"max_listen_s={max(max(0.8, float(DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S)) + 1.0, float(DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS)):.2f} "
-            f"no_voice_timeout_s={_esphome_no_voice_timeout_s():.2f}"
+            f"selector={token} idle_timeout_s=disabled max_listen_s=disabled no_voice_timeout_s=disabled"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
@@ -5015,11 +4965,12 @@ async def _esphome_subscribe_voice_assistant(
             total = int(runtime.get("audio_bytes") or 0)
             awaiting_announcement = bool(runtime.get("awaiting_announcement"))
             awaiting_announcement_session_id = _text(runtime.get("awaiting_announcement_session_id"))
-            _esphome_cancel_watchdog(runtime)
-            if bool(abort):
-                _esphome_cancel_announcement_wait(runtime)
-                runtime["awaiting_announcement"] = False
-                runtime["awaiting_announcement_session_id"] = ""
+            if session_id or awaiting_announcement:
+                _esphome_cancel_watchdog(runtime)
+                if bool(abort):
+                    _esphome_cancel_announcement_wait(runtime)
+                    runtime["awaiting_announcement"] = False
+                    runtime["awaiting_announcement_session_id"] = ""
         logger.info(
             "[native-voice] session stop selector=%s session_id=%s abort=%s chunks=%s bytes=%s awaiting_announcement=%s",
             token,
@@ -5029,6 +4980,8 @@ async def _esphome_subscribe_voice_assistant(
             total,
             awaiting_announcement,
         )
+        if (not session_id) and (not awaiting_announcement):
+            return
         if (not bool(abort)) and awaiting_announcement:
             completed = await _esphome_finalize_after_announcement(
                 token,
@@ -5379,6 +5332,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
         device_name = token
         voice_features = {
             "flags": 0,
+            "flags_known": False,
             "api_audio_bit": 0,
             "speaker_bit": 0,
             "api_audio_known": False,
@@ -5424,9 +5378,10 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
             api_audio_supported=bool(voice_features.get("api_audio_supported")),
         )
         logger.info(
-            "[native-voice] esphome voice features selector=%s flags=%s api_audio_known=%s api_audio_supported=%s speaker_supported=%s",
+            "[native-voice] esphome voice features selector=%s flags=%s flags_known=%s api_audio_known=%s api_audio_supported=%s speaker_supported=%s",
             token,
             int(voice_features.get("flags") or 0),
+            bool(voice_features.get("flags_known")),
             bool(voice_features.get("api_audio_known")),
             bool(voice_features.get("api_audio_supported")),
             bool(voice_features.get("speaker_supported")),
@@ -5441,6 +5396,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 "metadata": {
                     "esphome_port": connect_port,
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_feature_flags_known": bool(voice_features.get("flags_known")),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
@@ -5460,6 +5416,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "port": connect_port,
                     "verify": verify_reason,
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_feature_flags_known": bool(voice_features.get("flags_known")),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
@@ -5481,6 +5438,7 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                     "unsubscribe": unsubscribe,
                     "connected": True,
                     "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_feature_flags_known": bool(voice_features.get("flags_known")),
                     "voice_api_audio_known": bool(voice_features.get("api_audio_known")),
                     "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
                     "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
