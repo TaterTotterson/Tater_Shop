@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.53"
+__version__ = "2.0.54"
 
 load_dotenv()
 
@@ -4571,18 +4571,35 @@ async def _esphome_subscribe_voice_assistant(
 
                             peak_prev = runtime.get("vad_peak_dbfs")
                             peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
-                            if dbfs > peak:
+                            # Decay stale peaks so one loud moment doesn't hold speech-open indefinitely.
+                            peak_decay_per_s = 9.0
+                            if dbfs >= peak:
                                 peak = float(dbfs)
+                            else:
+                                peak = max(float(dbfs), float(peak) - (peak_decay_per_s * max(0.0, float(chunk_seconds))))
                             runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
                             trigger_threshold = max(float(abs_floor), float(floor) + float(trigger_margin))
-                            release_raw = max(float(floor) + float(release_margin), float(peak) - float(drop_db))
-                            # Keep release below trigger (hysteresis) and within a sensible band above noise floor.
-                            release_upper = float(trigger_threshold) - 0.5
-                            release_floor_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
                             release_lower = float(floor) + 0.5
-                            release_threshold = min(float(release_raw), float(release_upper), float(release_floor_cap))
-                            release_threshold = max(float(release_threshold), float(release_lower))
+                            if bool(runtime.get("vad_voice_seen")):
+                                # After speech starts, continuation should follow speech energy rather than
+                                # staying pinned to a very low floor in noisy rooms.
+                                release_candidate = max(float(floor) + float(release_margin), float(peak) - float(drop_db))
+                                previous_release = runtime.get("vad_dynamic_release_dbfs")
+                                if isinstance(previous_release, (int, float)):
+                                    release_candidate = (float(previous_release) * 0.65) + (float(release_candidate) * 0.35)
+                                release_upper = float(peak) - 1.0
+                                if release_upper < release_lower:
+                                    release_upper = release_lower
+                                release_threshold = min(float(release_candidate), float(release_upper))
+                                release_threshold = max(float(release_threshold), float(release_lower))
+                            else:
+                                release_raw = max(float(floor) + float(release_margin), float(peak) - float(drop_db))
+                                # Keep pre-speech continuation threshold conservative near trigger/floor.
+                                release_upper = float(trigger_threshold) - 0.5
+                                release_floor_cap = float(floor) + float(_esphome_server_vad_max_release_above_floor_db())
+                                release_threshold = min(float(release_raw), float(release_upper), float(release_floor_cap))
+                                release_threshold = max(float(release_threshold), float(release_lower))
                             strong_threshold = max(float(trigger_threshold) + float(strong_margin), float(trigger_threshold) + 1.0)
                             runtime["vad_dynamic_trigger_dbfs"] = round(float(trigger_threshold), 2)
                             runtime["vad_dynamic_release_dbfs"] = round(float(release_threshold), 2)
