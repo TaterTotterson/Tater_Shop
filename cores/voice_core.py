@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.63"
+__version__ = "2.0.64"
 
 load_dotenv()
 
@@ -146,6 +146,7 @@ DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
 DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
 DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 2
+DEFAULT_ESPHOME_BINARY_VAD_STUCK_SPEECH_CHUNKS = 240
 DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 2
 DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
 DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT = 1 << 1
@@ -2830,6 +2831,14 @@ def _esphome_binary_vad_stop_chunks() -> int:
     return min(12, max(1, int(value)))
 
 
+def _esphome_binary_vad_stuck_speech_chunks() -> int:
+    value = _get_int_platform_setting(
+        "VOICE_ESPHOME_BINARY_VAD_STUCK_SPEECH_CHUNKS",
+        DEFAULT_ESPHOME_BINARY_VAD_STUCK_SPEECH_CHUNKS,
+    )
+    return min(2000, max(40, int(value)))
+
+
 def _esphome_server_vad_enabled() -> bool:
     return _get_bool_platform_setting("VOICE_ESPHOME_SERVER_VAD_ENABLED", DEFAULT_ESPHOME_SERVER_VAD_ENABLED)
 
@@ -4115,6 +4124,8 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_dynamic_release_dbfs": None,
             "vad_start_sent": False,
             "vad_backend": DEFAULT_ESPHOME_SERVER_VAD_BACKEND,
+            "vad_backend_effective": DEFAULT_ESPHOME_SERVER_VAD_BACKEND,
+            "vad_binary_stuck_energy_mode": False,
             "webrtc_vad": None,
             "webrtc_frame_buffer": bytearray(),
             "silero_iterator": None,
@@ -4220,6 +4231,8 @@ async def _esphome_finalize_voice_session(
         runtime["vad_dynamic_release_dbfs"] = None
         runtime["vad_start_sent"] = False
         runtime["vad_backend"] = DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+        runtime["vad_backend_effective"] = DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+        runtime["vad_binary_stuck_energy_mode"] = False
         runtime["webrtc_vad"] = None
         runtime["webrtc_frame_buffer"] = bytearray()
         runtime["silero_iterator"] = None
@@ -4500,8 +4513,12 @@ async def _esphome_subscribe_voice_assistant(
                     runtime["vad_last_dbfs"] = round(float(dbfs), 2)
 
                 if _esphome_server_vad_enabled():
-                    vad_backend = _text(runtime.get("vad_backend")) or _esphome_resolve_vad_backend(audio_format, token)
-                    runtime["vad_backend"] = vad_backend
+                    configured_vad_backend = _text(runtime.get("vad_backend")) or _esphome_resolve_vad_backend(audio_format, token)
+                    runtime["vad_backend"] = configured_vad_backend
+                    vad_backend = configured_vad_backend
+                    if configured_vad_backend in {"webrtc", "silero"} and bool(runtime.get("vad_binary_stuck_energy_mode")):
+                        vad_backend = "energy"
+                    runtime["vad_backend_effective"] = vad_backend
                     abs_floor = _esphome_server_vad_threshold_dbfs()
                     drop_db = _esphome_server_vad_drop_db()
                     trigger_margin = _esphome_server_vad_trigger_margin_db()
@@ -4536,10 +4553,22 @@ async def _esphome_subscribe_voice_assistant(
                             )
                         except Exception as exc:
                             runtime["vad_backend"] = "energy"
+                            runtime["vad_backend_effective"] = "energy"
                             vad_backend = "energy"
                             _esphome_vad_warn_once(
                                 "silero:runtime",
                                 f"[native-voice] Silero VAD runtime error ({_text(exc) or exc.__class__.__name__}); using energy backend.",
+                            )
+                    if configured_vad_backend in {"webrtc", "silero"} and (not bool(runtime.get("vad_binary_stuck_energy_mode"))):
+                        if bool(runtime.get("binary_vad_active")) and int(runtime.get("binary_vad_speech_streak") or 0) >= _esphome_binary_vad_stuck_speech_chunks():
+                            runtime["vad_binary_stuck_energy_mode"] = True
+                            runtime["vad_backend_effective"] = "energy"
+                            vad_backend = "energy"
+                            _native_debug(
+                                "esphome vad stuck guard activated "
+                                f"selector={token} session_id={session_id} backend={configured_vad_backend} "
+                                f"speech_streak={int(runtime.get('binary_vad_speech_streak') or 0)} "
+                                f"switch_to=energy"
                             )
                     if vad_backend == "energy" and dbfs is not None:
                         floor_prev = runtime.get("vad_noise_floor_dbfs")
@@ -4675,6 +4704,7 @@ async def _esphome_subscribe_voice_assistant(
                 binary_active = False
                 binary_speech_streak = 0
                 binary_silence_streak = 0
+                stuck_energy_mode = False
                 async with lock:
                     floor_val = runtime.get("vad_noise_floor_dbfs")
                     peak_val = runtime.get("vad_peak_dbfs")
@@ -4685,6 +4715,7 @@ async def _esphome_subscribe_voice_assistant(
                     binary_active = bool(runtime.get("binary_vad_active"))
                     binary_speech_streak = int(runtime.get("binary_vad_speech_streak") or 0)
                     binary_silence_streak = int(runtime.get("binary_vad_silence_streak") or 0)
+                    stuck_energy_mode = bool(runtime.get("vad_binary_stuck_energy_mode"))
                 if isinstance(floor_val, (int, float)):
                     floor_text = f"{float(floor_val):.1f}"
                 if isinstance(peak_val, (int, float)):
@@ -4698,7 +4729,8 @@ async def _esphome_subscribe_voice_assistant(
                     f"dbfs={dbfs_text} trigger={trigger_text} release={release_text} strong={strong_text} floor={floor_text} "
                     f"peak={peak_text} silence_s={silence_text} speech_s={speech_text} backend={vad_backend} "
                     f"streak={strong_streak} voice_seen={str(voice_seen).lower()} "
-                    f"binary_active={str(binary_active).lower()} binary_s={binary_speech_streak} binary_z={binary_silence_streak}"
+                    f"binary_active={str(binary_active).lower()} binary_s={binary_speech_streak} binary_z={binary_silence_streak} "
+                    f"stuck_energy={str(stuck_energy_mode).lower()}"
                 )
             if emit_vad_start:
                 sent = await _esphome_send_event(
@@ -4901,6 +4933,8 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_dynamic_release_dbfs"] = None
             runtime["vad_start_sent"] = False
             runtime["vad_backend"] = _esphome_resolve_vad_backend(audio_format, token)
+            runtime["vad_backend_effective"] = _text(runtime.get("vad_backend")) or DEFAULT_ESPHOME_SERVER_VAD_BACKEND
+            runtime["vad_binary_stuck_energy_mode"] = False
             runtime["webrtc_vad"] = None
             runtime["webrtc_frame_buffer"] = bytearray()
             runtime["silero_iterator"] = None
@@ -4969,6 +5003,7 @@ async def _esphome_subscribe_voice_assistant(
             f"selector={token} backend={_text(runtime.get('vad_backend')) or 'energy'} "
             f"silence_s={_esphome_server_vad_silence_s():.2f} "
             f"start_chunks={_esphome_binary_vad_start_chunks()} stop_chunks={_esphome_binary_vad_stop_chunks()} "
+            f"stuck_speech_chunks={_esphome_binary_vad_stuck_speech_chunks()} "
             f"min_speech_chunks={_esphome_server_vad_min_speech_chunks()} min_speech_s={_esphome_server_vad_min_speech_seconds():.2f} "
             f"webrtc_mode={_esphome_webrtc_vad_aggressiveness()} silero_threshold={_esphome_silero_vad_threshold():.2f}"
         )
