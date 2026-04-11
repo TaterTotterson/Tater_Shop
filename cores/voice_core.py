@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.71"
+__version__ = "2.0.72"
 
 load_dotenv()
 
@@ -152,6 +152,7 @@ DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS = 0.9
+DEFAULT_ESPHOME_SERVER_VAD_RESET_SECONDS = 1.0
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
@@ -2914,6 +2915,14 @@ def _esphome_server_vad_min_listen_after_start_s() -> float:
     return min(6.0, max(0.2, float(value)))
 
 
+def _esphome_server_vad_reset_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_RESET_SECONDS",
+        DEFAULT_ESPHOME_SERVER_VAD_RESET_SECONDS,
+    )
+    return min(3.0, max(0.2, float(value)))
+
+
 def _esphome_auto_target_manual() -> bool:
     return _get_bool_platform_setting("VOICE_ESPHOME_AUTO_TARGET_MANUAL", True)
 
@@ -3129,11 +3138,8 @@ def _esphome_vad_apply_binary(
     should_finalize = False
     finalize_details: Dict[str, Any] = {}
 
-    start_chunks = _esphome_binary_vad_start_chunks()
-    stop_chunks = _esphome_binary_vad_stop_chunks()
     speech_streak = int(runtime.get("binary_vad_speech_streak") or 0)
     silence_streak = int(runtime.get("binary_vad_silence_streak") or 0)
-    binary_active = bool(runtime.get("binary_vad_active", False))
 
     if bool(is_speech):
         speech_streak += 1
@@ -3142,66 +3148,118 @@ def _esphome_vad_apply_binary(
         silence_streak += 1
         speech_streak = 0
 
-    if not binary_active:
-        if speech_streak >= start_chunks:
-            binary_active = True
-    else:
-        if silence_streak >= stop_chunks:
-            binary_active = False
-
     runtime["binary_vad_speech_streak"] = speech_streak
     runtime["binary_vad_silence_streak"] = silence_streak
-    runtime["binary_vad_active"] = bool(binary_active)
 
-    if bool(binary_active):
-        runtime["vad_quiet_start_ts"] = 0.0
-        if not bool(runtime.get("vad_voice_seen")):
-            first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
-            if first_speech_ts <= 0.0:
-                runtime["vad_first_speech_ts"] = now
+    # Mirror HA's command segmentation behavior:
+    # - need sustained speech to enter command
+    # - once in command, brief speech blips should not reset silence immediately
+    # - end when silence window and minimum command window are both satisfied
+    speech_window_s = max(0.05, float(min_speech_seconds))
+    command_window_s = max(1.0, float(min_listen_after_start_s))
+    silence_window_s = max(0.10, float(silence_target_s))
+    reset_window_s = _esphome_server_vad_reset_s()
+
+    segment_cfg = (
+        round(speech_window_s, 3),
+        round(command_window_s, 3),
+        round(silence_window_s, 3),
+        round(reset_window_s, 3),
+    )
+    if runtime.get("vad_segment_config") != segment_cfg:
+        runtime["vad_segment_config"] = segment_cfg
+        runtime["binary_vad_active"] = False
+        runtime["vad_segment_speech_left_s"] = float(speech_window_s)
+        runtime["vad_segment_command_left_s"] = max(0.0, float(command_window_s - speech_window_s))
+        runtime["vad_segment_silence_left_s"] = float(silence_window_s)
+        runtime["vad_segment_reset_left_s"] = float(reset_window_s)
+
+    in_command = bool(runtime.get("binary_vad_active", False))
+    speech_left_s = float(runtime.get("vad_segment_speech_left_s") or speech_window_s)
+    command_left_s = float(runtime.get("vad_segment_command_left_s") or max(0.0, command_window_s - speech_window_s))
+    silence_left_s = float(runtime.get("vad_segment_silence_left_s") or silence_window_s)
+    reset_left_s = float(runtime.get("vad_segment_reset_left_s") or reset_window_s)
+    step_s = max(0.0, float(chunk_seconds))
+
+    if not in_command:
+        if bool(is_speech):
+            reset_left_s = float(reset_window_s)
+            speech_left_s -= step_s
+            if speech_left_s <= 0.0:
+                in_command = True
+                speech_left_s = float(speech_window_s)
+                command_left_s = max(0.0, float(command_window_s - speech_window_s))
+                silence_left_s = float(silence_window_s)
+                runtime["vad_quiet_start_ts"] = 0.0
+                if not bool(runtime.get("vad_voice_seen")):
+                    first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
+                    if first_speech_ts <= 0.0:
+                        runtime["vad_first_speech_ts"] = now
+                runtime["vad_voice_seen"] = True
+                runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+                runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + step_s
+                runtime["vad_last_speech_ts"] = now
+                runtime["vad_last_strong_speech_ts"] = now
+                runtime["vad_silence_start_ts"] = 0.0
+                if not bool(runtime.get("vad_start_sent")):
+                    runtime["vad_start_sent"] = True
+                    emit_vad_start = True
+        else:
+            reset_left_s -= step_s
+            if reset_left_s <= 0.0:
+                speech_left_s = float(speech_window_s)
+                reset_left_s = float(reset_window_s)
+    else:
         runtime["vad_voice_seen"] = True
-        runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
-        runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + max(0.0, float(chunk_seconds))
-        runtime["vad_last_speech_ts"] = now
-        runtime["vad_last_strong_speech_ts"] = now
-        runtime["vad_silence_start_ts"] = 0.0
-        if not bool(runtime.get("vad_start_sent")):
-            runtime["vad_start_sent"] = True
-            emit_vad_start = True
-        return emit_vad_start, should_finalize, finalize_details
+        if bool(is_speech):
+            runtime["vad_quiet_start_ts"] = 0.0
+            runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
+            runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + step_s
+            runtime["vad_last_speech_ts"] = now
+            runtime["vad_last_strong_speech_ts"] = now
+            runtime["vad_silence_start_ts"] = 0.0
+            reset_left_s -= step_s
+            command_left_s = max(0.0, command_left_s - step_s)
+            if reset_left_s <= 0.0:
+                silence_left_s = float(silence_window_s)
+                reset_left_s = float(reset_window_s)
+        else:
+            silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
+            if silence_start_ts <= 0.0:
+                runtime["vad_silence_start_ts"] = now
+            reset_left_s = float(reset_window_s)
+            silence_left_s = max(0.0, silence_left_s - step_s)
+            command_left_s = max(0.0, command_left_s - step_s)
+            silence_elapsed = max(0.0, float(silence_window_s - silence_left_s))
+            speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
+            speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+            min_speech_met = speech_chunks >= int(min_speech_chunks) or speech_seconds >= float(min_speech_seconds)
+            if min_speech_met and silence_left_s <= 0.0 and command_left_s <= 0.0:
+                should_finalize = True
+                finalize_details = {
+                    "backend": _text(backend) or "energy",
+                    "speech_chunks": speech_chunks,
+                    "speech_seconds": speech_seconds,
+                    "silence_elapsed": silence_elapsed,
+                    "dbfs": float(dbfs) if isinstance(dbfs, (int, float)) else 0.0,
+                    "trigger_threshold": 0.0,
+                    "release_threshold": 0.0,
+                    "strong_threshold": 0.0,
+                    "noise_floor_dbfs": 0.0,
+                    "peak_dbfs": 0.0,
+                }
+                in_command = False
+                speech_left_s = float(speech_window_s)
+                command_left_s = max(0.0, float(command_window_s - speech_window_s))
+                silence_left_s = float(silence_window_s)
+                reset_left_s = float(reset_window_s)
+                runtime["vad_silence_start_ts"] = 0.0
 
-    if not bool(runtime.get("vad_voice_seen")):
-        return emit_vad_start, should_finalize, finalize_details
-
-    silence_start_ts = float(runtime.get("vad_silence_start_ts") or 0.0)
-    if silence_start_ts <= 0.0:
-        silence_start_ts = now
-        runtime["vad_silence_start_ts"] = silence_start_ts
-
-    last_speech_ts = float(runtime.get("vad_last_speech_ts") or 0.0)
-    silence_anchor = last_speech_ts if last_speech_ts > 0.0 else silence_start_ts
-    silence_elapsed = max(0.0, now - silence_anchor)
-    speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
-    speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
-    first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
-    min_window_met = True
-    if first_speech_ts > 0.0:
-        min_window_met = (now - first_speech_ts) >= float(min_listen_after_start_s)
-    min_speech_met = speech_chunks >= int(min_speech_chunks) or speech_seconds >= float(min_speech_seconds)
-    if min_speech_met and min_window_met and silence_elapsed >= float(silence_target_s):
-        should_finalize = True
-        finalize_details = {
-            "backend": _text(backend) or "energy",
-            "speech_chunks": speech_chunks,
-            "speech_seconds": speech_seconds,
-            "silence_elapsed": silence_elapsed,
-            "dbfs": float(dbfs) if isinstance(dbfs, (int, float)) else 0.0,
-            "trigger_threshold": 0.0,
-            "release_threshold": 0.0,
-            "strong_threshold": 0.0,
-            "noise_floor_dbfs": 0.0,
-            "peak_dbfs": 0.0,
-        }
+    runtime["binary_vad_active"] = bool(in_command)
+    runtime["vad_segment_speech_left_s"] = float(speech_left_s)
+    runtime["vad_segment_command_left_s"] = float(command_left_s)
+    runtime["vad_segment_silence_left_s"] = float(silence_left_s)
+    runtime["vad_segment_reset_left_s"] = float(reset_left_s)
 
     return emit_vad_start, should_finalize, finalize_details
 
@@ -4157,6 +4215,11 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "binary_vad_active": False,
             "binary_vad_speech_streak": 0,
             "binary_vad_silence_streak": 0,
+            "vad_segment_config": (),
+            "vad_segment_speech_left_s": 0.0,
+            "vad_segment_command_left_s": 0.0,
+            "vad_segment_silence_left_s": 0.0,
+            "vad_segment_reset_left_s": 0.0,
             "vad_silence_start_ts": 0.0,
             "vad_quiet_start_ts": 0.0,
             "vad_last_dbfs": None,
@@ -4241,6 +4304,11 @@ async def _esphome_finalize_voice_session(
         runtime["binary_vad_active"] = False
         runtime["binary_vad_speech_streak"] = 0
         runtime["binary_vad_silence_streak"] = 0
+        runtime["vad_segment_config"] = ()
+        runtime["vad_segment_speech_left_s"] = 0.0
+        runtime["vad_segment_command_left_s"] = 0.0
+        runtime["vad_segment_silence_left_s"] = 0.0
+        runtime["vad_segment_reset_left_s"] = 0.0
         runtime["vad_silence_start_ts"] = 0.0
         runtime["vad_quiet_start_ts"] = 0.0
         runtime["vad_last_dbfs"] = None
@@ -4941,6 +5009,11 @@ async def _esphome_subscribe_voice_assistant(
             runtime["binary_vad_active"] = False
             runtime["binary_vad_speech_streak"] = 0
             runtime["binary_vad_silence_streak"] = 0
+            runtime["vad_segment_config"] = ()
+            runtime["vad_segment_speech_left_s"] = 0.0
+            runtime["vad_segment_command_left_s"] = 0.0
+            runtime["vad_segment_silence_left_s"] = 0.0
+            runtime["vad_segment_reset_left_s"] = 0.0
             runtime["vad_silence_start_ts"] = 0.0
             runtime["vad_quiet_start_ts"] = 0.0
             runtime["vad_last_dbfs"] = None
@@ -5019,6 +5092,7 @@ async def _esphome_subscribe_voice_assistant(
             f"start_chunks={_esphome_binary_vad_start_chunks()} stop_chunks={_esphome_binary_vad_stop_chunks()} "
             f"min_speech_chunks={_esphome_server_vad_min_speech_chunks()} min_speech_s={_esphome_server_vad_min_speech_seconds():.2f} "
             f"min_listen_after_start_s={_esphome_server_vad_min_listen_after_start_s():.2f} "
+            f"reset_s={_esphome_server_vad_reset_s():.2f} "
             f"webrtc_mode={_esphome_webrtc_vad_aggressiveness()} silero_threshold={_esphome_silero_vad_threshold():.2f}"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
