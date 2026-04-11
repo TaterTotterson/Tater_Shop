@@ -62,7 +62,7 @@ except Exception as exc:  # pragma: no cover - import guard for deployments with
     WYOMING_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 
 load_dotenv()
 
@@ -124,11 +124,11 @@ DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 0.8
 DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 25.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -42.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.30
-DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 5
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.20
+DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 3
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 18.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 8.0
-DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 4.0
+DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 5.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
 DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS = -52.0
@@ -2755,8 +2755,8 @@ def _esphome_server_vad_silence_s() -> float:
         "VOICE_ESPHOME_SERVER_VAD_SILENCE_SECONDS",
         DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS,
     )
-    # Keep listen tail snappy for wake-word UX, even if stale settings exist.
-    return min(0.35, max(0.25, float(value)))
+    # Ultra-fast close after speech pause; clamp stale settings to this range.
+    return min(0.22, max(0.15, float(value)))
 
 
 def _esphome_server_vad_drop_db() -> float:
@@ -2781,7 +2781,7 @@ def _esphome_server_vad_release_margin_db() -> float:
         DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB,
     )
     # Bias toward earlier release-to-silence to reduce post-speech linger.
-    return min(20.0, max(4.0, float(value)))
+    return min(20.0, max(5.0, float(value)))
 
 
 def _esphome_server_vad_min_speech_chunks() -> int:
@@ -2789,7 +2789,8 @@ def _esphome_server_vad_min_speech_chunks() -> int:
         "VOICE_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS",
         DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS,
     )
-    return min(60, max(1, int(value)))
+    # Keep speech gate short so finalize can happen quickly.
+    return min(4, max(1, int(value)))
 
 
 def _esphome_auto_target_manual() -> bool:
