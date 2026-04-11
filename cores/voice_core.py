@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.62"
+__version__ = "2.0.63"
 
 load_dotenv()
 
@@ -4453,10 +4453,16 @@ async def _esphome_subscribe_voice_assistant(
             lock_obj = runtime["lock"]
         return cast(asyncio.Lock, lock_obj)
 
-    async def _ingest_audio_chunk(data: bytes) -> None:
+    async def _ingest_audio_chunk(data: bytes, *, expected_session_id: str = "") -> None:
         lock = _runtime_lock()
+        expected_sid = _text(expected_session_id)
         async with lock:
             session_id = _text(runtime.get("session_id"))
+            if expected_sid and expected_sid != session_id:
+                _native_debug(
+                    f"esphome audio drop stale selector={token} expected_session_id={expected_sid} active_session_id={session_id}"
+                )
+                return
         if not session_id:
             return
         audio_bytes = bytes(data or b"")
@@ -4768,7 +4774,10 @@ async def _esphome_subscribe_voice_assistant(
         packet = bytes(data or b"")
         if not packet:
             return
-        asyncio.create_task(_ingest_audio_chunk(packet))
+        expected_sid = _text(runtime.get("session_id"))
+        if not expected_sid:
+            return
+        asyncio.create_task(_ingest_audio_chunk(packet, expected_session_id=expected_sid))
 
     async def _handle_start_inner(
         conversation_id: str,
