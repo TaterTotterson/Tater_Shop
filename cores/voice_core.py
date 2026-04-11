@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.60"
+__version__ = "2.0.62"
 
 load_dotenv()
 
@@ -145,13 +145,13 @@ DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
 DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
-DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 1
-DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 3
+DEFAULT_ESPHOME_BINARY_VAD_STOP_CHUNKS = 2
+DEFAULT_ESPHOME_WEBRTC_VAD_AGGRESSIVENESS = 2
 DEFAULT_ESPHOME_SILERO_VAD_THRESHOLD = 0.5
 DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT = 1 << 1
 DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT = 1 << 2
 DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
-DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.25
+DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
@@ -3458,6 +3458,32 @@ def _esphome_voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict
     }
 
 
+def _esphome_live_feature_support(flags_value: Any) -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        flags = int(flags_value or 0)
+        if flags > 0:
+            return {
+                "flags": int(flags),
+                "flags_known": True,
+                "api_audio_bit": int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT),
+                "speaker_bit": int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT),
+                "api_audio_known": True,
+                "speaker_known": True,
+                "api_audio_supported": bool(int(flags) & int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT)),
+                "speaker_supported": bool(int(flags) & int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT)),
+            }
+    return {
+        "flags": 0,
+        "flags_known": False,
+        "api_audio_bit": int(DEFAULT_ESPHOME_FEATURE_API_AUDIO_BIT),
+        "speaker_bit": int(DEFAULT_ESPHOME_FEATURE_SPEAKER_BIT),
+        "api_audio_known": False,
+        "speaker_known": False,
+        "api_audio_supported": False,
+        "speaker_supported": False,
+    }
+
+
 def _esphome_entity_type_token(info: Any) -> str:
     cls = _text(getattr(getattr(info, "__class__", None), "__name__", ""))
     if not cls:
@@ -4796,8 +4822,25 @@ async def _esphome_subscribe_voice_assistant(
             )
         )
         session_id = _text(session.get("id"))
+        session_flags = int(_flags or 0)
+        live_features = _esphome_live_feature_support(session_flags)
+        session_api_audio_supported = bool(api_audio_supported)
+        session_speaker_supported = bool(await _esphome_selector_speaker_supported(token))
+        if bool(live_features.get("flags_known")):
+            session_api_audio_supported = bool(live_features.get("api_audio_supported"))
+            session_speaker_supported = bool(live_features.get("speaker_supported"))
+            async with _esphome_native_lock:
+                row = _esphome_native_clients.get(token)
+                if isinstance(row, dict):
+                    row["voice_feature_flags"] = int(live_features.get("flags") or 0)
+                    row["voice_feature_flags_known"] = True
+                    row["voice_api_audio_known"] = True
+                    row["voice_speaker_known"] = True
+                    row["voice_api_audio_supported"] = bool(session_api_audio_supported)
+                    row["voice_speaker_supported"] = bool(session_speaker_supported)
+                    _esphome_native_clients[token] = row
         udp_port = 0
-        if not api_audio_supported:
+        if not session_api_audio_supported:
             try:
                 udp_port = await _esphome_start_udp_server(
                     token,
@@ -4822,7 +4865,7 @@ async def _esphome_subscribe_voice_assistant(
         async with lock:
             _esphome_cancel_watchdog(runtime)
             _esphome_cancel_announcement_wait(runtime)
-            if api_audio_supported:
+            if session_api_audio_supported:
                 _esphome_close_udp_locked(runtime)
             runtime["session_id"] = session_id
             runtime["conversation_id"] = _text(conversation_id)
@@ -4854,8 +4897,10 @@ async def _esphome_subscribe_voice_assistant(
             runtime["silero_iterator"] = None
             runtime["silero_speaking"] = False
             runtime["silero_frame_buffer"] = bytearray()
-            runtime["api_audio_supported"] = bool(api_audio_supported)
-            if not api_audio_supported:
+            runtime["api_audio_supported"] = bool(session_api_audio_supported)
+            runtime["session_feature_flags"] = int(session_flags)
+            runtime["speaker_supported"] = bool(session_speaker_supported)
+            if not session_api_audio_supported:
                 runtime["udp_port"] = int(udp_port)
             runtime["awaiting_announcement"] = False
             runtime["awaiting_announcement_session_id"] = ""
@@ -4902,7 +4947,10 @@ async def _esphome_subscribe_voice_assistant(
                 effective_vad_backend,
             )
         _native_debug(
-            f"esphome session start flags selector={token} flags={int(_flags or 0)} transport={'api_audio' if api_audio_supported else f'udp:{udp_port}'}"
+            "esphome session start flags "
+            f"selector={token} flags={int(_flags or 0)} flags_known={bool(live_features.get('flags_known'))} "
+            f"api_audio={bool(session_api_audio_supported)} speaker={bool(session_speaker_supported)} "
+            f"transport={'api_audio' if session_api_audio_supported else f'udp:{udp_port}'}"
         )
         _native_debug(
             f"esphome vad backend selector={token} configured={_esphome_server_vad_backend()} effective={_text(runtime.get('vad_backend')) or 'energy'}"
@@ -4921,7 +4969,7 @@ async def _esphome_subscribe_voice_assistant(
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
-        return int(udp_port) if not api_audio_supported else 0
+        return int(udp_port) if not session_api_audio_supported else 0
 
     async def _handle_start(
         conversation_id: str,
