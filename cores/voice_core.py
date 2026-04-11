@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.65"
+__version__ = "2.0.68"
 
 load_dotenv()
 
@@ -139,9 +139,6 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
-DEFAULT_ESPHOME_AUDIO_IDLE_TIMEOUT_S = 1.6
-DEFAULT_ESPHOME_SESSION_MAX_LISTEN_SECONDS = 15.0
-DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S = 8.0
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
 DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
@@ -154,6 +151,7 @@ DEFAULT_ESPHOME_SERVER_VAD_THRESHOLD_DBFS = -50.0
 DEFAULT_ESPHOME_SERVER_VAD_SILENCE_SECONDS = 0.35
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_CHUNKS = 10
 DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS = 0.35
+DEFAULT_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS = 0.9
 DEFAULT_ESPHOME_SERVER_VAD_DROP_DB = 14.0
 DEFAULT_ESPHOME_SERVER_VAD_TRIGGER_MARGIN_DB = 2.0
 DEFAULT_ESPHOME_SERVER_VAD_RELEASE_MARGIN_DB = 1.5
@@ -161,7 +159,6 @@ DEFAULT_ESPHOME_SERVER_VAD_STRONG_MARGIN_DB = 24.0
 DEFAULT_ESPHOME_SERVER_VAD_STRONG_STREAK_CHUNKS = 5
 DEFAULT_ESPHOME_SERVER_VAD_WARMUP_SECONDS = 0.55
 DEFAULT_ESPHOME_SERVER_VAD_MAX_RELEASE_ABOVE_FLOOR_DB = 5.0
-DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S = 20.0
 DEFAULT_ESPHOME_TTS_URL_TTL_S = 180
 DEFAULT_ESPHOME_TTS_TRIM_ENABLED = True
 DEFAULT_ESPHOME_TTS_TRIM_THRESHOLD_DBFS = -52.0
@@ -2786,11 +2783,6 @@ def _esphome_retry_seconds() -> int:
     return max(3, int(value))
 
 
-def _esphome_no_voice_timeout_s() -> float:
-    value = _get_float_platform_setting("VOICE_ESPHOME_NO_VOICE_TIMEOUT_S", DEFAULT_ESPHOME_NO_VOICE_TIMEOUT_S)
-    return max(3.0, min(20.0, float(value)))
-
-
 def _esphome_server_vad_backend() -> str:
     token = _lower(_portal_settings().get("VOICE_ESPHOME_SERVER_VAD_BACKEND")) or DEFAULT_ESPHOME_SERVER_VAD_BACKEND
     if token in {"energy", "webrtc", "silero"}:
@@ -2912,6 +2904,14 @@ def _esphome_server_vad_min_speech_seconds() -> float:
         DEFAULT_ESPHOME_SERVER_VAD_MIN_SPEECH_SECONDS,
     )
     return min(3.0, max(0.05, float(value)))
+
+
+def _esphome_server_vad_min_listen_after_start_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS",
+        DEFAULT_ESPHOME_SERVER_VAD_MIN_LISTEN_AFTER_START_SECONDS,
+    )
+    return min(6.0, max(0.2, float(value)))
 
 
 def _esphome_auto_target_manual() -> bool:
@@ -3121,6 +3121,7 @@ def _esphome_vad_apply_binary(
     silence_target_s: float,
     min_speech_chunks: int,
     min_speech_seconds: float,
+    min_listen_after_start_s: float,
     backend: str,
     dbfs: Optional[float],
 ) -> Tuple[bool, bool, Dict[str, Any]]:
@@ -3153,6 +3154,10 @@ def _esphome_vad_apply_binary(
     runtime["binary_vad_active"] = bool(binary_active)
 
     if bool(binary_active):
+        if not bool(runtime.get("vad_voice_seen")):
+            first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
+            if first_speech_ts <= 0.0:
+                runtime["vad_first_speech_ts"] = now
         runtime["vad_voice_seen"] = True
         runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
         runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + max(0.0, float(chunk_seconds))
@@ -3177,8 +3182,12 @@ def _esphome_vad_apply_binary(
     silence_elapsed = max(0.0, now - silence_anchor)
     speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
     speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+    first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
+    min_window_met = True
+    if first_speech_ts > 0.0:
+        min_window_met = (now - first_speech_ts) >= float(min_listen_after_start_s)
     min_speech_met = speech_chunks >= int(min_speech_chunks) or speech_seconds >= float(min_speech_seconds)
-    if min_speech_met and silence_elapsed >= float(silence_target_s):
+    if min_speech_met and min_window_met and silence_elapsed >= float(silence_target_s):
         should_finalize = True
         finalize_details = {
             "backend": _text(backend) or "energy",
@@ -3239,6 +3248,7 @@ def _esphome_webrtc_vad_process_chunk(
     silence_target_s: float,
     min_speech_chunks: int,
     min_speech_seconds: float,
+    min_listen_after_start_s: float,
     dbfs: Optional[float],
 ) -> Tuple[bool, bool, Dict[str, Any]]:
     rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
@@ -3281,6 +3291,7 @@ def _esphome_webrtc_vad_process_chunk(
             silence_target_s=silence_target_s,
             min_speech_chunks=min_speech_chunks,
             min_speech_seconds=min_speech_seconds,
+            min_listen_after_start_s=min_listen_after_start_s,
             backend="webrtc",
             dbfs=dbfs,
         )
@@ -3302,6 +3313,7 @@ def _esphome_silero_vad_process_chunk(
     silence_target_s: float,
     min_speech_chunks: int,
     min_speech_seconds: float,
+    min_listen_after_start_s: float,
     dbfs: Optional[float],
 ) -> Tuple[bool, bool, Dict[str, Any]]:
     rate = int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
@@ -3384,6 +3396,7 @@ def _esphome_silero_vad_process_chunk(
             silence_target_s=silence_target_s,
             min_speech_chunks=min_speech_chunks,
             min_speech_seconds=min_speech_seconds,
+            min_listen_after_start_s=min_listen_after_start_s,
             backend="silero",
             dbfs=dbfs,
         )
@@ -3762,14 +3775,6 @@ async def _esphome_stream_tts_audio_udp(
     return chunks
 
 
-def _esphome_url_run_end_timeout_s() -> float:
-    value = _get_float_platform_setting(
-        "VOICE_ESPHOME_ANNOUNCEMENT_TIMEOUT_S",
-        DEFAULT_ESPHOME_ANNOUNCEMENT_TIMEOUT_S,
-    )
-    return max(2.0, min(35.0, float(value)))
-
-
 def _esphome_cancel_announcement_wait(runtime: Dict[str, Any]) -> None:
     task = runtime.get("announcement_task")
     if isinstance(task, asyncio.Task):
@@ -3808,41 +3813,6 @@ async def _esphome_finalize_after_announcement(
         f"esphome announcement finalize selector={token} session_id={session_id} reason={reason}"
     )
     return True
-
-
-def _esphome_schedule_announcement_timeout(
-    selector: str,
-    client: Any,
-    module: Any,
-    timeout_s: float,
-) -> None:
-    token = _text(selector)
-    if not token:
-        return
-    runtime = _esphome_voice_runtime_state(token)
-
-    async def _timer() -> None:
-        try:
-            await asyncio.sleep(max(0.2, float(timeout_s)))
-            completed = await _esphome_finalize_after_announcement(
-                token,
-                client,
-                module,
-                reason="announcement_timeout",
-            )
-            if completed:
-                logger.info(
-                    "[native-voice] announcement timeout finalize selector=%s timeout_s=%.2f",
-                    token,
-                    float(timeout_s),
-                )
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            _native_debug(f"esphome announcement timeout task failed selector={token} error={exc}")
-
-    task = asyncio.create_task(_timer())
-    runtime["announcement_task"] = task
 
 
 def _esphome_tts_url_ttl_s() -> float:
@@ -4101,6 +4071,7 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_soft_speech_chunks": 0,
             "vad_speech_chunks": 0,
             "vad_speech_seconds": 0.0,
+            "vad_first_speech_ts": 0.0,
             "vad_last_speech_ts": 0.0,
             "vad_last_strong_speech_ts": 0.0,
             "vad_strong_streak": 0,
@@ -4127,7 +4098,6 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "awaiting_announcement": False,
             "awaiting_announcement_session_id": "",
             "announcement_task": None,
-            "watchdog_task": None,
             "lock": asyncio.Lock(),
         }
         _esphome_voice_runtime[token] = row
@@ -4135,27 +4105,6 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
     if lock is None or not hasattr(lock, "acquire"):
         row["lock"] = asyncio.Lock()
     return row
-
-
-def _esphome_cancel_watchdog(runtime: Dict[str, Any]) -> None:
-    task = runtime.get("watchdog_task")
-    if isinstance(task, asyncio.Task):
-        if task is asyncio.current_task():
-            runtime["watchdog_task"] = None
-            return
-        task.cancel()
-    runtime["watchdog_task"] = None
-
-
-async def _esphome_session_watchdog(selector: str, client: Any, module: Any, session_id: str) -> None:
-    token = _text(selector)
-    sid = _text(session_id)
-    if not token or not sid:
-        return
-
-    _native_debug(
-        f"esphome watchdog disabled selector={token} session_id={sid}"
-    )
 
 
 async def _native_mark_session_aborted(session_id: str, reason: str) -> None:
@@ -4190,7 +4139,6 @@ async def _esphome_finalize_voice_session(
         lock = runtime["lock"]
 
     async with lock:
-        _esphome_cancel_watchdog(runtime)
         _esphome_cancel_announcement_wait(runtime)
         session_id = _text(runtime.get("session_id"))
         conversation_id = _text(runtime.get("conversation_id"))
@@ -4206,6 +4154,7 @@ async def _esphome_finalize_voice_session(
         runtime["vad_soft_speech_chunks"] = 0
         runtime["vad_speech_chunks"] = 0
         runtime["vad_speech_seconds"] = 0.0
+        runtime["vad_first_speech_ts"] = 0.0
         runtime["vad_last_speech_ts"] = 0.0
         runtime["vad_last_strong_speech_ts"] = 0.0
         runtime["vad_strong_streak"] = 0
@@ -4283,7 +4232,6 @@ async def _esphome_finalize_voice_session(
                 speaker_supported = True
                 tts_mode = "stream_api_fallback" if api_audio_supported else "stream_udp_fallback"
         wait_for_announcement = (not speaker_supported) and tts_url.startswith(("http://", "https://"))
-        run_end_timeout_s = _esphome_url_run_end_timeout_s() if wait_for_announcement else 0.0
 
         await _esphome_send_event(
             client,
@@ -4352,14 +4300,8 @@ async def _esphome_finalize_voice_session(
                 runtime["awaiting_announcement"] = True
                 runtime["awaiting_announcement_session_id"] = session_id
                 _esphome_cancel_announcement_wait(runtime)
-                _esphome_schedule_announcement_timeout(
-                    token,
-                    client,
-                    module,
-                    timeout_s=run_end_timeout_s,
-                )
             _native_debug(
-                f"esphome awaiting announcement_finished selector={token} session_id={session_id} timeout_s={run_end_timeout_s:.2f}"
+                f"esphome awaiting announcement_finished selector={token} session_id={session_id}"
             )
         else:
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_END", "RUN_END"), None)
@@ -4510,6 +4452,7 @@ async def _esphome_subscribe_voice_assistant(
                     strong_streak_chunks = _esphome_server_vad_strong_streak_chunks()
                     min_speech_chunks = _esphome_server_vad_min_speech_chunks()
                     min_speech_seconds = _esphome_server_vad_min_speech_seconds()
+                    min_listen_after_start_s = _esphome_server_vad_min_listen_after_start_s()
                     silence_target_s = _esphome_server_vad_silence_s()
                     if vad_backend == "webrtc":
                         emit_vad_start, should_finalize, finalize_details = _esphome_webrtc_vad_process_chunk(
@@ -4520,6 +4463,7 @@ async def _esphome_subscribe_voice_assistant(
                             silence_target_s=silence_target_s,
                             min_speech_chunks=min_speech_chunks,
                             min_speech_seconds=min_speech_seconds,
+                            min_listen_after_start_s=min_listen_after_start_s,
                             dbfs=dbfs,
                         )
                     elif vad_backend == "silero":
@@ -4532,6 +4476,7 @@ async def _esphome_subscribe_voice_assistant(
                                 silence_target_s=silence_target_s,
                                 min_speech_chunks=min_speech_chunks,
                                 min_speech_seconds=min_speech_seconds,
+                                min_listen_after_start_s=min_listen_after_start_s,
                                 dbfs=dbfs,
                             )
                         except Exception as exc:
@@ -4605,6 +4550,9 @@ async def _esphome_subscribe_voice_assistant(
 
                                 if start_detected:
                                     runtime["vad_voice_seen"] = True
+                                    first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
+                                    if first_speech_ts <= 0.0:
+                                        runtime["vad_first_speech_ts"] = now
                                     runtime["vad_silence_start_ts"] = 0.0
                                     runtime["vad_last_speech_ts"] = now
                                     runtime["vad_last_strong_speech_ts"] = 0.0
@@ -4643,9 +4591,14 @@ async def _esphome_subscribe_voice_assistant(
                                     silence_elapsed = max(0.0, now - silence_anchor)
                                     speech_chunks = int(runtime.get("vad_speech_chunks") or 0)
                                     speech_seconds = float(runtime.get("vad_speech_seconds") or 0.0)
+                                    first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
+                                    min_window_met = True
+                                    if first_speech_ts > 0.0:
+                                        min_window_met = (now - first_speech_ts) >= float(min_listen_after_start_s)
                                     min_speech_met = speech_chunks >= min_speech_chunks or speech_seconds >= min_speech_seconds
                                     if (
                                         min_speech_met
+                                        and min_window_met
                                         and silence_elapsed >= silence_target_s
                                     ):
                                         should_finalize = True
@@ -4872,7 +4825,6 @@ async def _esphome_subscribe_voice_assistant(
 
         lock = _runtime_lock()
         async with lock:
-            _esphome_cancel_watchdog(runtime)
             _esphome_cancel_announcement_wait(runtime)
             if session_api_audio_supported:
                 _esphome_close_udp_locked(runtime)
@@ -4887,6 +4839,7 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_soft_speech_chunks"] = 0
             runtime["vad_speech_chunks"] = 0
             runtime["vad_speech_seconds"] = 0.0
+            runtime["vad_first_speech_ts"] = 0.0
             runtime["vad_last_speech_ts"] = 0.0
             runtime["vad_last_strong_speech_ts"] = 0.0
             runtime["vad_strong_streak"] = 0
@@ -4913,7 +4866,6 @@ async def _esphome_subscribe_voice_assistant(
                 runtime["udp_port"] = int(udp_port)
             runtime["awaiting_announcement"] = False
             runtime["awaiting_announcement_session_id"] = ""
-            runtime["watchdog_task"] = None
 
         await _compat_emit_event(
             token,
@@ -4970,11 +4922,8 @@ async def _esphome_subscribe_voice_assistant(
             f"silence_s={_esphome_server_vad_silence_s():.2f} "
             f"start_chunks={_esphome_binary_vad_start_chunks()} stop_chunks={_esphome_binary_vad_stop_chunks()} "
             f"min_speech_chunks={_esphome_server_vad_min_speech_chunks()} min_speech_s={_esphome_server_vad_min_speech_seconds():.2f} "
+            f"min_listen_after_start_s={_esphome_server_vad_min_listen_after_start_s():.2f} "
             f"webrtc_mode={_esphome_webrtc_vad_aggressiveness()} silero_threshold={_esphome_silero_vad_threshold():.2f}"
-        )
-        _native_debug(
-            "esphome watchdog config "
-            f"selector={token} idle_timeout_s=disabled max_listen_s=disabled no_voice_timeout_s=disabled"
         )
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_RUN_START", "RUN_START"), None)
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
@@ -5031,7 +4980,6 @@ async def _esphome_subscribe_voice_assistant(
             awaiting_announcement = bool(runtime.get("awaiting_announcement"))
             awaiting_announcement_session_id = _text(runtime.get("awaiting_announcement_session_id"))
             if session_id or awaiting_announcement:
-                _esphome_cancel_watchdog(runtime)
                 if bool(abort):
                     _esphome_cancel_announcement_wait(runtime)
                     runtime["awaiting_announcement"] = False
@@ -5202,7 +5150,6 @@ async def _esphome_disconnect_selector(selector: str, *, reason: str) -> None:
 
     runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
     if isinstance(runtime, dict) and _text(runtime.get("session_id")):
-        _esphome_cancel_watchdog(runtime)
         module, _ = _esphome_import()
         if module is not None and client is not None:
             with contextlib.suppress(Exception):
@@ -5247,7 +5194,6 @@ async def _esphome_client_stopped(selector: str, *, expected_disconnect: bool) -
     was_connected = False
     runtime = _esphome_voice_runtime.get(token) if isinstance(_esphome_voice_runtime, dict) else None
     if isinstance(runtime, dict) and _text(runtime.get("session_id")):
-        _esphome_cancel_watchdog(runtime)
         with contextlib.suppress(Exception):
             await _native_mark_session_aborted(
                 _text(runtime.get("session_id")),
