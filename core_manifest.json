@@ -70,20 +70,6 @@
       "tags": [],
       "entry": "cores/rss_core.py",
       "sha256": "308c1e72db91b161f90d86d479a5cd72d03ede495399ce7412ebd31e0ef0cd1f"
-    },
-    {
-      "id": "voice",
-      "name": "Voice Core",
-      "module_key": "voice_core",
-      "version": "2.1.3",
-      "min_tater_version": "59",
-      "description": "Voice Core integration core for Tater.",
-      "settings_category": "Voice Core Settings",
-      "required_settings_count": 21,
-      "autostart_key": "voice_core_running",
-      "tags": [],
-      "entry": "cores/voice_core.py",
-      "sha256": "eac36c8296cc37107907c04ec9e5dea88248adfd5cd19462cc6f6564f777ee14"
     }
   ]
 }
