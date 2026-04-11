@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.73"
+__version__ = "2.0.74"
 
 load_dotenv()
 
@@ -139,6 +139,7 @@ DEFAULT_ESPHOME_API_PORT = 6053
 DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
 DEFAULT_ESPHOME_RETRY_SECONDS = 15
 DEFAULT_ESPHOME_TTS_CHUNK_BYTES = 3200
+DEFAULT_ESPHOME_STARTUP_AUDIO_GATE_SECONDS = 0.30
 DEFAULT_ESPHOME_SERVER_VAD_ENABLED = True
 DEFAULT_ESPHOME_SERVER_VAD_BACKEND = "energy"
 DEFAULT_ESPHOME_BINARY_VAD_START_CHUNKS = 2
@@ -2779,6 +2780,14 @@ def _esphome_connect_timeout_s() -> float:
     return max(3.0, float(value))
 
 
+def _esphome_startup_audio_gate_s() -> float:
+    value = _get_float_platform_setting(
+        "VOICE_ESPHOME_STARTUP_AUDIO_GATE_SECONDS",
+        DEFAULT_ESPHOME_STARTUP_AUDIO_GATE_SECONDS,
+    )
+    return min(1.5, max(0.0, float(value)))
+
+
 def _esphome_retry_seconds() -> int:
     value = _get_int_platform_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS)
     return max(3, int(value))
@@ -4201,6 +4210,9 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
                 "channels": int(DEFAULT_VOICE_CHANNELS),
             },
             "session_start_ts": 0.0,
+            "startup_ignore_until_ts": 0.0,
+            "startup_dropped_chunks": 0,
+            "startup_ignore_logged": False,
             "last_audio_ts": 0.0,
             "audio_chunks": 0,
             "audio_bytes": 0,
@@ -4290,6 +4302,9 @@ async def _esphome_finalize_voice_session(
         runtime["session_id"] = ""
         runtime["conversation_id"] = ""
         runtime["session_start_ts"] = 0.0
+        runtime["startup_ignore_until_ts"] = 0.0
+        runtime["startup_dropped_chunks"] = 0
+        runtime["startup_ignore_logged"] = False
         runtime["last_audio_ts"] = 0.0
         runtime["audio_chunks"] = 0
         runtime["audio_bytes"] = 0
@@ -4558,6 +4573,19 @@ async def _esphome_subscribe_voice_assistant(
                     f"esphome audio drop stale selector={token} expected_session_id={expected_sid} active_session_id={session_id}"
                 )
                 return
+            if session_id:
+                now_check = _native_monotonic()
+                ignore_until = float(runtime.get("startup_ignore_until_ts") or 0.0)
+                if ignore_until > now_check:
+                    dropped = int(runtime.get("startup_dropped_chunks") or 0) + 1
+                    runtime["startup_dropped_chunks"] = dropped
+                    if not bool(runtime.get("startup_ignore_logged")):
+                        runtime["startup_ignore_logged"] = True
+                        _native_debug(
+                            f"esphome startup audio gate selector={token} session_id={session_id} "
+                            f"gate_s={_esphome_startup_audio_gate_s():.2f} dropped_chunks={dropped}"
+                        )
+                    return
         if not session_id:
             return
         audio_bytes = bytes(data or b"")
@@ -4995,12 +5023,19 @@ async def _esphome_subscribe_voice_assistant(
             _esphome_cancel_announcement_wait(runtime)
             if session_api_audio_supported:
                 _esphome_close_udp_locked(runtime)
+            startup_gate_s = _esphome_startup_audio_gate_s()
+            session_start_ts = _native_monotonic()
             runtime["session_id"] = session_id
             runtime["conversation_id"] = _text(conversation_id)
             runtime["audio_format"] = audio_format
             runtime["audio_chunks"] = 0
             runtime["audio_bytes"] = 0
-            runtime["session_start_ts"] = _native_monotonic()
+            runtime["session_start_ts"] = session_start_ts
+            runtime["startup_ignore_until_ts"] = (
+                session_start_ts + float(startup_gate_s) if float(startup_gate_s) > 0.0 else 0.0
+            )
+            runtime["startup_dropped_chunks"] = 0
+            runtime["startup_ignore_logged"] = False
             runtime["last_audio_ts"] = 0.0
             runtime["vad_voice_seen"] = False
             runtime["vad_soft_speech_chunks"] = 0
@@ -5092,6 +5127,7 @@ async def _esphome_subscribe_voice_assistant(
         _native_debug(
             "esphome vad tuning "
             f"selector={token} backend={_text(runtime.get('vad_backend')) or 'energy'} "
+            f"startup_gate_s={_esphome_startup_audio_gate_s():.2f} "
             f"silence_s={_esphome_server_vad_silence_s():.2f} "
             f"start_chunks={_esphome_binary_vad_start_chunks()} stop_chunks={_esphome_binary_vad_stop_chunks()} "
             f"min_speech_chunks={_esphome_server_vad_min_speech_chunks()} min_speech_s={_esphome_server_vad_min_speech_seconds():.2f} "
