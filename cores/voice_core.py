@@ -81,7 +81,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
     SILERO_IMPORT_ERROR = str(exc)
 
 from dotenv import load_dotenv
-__version__ = "2.0.74"
+__version__ = "2.0.75"
 
 load_dotenv()
 
@@ -3200,6 +3200,8 @@ def _esphome_vad_apply_binary(
                 command_left_s = max(0.0, float(command_window_s - speech_window_s))
                 silence_left_s = float(silence_window_s)
                 runtime["vad_quiet_start_ts"] = 0.0
+                if isinstance(dbfs, (int, float)):
+                    runtime["vad_command_peak_dbfs"] = round(float(dbfs), 2)
                 if not bool(runtime.get("vad_voice_seen")):
                     first_speech_ts = float(runtime.get("vad_first_speech_ts") or 0.0)
                     if first_speech_ts <= 0.0:
@@ -3221,12 +3223,17 @@ def _esphome_vad_apply_binary(
     else:
         runtime["vad_voice_seen"] = True
         if bool(is_speech):
-            runtime["vad_quiet_start_ts"] = 0.0
             runtime["vad_speech_chunks"] = int(runtime.get("vad_speech_chunks") or 0) + 1
             runtime["vad_speech_seconds"] = float(runtime.get("vad_speech_seconds") or 0.0) + step_s
             runtime["vad_last_speech_ts"] = now
             runtime["vad_last_strong_speech_ts"] = now
             runtime["vad_silence_start_ts"] = 0.0
+            if isinstance(dbfs, (int, float)):
+                peak_prev = runtime.get("vad_command_peak_dbfs")
+                peak_value = float(peak_prev) if isinstance(peak_prev, (int, float)) else float(dbfs)
+                if float(dbfs) > peak_value:
+                    peak_value = float(dbfs)
+                runtime["vad_command_peak_dbfs"] = round(float(peak_value), 2)
             reset_left_s -= step_s
             command_left_s = max(0.0, command_left_s - step_s)
             if reset_left_s <= 0.0:
@@ -3263,6 +3270,7 @@ def _esphome_vad_apply_binary(
                 silence_left_s = float(silence_window_s)
                 reset_left_s = float(reset_window_s)
                 runtime["vad_silence_start_ts"] = 0.0
+                runtime["vad_command_peak_dbfs"] = None
 
     runtime["binary_vad_active"] = bool(in_command)
     runtime["vad_segment_speech_left_s"] = float(speech_left_s)
@@ -3300,12 +3308,17 @@ def _esphome_vad_apply_quiet_fallback(
         floor = (floor * 0.995) + (current * 0.005)
     runtime["vad_noise_floor_dbfs"] = round(float(floor), 2)
 
+    command_peak_prev = runtime.get("vad_command_peak_dbfs")
     peak_prev = runtime.get("vad_peak_dbfs")
-    peak = float(peak_prev) if isinstance(peak_prev, (int, float)) else current
-    if current >= peak:
-        peak = current
+    if isinstance(command_peak_prev, (int, float)):
+        peak = float(command_peak_prev)
+    elif isinstance(peak_prev, (int, float)):
+        peak = float(peak_prev)
     else:
-        peak = max(current, float(peak) - (9.0 * max(0.0, float(chunk_seconds))))
+        peak = current
+    if current > peak:
+        peak = current
+    runtime["vad_command_peak_dbfs"] = round(float(peak), 2)
     runtime["vad_peak_dbfs"] = round(float(peak), 2)
 
     quiet_threshold = max(float(abs_floor_dbfs) + 6.0, float(peak) - float(drop_db))
@@ -4237,6 +4250,7 @@ def _esphome_voice_runtime_state(selector: str) -> Dict[str, Any]:
             "vad_last_dbfs": None,
             "vad_noise_floor_dbfs": None,
             "vad_peak_dbfs": None,
+            "vad_command_peak_dbfs": None,
             "vad_dynamic_trigger_dbfs": None,
             "vad_dynamic_release_dbfs": None,
             "vad_start_sent": False,
@@ -4329,6 +4343,7 @@ async def _esphome_finalize_voice_session(
         runtime["vad_last_dbfs"] = None
         runtime["vad_noise_floor_dbfs"] = None
         runtime["vad_peak_dbfs"] = None
+        runtime["vad_command_peak_dbfs"] = None
         runtime["vad_dynamic_trigger_dbfs"] = None
         runtime["vad_dynamic_release_dbfs"] = None
         runtime["vad_start_sent"] = False
@@ -5058,6 +5073,7 @@ async def _esphome_subscribe_voice_assistant(
             runtime["vad_last_dbfs"] = None
             runtime["vad_noise_floor_dbfs"] = None
             runtime["vad_peak_dbfs"] = None
+            runtime["vad_command_peak_dbfs"] = None
             runtime["vad_dynamic_trigger_dbfs"] = None
             runtime["vad_dynamic_release_dbfs"] = None
             runtime["vad_start_sent"] = False
