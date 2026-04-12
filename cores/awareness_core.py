@@ -20,16 +20,11 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import dispatch_notification
-from speech_settings import (
-    DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-    build_announcement_tts_fields,
-    get_speech_settings as get_shared_speech_settings,
-    normalize_announcement_tts_backend,
-)
+from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_homeassistant_media_players
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "3.1.4"
+__version__ = "3.1.5"
 
 load_dotenv()
 
@@ -693,13 +688,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_to_state": "on",
                 "trigger_attribute": "",
                 "trigger_attribute_value": "",
-                "tts_backend": normalize_announcement_tts_backend(
-                    raw.get("tts_backend"),
-                    default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-                ),
-                "tts_model": _text(raw.get("tts_model")),
-                "tts_voice": _text(raw.get("tts_voice")),
-                "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Doorbell"),
                 "priority": "high"
@@ -732,13 +720,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state")),
-                "tts_backend": normalize_announcement_tts_backend(
-                    raw.get("tts_backend"),
-                    default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-                ),
-                "tts_model": _text(raw.get("tts_model")),
-                "tts_voice": _text(raw.get("tts_voice")),
-                "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Entry Sensor"),
                 "priority": "high"
@@ -1777,6 +1758,146 @@ async def _notify_homeassistant(
     return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "homeassistant notifier failed"}
 
 
+def _shared_announcement_tts_settings() -> Dict[str, Any]:
+    shared = get_shared_speech_settings()
+    return {
+        "backend": _text(shared.get("announcement_tts_backend") or "homeassistant_api"),
+        "model": _text(shared.get("announcement_tts_model")),
+        "voice": _text(shared.get("announcement_tts_voice")),
+        "entity": _text(shared.get("announcement_tts_entity") or "tts.piper"),
+        "public_base_url": _text(shared.get("tts_public_base_url")),
+        "wyoming_host": _text(shared.get("wyoming_tts_host")),
+        "wyoming_port": shared.get("wyoming_tts_port"),
+        "wyoming_voice": _text(shared.get("wyoming_tts_voice")),
+    }
+
+
+async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    del llm_client
+    camera = _text(rule.get("camera_entity"))
+    area = _text(rule.get("area")) or "camera"
+    provider = _rule_provider(rule)
+    if not camera:
+        raise ValueError("Camera rule is missing camera_entity.")
+
+    cooldown_seconds = _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400)
+    cooldown_key = _camera_cooldown_key(camera)
+    if not _acquire_cooldown(cooldown_key, cooldown_seconds):
+        return {
+            "ok": True,
+            "summary": "Camera cooldown active.",
+            "camera": camera,
+            "area": area,
+            "provider": provider,
+            "skipped": "cooldown",
+        }
+
+    vision = get_shared_vision_settings(
+        default_api_base="http://127.0.0.1:1234",
+        default_model="qwen2.5-vl-7b-instruct",
+    )
+    query = _text(rule.get("query"))
+    ignore_vehicles = _bool(rule.get("ignore_vehicles"), False)
+
+    try:
+        if provider == "unifi_protect":
+            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
+        else:
+            ha = _ha_config()
+            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+        summary = await _vision_describe(
+            image_bytes=jpeg,
+            api_base=_text(vision.get("api_base")),
+            model=_text(vision.get("model")),
+            api_key=_text(vision.get("api_key")),
+            query=query,
+            ignore_vehicles=ignore_vehicles,
+            mode="camera",
+        )
+        summary = _compact(summary, limit=180) or "Nothing notable."
+    except Exception:
+        _clear_cooldown(cooldown_key)
+        logger.exception("[awareness] camera snapshot/vision failed for %s", camera)
+        raise
+
+    if _is_nothing_notable_summary(summary):
+        _clear_cooldown(cooldown_key)
+        return {
+            "ok": True,
+            "summary": summary,
+            "camera": camera,
+            "area": area,
+            "provider": provider,
+            "skipped": "nothing_notable",
+        }
+
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+    trigger_entity = _text(event.get("entity_id"))
+    event_payload = {
+        "source": _slug(area),
+        "title": _text(rule.get("title") or "Camera Event"),
+        "type": "camera_event",
+        "message": summary,
+        "entity_id": camera,
+        "ha_time": _now_iso(),
+        "level": "info",
+        "data": {
+            "area": area,
+            "reason": reason,
+            "trigger_entity": trigger_entity,
+            "provider": provider,
+            "query": query,
+            "ignore_vehicles": ignore_vehicles,
+        },
+    }
+    if snapshot_store.get("stored"):
+        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
+        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
+        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    _append_event(redis_client, source=area, payload=event_payload)
+
+    notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+    device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+    api_notification = _bool(rule.get("api_notification"), False)
+    notification_cooldown_seconds = _as_int(rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400)
+    if api_notification or device_services:
+        notify_key = _camera_notify_cooldown_key(camera)
+        if notification_cooldown_seconds > 0 and not _acquire_cooldown(notify_key, notification_cooldown_seconds):
+            notify_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
+        else:
+            notify_result = await _notify_homeassistant(
+                title=_text(rule.get("title") or "Camera Event"),
+                message=summary,
+                priority=_text(rule.get("priority") or "high"),
+                api_notification=api_notification,
+                device_services=device_services,
+                origin={
+                    "platform": "awareness_core",
+                    "scope": "camera_rule",
+                    "rule_id": rule.get("id"),
+                    "camera": camera,
+                    "area": area,
+                    "provider": provider,
+                    "trigger_entity": trigger_entity,
+                },
+            )
+            if not notify_result.get("ok") and notification_cooldown_seconds > 0:
+                _clear_cooldown(notify_key)
+
+    return {
+        "ok": True,
+        "summary": summary,
+        "camera": camera,
+        "area": area,
+        "provider": provider,
+        "notification": notify_result,
+    }
+
+
 async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
     del llm_client
     camera = _text(rule.get("camera_entity"))
@@ -1789,13 +1910,11 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         default_model="qwen2.5-vl-7b-instruct",
     )
     players = _normalize_players(rule.get("players"))
-    tts_backend = normalize_announcement_tts_backend(
-        rule.get("tts_backend"),
-        default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-    )
-    tts_model = _text(rule.get("tts_model"))
-    tts_voice = _text(rule.get("tts_voice"))
-    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
+    shared_tts = _shared_announcement_tts_settings()
+    tts_backend = _text(shared_tts.get("backend") or "homeassistant_api")
+    tts_model = _text(shared_tts.get("model"))
+    tts_voice = _text(shared_tts.get("voice"))
+    tts_entity = _text(shared_tts.get("entity") or "tts.piper")
     jpeg: bytes = b""
     try:
         if provider == "unifi_protect":
@@ -1821,21 +1940,20 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     if players:
         try:
             ha = _ha_config()
-            shared_speech = get_shared_speech_settings()
             tts_result = await speak_homeassistant_media_players(
                 text=spoken_line,
                 backend=tts_backend,
                 ha_base=ha["base"],
                 token=ha["token"],
                 players=players,
-                public_base_url=_text(shared_speech.get("tts_public_base_url")),
+                public_base_url=_text(shared_tts.get("public_base_url")),
                 tts_entity=tts_entity,
                 model=tts_model,
                 voice=tts_voice,
-                wyoming_host=_text(shared_speech.get("wyoming_tts_host")),
-                wyoming_port=shared_speech.get("wyoming_tts_port"),
-                wyoming_voice=_text(shared_speech.get("wyoming_tts_voice")),
-                default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+                wyoming_host=_text(shared_tts.get("wyoming_host")),
+                wyoming_port=shared_tts.get("wyoming_port"),
+                wyoming_voice=_text(shared_tts.get("wyoming_voice")),
+                default_backend=tts_backend,
             )
         except Exception as exc:
             logger.warning("[awareness] doorbell TTS failed for %s: %s", camera, exc)
@@ -1900,7 +2018,6 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     }
 
 
-
 async def _execute_entry_sensor_rule(
     rule: Dict[str, Any],
     llm_client: Any,
@@ -1923,13 +2040,11 @@ async def _execute_entry_sensor_rule(
     spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
-    tts_backend = normalize_announcement_tts_backend(
-        rule.get("tts_backend"),
-        default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-    )
-    tts_model = _text(rule.get("tts_model"))
-    tts_voice = _text(rule.get("tts_voice"))
-    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
+    shared_tts = _shared_announcement_tts_settings()
+    tts_backend = _text(shared_tts.get("backend") or "homeassistant_api")
+    tts_model = _text(shared_tts.get("model"))
+    tts_voice = _text(shared_tts.get("voice"))
+    tts_entity = _text(shared_tts.get("entity") or "tts.piper")
     snapshot_store: Dict[str, Any] = {}
     if camera:
         try:
@@ -1986,21 +2101,20 @@ async def _execute_entry_sensor_rule(
     if action_token == "open" and players:
         try:
             ha = _ha_config()
-            shared_speech = get_shared_speech_settings()
             tts_result = await speak_homeassistant_media_players(
                 text=spoken_line,
                 backend=tts_backend,
                 ha_base=ha["base"],
                 token=ha["token"],
                 players=players,
-                public_base_url=_text(shared_speech.get("tts_public_base_url")),
+                public_base_url=_text(shared_tts.get("public_base_url")),
                 tts_entity=tts_entity,
                 model=tts_model,
                 voice=tts_voice,
-                wyoming_host=_text(shared_speech.get("wyoming_tts_host")),
-                wyoming_port=shared_speech.get("wyoming_tts_port"),
-                wyoming_voice=_text(shared_speech.get("wyoming_tts_voice")),
-                default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+                wyoming_host=_text(shared_tts.get("wyoming_host")),
+                wyoming_port=shared_tts.get("wyoming_port"),
+                wyoming_voice=_text(shared_tts.get("wyoming_voice")),
+                default_backend=tts_backend,
             )
         except Exception as exc:
             logger.warning("[awareness] entry sensor TTS failed for %s: %s", entity_id, exc)
@@ -2039,831 +2153,6 @@ async def _execute_entry_sensor_rule(
         "players": players,
         "tts": tts_result,
         "notification": notify_result,
-    }
-
-
-def _event_window(timeframe: str) -> Tuple[datetime, datetime, str]:
-    now = datetime.now()
-    token = _text(timeframe).lower()
-    if token == "yesterday":
-        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1) - timedelta(seconds=1)
-        return start, end, "yesterday"
-    if token in {"last_24h", "last24h"}:
-        return now - timedelta(hours=24), now, "in the last 24 hours"
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1) - timedelta(seconds=1)
-    return start, end, "today"
-
-
-def _discover_event_sources(client: Any) -> List[str]:
-    redis_obj = client or redis_client
-    out: List[str] = []
-    try:
-        for key in redis_obj.scan_iter(match=f"{_EVENTS_PREFIX}*", count=500):
-            src = str(key).split(":", maxsplit=3)[-1]
-            if src and src not in out:
-                out.append(src)
-    except Exception:
-        return []
-    return out
-
-
-def _load_events_for_sources(
-    client: Any,
-    sources: List[str],
-    start: datetime,
-    end: datetime,
-    limit_per_source: int = 200,
-) -> List[Dict[str, Any]]:
-    redis_obj = client or redis_client
-    events: List[Dict[str, Any]] = []
-    end_index = -1
-    try:
-        parsed_limit = int(limit_per_source)
-        if parsed_limit > 0:
-            end_index = max(1, parsed_limit) - 1
-    except Exception:
-        end_index = -1
-    for src in sources:
-        try:
-            rows = redis_obj.lrange(_event_key(src), 0, end_index) or []
-        except Exception:
-            continue
-        for row in rows:
-            try:
-                payload = json.loads(row)
-            except Exception:
-                continue
-            ts = _parse_iso(payload.get("ha_time"))
-            if ts is None or ts < start or ts > end:
-                continue
-            payload.setdefault("source", src)
-            events.append(payload)
-    events.sort(key=lambda item: _text(item.get("ha_time")), reverse=True)
-    return events
-
-
-def _events_query_source_to_area(source: Any) -> str:
-    text = _text(source).lower().replace("_", " ")
-    return " ".join(text.split())
-
-
-def _events_query_event_dt(event: Dict[str, Any]) -> Optional[datetime]:
-    parsed = _parse_iso(event.get("ha_time"))
-    if parsed is None:
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.replace(tzinfo=None)
-    return parsed
-
-
-def _events_query_event_id(event: Dict[str, Any]) -> str:
-    src = _text(event.get("source"))
-    ha_time = _text(event.get("ha_time"))
-    title = _text(event.get("title"))
-    message = _text(event.get("message"))
-    entity = _text(event.get("entity_id"))
-    seed = "|".join([src, ha_time, title, message, entity])
-    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
-    return f"ev_{digest[:16]}"
-
-
-def _events_query_compact_event_for_llm(event: Dict[str, Any]) -> Dict[str, Any]:
-    source = _text(event.get("source"))
-    data_payload = event.get("data") if isinstance(event.get("data"), dict) else {}
-    area = _events_query_source_to_area(source) or _text(data_payload.get("area"))
-    return {
-        "event_id": _events_query_event_id(event),
-        "source": source,
-        "area": area,
-        "ha_time": _text(event.get("ha_time")),
-        "title": _text(event.get("title")),
-        "message": _text(event.get("message")),
-        "type": _text(event.get("type")),
-        "entity_id": _text(event.get("entity_id")),
-        "level": _text(event.get("level")),
-        "data": data_payload,
-    }
-
-
-def _events_query_query_from_args(args: Dict[str, Any], origin: Optional[Dict[str, Any]] = None) -> str:
-    payload = args if isinstance(args, dict) else {}
-    for key in ("query", "request", "question", "user_query", "prompt", "text", "content", "message"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    arg_origin = payload.get("origin")
-    if isinstance(arg_origin, dict):
-        for key in ("request_text", "query", "question", "text", "content", "message"):
-            value = arg_origin.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    if isinstance(origin, dict):
-        for key in ("request_text", "query", "question", "text", "content", "message", "raw_message", "body"):
-            value = origin.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return ""
-
-
-def _events_query_parse_local_iso(value: Any) -> Optional[datetime]:
-    parsed = _parse_iso(value)
-    if parsed is None:
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.replace(tzinfo=None)
-    return parsed
-
-
-async def _events_query_llm_json_object(
-    *,
-    llm_client: Any,
-    system_prompt: str,
-    user_payload: Dict[str, Any],
-    max_tokens: int = 700,
-    temperature: float = 0.0,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    if llm_client is None:
-        return None, "LLM client is unavailable."
-    try:
-        response = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            temperature=temperature,
-            max_tokens=max(80, int(max_tokens or 700)),
-            timeout_ms=45_000,
-        )
-    except Exception as exc:
-        return None, f"LLM request failed: {exc}"
-
-    raw = _text((response.get("message") or {}).get("content"))
-    parsed_text = extract_json(raw) or raw
-    try:
-        obj = json.loads(parsed_text)
-    except Exception as exc:
-        obj = _json_object_from_text(raw)
-        if not obj:
-            return None, f"Could not parse LLM JSON: {exc}"
-    if not isinstance(obj, dict):
-        return None, "LLM did not return a JSON object."
-    return obj, ""
-
-
-async def _events_query_interpret_query(
-    *,
-    llm_client: Any,
-    user_query: str,
-    sources: List[str],
-    now_local: datetime,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    source_rows = [{"source_id": source, "area_name": _events_query_source_to_area(source)} for source in sources]
-    system_prompt = (
-        "You interpret natural-language event-history requests.\n"
-        "Return exactly one strict JSON object with this schema:\n"
-        "{"
-        "\"query_type\":\"summary|presence|count|semantic_search|timeline\","
-        "\"search_scope\":\"selected_sources|all_sources\","
-        "\"source_ids\":[\"<source_id>\"],"
-        "\"time_window\":{\"start_local\":\"YYYY-MM-DDTHH:MM:SS\",\"end_local\":\"YYYY-MM-DDTHH:MM:SS\",\"label\":\"...\"},"
-        "\"semantic_focus\":[\"...\"],"
-        "\"response_mode\":\"summary|presence|count|matches\""
-        "}\n"
-        "Rules:\n"
-        "- Use only source_ids from the provided source catalog.\n"
-        "- If the user asks broadly (for example around the house/outside), use search_scope=all_sources.\n"
-        "- time_window must always include both start_local and end_local in local naive ISO.\n"
-        "- Preserve user intent including area, timeframe, and semantic details (people/clothing/vehicles/packages/animals/unusual activity).\n"
-        "- Do not answer the user.\n"
-        "- Do not invent sources that are not in the catalog.\n"
-    )
-    payload = {
-        "user_query": user_query,
-        "now_local": now_local.strftime("%Y-%m-%dT%H:%M:%S"),
-        "available_sources": source_rows,
-    }
-    return await _events_query_llm_json_object(
-        llm_client=llm_client,
-        system_prompt=system_prompt,
-        user_payload=payload,
-        max_tokens=800,
-        temperature=0.0,
-    )
-
-
-def _events_query_normalize_interpretation(
-    *,
-    interpretation: Dict[str, Any],
-    sources_catalog: List[str],
-    now_local: datetime,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    catalog = set(sources_catalog)
-    query_type = _text(interpretation.get("query_type")).lower()
-    if query_type not in {"summary", "presence", "count", "semantic_search", "timeline"}:
-        query_type = "summary"
-
-    response_mode = _text(interpretation.get("response_mode")).lower()
-    if response_mode not in {"summary", "presence", "count", "matches"}:
-        response_mode = "summary"
-
-    search_scope = _text(interpretation.get("search_scope")).lower()
-    source_ids_raw = interpretation.get("source_ids") if isinstance(interpretation.get("source_ids"), list) else []
-    source_ids = [str(item).strip() for item in source_ids_raw if str(item).strip() in catalog]
-
-    if search_scope == "all_sources":
-        selected_sources = list(sources_catalog)
-    else:
-        selected_sources = sorted(set(source_ids))
-    if not selected_sources:
-        return None, "Could not resolve relevant event sources from request interpretation."
-
-    time_window = interpretation.get("time_window") if isinstance(interpretation.get("time_window"), dict) else {}
-    start_local = _events_query_parse_local_iso(time_window.get("start_local"))
-    end_local = _events_query_parse_local_iso(time_window.get("end_local"))
-    label = _text(time_window.get("label")) or "requested timeframe"
-    if start_local is None or end_local is None:
-        return None, "Could not resolve a valid timeframe from request interpretation."
-    if end_local < start_local:
-        return None, "Interpreted timeframe end is earlier than start."
-    if end_local > now_local and response_mode == "presence":
-        end_local = now_local
-
-    focus_raw = interpretation.get("semantic_focus") if isinstance(interpretation.get("semantic_focus"), list) else []
-    semantic_focus = [str(item).strip() for item in focus_raw if str(item).strip()][:24]
-    broad_summary = bool(
-        query_type in {"summary", "timeline"}
-        and response_mode == "summary"
-        and not semantic_focus
-    )
-    return (
-        {
-            "query_type": query_type,
-            "response_mode": response_mode,
-            "search_scope": search_scope,
-            "selected_sources": selected_sources,
-            "time_label": label,
-            "time_start": start_local,
-            "time_end": end_local,
-            "semantic_focus": semantic_focus,
-            "broad_summary": broad_summary,
-        },
-        "",
-    )
-
-
-async def _events_query_select_relevant_event_ids(
-    *,
-    llm_client: Any,
-    user_query: str,
-    interpretation: Dict[str, Any],
-    candidate_events: List[Dict[str, Any]],
-) -> Tuple[Optional[List[str]], str]:
-    system_prompt = (
-        "You are selecting relevant home events for a user question.\n"
-        "Return exactly one strict JSON object:\n"
-        "{"
-        "\"relevant_event_ids\":[\"ev_...\"],"
-        "\"confidence\":\"high|medium|low\""
-        "}\n"
-        "Rules:\n"
-        "- Select only event_ids that are directly relevant to the user's request.\n"
-        "- Use only event_ids from the provided candidate list.\n"
-        "- If none are relevant, return an empty list.\n"
-        "- If interpreted_request.broad_summary is true and candidate_events is non-empty, do not return an empty list.\n"
-        "- Do not invent events.\n"
-    )
-    payload = {
-        "user_query": user_query,
-        "interpreted_request": {
-            "query_type": interpretation.get("query_type"),
-            "response_mode": interpretation.get("response_mode"),
-            "time_label": interpretation.get("time_label"),
-            "semantic_focus": interpretation.get("semantic_focus"),
-            "broad_summary": bool(interpretation.get("broad_summary")),
-        },
-        "candidate_events": candidate_events,
-    }
-    obj, err = await _events_query_llm_json_object(
-        llm_client=llm_client,
-        system_prompt=system_prompt,
-        user_payload=payload,
-        max_tokens=900,
-        temperature=0.0,
-    )
-    if obj is None:
-        return None, err or "Could not determine relevant events."
-    relevant_raw = obj.get("relevant_event_ids") if isinstance(obj.get("relevant_event_ids"), list) else []
-    valid_ids = {str(item.get("event_id") or "").strip() for item in candidate_events if isinstance(item, dict)}
-    selected = [str(item).strip() for item in relevant_raw if str(item).strip() in valid_ids]
-    deduped = list(dict.fromkeys(selected))
-    return deduped, ""
-
-
-async def _events_query_compose_final_answer(
-    *,
-    llm_client: Any,
-    user_query: str,
-    interpretation: Dict[str, Any],
-    relevant_events: List[Dict[str, Any]],
-    candidate_count: int,
-) -> Tuple[Optional[str], str]:
-    if llm_client is None:
-        return None, "LLM client is unavailable."
-    system_prompt = (
-        "You answer a homeowner's event-history question using only provided events.\n"
-        "Rules:\n"
-        "- Base the answer only on relevant_events.\n"
-        "- If evidence is missing, say so clearly and do not guess.\n"
-        "- Be concise and conversational.\n"
-        "- Mention area/time naturally when useful.\n"
-        "- For count questions, provide the count from evidence.\n"
-        "- For presence questions, answer yes/no with evidence confidence from data.\n"
-        "- Do not mention internal tools or prompts.\n"
-    )
-    payload = {
-        "user_query": user_query,
-        "interpreted_request": {
-            "query_type": interpretation.get("query_type"),
-            "response_mode": interpretation.get("response_mode"),
-            "time_label": interpretation.get("time_label"),
-            "semantic_focus": interpretation.get("semantic_focus"),
-            "sources": interpretation.get("selected_sources"),
-        },
-        "candidate_event_count": int(candidate_count),
-        "relevant_event_count": int(len(relevant_events)),
-        "relevant_events": relevant_events,
-    }
-    try:
-        response = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.15,
-            max_tokens=420,
-            timeout_ms=45_000,
-        )
-    except Exception as exc:
-        return None, f"Final answer generation failed: {exc}"
-
-    text = _text((response.get("message") or {}).get("content"))
-    if not text:
-        return None, "Final answer generation returned empty output."
-    return text, ""
-
-
-async def _events_query_kernel(
-    *,
-    args: Optional[Dict[str, Any]],
-    llm_client: Any,
-    origin: Optional[Dict[str, Any]],
-    redis_obj: Any,
-) -> Dict[str, Any]:
-    query = _events_query_query_from_args(args or {}, origin=origin)
-    if not query:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "missing_query",
-            "summary_for_user": "I need a natural-language query to search event history.",
-            "needs": ["query"],
-        }
-
-    sources_catalog = _discover_event_sources(redis_obj)
-    if not sources_catalog:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "events_sources_missing",
-            "summary_for_user": "No awareness event sources are available yet.",
-        }
-
-    now_local = datetime.now()
-    interpretation_obj, interpretation_err = await _events_query_interpret_query(
-        llm_client=llm_client,
-        user_query=query,
-        sources=sources_catalog,
-        now_local=now_local,
-    )
-    if interpretation_obj is None:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "interpretation_failed",
-            "summary_for_user": "I couldn't interpret that event-history request. Try rephrasing with area/time details.",
-            "details": interpretation_err or "unknown error",
-        }
-
-    interpreted, interpreted_err = _events_query_normalize_interpretation(
-        interpretation=interpretation_obj,
-        sources_catalog=sources_catalog,
-        now_local=now_local,
-    )
-    if interpreted is None:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "interpretation_invalid",
-            "summary_for_user": "I couldn't resolve a valid area/time window for that request.",
-            "details": interpreted_err,
-        }
-
-    selected_sources = interpreted["selected_sources"]
-    start_dt = interpreted["time_start"]
-    end_dt = interpreted["time_end"]
-    logger.info(
-        "[awareness] events_query interpreted query_type=%s response_mode=%s sources=%s window=%s..%s label=%s broad_summary=%s",
-        interpreted.get("query_type"),
-        interpreted.get("response_mode"),
-        ",".join(selected_sources),
-        start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-        end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-        interpreted.get("time_label"),
-        bool(interpreted.get("broad_summary")),
-    )
-
-    fetched = _load_events_for_sources(
-        redis_obj,
-        selected_sources,
-        start_dt,
-        end_dt,
-        limit_per_source=_EVENTS_QUERY_MAX_EVENTS_PER_SOURCE,
-    )
-    fetched_sorted = sorted(fetched, key=lambda item: _events_query_event_dt(item) or datetime.min)
-    compact_events = [_events_query_compact_event_for_llm(item) for item in fetched_sorted]
-    if len(compact_events) > _EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:
-        compact_events = compact_events[-_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:]
-    logger.info(
-        "[awareness] events_query fetched_events=%s candidate_events=%s",
-        len(fetched_sorted),
-        len(compact_events),
-    )
-
-    relevant_ids, relevance_err = await _events_query_select_relevant_event_ids(
-        llm_client=llm_client,
-        user_query=query,
-        interpretation=interpreted,
-        candidate_events=compact_events,
-    )
-    if relevant_ids is None:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "relevance_selection_failed",
-            "summary_for_user": "I couldn't determine which events were relevant. Please try that request again.",
-            "details": relevance_err or "unknown error",
-        }
-
-    if not relevant_ids and compact_events and bool(interpreted.get("broad_summary")):
-        relevant_ids = [
-            str(item.get("event_id") or "").strip()
-            for item in compact_events
-            if str(item.get("event_id") or "").strip()
-        ]
-        logger.info(
-            "[awareness] events_query relevance returned empty for broad summary; using all candidate events (%s).",
-            len(relevant_ids),
-        )
-
-    event_by_id = {str(item.get("event_id") or ""): item for item in compact_events}
-    relevant_events = [event_by_id[event_id] for event_id in relevant_ids if event_id in event_by_id]
-    if len(relevant_events) > _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:
-        relevant_events = relevant_events[-_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:]
-    logger.info(
-        "[awareness] events_query relevant_event_ids=%s relevant_events=%s",
-        len(relevant_ids),
-        len(relevant_events),
-    )
-
-    final_text, final_err = await _events_query_compose_final_answer(
-        llm_client=llm_client,
-        user_query=query,
-        interpretation=interpreted,
-        relevant_events=relevant_events,
-        candidate_count=len(compact_events),
-    )
-    if final_text is None:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "final_answer_failed",
-            "summary_for_user": "I couldn't finish the event-history answer this time.",
-            "details": final_err or "unknown error",
-        }
-
-    return {
-        "tool": "events_query",
-        "ok": True,
-        "query": query,
-        "intent": interpreted.get("query_type"),
-        "response_mode": interpreted.get("response_mode"),
-        "timeframe": interpreted.get("time_label"),
-        "sources": list(selected_sources),
-        "candidate_event_count": int(len(compact_events)),
-        "relevant_event_count": int(len(relevant_events)),
-        "time_window": {
-            "start_local": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-            "end_local": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-            "label": interpreted.get("time_label"),
-        },
-        "semantic_focus": list(interpreted.get("semantic_focus") or []),
-        "summary_for_user": final_text,
-    }
-
-
-def _event_time_display(value: Any) -> str:
-    parsed = _parse_iso(value)
-    if parsed is not None:
-        return parsed.strftime("%Y-%m-%d %H:%M:%S")
-    raw = _text(value)
-    return raw or "n/a"
-
-
-def _load_event_snapshot_payload(client: Any, snapshot_id: str) -> Optional[Dict[str, Any]]:
-    sid = _text(snapshot_id)
-    if not sid:
-        return None
-    redis_obj = client or redis_client
-    if redis_obj is None:
-        return None
-    try:
-        raw = redis_obj.get(_event_snapshot_key(sid))
-    except Exception:
-        return None
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _event_snapshot_preview(client: Any, event: Dict[str, Any]) -> Dict[str, Any]:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    snapshot_id = _text(event.get("snapshot_id") or data.get("snapshot_id"))
-    if not snapshot_id:
-        return {}
-    payload = _load_event_snapshot_payload(client, snapshot_id)
-    if payload is None:
-        return {
-            "snapshot_id": snapshot_id,
-            "bytes": _as_int(data.get("snapshot_bytes"), 0, minimum=0),
-            "content_type": _text(data.get("snapshot_content_type") or "image/jpeg"),
-            "status": "missing",
-        }
-    content_type = _text(payload.get("content_type") or "image/jpeg")
-    byte_count = _as_int(payload.get("bytes"), 0, minimum=0)
-    data_b64 = _text(payload.get("data_b64"))
-    preview: Dict[str, Any] = {
-        "snapshot_id": snapshot_id,
-        "bytes": byte_count,
-        "content_type": content_type,
-    }
-    if data_b64:
-        preview["data_url"] = f"data:{content_type};base64,{data_b64}"
-    return preview
-
-
-def _event_type_filters(client: Any) -> Dict[str, bool]:
-    runtime = _runtime_get(client)
-    return {
-        key: _bool(runtime.get(runtime_key), _EVENT_FILTER_DEFAULTS.get(key, True))
-        for key, runtime_key in _EVENT_FILTER_RUNTIME_KEYS.items()
-    }
-
-
-def _event_list_view_enabled(client: Any) -> bool:
-    runtime = _runtime_get(client)
-    return _bool(runtime.get(_EVENT_LIST_VIEW_RUNTIME_KEY), False)
-
-
-def _event_type_bucket(event: Dict[str, Any]) -> str:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    event_type = _text(event.get("type")).lower()
-    if event_type == "doorbell":
-        return "doorbell"
-    if event_type.startswith("camera"):
-        return "camera"
-    if "_sensor_" in event_type or _text(data.get("sensor_type")):
-        return "sensor"
-    entity_id = _text(event.get("entity_id")).lower()
-    if entity_id.startswith("camera."):
-        return "camera"
-    if entity_id.startswith(("binary_sensor.", "sensor.", "cover.")):
-        return "sensor"
-    return "other"
-
-
-def _event_allowed_by_filter(filters: Dict[str, bool], event_type: str) -> bool:
-    if event_type not in filters:
-        return True
-    return bool(filters.get(event_type))
-
-
-def _event_filter_form(
-    *,
-    filters: Dict[str, bool],
-    list_view: bool,
-    totals: Dict[str, int],
-    visible_totals: Dict[str, int],
-) -> Dict[str, Any]:
-    labels = [("camera", "Cameras"), ("doorbell", "Doorbells"), ("sensor", "Sensors")]
-    selected_labels = [label for key, label in labels if filters.get(key)]
-    if selected_labels:
-        subtitle = f"Showing: {', '.join(selected_labels)}"
-    else:
-        subtitle = "No event types selected. Enable at least one type to view matching events."
-    subtitle += f" • View: {'List' if list_view else 'Current'}"
-    subtitle += (
-        f" • Visible {visible_totals.get('camera', 0)}/{totals.get('camera', 0)} cameras, "
-        f"{visible_totals.get('doorbell', 0)}/{totals.get('doorbell', 0)} doorbells, "
-        f"{visible_totals.get('sensor', 0)}/{totals.get('sensor', 0)} sensors"
-    )
-    return {
-        "id": "awareness_event_filters",
-        "group": "event",
-        "title": "Event Filters",
-        "subtitle": subtitle,
-        "save_action": "awareness_save_event_filters",
-        "save_label": "Apply Filters",
-        "fields_popup": False,
-        "fields_dropdown": True,
-        "sections_in_dropdown": False,
-        "fields": [
-            {
-                "key": "show_camera_events",
-                "label": "Show Cameras",
-                "type": "checkbox",
-                "value": bool(filters.get("camera", True)),
-            },
-            {
-                "key": "show_doorbell_events",
-                "label": "Show Doorbells",
-                "type": "checkbox",
-                "value": bool(filters.get("doorbell", True)),
-            },
-            {
-                "key": "show_sensor_events",
-                "label": "Show Sensors",
-                "type": "checkbox",
-                "value": bool(filters.get("sensor", True)),
-            },
-            {
-                "key": "show_event_list_view",
-                "label": "List View (compact)",
-                "type": "checkbox",
-                "value": bool(list_view),
-            },
-        ],
-    }
-
-
-def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
-    filters = _event_type_filters(client)
-    list_view = _event_list_view_enabled(client)
-    sources = _discover_event_sources(client)
-    if not sources:
-        return []
-    events = _load_events_for_sources(
-        client,
-        sources=sources,
-        start=datetime(1970, 1, 1),
-        end=datetime.now() + timedelta(days=1),
-        limit_per_source=0,
-    )
-    items: List[Dict[str, Any]] = []
-    for idx, event in enumerate(events):
-        event_bucket = _event_type_bucket(event)
-        if not _event_allowed_by_filter(filters, event_bucket):
-            continue
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        event_time = _event_time_display(event.get("ha_time"))
-        source = _text(event.get("source"))
-        area = _text(data.get("area")) or source
-        event_type = _text(event.get("type"))
-        entity_id = _text(event.get("entity_id"))
-        title = _text(event.get("title"))
-        if not title and event_type:
-            title = event_type.replace("_", " ").title()
-        if not title:
-            title = "Awareness Event"
-        subtitle_parts = [event_time]
-        if area:
-            subtitle_parts.append(f"Area: {area}")
-        if entity_id:
-            subtitle_parts.append(f"Entity: {entity_id}")
-        description = _text(event.get("message"))
-        if description and list_view:
-            subtitle_parts.append(f"Summary: {_compact(description, limit=120)}")
-        subtitle = " • ".join([part for part in subtitle_parts if part])
-
-        fields: List[Dict[str, Any]] = []
-        snapshot = _event_snapshot_preview(client, event)
-        snapshot_id = _text(snapshot.get("snapshot_id"))
-        if list_view and snapshot.get("data_url"):
-            fields.append(
-                {
-                    "key": f"snapshot_thumb_{idx}",
-                    "label": "Thumbnail",
-                    "type": "image",
-                    "src": _text(snapshot.get("data_url")),
-                    "alt": f"{title} thumbnail",
-                    "hide_label": True,
-                    "display": "thumbnail",
-                    "max_width": 160,
-                    "max_height": 90,
-                }
-            )
-        elif (not list_view) and snapshot.get("data_url"):
-            fields.append(
-                {
-                    "key": f"snapshot_{idx}",
-                    "label": "Snapshot",
-                    "type": "image",
-                    "src": _text(snapshot.get("data_url")),
-                    "alt": f"{title} snapshot",
-                    "hide_label": True,
-                }
-            )
-        elif snapshot_id:
-            fields.append(
-                {
-                    "key": f"snapshot_status_{idx}",
-                    "label": "Snapshot",
-                    "type": "text" if not list_view else "textarea",
-                    "value": (
-                        f"Stored snapshot unavailable ({snapshot_id})"
-                        if not list_view
-                        else f"Snapshot stored: {snapshot_id}"
-                    ),
-                    "read_only": True,
-                    "hide_label": bool(list_view),
-                }
-            )
-
-        if description and not list_view:
-            fields.append(
-                {
-                    "key": f"description_{idx}",
-                    "label": "",
-                    "type": "textarea",
-                    "value": description,
-                    "read_only": True,
-                    "hide_label": True,
-                }
-            )
-
-        item_id = _text(event.get("id")) or f"event_{idx}_{_slug(_text(event.get('ha_time')) or str(idx))}"
-        items.append(
-            {
-                "id": item_id,
-                "group": "event",
-                "title": title,
-                "subtitle": subtitle,
-                "fields_popup": False,
-                "fields_dropdown": False,
-                "sections_in_dropdown": False,
-                "fields": fields,
-            }
-        )
-    return items
-
-
-def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
-    counts = {
-        "total": 0,
-        "camera": 0,
-        "doorbell": 0,
-        "sensor": 0,
-        "other": 0,
-    }
-    sources = _discover_event_sources(client)
-    if not sources:
-        return {"counts": counts, "source_count": 0, "last_event": "n/a"}
-    events = _load_events_for_sources(
-        client,
-        sources=sources,
-        start=datetime(1970, 1, 1),
-        end=datetime.now() + timedelta(days=1),
-        limit_per_source=0,
-    )
-    for event in events:
-        counts["total"] += 1
-        bucket = _event_type_bucket(event)
-        if bucket in {"camera", "doorbell", "sensor"}:
-            counts[bucket] += 1
-        else:
-            counts["other"] += 1
-    last_event = _event_time_display(events[0].get("ha_time")) if events else "n/a"
-    return {
-        "counts": counts,
-        "source_count": len(sources),
-        "last_event": last_event,
     }
 
 
@@ -3557,22 +2846,6 @@ def _announcement_tts_fields(
     players_description: str,
 ) -> List[Dict[str, Any]]:
     return [
-        *build_announcement_tts_fields(
-            backend=_text(rule.get("tts_backend") or DEFAULT_ANNOUNCEMENT_TTS_BACKEND),
-            model=_text(rule.get("tts_model")),
-            voice=_text(rule.get("tts_voice")),
-            homeassistant_tts_entity=_text(rule.get("tts_entity") or "tts.piper"),
-            homeassistant_tts_options=_choices_from_pairs(
-                catalog.get("tts") or [],
-                placeholder="(Select Home Assistant TTS entity)",
-                current_value=_text(rule.get("tts_entity") or "tts.piper"),
-            ),
-            default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-            backend_description="Choose Home Assistant API, Wyoming, or a built-in Tater voice.",
-            model_description="Shown when the selected backend has selectable models.",
-            voice_description="Shown when the selected backend has selectable voices.",
-            homeassistant_tts_entity_description="Used only for the Home Assistant API backend.",
-        ),
         {
             "key": "players",
             "label": "Media Players",
@@ -3587,6 +2860,7 @@ def _announcement_tts_fields(
     ]
 
 
+
 def _announcement_tts_add_fields(
     catalog: Dict[str, List[Tuple[str, str]]],
     *,
@@ -3595,8 +2869,6 @@ def _announcement_tts_add_fields(
 ) -> List[Dict[str, Any]]:
     fields = _announcement_tts_fields(
         {
-            "tts_backend": DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-            "tts_entity": "tts.piper",
             "players": [],
         },
         catalog,
@@ -3995,11 +3267,11 @@ def _doorbell_form(
                 ],
             },
             {
-                "label": "TTS",
+                "label": "Playback",
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Select one or more media_player entities for doorbell TTS.",
+                    players_description="Speak the shared announcement voice on selected media_player entities.",
                 ),
             },
             {
@@ -4114,11 +3386,11 @@ def _entry_sensor_form(
         ],
         "sections": [
             {
-                "label": "TTS (open only)",
+                "label": "Playback (open only)",
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When sensor opens, speak an alert on selected media_player entities.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected media_player entities.",
                 ),
             },
             {
@@ -4248,7 +3520,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Select one or more media_player entities for doorbell/entry sensor TTS.",
+        players_description="Speak using the shared announcement voice on selected media_player entities.",
     )
     return {
         "kind": "settings_manager",
@@ -4727,13 +3999,6 @@ def _build_rule_from_values(
                 False,
             ),
             "device_services": _normalize_device_services(device_services_value),
-            "tts_backend": normalize_announcement_tts_backend(
-                _value(values, payload, "tts_backend", previous.get("tts_backend", DEFAULT_ANNOUNCEMENT_TTS_BACKEND)),
-                default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-            ),
-            "tts_model": _text(_value(values, payload, "tts_model", previous.get("tts_model", ""))),
-            "tts_voice": _text(_value(values, payload, "tts_voice", previous.get("tts_voice", ""))),
-            "tts_entity": _text(_value(values, payload, "tts_entity", previous.get("tts_entity", "tts.piper"))),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
                 _value(values, payload, "notifications", previous.get("notifications", notifications_default)),
@@ -4810,8 +4075,7 @@ def _build_rule_from_values(
             raise ValueError("At least one trigger entity is required for doorbell rules.")
         if not base["players"]:
             raise ValueError("At least one media player is required for doorbell rules.")
-        if base["tts_backend"] == "homeassistant_api" and not base["tts_entity"]:
-            raise ValueError("Home Assistant TTS entity is required when Home Assistant API TTS is selected.")
+
         if not base["area"]:
             base["area"] = "front door"
     elif kind == "entry_sensor":
@@ -4820,8 +4084,7 @@ def _build_rule_from_values(
         base["sensor_entity"] = base["trigger_entities"][0]
         if base["sensor_type"] not in {"door", "window", "garage"}:
             base["sensor_type"] = "door"
-        if base["players"] and base["tts_backend"] == "homeassistant_api" and not base["tts_entity"]:
-            raise ValueError("Home Assistant TTS entity is required when Home Assistant API TTS is selected.")
+
         if not base["area"]:
             base["area"] = base["sensor_type"]
     elif kind == "brief":
