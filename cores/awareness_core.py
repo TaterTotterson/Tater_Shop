@@ -20,6 +20,13 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import dispatch_notification
+from speech_settings import (
+    DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    build_announcement_tts_fields,
+    get_speech_settings as get_shared_speech_settings,
+    normalize_announcement_tts_backend,
+)
+from speech_tts import speak_homeassistant_media_players
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
 __version__ = "3.1.3"
@@ -686,6 +693,12 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_to_state": "on",
                 "trigger_attribute": "",
                 "trigger_attribute_value": "",
+                "tts_backend": normalize_announcement_tts_backend(
+                    raw.get("tts_backend"),
+                    default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+                ),
+                "tts_model": _text(raw.get("tts_model")),
+                "tts_voice": _text(raw.get("tts_voice")),
                 "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Doorbell"),
@@ -719,6 +732,12 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "trigger_entities": trigger_entities,
                 "trigger_entity": trigger_entities[0] if trigger_entities else "",
                 "trigger_to_state": _text(raw.get("trigger_to_state")),
+                "tts_backend": normalize_announcement_tts_backend(
+                    raw.get("tts_backend"),
+                    default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+                ),
+                "tts_model": _text(raw.get("tts_model")),
+                "tts_voice": _text(raw.get("tts_voice")),
                 "tts_entity": _text(raw.get("tts_entity") or "tts.piper"),
                 "players": _normalize_players(raw.get("players")),
                 "title": _text(raw.get("title") or "Entry Sensor"),
@@ -1758,267 +1777,6 @@ async def _notify_homeassistant(
     return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "homeassistant notifier failed"}
 
 
-def _tts_speak_sync(*, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
-    if not players:
-        return
-    payload_template = {"entity_id": tts_entity, "message": message, "cache": True}
-    headers = _ha_headers(token)
-    for player in players:
-        payload = dict(payload_template)
-        payload["media_player_entity_id"] = player
-        primary = requests.post(f"{ha_base}/api/services/tts/speak", headers=headers, json=payload, timeout=15)
-        if primary.status_code < 400:
-            continue
-        fallback = requests.post(f"{ha_base}/api/services/tts/piper_say", headers=headers, json=payload, timeout=15)
-        if fallback.status_code >= 400:
-            raise RuntimeError(f"TTS failed (speak:{primary.status_code}, piper_say:{fallback.status_code})")
-
-
-async def _tts_speak(*, ha_base: str, token: str, tts_entity: str, players: List[str], message: str) -> None:
-    await asyncio.to_thread(
-        _tts_speak_sync,
-        ha_base=ha_base,
-        token=token,
-        tts_entity=tts_entity,
-        players=players,
-        message=message,
-    )
-
-
-def _ha_set_input_text_sync(ha_base: str, token: str, entity_id: str, value: str) -> None:
-    entity = _text(entity_id)
-    if not entity:
-        return
-    text_value = str(value or "")
-    max_len = _ha_get_input_text_max_len_sync(ha_base, token, entity)
-    if max_len is not None and len(text_value) > max_len:
-        text_value = text_value[:max_len]
-        logger.info(
-            "[awareness] truncated input_text payload for %s to %s chars",
-            entity,
-            max_len,
-        )
-    url = f"{ha_base}/api/services/input_text/set_value"
-    payload = {"entity_id": entity, "value": text_value}
-    resp = requests.post(url, headers=_ha_headers(token), json=payload, timeout=10)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"input_text.set_value HTTP {resp.status_code}: {resp.text[:200]}")
-
-
-async def _ha_set_input_text(ha_base: str, token: str, entity_id: str, value: str) -> None:
-    await asyncio.to_thread(_ha_set_input_text_sync, ha_base, token, entity_id, value)
-
-
-def _ha_get_input_text_max_len_sync(ha_base: str, token: str, entity_id: str) -> Optional[int]:
-    entity = _text(entity_id)
-    if not entity:
-        return None
-    try:
-        resp = requests.get(
-            f"{ha_base}/api/states/{quote(entity, safe='')}",
-            headers=_ha_headers(token, json_content=False),
-            timeout=10,
-        )
-        if resp.status_code >= 400:
-            return None
-        payload = resp.json() or {}
-        attrs = payload.get("attributes") if isinstance(payload, dict) else {}
-        if not isinstance(attrs, dict):
-            return None
-        for key in ("max", "max_length", "maxlen"):
-            raw = attrs.get(key)
-            try:
-                value = int(raw)
-            except Exception:
-                continue
-            if 1 <= value <= 10000:
-                return value
-    except Exception:
-        return None
-    return None
-
-
-def _ha_fetch_history_sync(
-    ha_base: str,
-    token: str,
-    entities: List[str],
-    start: datetime,
-    end: datetime,
-) -> Dict[str, List[Dict[str, Any]]]:
-    clean_entities = [entity for entity in entities if _text(entity)]
-    if not clean_entities:
-        return {}
-    start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
-    end_iso = end.strftime("%Y-%m-%dT%H:%M:%S")
-    url = f"{ha_base}/api/history/period/{start_iso}"
-    params = {"filter_entity_id": ",".join(clean_entities), "end_time": end_iso}
-    resp = requests.get(url, headers=_ha_headers(token, json_content=False), params=params, timeout=15)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"history HTTP {resp.status_code}: {resp.text[:200]}")
-    payload = resp.json() or []
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    for series in payload:
-        if not isinstance(series, list) or not series:
-            continue
-        entity_id = _text((series[0] or {}).get("entity_id"))
-        if entity_id:
-            out[entity_id] = series
-    return out
-
-
-async def _ha_fetch_history(
-    ha_base: str,
-    token: str,
-    entities: List[str],
-    start: datetime,
-    end: datetime,
-) -> Dict[str, List[Dict[str, Any]]]:
-    return await asyncio.to_thread(_ha_fetch_history_sync, ha_base, token, entities, start, end)
-
-
-def _extract_numeric(series: List[Dict[str, Any]]) -> List[float]:
-    values: List[float] = []
-    for item in series or []:
-        state = _text((item or {}).get("state"))
-        if not state or state in {"unknown", "unavailable"}:
-            continue
-        try:
-            values.append(float(state))
-        except Exception:
-            continue
-    return values
-
-
-def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
-    if not values:
-        return None
-    return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
-
-
-async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
-    del llm_client
-    camera = _text(rule.get("camera_entity"))
-    area = _text(rule.get("area")) or "camera"
-    provider = _rule_provider(rule)
-    if not camera:
-        raise ValueError("Camera rule is missing camera_entity.")
-    vision = get_shared_vision_settings(
-        default_api_base="http://127.0.0.1:1234",
-        default_model="qwen2.5-vl-7b-instruct",
-    )
-    cooldown_seconds = _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400)
-    notification_cooldown_seconds = _as_int(
-        rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
-    )
-    if not _acquire_cooldown(_camera_cooldown_key(camera), cooldown_seconds):
-        return {"ok": True, "summary": f"Skipped '{rule.get('name')}' due to cooldown.", "skipped": "cooldown"}
-    used_fallback = False
-    jpeg: bytes = b""
-    try:
-        if provider == "unifi_protect":
-            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
-        else:
-            ha = _ha_config()
-            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
-        summary = await _vision_describe(
-            image_bytes=jpeg,
-            api_base=_text(vision.get("api_base")),
-            model=_text(vision.get("model")),
-            api_key=_text(vision.get("api_key")),
-            query=_text(rule.get("query")),
-            ignore_vehicles=_bool(rule.get("ignore_vehicles"), False),
-            mode="camera",
-        )
-    except Exception:
-        logger.exception("[awareness] camera snapshot/vision failed for %s", camera)
-        summary = "Motion event detected, but camera analysis was unavailable."
-        used_fallback = True
-    summary = _compact(summary) or "Motion event detected."
-    if _is_nothing_notable_summary(summary):
-        _clear_cooldown(_camera_cooldown_key(camera))
-        return {
-            "ok": True,
-            "summary": "Nothing notable.",
-            "camera": camera,
-            "area": area,
-            "provider": provider,
-            "vision_fallback_used": used_fallback,
-            "skipped": "nothing_notable",
-            "notification": {"ok": True, "sent_count": 0, "skipped": "nothing_notable"},
-        }
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
-    event_payload = {
-        "source": _slug(area),
-        "title": f"{area.title()} motion",
-        "type": "camera_motion",
-        "message": summary,
-        "entity_id": camera,
-        "ha_time": _now_iso(),
-        "level": "info",
-        "data": {
-            "area": area,
-            "reason": reason,
-            "trigger_entity": _text(event.get("entity_id")),
-            "provider": provider,
-        },
-    }
-    if snapshot_store.get("stored"):
-        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    elif snapshot_store.get("reason"):
-        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    _append_event(redis_client, source=area, payload=event_payload)
-    device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-    api_notification = _bool(rule.get("api_notification"), False)
-    notify_requested = bool(device_services or api_notification)
-    notify_cooldown_key = _camera_notify_cooldown_key(camera)
-    notify_cooldown_claimed = False
-    if (
-        notify_requested
-        and notification_cooldown_seconds > 0
-    ):
-        notify_cooldown_claimed = _acquire_cooldown(notify_cooldown_key, notification_cooldown_seconds)
-    if notify_requested and notification_cooldown_seconds > 0 and not notify_cooldown_claimed:
-        notify_result = {
-            "ok": True,
-            "sent_count": 0,
-            "skipped": "notification_cooldown",
-            "notification_cooldown_seconds": notification_cooldown_seconds,
-        }
-    else:
-        notify_result = await _notify_homeassistant(
-            title=_text(rule.get("title") or "Camera Event"),
-            message=summary,
-            priority=_text(rule.get("priority") or "high"),
-            api_notification=api_notification,
-            device_services=device_services,
-            origin={
-                "platform": "awareness_core",
-                "scope": "camera_rule",
-                "rule_id": rule.get("id"),
-                "camera": camera,
-                "area": area,
-                "provider": provider,
-            },
-        )
-        if notify_cooldown_claimed and not (
-            notify_result.get("ok") and int(notify_result.get("sent_count") or 0) > 0
-        ):
-            _clear_cooldown(notify_cooldown_key)
-    return {
-        "ok": True,
-        "summary": summary,
-        "camera": camera,
-        "area": area,
-        "provider": provider,
-        "vision_fallback_used": used_fallback,
-        "notification": notify_result,
-    }
-
-
 async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
     del llm_client
     camera = _text(rule.get("camera_entity"))
@@ -2031,6 +1789,12 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         default_model="qwen2.5-vl-7b-instruct",
     )
     players = _normalize_players(rule.get("players"))
+    tts_backend = normalize_announcement_tts_backend(
+        rule.get("tts_backend"),
+        default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    )
+    tts_model = _text(rule.get("tts_model"))
+    tts_voice = _text(rule.get("tts_voice"))
     tts_entity = _text(rule.get("tts_entity") or "tts.piper")
     jpeg: bytes = b""
     try:
@@ -2053,15 +1817,29 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         logger.exception("[awareness] doorbell snapshot/vision failed for %s", camera)
         spoken_line = "Someone is at the door."
     snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+    tts_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "no_players", "backend": tts_backend}
     if players:
-        ha = _ha_config()
-        await _tts_speak(
-            ha_base=ha["base"],
-            token=ha["token"],
-            tts_entity=tts_entity,
-            players=players,
-            message=spoken_line,
-        )
+        try:
+            ha = _ha_config()
+            shared_speech = get_shared_speech_settings()
+            tts_result = await speak_homeassistant_media_players(
+                text=spoken_line,
+                backend=tts_backend,
+                ha_base=ha["base"],
+                token=ha["token"],
+                players=players,
+                public_base_url=_text(shared_speech.get("tts_public_base_url")),
+                tts_entity=tts_entity,
+                model=tts_model,
+                voice=tts_voice,
+                wyoming_host=_text(shared_speech.get("wyoming_tts_host")),
+                wyoming_port=shared_speech.get("wyoming_tts_port"),
+                wyoming_voice=_text(shared_speech.get("wyoming_tts_voice")),
+                default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+            )
+        except Exception as exc:
+            logger.warning("[awareness] doorbell TTS failed for %s: %s", camera, exc)
+            tts_result = {"ok": False, "sent_count": 0, "error": str(exc), "backend": tts_backend}
     event_payload = {
         "source": _slug(area),
         "title": "Doorbell",
@@ -2073,7 +1851,10 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         "data": {
             "area": area,
             "players": players,
-            "tts_entity": tts_entity,
+            "tts_backend": tts_backend,
+            "tts_model": tts_model,
+            "tts_voice": tts_voice,
+            "tts_entity": tts_entity if tts_backend == "homeassistant_api" else "",
             "reason": reason,
             "trigger_entity": _text(event.get("entity_id")),
             "provider": provider,
@@ -2114,8 +1895,10 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         "area": area,
         "provider": provider,
         "players": players,
+        "tts": tts_result,
         "notification": notify_result,
     }
+
 
 
 async def _execute_entry_sensor_rule(
@@ -2140,6 +1923,13 @@ async def _execute_entry_sensor_rule(
     spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
+    tts_backend = normalize_announcement_tts_backend(
+        rule.get("tts_backend"),
+        default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    )
+    tts_model = _text(rule.get("tts_model"))
+    tts_voice = _text(rule.get("tts_voice"))
+    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
     snapshot_store: Dict[str, Any] = {}
     if camera:
         try:
@@ -2169,6 +1959,10 @@ async def _execute_entry_sensor_rule(
             "new_state": _text((new_state or {}).get("state")),
             "old_state": _text((old_state or {}).get("state")),
             "provider": provider,
+            "tts_backend": tts_backend,
+            "tts_model": tts_model,
+            "tts_voice": tts_voice,
+            "tts_entity": tts_entity if tts_backend == "homeassistant_api" else "",
         },
     }
     if camera:
@@ -2183,26 +1977,34 @@ async def _execute_entry_sensor_rule(
         event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
     players = _normalize_players(rule.get("players"))
-    tts_entity = _text(rule.get("tts_entity") or "tts.piper")
     tts_result: Dict[str, Any] = {
         "ok": True,
         "sent_count": 0,
         "skipped": "open_only" if action_token != "open" else "no_players",
+        "backend": tts_backend,
     }
     if action_token == "open" and players:
         try:
             ha = _ha_config()
-            await _tts_speak(
+            shared_speech = get_shared_speech_settings()
+            tts_result = await speak_homeassistant_media_players(
+                text=spoken_line,
+                backend=tts_backend,
                 ha_base=ha["base"],
                 token=ha["token"],
-                tts_entity=tts_entity,
                 players=players,
-                message=spoken_line,
+                public_base_url=_text(shared_speech.get("tts_public_base_url")),
+                tts_entity=tts_entity,
+                model=tts_model,
+                voice=tts_voice,
+                wyoming_host=_text(shared_speech.get("wyoming_tts_host")),
+                wyoming_port=shared_speech.get("wyoming_tts_port"),
+                wyoming_voice=_text(shared_speech.get("wyoming_tts_voice")),
+                default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
             )
-            tts_result = {"ok": True, "sent_count": len(players)}
         except Exception as exc:
             logger.warning("[awareness] entry sensor TTS failed for %s: %s", entity_id, exc)
-            tts_result = {"ok": False, "sent_count": 0, "error": str(exc)}
+            tts_result = {"ok": False, "sent_count": 0, "error": str(exc), "backend": tts_backend}
     notify_result: Dict[str, Any]
     if action_token != "open":
         notify_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
@@ -3748,6 +3550,73 @@ def _players_text(value: Any) -> str:
     return "\n".join(_normalize_players(value))
 
 
+def _announcement_tts_fields(
+    rule: Dict[str, Any],
+    catalog: Dict[str, List[Tuple[str, str]]],
+    *,
+    players_description: str,
+) -> List[Dict[str, Any]]:
+    return [
+        *build_announcement_tts_fields(
+            backend=_text(rule.get("tts_backend") or DEFAULT_ANNOUNCEMENT_TTS_BACKEND),
+            model=_text(rule.get("tts_model")),
+            voice=_text(rule.get("tts_voice")),
+            homeassistant_tts_entity=_text(rule.get("tts_entity") or "tts.piper"),
+            homeassistant_tts_options=_choices_from_pairs(
+                catalog.get("tts") or [],
+                placeholder="(Select Home Assistant TTS entity)",
+                current_value=_text(rule.get("tts_entity") or "tts.piper"),
+            ),
+            default_backend=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+            backend_description="Choose Home Assistant API, Wyoming, or a built-in Tater voice.",
+            model_description="Shown when the selected backend has selectable models.",
+            voice_description="Shown when the selected backend has selectable voices.",
+            homeassistant_tts_entity_description="Used only for the Home Assistant API backend.",
+        ),
+        {
+            "key": "players",
+            "label": "Media Players",
+            "type": "multiselect",
+            "description": players_description,
+            "options": _multiselect_choices_from_pairs(
+                catalog.get("media_players") or [],
+                current_values=rule.get("players"),
+            ),
+            "value": _normalize_players(rule.get("players")),
+        },
+    ]
+
+
+def _announcement_tts_add_fields(
+    catalog: Dict[str, List[Tuple[str, str]]],
+    *,
+    show_when: Dict[str, Any],
+    players_description: str,
+) -> List[Dict[str, Any]]:
+    fields = _announcement_tts_fields(
+        {
+            "tts_backend": DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+            "tts_entity": "tts.piper",
+            "players": [],
+        },
+        catalog,
+        players_description=players_description,
+    )
+    wrapped: List[Dict[str, Any]] = []
+    for field in fields:
+        field_copy = dict(field)
+        show_when_all: List[Dict[str, Any]] = [dict(show_when)]
+        existing_show = field_copy.pop("show_when", None)
+        if isinstance(existing_show, dict):
+            show_when_all.append(existing_show)
+        existing_show_all = field_copy.pop("show_when_all", None)
+        if isinstance(existing_show_all, list):
+            show_when_all.extend([cond for cond in existing_show_all if isinstance(cond, dict)])
+        field_copy["show_when_all"] = show_when_all
+        wrapped.append(field_copy)
+    return wrapped
+
+
 def _rule_subtitle(rule: Dict[str, Any]) -> str:
     kind = _text(rule.get("kind"))
     enabled = "Enabled" if _bool(rule.get("enabled"), True) else "Disabled"
@@ -4072,18 +3941,9 @@ def _doorbell_form(
         rules,
         current_value=_text(rule.get("area")),
     )
-    tts_options = _choices_from_pairs(
-        catalog.get("tts") or [],
-        placeholder="(Select TTS entity)",
-        current_value=_text(rule.get("tts_entity")),
-    )
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
-    )
-    media_player_options = _multiselect_choices_from_pairs(
-        catalog.get("media_players") or [],
-        current_values=rule.get("players"),
     )
     return {
         "id": rule["id"],
@@ -4136,23 +3996,11 @@ def _doorbell_form(
             },
             {
                 "label": "TTS",
-                "fields": [
-                    {
-                        "key": "tts_entity",
-                        "label": "TTS Entity",
-                        "type": "select",
-                        "options": tts_options,
-                        "value": _text(rule.get("tts_entity")),
-                    },
-                    {
-                        "key": "players",
-                        "label": "Media Players",
-                        "type": "multiselect",
-                        "description": "Select one or more media_player entities for doorbell TTS.",
-                        "options": media_player_options,
-                        "value": _normalize_players(rule.get("players")),
-                    },
-                ],
+                "fields": _announcement_tts_fields(
+                    rule,
+                    catalog,
+                    players_description="Select one or more media_player entities for doorbell TTS.",
+                ),
             },
             {
                 "label": "Notifications",
@@ -4184,6 +4032,7 @@ def _doorbell_form(
     }
 
 
+
 def _entry_sensor_form(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
@@ -4209,15 +4058,6 @@ def _entry_sensor_form(
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
-    )
-    tts_options = _choices_from_pairs(
-        catalog.get("tts") or [],
-        placeholder="(Select TTS entity)",
-        current_value=_text(rule.get("tts_entity")),
-    )
-    media_player_options = _multiselect_choices_from_pairs(
-        catalog.get("media_players") or [],
-        current_values=rule.get("players"),
     )
     return {
         "id": rule["id"],
@@ -4275,23 +4115,11 @@ def _entry_sensor_form(
         "sections": [
             {
                 "label": "TTS (open only)",
-                "fields": [
-                    {
-                        "key": "tts_entity",
-                        "label": "TTS Entity",
-                        "type": "select",
-                        "options": tts_options,
-                        "value": _text(rule.get("tts_entity") or "tts.piper"),
-                    },
-                    {
-                        "key": "players",
-                        "label": "Media Players",
-                        "type": "multiselect",
-                        "description": "When sensor opens, speak an alert on selected media_player entities.",
-                        "options": media_player_options,
-                        "value": _normalize_players(rule.get("players")),
-                    },
-                ],
+                "fields": _announcement_tts_fields(
+                    rule,
+                    catalog,
+                    players_description="When sensor opens, speak an alert on selected media_player entities.",
+                ),
             },
             {
                 "label": "Notifications",
@@ -4323,206 +4151,10 @@ def _entry_sensor_form(
                         "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
                 ],
-            }
-        ],
-    }
-
-
-def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
-    input_text_options = _choices_from_pairs(
-        catalog.get("input_text") or [],
-        placeholder="(None)",
-        current_value=_text(rule.get("input_text_entity")),
-    )
-    weather_temp_options = _choices_from_pairs(
-        catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
-        placeholder="(Select temperature sensor)",
-        current_value=_text(rule.get("weather_temp_entity")),
-    )
-    weather_wind_options = _choices_from_pairs(
-        catalog.get("weather_wind") or catalog.get("weather_sensors") or [],
-        placeholder="(Select wind sensor)",
-        current_value=_text(rule.get("weather_wind_entity")),
-    )
-    weather_rain_options = _choices_from_pairs(
-        catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
-        placeholder="(Select rain sensor)",
-        current_value=_text(rule.get("weather_rain_entity")),
-    )
-    show_events = {"source_key": "brief_kind", "equals": "events_query_brief"}
-    show_weather = {"source_key": "brief_kind", "equals": "weather_brief"}
-    show_zen = {"source_key": "brief_kind", "equals": "zen_greeting"}
-    show_alan = {"source_key": "brief_kind", "equals": "alan_watts_greeting"}
-    quote_history_preview = "\n".join(_normalize_quote_history(rule.get("quote_history"), limit=5))
-    return {
-        "id": rule["id"],
-        "group": "brief",
-        "title": _text(rule.get("name")) or "Brief job",
-        "subtitle": _rule_subtitle(rule),
-        "save_action": "awareness_save_rule",
-        "remove_action": "awareness_remove_rule",
-        "run_action": "awareness_run_now",
-        "run_label": "Run Now",
-        "remove_confirm": "Remove this brief job?",
-        "fields": [
-            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
-            {"key": "name", "label": "Job Name", "type": "text", "value": _text(rule.get("name"))},
-            {
-                "key": "brief_kind",
-                "label": "Brief Type",
-                "type": "select",
-                "options": [
-                    {"value": "events_query_brief", "label": "Events Brief"},
-                    {"value": "weather_brief", "label": "Weather Brief"},
-                    {"value": "zen_greeting", "label": "Zen Greeting"},
-                    {"value": "alan_watts_greeting", "label": "Alan Watts Greeting"},
-                ],
-                "value": _text(rule.get("brief_kind") or "events_query_brief"),
-            },
-            {
-                "key": "interval_minutes",
-                "label": "Interval (minutes)",
-                "type": "number",
-                "value": _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080),
-            },
-            {
-                "key": "input_text_entity",
-                "label": "Output input_text (optional)",
-                "type": "select",
-                "options": input_text_options,
-                "value": _text(rule.get("input_text_entity")),
-            },
-        ],
-        "sections": [
-            {
-                "label": "Events Brief",
-                "fields": [
-                    {
-                        "key": "timeframe",
-                        "label": "Timeframe",
-                        "type": "select",
-                        "options": [
-                            {"value": "today", "label": "Today"},
-                            {"value": "yesterday", "label": "Yesterday"},
-                            {"value": "last_24h", "label": "Last 24 Hours"},
-                        ],
-                        "value": _text(rule.get("timeframe") or "today"),
-                        "show_when": show_events,
-                    },
-                    {
-                        "key": "area",
-                        "label": "Area Source (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("area")),
-                        "show_when": show_events,
-                    },
-                    {
-                        "key": "query",
-                        "label": "Query Hint (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("query")),
-                        "show_when": show_events,
-                    },
-                ],
-            },
-            {
-                "label": "Weather Brief",
-                "fields": [
-                    {
-                        "key": "hours",
-                        "label": "Hours",
-                        "type": "number",
-                        "value": _as_int(rule.get("hours"), 12, minimum=1, maximum=72),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_temp_entity",
-                        "label": "Temperature Sensor",
-                        "type": "select",
-                        "options": weather_temp_options,
-                        "value": _text(rule.get("weather_temp_entity")),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_wind_entity",
-                        "label": "Wind Sensor",
-                        "type": "select",
-                        "options": weather_wind_options,
-                        "value": _text(rule.get("weather_wind_entity")),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_rain_entity",
-                        "label": "Rain Sensor",
-                        "type": "select",
-                        "options": weather_rain_options,
-                        "value": _text(rule.get("weather_rain_entity")),
-                        "show_when": show_weather,
-                    }
-                ],
-            },
-            {
-                "label": "Zen Greeting",
-                "fields": [
-                    {
-                        "key": "include_date",
-                        "label": "Include Date",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("include_date"), False),
-                        "show_when": show_zen,
-                    },
-                    {
-                        "key": "tone",
-                        "label": "Tone",
-                        "type": "text",
-                        "value": _text(rule.get("tone") or "zen"),
-                        "show_when": show_zen,
-                    },
-                    {
-                        "key": "prompt_hint",
-                        "label": "Prompt Hint",
-                        "type": "text",
-                        "value": _text(rule.get("prompt_hint")),
-                        "show_when": show_zen,
-                    },
-                    {
-                        "key": "max_chars",
-                        "label": "Max Characters",
-                        "type": "number",
-                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
-                        "show_when": show_zen,
-                    },
-                ],
-            },
-            {
-                "label": "Alan Watts Greeting",
-                "fields": [
-                    {
-                        "key": "prompt_hint",
-                        "label": "Prompt Hint",
-                        "type": "text",
-                        "value": _text(rule.get("prompt_hint")),
-                        "show_when": show_alan,
-                    },
-                    {
-                        "key": "max_chars",
-                        "label": "Max Characters",
-                        "type": "number",
-                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
-                        "show_when": show_alan,
-                    },
-                    {
-                        "key": "quote_history_preview",
-                        "label": "Recent Quotes (last 5, auto)",
-                        "type": "textarea",
-                        "read_only": True,
-                        "value": quote_history_preview,
-                        "show_when": show_alan,
-                    },
-                ],
             },
         ],
     }
+
 
 
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
@@ -4567,7 +4199,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         current_triggers=[],
         doorbell=True,
     )
-    tts_options = _choices_from_pairs(catalog.get("tts") or [], placeholder="(Select TTS entity)")
     input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
     weather_temp_options = _choices_from_pairs(
         catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
@@ -4588,9 +4219,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
-    )
-    media_player_options = _multiselect_choices_from_pairs(
-        catalog.get("media_players") or [],
     )
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
@@ -4617,6 +4245,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         {"source_key": "kind", "equals": "brief"},
         {"source_key": "brief_kind", "any_of": ["zen_greeting", "alan_watts_greeting"]},
     ]
+    add_tts_fields = _announcement_tts_add_fields(
+        catalog,
+        show_when=show_doorbell_or_entry,
+        players_description="Select one or more media_player entities for doorbell/entry sensor TTS.",
+    )
     return {
         "kind": "settings_manager",
         "title": f"Awareness Rule Manager ({_provider_label(active_provider)} Events)",
@@ -4836,23 +4469,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "value": [],
                     "show_when": show_camera_or_doorbell_or_entry,
                 },
-                {
-                    "key": "tts_entity",
-                    "label": "TTS Entity",
-                    "type": "select",
-                    "options": tts_options,
-                    "value": "",
-                    "show_when": show_doorbell_or_entry,
-                },
-                {
-                    "key": "players",
-                    "label": "Media Players",
-                    "type": "multiselect",
-                    "description": "Select one or more media_player entities for doorbell/entry sensor TTS.",
-                    "options": media_player_options,
-                    "value": [],
-                    "show_when": show_doorbell_or_entry,
-                },
+                *add_tts_fields,
                 {
                     "key": "brief_kind",
                     "label": "Brief Type",
@@ -5110,6 +4727,12 @@ def _build_rule_from_values(
                 False,
             ),
             "device_services": _normalize_device_services(device_services_value),
+            "tts_backend": normalize_announcement_tts_backend(
+                _value(values, payload, "tts_backend", previous.get("tts_backend", DEFAULT_ANNOUNCEMENT_TTS_BACKEND)),
+                default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+            ),
+            "tts_model": _text(_value(values, payload, "tts_model", previous.get("tts_model", ""))),
+            "tts_voice": _text(_value(values, payload, "tts_voice", previous.get("tts_voice", ""))),
             "tts_entity": _text(_value(values, payload, "tts_entity", previous.get("tts_entity", "tts.piper"))),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
@@ -5187,6 +4810,8 @@ def _build_rule_from_values(
             raise ValueError("At least one trigger entity is required for doorbell rules.")
         if not base["players"]:
             raise ValueError("At least one media player is required for doorbell rules.")
+        if base["tts_backend"] == "homeassistant_api" and not base["tts_entity"]:
+            raise ValueError("Home Assistant TTS entity is required when Home Assistant API TTS is selected.")
         if not base["area"]:
             base["area"] = "front door"
     elif kind == "entry_sensor":
@@ -5195,6 +4820,8 @@ def _build_rule_from_values(
         base["sensor_entity"] = base["trigger_entities"][0]
         if base["sensor_type"] not in {"door", "window", "garage"}:
             base["sensor_type"] = "door"
+        if base["players"] and base["tts_backend"] == "homeassistant_api" and not base["tts_entity"]:
+            raise ValueError("Home Assistant TTS entity is required when Home Assistant API TTS is selected.")
         if not base["area"]:
             base["area"] = base["sensor_type"]
     elif kind == "brief":
