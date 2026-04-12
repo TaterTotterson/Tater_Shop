@@ -1,13 +1,16 @@
 # verba/broadcast.py
-import asyncio
+import json
 import logging
 import re
-from typing import Any, Dict, List, Tuple
-from dotenv import load_dotenv
-import requests
+from typing import Any, Dict, List
 
+from dotenv import load_dotenv
+
+from announcement_targets import build_announcement_target_options, normalize_announcement_targets
+from helpers import get_tater_name, redis_client
+from speech_settings import DEFAULT_ANNOUNCEMENT_TTS_ENTITY, get_speech_settings
+from speech_tts import speak_announcement_targets
 from verba_base import ToolVerba
-from helpers import redis_client, get_tater_name
 from verba_result import action_failure, action_success
 
 load_dotenv()
@@ -16,43 +19,28 @@ logger.setLevel(logging.INFO)
 
 
 class BroadcastPlugin(ToolVerba):
-    """
-    Broadcast a spoken announcement via Home Assistant TTS to up to 5 configured playback devices.
-    Mimics the doorbell_alert TTS behavior (tts/speak with fallback to tts/piper_say).
-    """
+    """Broadcast a spoken announcement to configured Home Assistant and Voice Core targets."""
+
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.3"
+    version = "1.1.6"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
-        "Send a one-time whole-house spoken announcement using Home Assistant TTS on the configured devices. "
-        "Use ONLY when the user explicitly asks to broadcast/announce/page an audio message (e.g., 'announce dinner is ready', "
-        "'broadcast this', 'page the house') and provides what to say."
+        "Send a one-time whole-house spoken announcement using the global announcement TTS settings on the configured targets. "
+        "Use ONLY when the user explicitly asks to broadcast/announce/page an audio message and provides what to say."
     )
-    verba_dec = "Send a one-time spoken announcement to your Home Assistant media players."
+    verba_dec = "Send a one-time spoken announcement to your configured broadcast targets."
     pretty_name = "Broadcast Announcement"
     settings_category = "Broadcast"
 
     required_settings = {
-        "TTS_ENTITY": {
-            "label": "TTS Entity",
-            "type": "string",
-            "default": "tts.piper",
-            "description": "TTS entity to use (e.g., tts.piper)."
-        },
-
-        # ---- Playback targets (media_player.*) ----
-        "DEVICE_1": {"label": "Broadcast device #1", "type": "string", "default": "", "description": "media_player.*"},
-        "DEVICE_2": {"label": "Broadcast device #2", "type": "string", "default": "", "description": "media_player.*"},
-        "DEVICE_3": {"label": "Broadcast device #3", "type": "string", "default": "", "description": "media_player.*"},
-        "DEVICE_4": {"label": "Broadcast device #4", "type": "string", "default": "", "description": "media_player.*"},
-        "DEVICE_5": {"label": "Broadcast device #5", "type": "string", "default": "", "description": "media_player.*"},
-        "REQUEST_TIMEOUT_SECONDS": {
-            "label": "Request Timeout (seconds)",
-            "type": "number",
-            "default": 15,
-            "description": "Timeout for each Home Assistant TTS service call.",
+        "TARGETS": {
+            "label": "Broadcast Targets",
+            "type": "multiselect",
+            "default": [],
+            "description": "Choose Home Assistant media players and/or Voice Core satellites.",
+            "options": [],
         },
     }
 
@@ -61,15 +49,10 @@ class BroadcastPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ["homeassistant", "homekit", "xbmc", "webui", "macos", "discord", "telegram", "matrix", "irc"]
+    platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'macos', 'discord', 'telegram', 'matrix', 'irc']
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
-
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Settings / HA
-    # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _decode_redis_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
@@ -88,46 +71,54 @@ class BroadcastPlugin(ToolVerba):
         )
         return self._decode_redis_map(raw)
 
-    @staticmethod
-    def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-        try:
-            parsed = int(float(value))
-        except Exception:
-            parsed = int(default)
-        if parsed < minimum:
-            return minimum
-        if parsed > maximum:
-            return maximum
-        return parsed
+    def _targets(self, settings: dict | None) -> list[str]:
+        values = settings if isinstance(settings, dict) else {}
+        configured = normalize_announcement_targets(values.get("TARGETS"))
+        if configured:
+            return configured
 
-    def _ha_headers(self, token: str) -> dict:
-        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    def _targets(self, s: dict) -> list[str]:
-        ids = [
-            (s.get("DEVICE_1") or "").strip(),
-            (s.get("DEVICE_2") or "").strip(),
-            (s.get("DEVICE_3") or "").strip(),
-            (s.get("DEVICE_4") or "").strip(),
-            (s.get("DEVICE_5") or "").strip(),
+        legacy = [
+            (values.get("DEVICE_1") or "").strip(),
+            (values.get("DEVICE_2") or "").strip(),
+            (values.get("DEVICE_3") or "").strip(),
+            (values.get("DEVICE_4") or "").strip(),
+            (values.get("DEVICE_5") or "").strip(),
         ]
-        out: List[str] = []
-        seen = set()
-        for entity in ids:
-            if not entity:
-                continue
-            if not entity.startswith("media_player."):
-                logger.warning("[broadcast] Ignoring non-media_player target: %s", entity)
-                continue
-            if entity in seen:
-                continue
-            seen.add(entity)
-            out.append(entity)
-        return out
+        return normalize_announcement_targets([item for item in legacy if item.startswith("media_player.")])
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Formatting helpers
-    # ──────────────────────────────────────────────────────────────────────────
+    def webui_settings_fields(self, fields, current_settings=None, redis_client=None, notifier_destination_catalog=None):
+        rows = [dict(field) if isinstance(field, dict) else field for field in list(fields or [])]
+        current = dict(current_settings or {})
+        current_targets = self._targets(current)
+
+        ha_settings = self._decode_redis_map((redis_client or globals().get("redis_client")).hgetall("homeassistant_settings") or {})
+        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
+        target_options = build_announcement_target_options(
+            homeassistant_base_url=ha_base,
+            homeassistant_token=token,
+            current_values=current_targets,
+        )
+
+        for field in rows:
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("key") or "").strip() != "TARGETS":
+                continue
+            field["type"] = "multiselect"
+            field["options"] = list(target_options)
+            field["value"] = list(current_targets)
+            field["default"] = []
+            break
+        return rows
+
+    def webui_prepare_settings_values(self, values=None, redis_client=None):
+        out = dict(values or {})
+        targets = normalize_announcement_targets(out.get("TARGETS"))
+        out["TARGETS"] = json.dumps(targets, ensure_ascii=False)
+        for legacy_key in ("DEVICE_1", "DEVICE_2", "DEVICE_3", "DEVICE_4", "DEVICE_5", "TTS_ENTITY"):
+            out[legacy_key] = ""
+        return out
 
     def _siri_flatten(self, text: str | None) -> str:
         if not text:
@@ -153,7 +144,6 @@ class BroadcastPlugin(ToolVerba):
 
         first, last = get_tater_name()
         max_chars = 220
-
         prompt = (
             f"Your name is {first} {last}. The user wants you to broadcast an announcement.\n\n"
             f"User said: {raw_text}\n\n"
@@ -179,96 +169,19 @@ class BroadcastPlugin(ToolVerba):
             txt = (txt or "").strip().strip('"').strip()
             if txt:
                 return txt[:max_chars]
-        except Exception as e:
-            logger.warning(f"[broadcast] LLM rewrite failed, using raw text: {e}")
+        except Exception as exc:
+            logger.warning("[broadcast] LLM rewrite failed, using raw text: %s", exc)
 
         return raw_text[:max_chars]
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # HA TTS (mimic doorbell_alert)
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def _tts_speak(
-        self,
-        ha_base: str,
-        token: str,
-        tts_entity: str,
-        players: list[str],
-        message: str,
-        timeout_seconds: int,
-    ) -> Tuple[int, List[str]]:
-        """
-        Mimics doorbell_alert:
-          - POST /api/services/tts/speak with entity_id + media_player_entity_id + message + cache
-          - fallback to /api/services/tts/piper_say if speak fails
-        Speaks per-player for max compatibility.
-        """
-        svc_url = f"{ha_base}/api/services/tts/speak"
-        headers = self._ha_headers(token)
-        ok_count = 0
-        failures: List[str] = []
-        fallback_url = f"{ha_base}/api/services/tts/piper_say"
-
-        for mp in players:
-            data = {
-                "entity_id": tts_entity,
-                "media_player_entity_id": mp,
-                "message": message,
-                "cache": True,
-            }
-            speak_status: int | None = None
-            try:
-                r = requests.post(svc_url, headers=headers, json=data, timeout=timeout_seconds)
-                speak_status = int(r.status_code)
-                if speak_status < 400:
-                    ok_count += 1
-                    continue
-            except Exception as exc:
-                logger.warning("[broadcast] speak failed for %s: %s", mp, exc)
-
-            try:
-                r2 = requests.post(fallback_url, headers=headers, json=data, timeout=timeout_seconds)
-                fallback_status = int(r2.status_code)
-                if fallback_status < 400:
-                    ok_count += 1
-                else:
-                    if speak_status is None:
-                        failures.append(f"{mp} (speak:error, piper_say:{fallback_status})")
-                    else:
-                        failures.append(f"{mp} (speak:{speak_status}, piper_say:{fallback_status})")
-            except Exception as exc:
-                logger.warning("[broadcast] piper_say failed for %s: %s", mp, exc)
-                if speak_status is None:
-                    failures.append(f"{mp} (speak:error, piper_say:error)")
-                else:
-                    failures.append(f"{mp} (speak:{speak_status}, piper_say:error)")
-        return ok_count, failures
-
     async def _broadcast(self, raw_text: str, llm_client) -> dict:
-        s = self._get_settings()
-        timeout_seconds = self._as_int(s.get("REQUEST_TIMEOUT_SECONDS"), default=15, minimum=5, maximum=120)
-
-        ha_settings = self._decode_redis_map(redis_client.hgetall("homeassistant_settings") or {})
-        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        token = (ha_settings.get("HA_TOKEN") or "").strip()
-        if not token:
-            return action_failure(
-                code="missing_ha_token",
-                message=(
-                    "Home Assistant token is not set. Open WebUI Settings Home Assistant Settings "
-                    "and add a Long-Lived Access Token."
-                ),
-                needs=["Please set HA_TOKEN in Home Assistant settings."],
-                say_hint="Explain Home Assistant token is missing and ask to configure it.",
-            )
-
-        tts_entity = (s.get("TTS_ENTITY") or "tts.piper").strip() or "tts.piper"
-        players = self._targets(s)
-        if not players:
+        settings = self._get_settings()
+        targets = self._targets(settings)
+        if not targets:
             return action_failure(
                 code="no_broadcast_targets",
-                message="No broadcast devices are configured.",
-                needs=["Please configure DEVICE_1 through DEVICE_5 with media_player entities."],
+                message="No broadcast targets are configured.",
+                needs=["Please configure one or more broadcast targets."],
                 say_hint="Explain there are no configured broadcast targets.",
             )
 
@@ -285,79 +198,121 @@ class BroadcastPlugin(ToolVerba):
                 say_hint="Ask what announcement text should be broadcast.",
             )
 
-        try:
-            ok_count, failures = await asyncio.to_thread(
-                self._tts_speak,
-                ha_base,
-                token,
-                tts_entity,
-                players,
-                announcement,
-                timeout_seconds,
+        ha_settings = self._decode_redis_map(redis_client.hgetall("homeassistant_settings") or {})
+        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
+        token = (ha_settings.get("HA_TOKEN") or "").strip()
+        if not token:
+            return action_failure(
+                code="missing_ha_token",
+                message=(
+                    "Home Assistant token is not set. Open WebUI Settings Home Assistant Settings "
+                    "and add a Long-Lived Access Token."
+                ),
+                needs=["Please set HA_TOKEN in Home Assistant settings."],
+                say_hint="Explain Home Assistant token is missing and ask to configure it.",
             )
-        except Exception as e:
-            logger.error(f"[broadcast] TTS call failed: {e}")
+
+        speech = get_speech_settings()
+        announcement_backend = str(speech.get("announcement_tts_backend") or "homeassistant_api")
+        announcement_model = str(speech.get("announcement_tts_model") or "")
+        announcement_voice = str(speech.get("announcement_tts_voice") or "")
+        announcement_entity = str(speech.get("announcement_tts_entity") or DEFAULT_ANNOUNCEMENT_TTS_ENTITY)
+
+        try:
+            tts_result = await speak_announcement_targets(
+                text=announcement,
+                backend=announcement_backend,
+                ha_base=ha_base,
+                token=token,
+                targets=targets,
+                public_base_url=str(speech.get("tts_public_base_url") or ""),
+                tts_entity=announcement_entity,
+                model=announcement_model,
+                voice=announcement_voice,
+                wyoming_host=str(speech.get("wyoming_tts_host") or ""),
+                wyoming_port=speech.get("wyoming_tts_port"),
+                wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
+                default_backend=announcement_backend,
+            )
+        except Exception as exc:
+            logger.error("[broadcast] TTS call failed: %s", exc)
             return action_failure(
                 code="broadcast_tts_error",
-                message=f"Broadcast failed due to a TTS service call error: {e}",
+                message=f"Broadcast failed due to a TTS service call error: {exc}",
                 say_hint="Explain the TTS service call failed and suggest retrying.",
             )
 
-        total = len(players)
-        if ok_count <= 0:
-            detail = ", ".join(failures[:3]) if failures else ""
+        backend_used = str(tts_result.get("backend") or announcement_backend)
+        sent_count = int(tts_result.get("sent_count") or 0)
+        target_count = int(tts_result.get("target_count") or len(targets))
+        warnings = [str(item) for item in list(tts_result.get("warnings") or []) if str(item).strip()]
+
+        if not tts_result.get("ok") or sent_count <= 0:
+            detail = str(tts_result.get("error") or "").strip()
             return action_failure(
                 code="broadcast_all_targets_failed",
-                message=f"Broadcast failed on all target devices.{f' Failures: {detail}' if detail else ''}",
+                message=f"Broadcast failed on all target devices.{f' {detail}' if detail else ''}",
                 say_hint="Explain that all target devices rejected the broadcast.",
             )
-        if failures:
+
+        facts = {
+            "announcement": announcement,
+            "tts_backend": backend_used,
+            "tts_model": announcement_model if backend_used not in {"homeassistant_api", "wyoming"} else announcement_model,
+            "tts_voice": announcement_voice,
+            "tts_entity": announcement_entity if backend_used == "homeassistant_api" else "",
+            "target_count": target_count,
+            "ok_count": sent_count,
+            "failed_targets": warnings[:10],
+            "homeassistant_target_count": int(tts_result.get("homeassistant_target_count") or 0),
+            "voice_core_target_count": int(tts_result.get("voice_core_target_count") or 0),
+            "homeassistant_sent_count": int(tts_result.get("homeassistant_sent_count") or 0),
+            "voice_core_sent_count": int(tts_result.get("voice_core_sent_count") or 0),
+            "targets": list(targets),
+        }
+        if tts_result.get("media_url"):
+            facts["media_url"] = str(tts_result.get("media_url"))
+
+        if warnings:
             return action_success(
-                facts={
-                    "announcement": announcement,
-                    "tts_entity": tts_entity,
-                    "target_count": total,
-                    "ok_count": ok_count,
-                    "failed_targets": failures[:10],
-                },
+                facts=facts,
                 summary_for_user=(
-                    f"Broadcast sent to {ok_count} of {total} devices. "
-                    f"{len(failures)} device targets failed."
+                    f"Broadcast sent to {sent_count} of {target_count} targets using {backend_used}. "
+                    f"{len(warnings)} targets failed."
                 ),
                 say_hint="Confirm partial broadcast success and mention failed targets if useful.",
             )
+
         return action_success(
-            facts={
-                "announcement": announcement,
-                "tts_entity": tts_entity,
-                "target_count": total,
-                "ok_count": ok_count,
-                "failed_targets": [],
-            },
-            summary_for_user=f"Broadcast sent to all {total} configured devices.",
+            facts=facts,
+            summary_for_user=f"Broadcast sent to all {target_count} configured targets using {backend_used}.",
             say_hint="Confirm the broadcast was sent successfully.",
         )
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Platform handlers
-    # ──────────────────────────────────────────────────────────────────────────
 
     async def handle_homeassistant(self, args, llm_client):
         args = args or {}
         text = self._extract_announcement_arg(args)
         return await self._broadcast(text, llm_client)
 
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
     async def handle_webui(self, args, llm_client):
         args = args or {}
-        raw_text = self._extract_announcement_arg(args)
-        return await self._broadcast(raw_text, llm_client)
-
+        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         try:
             return await self.handle_webui(args, llm_client, context=context)
         except TypeError:
             return await self.handle_webui(args, llm_client)
+
     async def handle_homekit(self, args, llm_client):
         args = args or {}
         return await self._broadcast(self._extract_announcement_arg(args), llm_client)

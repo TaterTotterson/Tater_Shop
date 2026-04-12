@@ -31,14 +31,14 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.6"
+    version = "1.0.9"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
     verba_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ["discord", "webui", "macos", "homeassistant", "matrix", "telegram"]
+    platforms = ['discord', 'webui', 'macos', 'voice_core', 'homeassistant', 'matrix', 'telegram']
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {
@@ -511,6 +511,45 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             summary_for_user=f"Started generating a song and queued playback on {target_player}.",
             say_hint="Confirm that generation started and playback will occur on the selected player.",
         )
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        args = args or {}
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return action_failure(
+                code="missing_prompt",
+                message="No prompt provided.",
+                needs=["Provide a prompt describing the song you want."],
+                say_hint="Ask the user for a music prompt.",
+            )
+
+        selector = self._voice_core_selector(context)
+        if not selector:
+            return action_failure(
+                code="missing_voice_core_satellite",
+                message="I can create your song, but I couldn't determine which Voice Core satellite to play it on.",
+                say_hint="Explain that Voice Core playback needs the speaking satellite selector and ask the user to retry from a satellite.",
+            )
+
+        try:
+            asyncio.create_task(self._bg_generate_and_play_voice_core(prompt, llm_client, selector))
+        except Exception as e:
+            logger.exception("Failed to schedule Voice Core background job: %s", e)
+            return action_failure(
+                code="background_job_failed",
+                message=f"Failed to schedule song generation: {e}",
+                say_hint="Explain that background scheduling failed and suggest retrying.",
+            )
+
+        return action_success(
+            facts={
+                "prompt": prompt,
+                "selector": selector,
+                "background_started": True,
+            },
+            summary_for_user=f"Started generating a song and will play it on {selector}.",
+            say_hint="Confirm that generation started and playback will happen on the current Voice Core satellite.",
+        )
+
 
     async def _bg_generate_and_play(self, prompt: str, llm_client, target_player: str):
         """
@@ -535,6 +574,85 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             ha.play_media(target_player, media_url, mimetype="music")
         except Exception as e:
             logger.exception("Failed to play media on %s: %s", target_player, e)
+            return
+
+    @staticmethod
+    def _voice_core_settings() -> dict:
+        row = redis_client.hgetall("voice_core_settings") or {}
+        return row if isinstance(row, dict) else {}
+
+    @staticmethod
+    def _voice_core_base_url() -> str:
+        settings = ComfyUIAudioAcePlugin._voice_core_settings()
+        raw_port = str(settings.get("bind_port") or "8502").strip()
+        try:
+            port = int(raw_port)
+        except Exception:
+            port = 8502
+        if port < 1 or port > 65535:
+            port = 8502
+        return f"http://127.0.0.1:{port}"
+
+    def _voice_core_selector(self, context: dict | None) -> str:
+        ctx = context if isinstance(context, dict) else {}
+        selector = self._ctx_text(ctx, "satellite_selector")
+        if selector:
+            return selector
+        device_id = self._ctx_text(ctx, "device_id")
+        if self._looks_like_transport_selector(device_id):
+            return device_id
+        return ""
+
+    def _request_voice_core_playback(
+        self,
+        selector: str,
+        source_url: str,
+        *,
+        text: str = "Playing your new song.",
+        timeout_s: float = 360.0,
+    ) -> dict:
+        base_url = self._voice_core_base_url()
+        payload = {
+            "selector": str(selector or "").strip(),
+            "source_url": str(source_url or "").strip(),
+            "media_type": "audio/mpeg",
+            "filename": "ace_song.mp3",
+            "text": str(text or "").strip(),
+            "timeout_s": float(timeout_s),
+        }
+        resp = requests.post(
+            f"{base_url}/tater-ha/v1/voice/esphome/play",
+            json=payload,
+            timeout=90,
+        )
+        resp.raise_for_status()
+        try:
+            return resp.json() if (resp.text or "").strip() else {"ok": True}
+        except Exception:
+            return {"ok": True, "raw": resp.text}
+
+    async def _bg_generate_and_play_voice_core(self, prompt: str, llm_client, selector: str):
+        try:
+            tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
+            media_url, _audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+        except Exception as e:
+            logger.exception("ComfyUI Voice Core generation failed: %s", e)
+            return
+
+        if not media_url:
+            logger.error("No media URL returned from ComfyUI for Voice Core playback.")
+            return
+
+        try:
+            await asyncio.to_thread(
+                self._request_voice_core_playback,
+                selector,
+                media_url,
+                text="Playing your new song.",
+                timeout_s=360.0,
+            )
+        except Exception as e:
+            logger.exception("Failed to queue Voice Core playback on %s: %s", selector, e)
             return
 
     # ---------------------------------------
@@ -584,6 +702,33 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             if base.endswith(suffix):
                 base = base[: -len(suffix)].strip("_")
         return base
+
+    @staticmethod
+    def _normalize_mac(value: Any) -> str:
+        txt = str(value or "").strip().lower()
+        if not txt:
+            return ""
+        return re.sub(r"[^0-9a-f]", "", txt)
+
+    @staticmethod
+    def _looks_like_transport_selector(value: str) -> bool:
+        txt = str(value or "").strip().lower()
+        if not txt:
+            return False
+        if txt.startswith(("host:", "selector:", "mac:")):
+            return True
+        return bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", txt))
+
+    def _candidate_device_names(self, context: dict | None) -> list[str]:
+        ctx = context if isinstance(context, dict) else {}
+        return self._dedupe_preserve(
+            [
+                self._ctx_text(ctx, "device_friendly_name"),
+                self._ctx_text(ctx, "device_info_name"),
+                self._ctx_text(ctx, "device_name"),
+                self._ctx_text(ctx, "satellite_name"),
+            ]
+        )
 
     def _extract_satellite_entity_id(self, context: dict | None) -> str:
         ctx = context if isinstance(context, dict) else {}
@@ -765,13 +910,63 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 return eid
         return ranked[0] if ranked else None
 
+    async def _assist_satellite_for_device_id(self, ha, device_id: str) -> str | None:
+        did = str(device_id or "").strip()
+        if not did:
+            return None
+
+        entity_reg = await ha.entity_registry_list()
+        for row in entity_reg or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("device_id") or "").strip() != did:
+                continue
+            if row.get("disabled_by") not in (None, ""):
+                continue
+            ent = str(row.get("entity_id") or "").strip()
+            if ent.startswith("assist_satellite."):
+                return ent
+        return None
+
+    async def _device_id_for_mac(
+        self,
+        ha,
+        *,
+        mac_address: str = "",
+        bluetooth_mac_address: str = "",
+    ) -> str | None:
+        want = {
+            self._normalize_mac(mac_address),
+            self._normalize_mac(bluetooth_mac_address),
+        }
+        want.discard("")
+        if not want:
+            return None
+
+        devices = await ha.device_registry_list()
+        for row in devices or []:
+            if not isinstance(row, dict):
+                continue
+            device_id = str(row.get("id") or "").strip()
+            if not device_id:
+                continue
+            connections = row.get("connections") if isinstance(row.get("connections"), list) else []
+            for conn in connections:
+                if not isinstance(conn, (list, tuple)) or len(conn) < 2:
+                    continue
+                conn_value = self._normalize_mac(conn[1])
+                if conn_value and conn_value in want:
+                    return device_id
+        return None
+
     async def _pick_target_player(self, context: dict | None = None) -> str | None:
         """
         Pick a media_player in this order:
           1) Explicit plugin setting HA_DEFAULT_MEDIA_PLAYER
-          2) Deterministic registry lookup by speaking device_id (same HA device)
-          3) Deterministic entity-id patterns from assist_satellite/device_name
-          4) Fuzzy fallback scan by friendly_name/entity_id
+          2) Deterministic registry lookup by HA device_id from context
+          3) Deterministic registry lookup by MAC address from Voice Core context
+          4) Deterministic entity-id patterns from assist_satellite/device_name
+          5) Fuzzy fallback scan by friendly_name/entity_id
         """
         sett = self._settings()
         default_mp = (sett.get("HA_DEFAULT_MEDIA_PLAYER") or "").strip()
@@ -779,9 +974,12 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             return default_mp
 
         ctx = context or {}
-        device_name = self._ctx_text(ctx, "device_name")
-        device_id = self._ctx_text(ctx, "device_id")
+        device_names = self._candidate_device_names(ctx)
+        device_name = device_names[0] if device_names else ""
+        raw_device_id = self._ctx_text(ctx, "ha_device_id", "device_id")
         satellite_entity_id = self._extract_satellite_entity_id(ctx)
+        mac_address = self._ctx_text(ctx, "device_mac_address", "mac_address")
+        bluetooth_mac_address = self._ctx_text(ctx, "device_bluetooth_mac_address", "bluetooth_mac_address")
 
         try:
             ha = self._HA()
@@ -789,30 +987,57 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             logger.warning("Cannot initialize Home Assistant client for media_player resolution: %s", e)
             return None
 
-        # Deterministic path: resolve media_player entities registered to this exact HA device.
-        if device_id:
+        resolved_device_id = ""
+        if raw_device_id and not self._looks_like_transport_selector(raw_device_id):
+            resolved_device_id = raw_device_id
+
+        if not resolved_device_id and (mac_address or bluetooth_mac_address):
+            try:
+                resolved_device_id = await self._device_id_for_mac(
+                    ha,
+                    mac_address=mac_address,
+                    bluetooth_mac_address=bluetooth_mac_address,
+                ) or ""
+            except Exception as e:
+                logger.warning(
+                    "MAC-based device lookup failed for mac=%s bluetooth_mac=%s: %s",
+                    mac_address,
+                    bluetooth_mac_address,
+                    e,
+                )
+
+        if resolved_device_id and not satellite_entity_id:
+            try:
+                satellite_entity_id = await self._assist_satellite_for_device_id(ha, resolved_device_id) or satellite_entity_id
+            except Exception as e:
+                logger.warning(
+                    "Assist satellite lookup failed for device_id=%s: %s",
+                    resolved_device_id,
+                    e,
+                )
+
+        if resolved_device_id:
             try:
                 by_device = await self._media_player_for_device_id(
                     ha,
-                    device_id=device_id,
+                    device_id=resolved_device_id,
                     device_name=device_name,
                     satellite_entity_id=satellite_entity_id,
                 )
                 if by_device:
                     return by_device
             except Exception as e:
-                logger.warning("Device-id media_player lookup failed for %s: %s", device_id, e)
+                logger.warning("Device-id media_player lookup failed for %s: %s", resolved_device_id, e)
 
-        # Deterministic fallback: known Voice PE naming patterns.
-        direct_candidates = self._dedupe_preserve(
-            self._media_player_candidates_from_satellite_entity(satellite_entity_id)
-            + self._media_player_candidates_from_device_name(device_name)
-        )
+        direct_candidates: list[str] = []
+        direct_candidates.extend(self._media_player_candidates_from_satellite_entity(satellite_entity_id))
+        for candidate_name in device_names:
+            direct_candidates.extend(self._media_player_candidates_from_device_name(candidate_name))
+        direct_candidates = self._dedupe_preserve(direct_candidates)
         for eid in direct_candidates:
             if self._entity_exists(ha, eid):
                 return eid
 
-        # Last resort: fuzzy scan by friendly_name / entity_id.
         try:
             all_states = ha.list_states()
             best = self._find_best_media_player(
@@ -940,6 +1165,10 @@ class ComfyUIAudioAcePlugin(ToolVerba):
 
         async def entity_registry_list(self) -> list[dict]:
             res = await self.ws_call("config/entity_registry/list", timeout_s=30.0)
+            return res if isinstance(res, list) else []
+
+        async def device_registry_list(self) -> list[dict]:
+            res = await self.ws_call("config/device_registry/list", timeout_s=30.0)
             return res if isinstance(res, list) else []
 
 

@@ -26,7 +26,7 @@ class OverseerrRequestPlugin(ToolVerba):
     """
     name = "overseerr_request"
     verba_name = "Overseerr Request"
-    version = "1.1.1"
+    version = "1.1.2"
     min_tater_version = "59"
     usage = (
         '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
@@ -54,7 +54,7 @@ class OverseerrRequestPlugin(ToolVerba):
         "Tell {mention} you’re adding their title to Overseerr now. "
         "Keep it short and friendly. Only output that message."
     )
-    platforms = ["webui", "macos", "homeassistant", "homekit", "discord", "telegram", "matrix", "irc"]
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
     when_to_use = "Use when the user wants to request a specific movie or TV show in Overseerr."
     how_to_use = (
         "Pass one natural-language request in query. Include the title naturally. "
@@ -448,6 +448,15 @@ class OverseerrRequestPlugin(ToolVerba):
         title, kind = await self._resolve_request(args or {}, llm_client)
         raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=True)]
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         title, kind = await self._resolve_request(args or {}, llm_client)

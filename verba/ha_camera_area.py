@@ -138,11 +138,11 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
-    platforms = ["homeassistant", "webui", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc"]
+    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
     tags = ["homeassistant", "camera", "area"]
 
     usage = '{"function":"ha_camera_area","arguments":{"query":"what is happening in the front yard"}}'
@@ -456,6 +456,15 @@ class HACameraAreaPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="homeassistant", context=context)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="homekit", context=context)

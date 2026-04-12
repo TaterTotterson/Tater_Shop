@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeAddTransferPlugin(ToolVerba):
     name = "premiumize_add_transfer"
     verba_name = "Premiumize Add Transfer"
-    version = "1.0.0"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Premiumize Add Transfer"
     settings_category = "Premiumize"
@@ -36,7 +36,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram", "homeassistant", "homekit", "xbmc"]
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
     required_settings = {
         "PREMIUMIZE_API_KEY": {
             "label": "Premiumize API Key",
@@ -1119,20 +1119,6 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             logger.exception("[premiumize handle_irc] %s", exc)
             return action_failure(code="premiumize_exception", message=f"Premiumize request failed: {exc}")
 
-    async def handle_homeassistant(self, args, llm_client):
-        try:
-            return await self._run(args or {}, llm_client, context={})
-        except Exception as exc:
-            logger.exception("[premiumize handle_homeassistant] %s", exc)
-            return action_failure(code="premiumize_exception", message="Premiumize request failed.")
-
-    async def handle_homekit(self, args, llm_client):
-        try:
-            return await self._run(args or {}, llm_client, context={})
-        except Exception as exc:
-            logger.exception("[premiumize handle_homekit] %s", exc)
-            return action_failure(code="premiumize_exception", message="Premiumize request failed.")
-
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
@@ -1163,13 +1149,5 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         except Exception as exc:
             logger.exception("[premiumize handle_telegram] %s", exc)
             return action_failure(code="premiumize_exception", message=f"Premiumize request failed: {exc}")
-
-    async def handle_xbmc(self, args, llm_client):
-        try:
-            return await self._run(args or {}, llm_client, context={})
-        except Exception as exc:
-            logger.exception("[premiumize handle_xbmc] %s", exc)
-            return action_failure(code="premiumize_exception", message="Premiumize request failed.")
-
 
 verba = PremiumizeAddTransferPlugin()

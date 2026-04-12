@@ -45,7 +45,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.27"
+    version = "1.0.28"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -92,7 +92,7 @@ class MusicAssistantPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     def __init__(self):
         self._ma_entry_id_cache: Optional[str] = None
@@ -1679,6 +1679,15 @@ class MusicAssistantPlugin(ToolVerba):
                 diagnosis=self._diagnosis(),
                 say_hint="Explain that playback control failed and ask if the user wants to retry.",
             )
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         try:

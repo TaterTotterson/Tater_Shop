@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolVerba):
     name = "mister_remote"
     verba_name = "MiSTer Remote"
-    version = "1.1.7"
+    version = "1.1.8"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
     routing_keywords = [
@@ -87,7 +87,7 @@ class MisterRemotePlugin(ToolVerba):
     )
     verba_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
-    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     usage = (
         '{"function":"mister_remote","arguments":{"query":"ONE consolidated MiSTer request in natural language '
@@ -948,6 +948,15 @@ class MisterRemotePlugin(ToolVerba):
     async def handle_homeassistant(self, args, llm_client):
         args = args or {}
         return await self._handle_structured(args, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         args = args or {}

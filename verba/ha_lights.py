@@ -55,11 +55,11 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = '2.1.4'
+    version = '2.1.5'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
-    platforms = ['homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
     tags = ['homeassistant', 'light']
 
     forced_route = 'light'

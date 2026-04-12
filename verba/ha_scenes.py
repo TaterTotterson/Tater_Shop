@@ -54,11 +54,11 @@ class HAClient:
 class HAScenesPlugin(ToolVerba):
     name = 'ha_scenes'
     verba_name = 'Home Assistant Scenes'
-    version = '2.0.0'
+    version = '2.0.1'
     min_tater_version = "59"
     pretty_name = 'Home Assistant Scenes'
     settings_category = "Home Assistant Control"
-    platforms = ['homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc']
     tags = ['homeassistant', 'scene']
 
     forced_route = 'scene'
@@ -650,6 +650,15 @@ class HAScenesPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)

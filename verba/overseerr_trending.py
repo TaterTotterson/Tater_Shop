@@ -18,7 +18,7 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolVerba):
     name = "overseerr_trending"
     verba_name = "Overseerr Trending"
-    version = "1.2.1"
+    version = "1.2.2"
     min_tater_version = "59"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
@@ -34,7 +34,7 @@ class OverseerrTrendingPlugin(ToolVerba):
         "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -312,6 +312,15 @@ class OverseerrTrendingPlugin(ToolVerba):
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_homeassistant] %s", exc)
             return action_failure(code="overseerr_trending_exception", message="There was an error fetching results.")
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:

@@ -352,13 +352,13 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     name = 'unifi_protect_area'
     verba_name = 'UniFi Protect Area'
-    version = '1.0.1'
+    version = '1.0.2'
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Area'
     settings_category = "UniFi Protect"
     tags = ['unifi', 'area_snapshot']
 
-    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
     routing_keywords = ['unifi protect', 'protect', 'front yard', 'back yard', 'yard', 'driveway', 'porch', 'patio', 'garage area']
     fixed_action = 'describe_area'
 
@@ -661,6 +661,15 @@ class UniFiProtectAreaPlugin(ToolVerba):
             return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="homeassistant", context=context)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="homekit", context=context)

@@ -157,13 +157,13 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookFellowTatersPlugin(ToolVerba):
     name = "moltbook_fellow_taters"
     verba_name = "Moltbook Fellow Taters"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Moltbook Fellow Taters"
     settings_category = "Moltbook Info"
     tags = ['moltbook', 'fellow_taters']
     fixed_route = "fellow_taters"
-    platforms = ['webui', 'macos', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     usage = (
         "{\"function\":\"moltbook_fellow_taters\",\"arguments\":{\"query\":\"list known fellow Tater agents\"}}"
@@ -1018,6 +1018,15 @@ class MoltbookFellowTatersPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args or {}, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         return await self._handle(args or {}, llm_client)

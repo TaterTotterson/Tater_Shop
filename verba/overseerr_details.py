@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolVerba):
     name = "overseerr_details"
     verba_name = "Overseerr Details"
-    version = "1.2.1"
+    version = "1.2.2"
     min_tater_version = "59"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -37,7 +37,7 @@ class OverseerrDetailsPlugin(ToolVerba):
         "Give {mention} a short, cheerful note that you’re fetching details from Overseerr now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "telegram"]
+    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -368,6 +368,15 @@ class OverseerrDetailsPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._answer(args, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
         if llm_client is None:

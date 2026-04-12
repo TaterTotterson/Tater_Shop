@@ -157,13 +157,13 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookLatestPostsPlugin(ToolVerba):
     name = "moltbook_latest_posts"
     verba_name = "Moltbook Latest Posts"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Moltbook Latest Posts"
     settings_category = "Moltbook Info"
     tags = ['moltbook', 'latest_posts']
     fixed_route = "latest_posts"
-    platforms = ['webui', 'macos', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     usage = (
         "{\"function\":\"moltbook_latest_posts\",\"arguments\":{\"query\":\"what are your latest Moltbook posts\",\"limit\":5}}"
@@ -1018,6 +1018,15 @@ class MoltbookLatestPostsPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args or {}, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         return await self._handle(args or {}, llm_client)

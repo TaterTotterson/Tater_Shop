@@ -1177,7 +1177,7 @@
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet or HTTP(S) source links.",
       "portals": [
@@ -1186,10 +1186,7 @@
         "macos",
         "irc",
         "matrix",
-        "telegram",
-        "homeassistant",
-        "homekit",
-        "xbmc"
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
@@ -1198,12 +1195,12 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "cc86767fa743e03401d4f96e119a255d79fb288eb06287979b67576cdf143da7"
+      "sha256": "8627aaf3ea7ac8cde41ce3ad9f777aa965c007213127669c4a06adca767dc404"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
@@ -1212,10 +1209,7 @@
         "macos",
         "irc",
         "matrix",
-        "telegram",
-        "homeassistant",
-        "homekit",
-        "xbmc"
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
@@ -1224,12 +1218,12 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "cf6f1a48db98a207ac93b77667ad61bd18c4cb0ef5e53ccff0b749a6b4555ed2"
+      "sha256": "c29f5a87068c23de40627cea89c9a04337beae6152422fd710fe9647a0ad9202"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.0.2",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet/URL.",
       "portals": [
@@ -1238,10 +1232,7 @@
         "macos",
         "irc",
         "matrix",
-        "telegram",
-        "homeassistant",
-        "homekit",
-        "xbmc"
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
@@ -1250,12 +1241,12 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "34ffd55bdd5eabb98b41aea1686908da4c5957fa0de266412c1268577716bf08"
+      "sha256": "d45e57858334eb57cf0393e29fb5f9ba2ea3d12d43ed46960bac8e320557712e"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
@@ -1264,10 +1255,7 @@
         "macos",
         "irc",
         "matrix",
-        "telegram",
-        "homeassistant",
-        "homekit",
-        "xbmc"
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
@@ -1276,12 +1264,12 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "0e47bdb16d8e1e0c494aee3701ced6005a82234555080a49d26fc1a22b0d8219"
+      "sha256": "2f184f536cdd826bf788107addf3d37b7a2470268bfa4bb5a088c87109515e8b"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
@@ -1290,10 +1278,7 @@
         "macos",
         "irc",
         "matrix",
-        "telegram",
-        "homeassistant",
-        "homekit",
-        "xbmc"
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "Premiumize",
@@ -1302,7 +1287,7 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "b49203ad99d33865ca7409e3f5e5a9e1b067f8988bf70270d947aba31087b0d0"
+      "sha256": "08e3e57698827f45ae4fb8a54e058a914f3094e3ddb0b0840e93756c8da7ff7d"
     },
     {
       "id": "sftpgo_account",

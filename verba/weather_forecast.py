@@ -36,7 +36,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.1.6"
+    version = "1.1.7"
     min_tater_version = "59"
     routing_keywords = [
         "weather",
@@ -136,7 +136,7 @@ class WeatherForecastPlugin(ToolVerba):
         "Do not use markdown. Only output the message."
     )
 
-    platforms = ["discord", "webui", "macos", "irc", "homeassistant", "matrix", "homekit", "xbmc", "telegram"]
+    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'xbmc', 'telegram']
 
     def _normalize_request_text(self, text: str) -> str:
         if not text:
@@ -986,6 +986,15 @@ class WeatherForecastPlugin(ToolVerba):
         args2, request_text = self._with_request_from_fallback(args or {}, "")
         text = await self._get_weather_text(args2, llm_client=llm_client)
         return self._to_contract(text, request_text)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_matrix(self, client, room, sender, body, args, llm_client):
         args2, request_text = self._with_request_from_fallback(args or {}, body)

@@ -31,7 +31,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -78,7 +78,7 @@ class FindMyPhonePlugin(ToolVerba):
         "Write a short, friendly message telling {mention} you're looking for their phone now. "
         "Only output that message."
     )
-    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
     common_needs = []
     missing_info_prompts = []
 
@@ -327,6 +327,15 @@ class FindMyPhonePlugin(ToolVerba):
             return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args, llm_client):
         return await self._run(args or {}, llm_client, mention="you")
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         return await self._run(args or {}, llm_client, mention="you")

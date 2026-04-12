@@ -157,13 +157,13 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookActivityOnPostsPlugin(ToolVerba):
     name = "moltbook_activity_on_posts"
     verba_name = "Moltbook Activity On Posts"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Moltbook Activity On Posts"
     settings_category = "Moltbook Info"
     tags = ['moltbook', 'activity_on_my_posts']
     fixed_route = "activity_on_my_posts"
-    platforms = ['webui', 'macos', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     usage = (
         "{\"function\":\"moltbook_activity_on_posts\",\"arguments\":{\"query\":\"any activity on your posts\",\"limit\":5}}"
@@ -1018,6 +1018,15 @@ class MoltbookActivityOnPostsPlugin(ToolVerba):
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._handle(args or {}, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     async def handle_homekit(self, args, llm_client):
         return await self._handle(args or {}, llm_client)

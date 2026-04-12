@@ -33,7 +33,7 @@ class UnifiNetworkHealthPlugin(ToolVerba):
 
     name = "unifi_network_health"
     verba_name = "UniFi Network Health"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "UniFi Network Health"
     tags = ["unifi", "health"]
@@ -68,7 +68,7 @@ class UnifiNetworkHealthPlugin(ToolVerba):
         "online",
     ]
     settings_category = "UniFi Network"
-    platforms = ["webui", "macos", "homeassistant", "homekit", "xbmc", "discord", "telegram", "matrix", "irc"]
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
 
     usage = '{"function":"unifi_network_health","arguments":{"query":"how is the network right now"}}'
     argument_schema = {
@@ -734,6 +734,15 @@ class UnifiNetworkHealthPlugin(ToolVerba):
             return await self.handle_webui(args, llm_client)
     async def handle_homeassistant(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        try:
+            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
+        except TypeError:
+            try:
+                return await self.handle_homeassistant(args=args, llm_client=llm_client)
+            except TypeError:
+                return await self.handle_homeassistant(args, llm_client)
+
 
     # ✅ New: HomeKit + XBMC handlers (same core logic)
     async def handle_homekit(self, args: Dict[str, Any], llm_client):
