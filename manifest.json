@@ -22,10 +22,11 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.3",
+      "version": "1.1.6",
       "min_tater_version": "59",
-      "description": "Send a one-time spoken announcement to your Home Assistant media players.",
+      "description": "Send a one-time spoken announcement to your configured broadcast targets.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -40,18 +41,19 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "eb62e6c8f9d2e44a8828aba26fa6626f767b39b9b05b8b4fbfc76e5e13bfdad9"
+      "sha256": "abb22bc7f378f1780911db78d0ff5b670e69cd644d94094f0fdabe8043f34cb9"
     },
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.6",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
         "discord",
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "matrix",
         "telegram"
@@ -60,7 +62,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "face2cf112b941cd686ed3921449d91dacad89b806d624bbc872acd574f35e04"
+      "sha256": "03f77372101fb1af602fbc641b54b44edc4d1cc6afda7dec284cd4c91df0281b"
     },
     {
       "id": "comfyui_image_plugin",
@@ -205,12 +207,13 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -223,7 +226,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "verba/find_my_phone.py",
-      "sha256": "13e5cb16e84a0e631235933da25658ffb6628907e65c0bbcdc0adb2f64195c30"
+      "sha256": "9d371eda892d4f4fcf0044732cdd78338e591b110b5507e8fd8c75f3128d26f4"
     },
     {
       "id": "ftp_browser",
@@ -243,12 +246,13 @@
     {
       "id": "get_notifications",
       "name": "Get Notifications",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Fetch queued notifications from the Home Assistant bridge.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "discord",
         "telegram",
@@ -259,15 +263,16 @@
       "settings_category": "Notifications",
       "tags": [],
       "entry": "verba/get_notifications.py",
-      "sha256": "c213bb956fd6200ec3d73df29001bd6d4bf6dc327463e2534de61b801e493fc4"
+      "sha256": "1ec5ac2dc2f9ac3a6f0c690f1897798a31d60dee79f643a9eb334a44ef989bb7"
     },
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -286,15 +291,16 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "224d1482515577b94ca72f1725d0ba646d2c94254d51cf54b8907f52c670841c"
+      "sha256": "8373cfe6c1c87347b230f088a484f65aa012f101f68a3986eac82058cf85cc44"
     },
     {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -312,15 +318,16 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "8a51a8f9803b9ff5f5f78b64ce0799ed70de9511c146852e04b9a78c1d646265"
+      "sha256": "98d9e3984bc59b0a23e6a44589f69d838b731b9ad312d43dce7dcda026796725"
     },
     {
       "id": "ha_covers",
       "name": "Home Assistant Covers",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant covers and garage doors.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -338,15 +345,16 @@
         "cover"
       ],
       "entry": "verba/ha_covers.py",
-      "sha256": "694af31ca7628bfe476a375efd2997a40e0e2c7bf254adbf68c61f4fe2714565"
+      "sha256": "2b31bde04a1ca2e458dfda0d210cd60458eb421dfd63c4f06d85f0aa094443cc"
     },
     {
       "id": "ha_fans",
       "name": "Home Assistant Fans",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant fans.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -364,15 +372,16 @@
         "fan"
       ],
       "entry": "verba/ha_fans.py",
-      "sha256": "629151d514a200f9c89c242bd99d7e5393195e723e61fd9348e80bdc4f6c2fcc"
+      "sha256": "718e111047baac1fb412d0e9c5ae114962c40f19802c89dc7bdf7b539f84140e"
     },
     {
       "id": "ha_lights",
       "name": "Home Assistant Lights",
-      "version": "2.1.4",
+      "version": "2.1.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant lights.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -390,15 +399,16 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "ebdbdd2620d09274b628d64d6388a769d0ba1d675fc6311cd50a0afa9e89eb86"
+      "sha256": "c5a81608e6c981c1b8fd505631bb9ba0f5860ee7b4bcbf090fede6fde1513397"
     },
     {
       "id": "ha_locks",
       "name": "Home Assistant Locks",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant lock entities.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -416,15 +426,16 @@
         "lock"
       ],
       "entry": "verba/ha_locks.py",
-      "sha256": "c6f0fa7e96f4ea017b3f883b54e197942ebb9cf2c28faed9a7338aaf36b84676"
+      "sha256": "fba63c2c342fb32f8d2f50ae8421a939d91d24fe81329269071320fd267ecb7d"
     },
     {
       "id": "ha_media_players",
       "name": "Home Assistant Media Players",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Media-player control for Home Assistant.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -442,15 +453,16 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "15a74c15f25c8e52bd68512145ab007a30cdf9aea8d69fbbd0aa2da7fc1134a1"
+      "sha256": "3dd929ec8bd9feef63ff175d8e1991ecdb4fcfc16d9705c847193fe1d0107c68"
     },
     {
       "id": "ha_remotes",
       "name": "Home Assistant Remotes",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant remote entities.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -468,15 +480,16 @@
         "remote"
       ],
       "entry": "verba/ha_remotes.py",
-      "sha256": "769cae104b4a165418f7f0389165ac474e4f7998a755a72aad46a0c61f78c470"
+      "sha256": "0db911d62c25e008301e5a942c381d9e3cb362acbb5a4b461a574f6df4b6e191"
     },
     {
       "id": "ha_scenes",
       "name": "Home Assistant Scenes",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant scenes.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -494,15 +507,16 @@
         "scene"
       ],
       "entry": "verba/ha_scenes.py",
-      "sha256": "7a094668eecfc6aeb9117c0335de7fcea6cec18d0cf8dcde327efbf49383df26"
+      "sha256": "2e52c431d9d7f39303b2097cff227cfdfe463995bb0ee718b53a7d5cfc594385"
     },
     {
       "id": "ha_scripts",
       "name": "Home Assistant Scripts",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Control Home Assistant scripts.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -520,15 +534,16 @@
         "script"
       ],
       "entry": "verba/ha_scripts.py",
-      "sha256": "74398306f1252ca41f89c3f7611fb93d592a6d6af20c327a0b26294d53b418fb"
+      "sha256": "22e6e969b6034d647014db1e707ce5eee1de12585bfc7ab259ef2938337a439f"
     },
     {
       "id": "ha_sensors",
       "name": "Home Assistant Sensors",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Read Home Assistant sensor and binary_sensor entities.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -546,15 +561,16 @@
         "sensor"
       ],
       "entry": "verba/ha_sensors.py",
-      "sha256": "bcd65bf8011a4c5268732f7dc0e23b4ace9f4b357121b49b5bf1cb303a2acf6b"
+      "sha256": "0ee6c5d3028ac39abfec54563898dda03d8cb11637f9055da99c73107bf773b6"
     },
     {
       "id": "ha_switches",
       "name": "Home Assistant Switches",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant switches and plugs.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -572,15 +588,16 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "dafc036da243cee29eb26c4226c47a4d0ade1065272e6b746b3075337d0fc495"
+      "sha256": "a9f18124cdc0bc93feae2087f1b806cb4a28b0ed80b3dc235312f48699abd277"
     },
     {
       "id": "ha_temperature",
       "name": "Home Assistant Temperature",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "min_tater_version": "59",
       "description": "Read Home Assistant ambient temperatures.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "webui",
         "macos",
@@ -598,7 +615,7 @@
         "temperature"
       ],
       "entry": "verba/ha_temperature.py",
-      "sha256": "2d999f1fa0da35e3f114dee904746d38d49bb8d418a50e33815de9cc2e5ef357"
+      "sha256": "b600792d1561d59ebbdd3c8ef6a973b572376aa03224c4b768799f4002088b7a"
     },
     {
       "id": "irc_admin_op",
@@ -657,7 +674,7 @@
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
@@ -665,6 +682,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "homekit",
         "matrix",
@@ -678,12 +696,12 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "5a93f13dc5c0c9c23ba18f58af765c60aa6e28b444c1609a0cb571cf3de9e3ee"
+      "sha256": "86210c2f6e24364d498fb931c4a78b07a29b8a98017398068650837fcf1c7efa"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -691,6 +709,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "homekit",
         "matrix",
@@ -704,17 +723,18 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "1fc074ebe423608ed0c4dc74ec230e29321ce250d314b8694642fb11a5074ba0"
+      "sha256": "b4e5756372a78eb84ddee53cdbc3545678d6fa7e69182566e780d693fc02ca72"
     },
     {
       "id": "joke_api",
       "name": "Joke API",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Fetch one joke from JokeAPI.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "discord",
@@ -727,7 +747,7 @@
       "settings_category": "Joke API",
       "tags": [],
       "entry": "verba/joke_api.py",
-      "sha256": "7e5e7fd7a41a5f68b048ae5c61af428bf294a9a45bf9a7a734c13b93ecfcebc5"
+      "sha256": "e934e8b2e636c8bd7e515ebf5dc774726a6da59e4d740b96144f7615528b1835"
     },
     {
       "id": "lowfi_video",
@@ -748,7 +768,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.7",
+      "version": "1.1.8",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "portals": [
@@ -756,6 +776,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "matrix",
         "homekit",
@@ -765,17 +786,18 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "verba/mister_remote.py",
-      "sha256": "6f5be6cce284cf4d3f3e6d6585dd8c4f64b03a6361cf3dd3ce6f4ee61d7285ea"
+      "sha256": "0cafe464f8e3a3bd4f13e944a365dd2b0341fb365ed882e9eafa06436c7eaeeb"
     },
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Moltbook account snapshot with profile link and key counters.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -791,17 +813,18 @@
         "account_summary"
       ],
       "entry": "verba/moltbook_account_summary.py",
-      "sha256": "40c6df3edcea4b1d940698d1afd1365d8b0182ac9e003e65b07eeb41e15fd4c5"
+      "sha256": "d5b2673f554cc0fcd192d2e3746c076750d1f09235266175a33ae38fa0f5d50a"
     },
     {
       "id": "moltbook_activity_on_posts",
       "name": "Moltbook Activity On Posts",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Read /home activity buckets for your posts and summarize engagement.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -817,17 +840,18 @@
         "activity_on_my_posts"
       ],
       "entry": "verba/moltbook_activity_on_posts.py",
-      "sha256": "cca369c3cce42eb32671c1d0d3046a305ce10aa3975ce62e72bcd00ba4c75a47"
+      "sha256": "4fa3dfe3c38b4b29f1b4cf4c079b91e6d0e9600c9cd32b32cd55199cb9801d45"
     },
     {
       "id": "moltbook_agent_profile",
       "name": "Moltbook Agent Profile",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Lookup target Moltbook agent profile details.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -843,17 +867,18 @@
         "agent_profile"
       ],
       "entry": "verba/moltbook_agent_profile.py",
-      "sha256": "1ae8a043595e2ceea2e4225bc3e672cfd3e021b13ac54be059fd765451a05dcb"
+      "sha256": "07525574ac247dfb3a526ff98019d2e6c896229ac6ac7cec7f6dc6ce34f5febe"
     },
     {
       "id": "moltbook_fellow_taters",
       "name": "Moltbook Fellow Taters",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Show tracked fellow Tater Moltbook agents.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -869,17 +894,18 @@
         "fellow_taters"
       ],
       "entry": "verba/moltbook_fellow_taters.py",
-      "sha256": "9cb4e5e9cf94bf0e0b61947a5b027b3ff87fed520d37b8b3d344c1f2acf13340"
+      "sha256": "f4c3a174387204c86a744e2166fd514cc25993b194c5f8258268958f45c61b1d"
     },
     {
       "id": "moltbook_following",
       "name": "Moltbook Following",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "List known followed agents and active authors from following feed.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -895,17 +921,18 @@
         "following"
       ],
       "entry": "verba/moltbook_following.py",
-      "sha256": "e3a7429e95efe670dfd42b08e982ef7b6ee4cd2f000b9102174fbd5cd1fc3db0"
+      "sha256": "139ed2597c2e0efb881ca9ee143d285cdde5f900777ece8d16969dc81a662dda"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Moltbook /home dashboard overview with unread/activity counters.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -921,17 +948,18 @@
         "home_overview"
       ],
       "entry": "verba/moltbook_home_overview.py",
-      "sha256": "2ea8c9550a50b269a5c1f276d798eb20f6d73dd86118fc31e1025696246d90e8"
+      "sha256": "6f95656f5d32ccf815c3aa9c9cb950e550e825b2bd10f8088d2495ae4d84ad89"
     },
     {
       "id": "moltbook_latest_announcement",
       "name": "Moltbook Latest Announcement",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Get the newest Moltbook announcement/news entry.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -947,17 +975,18 @@
         "latest_announcement"
       ],
       "entry": "verba/moltbook_latest_announcement.py",
-      "sha256": "5431709bc0bdcf705d9c7343ab3c1f184b7e88b2a43d6ac2ddfdcc2c35e08237"
+      "sha256": "a93777450eadba558f8a91f851034bfafa85c320206a27b8569d7c731493f77e"
     },
     {
       "id": "moltbook_latest_posts",
       "name": "Moltbook Latest Posts",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Fetch latest posts authored by this Moltbook agent.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -973,17 +1002,18 @@
         "latest_posts"
       ],
       "entry": "verba/moltbook_latest_posts.py",
-      "sha256": "986190cc0e967e7bd842bb5499a1e272c4fb09fdfd65a21085f0a165ec825ef2"
+      "sha256": "23a1578042de80f7ad030052239371523563256fcfc33d07403bfe80e16329e7"
     },
     {
       "id": "moltbook_monitoring_submolts",
       "name": "Moltbook Monitoring Submolts",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Read Moltbook portal settings for submolts to monitor/prefer/avoid.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -999,17 +1029,18 @@
         "monitoring_submolts"
       ],
       "entry": "verba/moltbook_monitoring_submolts.py",
-      "sha256": "adef17417cbae16d2eefba1e7f5864ceb95b5d848af601dda2e60fe1f2ca6e20"
+      "sha256": "ff61b9bccae7f4e95e1ccbd62ad29cfcf039df3777d3d7e8088468cd9da451d1"
     },
     {
       "id": "moltbook_profile_link",
       "name": "Moltbook Profile Link",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Get the current Moltbook profile URL.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1025,17 +1056,18 @@
         "profile_link"
       ],
       "entry": "verba/moltbook_profile_link.py",
-      "sha256": "82fb35026edd3870fc4c7daaf4746e31b0fa9c8069a8de23b18d99cbe259bbde"
+      "sha256": "8532999ba8b57b2257f13d1435e9d0549717f1ad295a97c928e4114cf4d9d33d"
     },
     {
       "id": "moltbook_subscriptions",
       "name": "Moltbook Subscriptions",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Show subscribed submolts from Moltbook portal state.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1051,17 +1083,18 @@
         "subscriptions"
       ],
       "entry": "verba/moltbook_subscriptions.py",
-      "sha256": "206d3add5d5e03d5e0bff62c927bc4facff553d48a98d178b9e688712192898f"
+      "sha256": "1cae70312365315bac84ad849481b91a33b74d52354de3c4fa20e1db19cf1299"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.27",
+      "version": "1.0.28",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1074,7 +1107,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "13b4b00adb91c7bb46ce850372be00ff669b8baf2a19a865b030a6b482f4756a"
+      "sha256": "0dfda166d2adbd6f8ffdffa894c3012c0ee7df63dfd6e671aa6e831288524f4f"
     },
     {
       "id": "obsidian_note",
@@ -1111,7 +1144,7 @@
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Fetch details for a specific movie or TV show from Overseerr.",
       "portals": [
@@ -1119,6 +1152,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "matrix",
         "homekit",
@@ -1128,17 +1162,18 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_details.py",
-      "sha256": "5a3bc8b289334c325fa97ba5662e627877278032ea7cdd64869890b7df54692f"
+      "sha256": "67b8037225002b7720a5431b21f049704598c70873c8c17d4fb45bff7889be17"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Request a movie or TV show in Overseerr by title.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "discord",
@@ -1150,12 +1185,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_request.py",
-      "sha256": "31bd161f382fb9d71a09e334f913dff91bcd860efff066e675c8bd9fde3de374"
+      "sha256": "96f8b14eee2dea0338c5d7a9fb317ad99504dd883b467781c6ec9cbe8d8bcd45"
     },
     {
       "id": "overseerr_trending",
       "name": "Overseerr Trending",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "List trending or upcoming movies/TV from Overseerr.",
       "portals": [
@@ -1163,6 +1198,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "matrix",
         "homekit",
@@ -1172,7 +1208,7 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_trending.py",
-      "sha256": "fc80291c7a7b00459a3b107ead428c45587a4205c9b206d64d929503806c744c"
+      "sha256": "f1d78a868ad1e472b73a2e20596895fdee01c4a8263b9ea7635ed6d1af3bd52c"
     },
     {
       "id": "premiumize_add_transfer",
@@ -1352,12 +1388,13 @@
     {
       "id": "unifi_network_clients",
       "name": "UniFi Network Clients",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "List UniFi clients with wired/wireless counts and client details.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1373,17 +1410,18 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "2d519b63d71381979c1dd1be8cec0df0a19f3110a857dfd637eb007ed011b16a"
+      "sha256": "d9f9376ba5313b64765a394f33db1cdd6c6c2b51ea1f123ac379fed5af43a529"
     },
     {
       "id": "unifi_network_devices",
       "name": "UniFi Network Devices",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "List UniFi devices with online/offline status and core details.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1399,17 +1437,18 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "e7d2ec8e0ee96eb58fc5a03004a4fbb4738758c3eb6e8e954d371109af2dab02"
+      "sha256": "acbbf74a4a89aa9582a04ff91be45f9cf08de56be909a8b075c73333df2d280e"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1425,17 +1464,18 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "53a2eef9766ea134bccea7f2257e267a55209d09a28411d702c440db00aa60a2"
+      "sha256": "efcbbe27e2fbe23f274d33a1bf7b401624027cc06fb11ec1ccccfc32d1af8f9c"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1451,17 +1491,18 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "fa729861930c85e62114c5d62cff23b21bc0cd9fba647bb753ac4da38755854c"
+      "sha256": "a0bb57b2edd218b98a79dd0d7328b623487d6336b224e56cf118634b73c0b3a6"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1477,17 +1518,18 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "a52dad9be467890f1cef508a169826b9e459c893f7cb5902f6d05c98d98a7596"
+      "sha256": "1130d2d27bc40098daf7f55957debbe8789c3566cf1a7beb35edcaddd6b43955"
     },
     {
       "id": "unifi_protect_camera",
       "name": "UniFi Protect Camera",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Describe a single UniFi Protect camera snapshot.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1503,17 +1545,18 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "5ed13b9d544912710b51d21170930f26019ca978f46ff9dc93d8412b70e0600f"
+      "sha256": "5ce2f4f431e2f315ac36df94048d488ced23fa1ed0f55b2afed63914592d842a"
     },
     {
       "id": "unifi_protect_camera_info",
       "name": "UniFi Protect Camera Info",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "List UniFi Protect cameras.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1529,17 +1572,18 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "bc1c3833afd4ce65b1384dd4a97eff48e98cb2f4a16e02baa8659c2c07d20122"
+      "sha256": "9a718ecf4e944074961dcabe21a0b035552f043cf079c608b283bea58f7efdc2"
     },
     {
       "id": "unifi_protect_sensors",
       "name": "UniFi Protect Sensors",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Check UniFi Protect sensor status and single-sensor detail.",
       "portals": [
         "webui",
         "macos",
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1555,15 +1599,16 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "432cd873fedd28c20219566a1d3c43d58cadc5140a4d53c84ae474c49153e7c1"
+      "sha256": "80f499a3e0e92b1fa7c34fb1ae923c9586a32ad3f8f920f07a9b289034349b64"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
+        "voice_core",
         "homeassistant",
         "homekit",
         "xbmc",
@@ -1578,12 +1623,12 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "33e3a01fab9ecc8607e428cda04f08456946bfc888aace2636c11768c160ca8b"
+      "sha256": "59200640c3429f021c20a2dbef7f6977e8c8173c4bb91c66942a3244d2aa0982"
     },
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "portals": [
@@ -1591,6 +1636,7 @@
         "webui",
         "macos",
         "irc",
+        "voice_core",
         "homeassistant",
         "matrix",
         "homekit",
@@ -1601,7 +1647,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "84a72631939e0eb54ad05e0a4ecc70b91933a34cc6f0c5a0be44f8540761e60d"
+      "sha256": "7f91d67eba8aa581174fc2b43d8c079a495c71eaacc2d737ea3c53f01e83aca8"
     },
     {
       "id": "webdav_browser",
