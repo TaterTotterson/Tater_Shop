@@ -29,7 +29,7 @@ from speech_settings import (
 from speech_tts import speak_homeassistant_media_players
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "3.1.3"
+__version__ = "3.1.4"
 
 load_dotenv()
 
