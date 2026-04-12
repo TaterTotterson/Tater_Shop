@@ -1,6 +1,7 @@
 # verba/comfyui_audio_ace.py
 import json
 import asyncio
+import base64
 import re
 import yaml
 import random
@@ -32,7 +33,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -609,6 +610,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         selector: str,
         source_url: str,
         *,
+        audio_bytes: bytes | None = None,
         text: str = "Playing your new song.",
         timeout_s: float = 360.0,
     ) -> dict:
@@ -621,6 +623,8 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             "text": str(text or "").strip(),
             "timeout_s": float(timeout_s),
         }
+        if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
+            payload["audio_b64"] = base64.b64encode(bytes(audio_bytes)).decode("ascii")
         resp = requests.post(
             f"{base_url}/tater-ha/v1/voice/esphome/play",
             json=payload,
@@ -635,7 +639,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
     async def _bg_generate_and_play_voice_core(self, prompt: str, llm_client, selector: str):
         try:
             tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
-            media_url, _audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+            media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
         except Exception as e:
             logger.exception("ComfyUI Voice Core generation failed: %s", e)
             return
@@ -649,6 +653,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 self._request_voice_core_playback,
                 selector,
                 media_url,
+                audio_bytes=audio_bytes,
                 text="Playing your new song.",
                 timeout_s=360.0,
             )
