@@ -9,10 +9,12 @@ import requests
 
 from verba_base import ToolVerba
 from helpers import redis_client
+from voice_core_entities import VoiceCoreEntityClient
 
 load_dotenv()
 logger = logging.getLogger("voicepe_remote_timer")
 logger.setLevel(logging.INFO)
+_VOICE_CORE = VoiceCoreEntityClient()
 
 
 class VoicePERemoteTimerPlugin(ToolVerba):
@@ -31,7 +33,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.1.5"
+    version = "1.2.0"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -156,6 +158,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if r.status_code >= 400:
             raise RuntimeError(f"GET states failed: {r.status_code} {r.text}")
         return r.json() if r.text else []
+
+    def _voice_core_selector(self, context: dict | None) -> str:
+        return VoiceCoreEntityClient.selector_from_context(context)
 
     # ─────────────────────────────────────────────────────────────
     # Entity inference (Voice context)
@@ -288,6 +293,65 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         )
 
         if not (seconds and start and cancel and remaining and running):
+            return None
+        return {
+            "TIMER_SECONDS_ENTITY": seconds,
+            "START_BUTTON_ENTITY": start,
+            "CANCEL_BUTTON_ENTITY": cancel,
+            "REMAINING_SENSOR_ENTITY": remaining,
+            "RUNNING_SENSOR_ENTITY": running,
+        }
+
+    def _pick_best_voice_core_entity(
+        self,
+        entries: list[dict],
+        domain: str,
+        required_parts: list[str],
+        optional_parts: list[str] | None = None,
+        avoid_parts: list[str] | None = None,
+    ) -> dict | None:
+        opts = optional_parts or []
+        avoids = avoid_parts or []
+        return VoiceCoreEntityClient.find_best(
+            list(entries or []),
+            domain,
+            required_parts,
+            optional_parts=opts,
+            avoid_parts=avoids,
+        )
+
+    def _bundle_timer_entities_from_voice_core(self, entries: list[dict]) -> dict | None:
+        rows = [dict(item) for item in (entries or []) if isinstance(item, dict)]
+        if not rows:
+            return None
+
+        seconds = (
+            self._pick_best_voice_core_entity(rows, "number", ["remote", "timer", "seconds"])
+            or self._pick_best_voice_core_entity(rows, "number", ["timer", "seconds"])
+            or self._pick_best_voice_core_entity(rows, "number", ["seconds"], optional_parts=["timer", "remote"])
+        )
+        start = (
+            self._pick_best_voice_core_entity(rows, "button", ["remote", "timer", "start"], optional_parts=["press"], avoid_parts=["restart"])
+            or self._pick_best_voice_core_entity(rows, "button", ["timer", "start"], optional_parts=["press"], avoid_parts=["restart"])
+            or self._pick_best_voice_core_entity(rows, "button", ["start"], optional_parts=["timer", "remote", "press"], avoid_parts=["restart"])
+        )
+        cancel = (
+            self._pick_best_voice_core_entity(rows, "button", ["remote", "timer", "cancel"], optional_parts=["press"])
+            or self._pick_best_voice_core_entity(rows, "button", ["timer", "cancel"], optional_parts=["press"])
+            or self._pick_best_voice_core_entity(rows, "button", ["cancel"], optional_parts=["timer", "remote", "press"])
+        )
+        remaining = (
+            self._pick_best_voice_core_entity(rows, "sensor", ["remote", "timer", "remaining"], optional_parts=["seconds"])
+            or self._pick_best_voice_core_entity(rows, "sensor", ["timer", "remaining"], optional_parts=["seconds"])
+            or self._pick_best_voice_core_entity(rows, "sensor", ["remaining"], optional_parts=["timer", "remote", "seconds"])
+        )
+        running = (
+            self._pick_best_voice_core_entity(rows, "binary_sensor", ["remote", "timer", "running"])
+            or self._pick_best_voice_core_entity(rows, "binary_sensor", ["timer", "running"])
+            or self._pick_best_voice_core_entity(rows, "binary_sensor", ["running"], optional_parts=["timer", "remote"])
+        )
+
+        if not (seconds and start and remaining and running):
             return None
         return {
             "TIMER_SECONDS_ENTITY": seconds,
@@ -496,6 +560,38 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         if by_device:
             return by_device
         return None
+
+    def _missing_voice_core_entities_message(self, context: dict | None = None) -> str:
+        dev = self._ctx_text(context, "device_name", "satellite_name", "device_id")
+        return (
+            "Voice PE Remote Timer couldn't find the direct timer entities on this Voice Core satellite"
+            + (f" ({dev}). " if dev else ". ")
+            + "I need the timer number, start button, remaining sensor, and running sensor to be exposed by the device."
+        )
+
+    def _voice_core_entities_sync(self, selector: str) -> dict:
+        return _VOICE_CORE.get_entities(selector)
+
+    def _voice_core_command_sync(self, selector: str, entity_key: Any, command: str, value: Any = None) -> dict:
+        return _VOICE_CORE.command(selector, entity_key, command, value=value)
+
+    async def _resolve_voice_core_entities(self, context: dict | None = None) -> tuple[str, dict | None]:
+        selector = self._voice_core_selector(context)
+        if not selector:
+            return "", None
+        try:
+            payload = await asyncio.to_thread(self._voice_core_entities_sync, selector)
+        except Exception as e:
+            logger.error(f"[voicepe_remote_timer] Voice Core entity fetch failed for {selector}: {e}")
+            return selector, None
+        entries = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+        return selector, self._bundle_timer_entities_from_voice_core(entries)
+
+    def _voice_core_entry_bool(self, entry: dict | None) -> bool | None:
+        return VoiceCoreEntityClient.state_bool(entry)
+
+    def _voice_core_entry_int(self, entry: dict | None) -> int | None:
+        return VoiceCoreEntityClient.state_int(entry)
 
     # ─────────────────────────────────────────────────────────────
     # Duration parsing (forgiving)
@@ -998,6 +1094,14 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             logger.error(f"[voicepe_remote_timer] Failed reading remaining sensor: {e}")
             return None
 
+    async def _is_timer_running_voice_core(self, entities: dict | None = None) -> bool | None:
+        row = (entities or {}).get("RUNNING_SENSOR_ENTITY") if isinstance(entities, dict) else None
+        return self._voice_core_entry_bool(row)
+
+    async def _get_remaining_seconds_voice_core(self, entities: dict | None = None) -> int | None:
+        row = (entities or {}).get("REMAINING_SENSOR_ENTITY") if isinstance(entities, dict) else None
+        return self._voice_core_entry_int(row)
+
     # ─────────────────────────────────────────────────────────────
     # Actions: start / status / cancel
     # ─────────────────────────────────────────────────────────────
@@ -1146,6 +1250,121 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
         return (await self._llm_cancelled_message(llm_client)).strip()
 
+    async def _start_timer_voice_core(self, duration_text: str, llm_client, context: dict | None = None) -> str:
+        selector, ents = await self._resolve_voice_core_entities(context=context)
+        if not selector:
+            return "I couldn't determine which Voice Core satellite you spoke from."
+        if not ents:
+            return self._missing_voice_core_entities_message(context)
+
+        seconds_entry = ents.get("TIMER_SECONDS_ENTITY") if isinstance(ents, dict) else None
+        start_entry = ents.get("START_BUTTON_ENTITY") if isinstance(ents, dict) else None
+        remaining_entry = ents.get("REMAINING_SENSOR_ENTITY") if isinstance(ents, dict) else None
+        running_entry = ents.get("RUNNING_SENSOR_ENTITY") if isinstance(ents, dict) else None
+        if not seconds_entry or not start_entry or not remaining_entry or not running_entry:
+            return self._missing_voice_core_entities_message(context)
+
+        try:
+            max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+        except Exception:
+            max_seconds = 7200
+
+        new_seconds = self._parse_duration_to_seconds(duration_text, max_seconds)
+        if new_seconds <= 0:
+            llm_seconds = await self._llm_infer_duration_seconds(duration_text, llm_client, max_seconds)
+            if llm_seconds:
+                new_seconds = llm_seconds
+        if new_seconds <= 0:
+            return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
+
+        running = await self._is_timer_running_voice_core(entities=ents)
+        if running is None:
+            return "I couldn't read the Voice PE running state from Voice Core."
+        if running:
+            remaining = await self._get_remaining_seconds_voice_core(entities=ents)
+            return (await self._llm_block_new_timer_message(remaining, llm_client)).strip()
+
+        try:
+            await asyncio.to_thread(_VOICE_CORE.set_number, selector, seconds_entry, new_seconds)
+            await asyncio.to_thread(_VOICE_CORE.press_button, selector, start_entry)
+        except Exception as e:
+            logger.error(f"[voicepe_remote_timer] Voice Core start calls failed for {selector}: {e}")
+            return "Failed to start the Voice PE timer through Voice Core."
+
+        return (await self._llm_started_message(new_seconds, llm_client)).strip()
+
+    async def _status_voice_core(self, llm_client, context: dict | None = None) -> str:
+        selector, ents = await self._resolve_voice_core_entities(context=context)
+        if not selector:
+            return "I couldn't determine which Voice Core satellite you spoke from."
+        if not ents:
+            return self._missing_voice_core_entities_message(context)
+
+        running = await self._is_timer_running_voice_core(entities=ents)
+        if running is None:
+            return "I couldn't read the Voice PE running state from Voice Core."
+        if not running:
+            return (await self._llm_no_timer_message(llm_client)).strip()
+
+        remaining = await self._get_remaining_seconds_voice_core(entities=ents)
+        if remaining is None:
+            fallback = "A timer is running, but I couldn't read the remaining time."
+            return (
+                await self._llm_phrase(
+                    llm_client,
+                    "The user asked how much time is left on a timer.\n\n"
+                    "Fact: A timer is running, but remaining time is unavailable.\n\n"
+                    "Write ONE short sentence explaining that.\n"
+                    "Rules:\n- No emojis\n- No markdown\n- Friendly but concise\n"
+                    "Only output the sentence.",
+                    fallback,
+                )
+            ).strip()
+
+        if remaining <= 0:
+            fallback = "The timer is running, but it’s at the end right now."
+            return (
+                await self._llm_phrase(
+                    llm_client,
+                    "The user asked how much time is left on a timer.\n\n"
+                    "Fact: The timer is running but remaining time is 0 (end/transition).\n\n"
+                    "Write ONE short, natural sentence explaining it.\n"
+                    "Rules:\n- No emojis\n- No markdown\n- Friendly but concise\n"
+                    "Only output the sentence.",
+                    fallback,
+                )
+            ).strip()
+
+        return (await self._llm_time_left_message(remaining, llm_client)).strip()
+
+    async def _cancel_voice_core(self, llm_client, context: dict | None = None) -> str:
+        selector, ents = await self._resolve_voice_core_entities(context=context)
+        if not selector:
+            return "I couldn't determine which Voice Core satellite you spoke from."
+        if not ents:
+            return self._missing_voice_core_entities_message(context)
+
+        running = await self._is_timer_running_voice_core(entities=ents)
+        if running is None:
+            return "I couldn't read the Voice PE running state from Voice Core."
+        if not running:
+            return (await self._llm_cancel_nothing_message(llm_client)).strip()
+
+        cancel_entry = ents.get("CANCEL_BUTTON_ENTITY") if isinstance(ents, dict) else None
+        if not cancel_entry:
+            return (
+                "This Voice PE exposes timer start and status in Voice Core, "
+                "but it does not expose a timer cancel button yet."
+            )
+
+        try:
+            await asyncio.to_thread(_VOICE_CORE.press_button, selector, cancel_entry)
+        except Exception as e:
+            logger.error(f"[voicepe_remote_timer] Voice Core cancel call failed for {selector}: {e}")
+            return "Failed to cancel the Voice PE timer through Voice Core."
+
+        return (await self._llm_cancelled_message(llm_client)).strip()
+
     # ─────────────────────────────────────────────────────────────
     # Main dispatcher
     # ─────────────────────────────────────────────────────────────
@@ -1178,20 +1397,43 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
         return await self._start_timer(duration, llm_client, context=context)
 
+    async def _handle_voice_core(self, args, llm_client, context: dict | None = None) -> str:
+        args = args or {}
+        action, duration = self._resolve_action_duration(args)
+        merged_request = self._merged_request_text(args)
+
+        if action in ("cancel", "stop", "clear"):
+            return await self._cancel_voice_core(llm_client, context=context)
+
+        if action in ("status", "check", "remaining", "time_left"):
+            return await self._status_voice_core(llm_client, context=context)
+
+        if action in ("start", "set") and not duration:
+            try:
+                max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+            except Exception:
+                max_seconds = 7200
+
+            llm_seconds = await self._llm_infer_duration_seconds(merged_request, llm_client, max_seconds)
+            if llm_seconds:
+                duration = str(llm_seconds)
+            else:
+                return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
+
+        if not duration:
+            return await self._status_voice_core(llm_client, context=context)
+
+        return await self._start_timer_voice_core(duration, llm_client, context=context)
+
     # ─────────────────────────────────────────────────────────────
     # Platform handlers (hybrid-safe webui)
     # ─────────────────────────────────────────────────────────────
 
     async def handle_homeassistant(self, args, llm_client, context: dict | None = None):
         return (await self._handle(args, llm_client, context=context)).strip()
+
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        try:
-            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
-        except TypeError:
-            try:
-                return await self.handle_homeassistant(args=args, llm_client=llm_client)
-            except TypeError:
-                return await self.handle_homeassistant(args, llm_client)
+        return (await self._handle_voice_core(args or {}, llm_client, context=context)).strip()
 
 
     async def handle_homekit(self, args, llm_client, context: dict | None = None):

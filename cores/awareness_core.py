@@ -21,8 +21,9 @@ from dotenv import load_dotenv
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import dispatch_notification
 from speech_settings import get_speech_settings as get_shared_speech_settings
-from speech_tts import speak_homeassistant_media_players
+from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
+from announcement_targets import get_voice_core_satellite_target_options
 
 __version__ = "3.1.7"
 
@@ -2701,6 +2702,12 @@ def _shared_announcement_tts_settings() -> Dict[str, Any]:
         "wyoming_host": _text(shared.get("wyoming_tts_host")),
         "wyoming_port": shared.get("wyoming_tts_port"),
         "wyoming_voice": _text(shared.get("wyoming_tts_voice")),
+        "voice_core_backend": _text(shared.get("tts_backend")),
+        "voice_core_model": _text(shared.get("tts_model")),
+        "voice_core_voice": _text(shared.get("tts_voice")),
+        "voice_core_wyoming_host": _text(shared.get("wyoming_tts_host")),
+        "voice_core_wyoming_port": shared.get("wyoming_tts_port"),
+        "voice_core_wyoming_voice": _text(shared.get("wyoming_tts_voice")),
     }
 
 
@@ -2872,12 +2879,12 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     if players:
         try:
             ha = _ha_config()
-            tts_result = await speak_homeassistant_media_players(
+            tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
                 ha_base=ha["base"],
                 token=ha["token"],
-                players=players,
+                targets=players,
                 public_base_url=_text(shared_tts.get("public_base_url")),
                 tts_entity=tts_entity,
                 model=tts_model,
@@ -2885,6 +2892,12 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
                 wyoming_port=shared_tts.get("wyoming_port"),
                 wyoming_voice=_text(shared_tts.get("wyoming_voice")),
+                voice_core_backend=_text(shared_tts.get("voice_core_backend")),
+                voice_core_model=_text(shared_tts.get("voice_core_model")),
+                voice_core_voice=_text(shared_tts.get("voice_core_voice")),
+                voice_core_wyoming_host=_text(shared_tts.get("voice_core_wyoming_host")),
+                voice_core_wyoming_port=shared_tts.get("voice_core_wyoming_port"),
+                voice_core_wyoming_voice=_text(shared_tts.get("voice_core_wyoming_voice")),
                 default_backend=tts_backend,
             )
         except Exception as exc:
@@ -3033,12 +3046,12 @@ async def _execute_entry_sensor_rule(
     if action_token == "open" and players:
         try:
             ha = _ha_config()
-            tts_result = await speak_homeassistant_media_players(
+            tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
                 ha_base=ha["base"],
                 token=ha["token"],
-                players=players,
+                targets=players,
                 public_base_url=_text(shared_tts.get("public_base_url")),
                 tts_entity=tts_entity,
                 model=tts_model,
@@ -3046,6 +3059,12 @@ async def _execute_entry_sensor_rule(
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
                 wyoming_port=shared_tts.get("wyoming_port"),
                 wyoming_voice=_text(shared_tts.get("wyoming_voice")),
+                voice_core_backend=_text(shared_tts.get("voice_core_backend")),
+                voice_core_model=_text(shared_tts.get("voice_core_model")),
+                voice_core_voice=_text(shared_tts.get("voice_core_voice")),
+                voice_core_wyoming_host=_text(shared_tts.get("voice_core_wyoming_host")),
+                voice_core_wyoming_port=shared_tts.get("voice_core_wyoming_port"),
+                voice_core_wyoming_voice=_text(shared_tts.get("voice_core_wyoming_voice")),
                 default_backend=tts_backend,
             )
         except Exception as exc:
@@ -3627,6 +3646,7 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
     except Exception:
         logger.debug("[awareness] notify service discovery failed", exc_info=True)
 
+    catalog["media_players"] = _announcement_target_pairs(catalog.get("media_players") or [])
     catalog = _finalize_catalog(catalog)
     _set_cached_catalog("homeassistant", catalog)
     return catalog
@@ -3771,6 +3791,34 @@ def _players_text(value: Any) -> str:
     return "\n".join(_normalize_players(value))
 
 
+def _announcement_target_pairs(
+    homeassistant_pairs: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for value, label in homeassistant_pairs or []:
+        token = _text(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        pretty = _text(label) or token
+        if not pretty.lower().startswith("home assistant:"):
+            pretty = f"Home Assistant: {pretty}"
+        pairs.append((token, pretty))
+
+    for option in get_voice_core_satellite_target_options():
+        if not isinstance(option, dict):
+            continue
+        token = _text(option.get("value"))
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        pairs.append((token, _text(option.get("label")) or token))
+
+    return pairs
+
+
 def _announcement_tts_fields(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
@@ -3780,7 +3828,7 @@ def _announcement_tts_fields(
     return [
         {
             "key": "players",
-            "label": "Media Players",
+            "label": "Playback Targets",
             "type": "multiselect",
             "description": players_description,
             "options": _multiselect_choices_from_pairs(
@@ -4203,7 +4251,7 @@ def _doorbell_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Speak the shared announcement voice on selected media_player entities.",
+                    players_description="Speak the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
                 ),
             },
             {
@@ -4322,7 +4370,7 @@ def _entry_sensor_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected media_player entities.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
                 ),
             },
             {
@@ -4648,7 +4696,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected media_player entities.",
+        players_description="Speak using the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
     )
     return {
         "kind": "settings_manager",
@@ -5202,7 +5250,7 @@ def _build_rule_from_values(
         if not base["trigger_entities"]:
             raise ValueError("At least one trigger entity is required for doorbell rules.")
         if not base["players"]:
-            raise ValueError("At least one media player is required for doorbell rules.")
+            raise ValueError("At least one playback target is required for doorbell rules.")
 
         if not base["area"]:
             base["area"] = "front door"
