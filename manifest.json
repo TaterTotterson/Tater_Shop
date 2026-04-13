@@ -1604,7 +1604,7 @@
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.1.5",
+      "version": "1.2.0",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
@@ -1623,7 +1623,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "59200640c3429f021c20a2dbef7f6977e8c8173c4bb91c66942a3244d2aa0982"
+      "sha256": "1ffe1fd07bd27bf94d85b570362cc2695dce2cfacbab3badd7aed7c2f25d0ebd"
     },
     {
       "id": "weather_forecast",
