@@ -23,7 +23,7 @@ class BroadcastPlugin(ToolVerba):
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.6"
+    version = "1.1.7"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -217,6 +217,9 @@ class BroadcastPlugin(ToolVerba):
         announcement_model = str(speech.get("announcement_tts_model") or "")
         announcement_voice = str(speech.get("announcement_tts_voice") or "")
         announcement_entity = str(speech.get("announcement_tts_entity") or DEFAULT_ANNOUNCEMENT_TTS_ENTITY)
+        direct_tts_backend = str(speech.get("tts_backend") or "")
+        direct_tts_model = str(speech.get("tts_model") or "")
+        direct_tts_voice = str(speech.get("tts_voice") or "")
 
         try:
             tts_result = await speak_announcement_targets(
@@ -232,6 +235,12 @@ class BroadcastPlugin(ToolVerba):
                 wyoming_host=str(speech.get("wyoming_tts_host") or ""),
                 wyoming_port=speech.get("wyoming_tts_port"),
                 wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
+                voice_core_backend=direct_tts_backend,
+                voice_core_model=direct_tts_model,
+                voice_core_voice=direct_tts_voice,
+                voice_core_wyoming_host=str(speech.get("wyoming_tts_host") or ""),
+                voice_core_wyoming_port=speech.get("wyoming_tts_port"),
+                voice_core_wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
                 default_backend=announcement_backend,
             )
         except Exception as exc:
