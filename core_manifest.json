@@ -70,6 +70,20 @@
       "tags": [],
       "entry": "cores/rss_core.py",
       "sha256": "308c1e72db91b161f90d86d479a5cd72d03ede495399ce7412ebd31e0ef0cd1f"
+    },
+    {
+      "id": "voice",
+      "name": "Voice Core",
+      "module_key": "voice_core",
+      "version": "3.0.0",
+      "min_tater_version": "59",
+      "description": "Tater Native Voice Pipeline",
+      "settings_category": "Voice Core Settings",
+      "required_settings_count": 0,
+      "autostart_key": "voice_core_running",
+      "tags": [],
+      "entry": "cores/voice_core.py",
+      "sha256": "ef40ad79a562859fbd05febdc7e05439c6738c2a921564a04f74165336f36aa1"
     }
   ]
 }

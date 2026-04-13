@@ -16,6 +16,7 @@
 | `memory` | `memory_core` | Memory Core integration core for Tater. |
 | `personal` | `personal_core` | Personal Core integration core for Tater. |
 | `rss` | `rss_core` | RSS Core integration core for Tater. |
+| `voice` | `voice_core` | Tater Native Voice Pipeline |
 
 ## 🌐 Portal Store
 
