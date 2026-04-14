@@ -162,6 +162,8 @@ DEFAULT_WYOMING_TTS_VOICE = ""
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
 DEFAULT_STT_BACKEND = "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
+DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
+DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
 DEFAULT_PIPER_TAIL_PAD_SECONDS = 0.18
 DEFAULT_FASTER_WHISPER_MODEL = "base.en"
 DEFAULT_FASTER_WHISPER_DEVICE = "cpu"
@@ -180,6 +182,7 @@ DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
+_PIPER_ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e"}
 
 DEFAULT_VOICE_SAMPLE_RATE_HZ = 16000
 DEFAULT_VOICE_SAMPLE_WIDTH = 2
@@ -195,6 +198,14 @@ DEFAULT_DISCOVERY_MDNS_TIMEOUT_S = 3.0
 DEFAULT_CONTINUED_CHAT_ENABLED = False
 DEFAULT_CONTINUED_CHAT_REUSE_SECONDS = 30.0
 DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S = 4.0
+DEFAULT_CONTINUED_CHAT_REPLY_TO_CUE_PAUSE_S = 0.60
+DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S = 0.45
+DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS = 1.20
+DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS = 14.0
+DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S = 6.50
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES = 5
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.82
+DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 1.00
 DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_STARTUP_GATE_S = 0.32
 DEFAULT_TTS_URL_TTL_S = 180
@@ -210,6 +221,8 @@ DEFAULT_SILERO_NEG_THRESHOLD = 0.20
 DEFAULT_SILERO_FRAME_SAMPLES = 512
 DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
 DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
+DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.58
+DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.72
 DEFAULT_PRE_ROLL_SECONDS = 0.50
 DEFAULT_PRE_ROLL_CHUNKS = 16
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
@@ -596,6 +609,18 @@ def _continued_chat_spoken_reply_text(
     if reply[-1:] in ".!?":
         return f"{reply} {cue}".strip()
     return f"{reply}. {cue}".strip()
+
+
+def _merge_text_notes(*parts: str) -> str:
+    seen = set()
+    out: List[str] = []
+    for part in parts:
+        text = _text(part)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return " ".join(out).strip()
 
 
 def _response_followup_heuristic(text: str) -> bool:
@@ -1654,6 +1679,8 @@ class SegmenterState:
     neg_threshold: float
     min_speech_frames: int
     min_silence_frames: int
+    min_silence_short_s: float = DEFAULT_VAD_MIN_SILENCE_SHORT_S
+    min_silence_long_s: float = DEFAULT_VAD_MIN_SILENCE_LONG_S
 
     # running counters
     speech_chunks: int = 0
@@ -1786,7 +1813,9 @@ class SegmenterState:
                 # sparse chunk cadence where 3 silent chunks can be only ~0.15s.
                 min_silence_elapsed = min(
                     float(self.silence_s),
-                    0.72 if self.speech_seconds_total >= 1.0 else 0.58,
+                    float(self.min_silence_long_s)
+                    if self.speech_seconds_total >= 1.0
+                    else float(self.min_silence_short_s),
                 )
                 if (
                     (
@@ -1849,7 +1878,7 @@ class EouEngine:
             self.backend.reset_state()
 
 
-def _build_eou_engine(audio_format: Dict[str, int]) -> EouEngine:
+def _build_eou_engine(audio_format: Dict[str, int], *, continued_chat_reopen: bool = False) -> EouEngine:
     cfg = _voice_config_snapshot()
     eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
     backend_name = DEFAULT_VAD_BACKEND
@@ -1869,7 +1898,28 @@ def _build_eou_engine(audio_format: Dict[str, int]) -> EouEngine:
         neg_threshold=neg_threshold,
         min_speech_frames=_as_int(eou.get("min_speech_frames"), DEFAULT_SILERO_MIN_SPEECH_FRAMES, minimum=1, maximum=30),
         min_silence_frames=_as_int(eou.get("min_silence_frames"), DEFAULT_SILERO_MIN_SILENCE_FRAMES, minimum=3, maximum=60),
+        min_silence_short_s=float(DEFAULT_VAD_MIN_SILENCE_SHORT_S),
+        min_silence_long_s=float(DEFAULT_VAD_MIN_SILENCE_LONG_S),
     )
+    if continued_chat_reopen:
+        segmenter.silence_s = max(float(segmenter.silence_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS))
+        segmenter.timeout_s = max(float(segmenter.timeout_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS))
+        segmenter.no_speech_timeout_s = max(
+            float(segmenter.no_speech_timeout_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S),
+        )
+        segmenter.min_silence_frames = max(
+            int(segmenter.min_silence_frames),
+            int(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES),
+        )
+        segmenter.min_silence_short_s = max(
+            float(segmenter.min_silence_short_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S),
+        )
+        segmenter.min_silence_long_s = max(
+            float(segmenter.min_silence_long_s),
+            float(DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S),
+        )
 
     return EouEngine(mode=mode, backend_name=backend_name, backend=backend, segmenter=segmenter)
 
@@ -2762,11 +2812,74 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
     return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
 
 
-def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+def _split_piper_sentences(text: str) -> List[str]:
     prompt = _text(text)
     if not prompt:
-        return b"", {}
-    voice = _load_piper_voice_model(model_id)
+        return []
+    parts: List[str] = []
+    start = 0
+    length = len(prompt)
+    i = 0
+    while i < length:
+        ch = prompt[i]
+        if ch not in ".!?":
+            i += 1
+            continue
+        if i + 1 < length and prompt[i + 1] in ".!?":
+            i += 1
+            continue
+        if ch == "." and i > 0 and i + 1 < length and prompt[i - 1].isdigit() and prompt[i + 1].isdigit():
+            i += 1
+            continue
+        j = i - 1
+        while j >= start and (prompt[j].isalnum() or prompt[j] in "_-"):
+            j -= 1
+        token = prompt[j + 1 : i].lower()
+        if ch == "." and (token in _PIPER_ABBREVIATIONS or (len(token) == 1 and token.isalpha())):
+            i += 1
+            continue
+        k = i + 1
+        while k < length and prompt[k] in "\"'”’)]}":
+            k += 1
+        if k < length and not prompt[k].isspace():
+            i += 1
+            continue
+        segment = prompt[start:k].strip()
+        if segment:
+            parts.append(segment)
+        while k < length and prompt[k].isspace():
+            k += 1
+        start = k
+        i = k
+    tail = prompt[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _build_piper_segment_plan(text: str) -> List[Tuple[str, float]]:
+    normalized = re.sub(r"\r\n?", "\n", _text(text))
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", normalized) if _text(part)]
+    if not paragraphs:
+        return []
+    plan: List[Tuple[str, float]] = []
+    last_paragraph_index = len(paragraphs) - 1
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        sentences = _split_piper_sentences(paragraph)
+        if not sentences:
+            continue
+        last_sentence_index = len(sentences) - 1
+        for sentence_index, sentence in enumerate(sentences):
+            pause_seconds = 0.0
+            if sentence_index < last_sentence_index:
+                pause_seconds = DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS
+            elif paragraph_index < last_paragraph_index:
+                pause_seconds = DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS
+            plan.append((sentence, pause_seconds))
+    return plan
+
+
+def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict[str, Any]]:
     audio_out = bytearray()
     sample_rate = 22050
     sample_width = 2
@@ -2777,9 +2890,26 @@ def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, A
         sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
         sample_width = int(getattr(chunk, "sample_width", sample_width) or sample_width)
         sample_channels = int(getattr(chunk, "sample_channels", sample_channels) or sample_channels)
-    audio_format = {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
+    return bytes(audio_out), {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
+
+
+def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+    voice = _load_piper_voice_model(model_id)
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    audio_parts: List[bytes] = []
+    audio_format: Dict[str, Any] = {"rate": 22050, "width": 2, "channels": 1}
+    for segment_text, pause_seconds in segment_plan:
+        segment_audio, segment_format = _synthesize_piper_segment_sync(voice, segment_text)
+        if segment_audio:
+            audio_parts.append(segment_audio)
+            audio_format = dict(segment_format)
+        if pause_seconds > 0:
+            audio_parts.append(_append_pcm_silence(b"", audio_format, seconds=pause_seconds))
     padded = _append_pcm_silence(
-        bytes(audio_out),
+        b"".join(audio_parts),
         audio_format,
         seconds=DEFAULT_PIPER_TAIL_PAD_SECONDS,
     )
@@ -2866,6 +2996,154 @@ async def _native_synthesize_text(
                 ) + f"{effective_backend} synthesis failed: {_text(exc)}. Falling back to Wyoming."
                 return audio_bytes, audio_format, "wyoming", fallback_note.strip()
         raise
+
+
+def _normalized_audio_format(audio_format: Dict[str, Any]) -> Dict[str, int]:
+    return {
+        "rate": int(audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ),
+        "width": int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH),
+        "channels": int(audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
+    }
+
+
+def _trim_pcm_for_playback(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Tuple[bytes, Dict[str, int]]:
+    data = bytes(audio_bytes or b"")
+    fmt = _normalized_audio_format(audio_format or {})
+    width = int(fmt.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(fmt.get("channels") or DEFAULT_VOICE_CHANNELS)
+    if width not in {1, 2, 3, 4}:
+        width = DEFAULT_VOICE_SAMPLE_WIDTH
+    if channels < 1 or channels > 8:
+        channels = DEFAULT_VOICE_CHANNELS
+    fmt = {"rate": int(fmt.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ), "width": width, "channels": channels}
+    if not data:
+        return b"", fmt
+    block_align = max(1, width * channels)
+    usable = len(data) - (len(data) % block_align)
+    if usable <= 0:
+        return b"", fmt
+    return data[:usable], fmt
+
+
+def _stitch_pcm_playback_segments(parts: List[Tuple[bytes, Dict[str, Any], float]]) -> Tuple[bytes, Dict[str, int]]:
+    segments: List[Tuple[bytes, Dict[str, int], float]] = []
+    for audio_bytes, audio_format, pause_s in parts:
+        data, fmt = _trim_pcm_for_playback(audio_bytes, audio_format)
+        if not data:
+            continue
+        segments.append((data, fmt, max(0.0, float(pause_s or 0.0))))
+    if not segments:
+        return b"", {}
+
+    target_fmt = dict(segments[0][1])
+    if all(fmt == target_fmt for _, fmt, _ in segments):
+        out = bytearray()
+        for data, fmt, pause_s in segments:
+            out.extend(data)
+            if pause_s > 0:
+                out.extend(_append_pcm_silence(b"", fmt, seconds=pause_s))
+        return bytes(out), target_fmt
+
+    normalized_fmt = {"rate": 16000, "width": 2, "channels": 1}
+    out = bytearray()
+    for data, fmt, pause_s in segments:
+        normalized, _state = _pcm_to_pcm16_mono_16k(data, fmt)
+        if not normalized:
+            return b"", {}
+        out.extend(normalized)
+        if pause_s > 0:
+            out.extend(_append_pcm_silence(b"", normalized_fmt, seconds=pause_s))
+    return bytes(out), normalized_fmt
+
+
+async def _synthesize_spoken_response_audio(
+    response_text: str,
+    *,
+    session: "VoiceSessionRuntime",
+    continue_conversation: bool,
+    followup_cue: str = "",
+) -> Tuple[bytes, Dict[str, Any], str, str]:
+    reply = _text(response_text)
+    cue = _sanitize_followup_cue_text(followup_cue)
+    if not continue_conversation:
+        return await _native_synthesize_text(reply, session=session)
+
+    if not cue:
+        combined = _continued_chat_spoken_reply_text(
+            reply,
+            continue_conversation=True,
+            followup_cue=cue,
+        )
+        audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
+            combined,
+            session=session,
+        )
+        if audio_bytes:
+            audio_bytes = _append_pcm_silence(
+                audio_bytes,
+                audio_format,
+                seconds=DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S,
+            )
+        return audio_bytes, audio_format, backend_used, backend_note
+
+    split_error = ""
+    try:
+        reply_audio = b""
+        reply_format: Dict[str, Any] = {}
+        reply_backend = ""
+        reply_note = ""
+        if reply:
+            reply_audio, reply_format, reply_backend, reply_note = await _native_synthesize_text(
+                reply,
+                session=session,
+            )
+
+        cue_audio, cue_format, cue_backend, cue_note = await _native_synthesize_text(
+            cue,
+            session=session,
+        )
+        stitched_audio, stitched_format = _stitch_pcm_playback_segments(
+            [
+                (reply_audio, reply_format, DEFAULT_CONTINUED_CHAT_REPLY_TO_CUE_PAUSE_S if cue_audio else 0.0),
+                (cue_audio, cue_format, DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S),
+            ]
+        )
+        if stitched_audio:
+            backend_used = reply_backend or cue_backend or _text(session.tts_backend_effective)
+            backend_note = _merge_text_notes(
+                reply_note,
+                cue_note,
+                (
+                    f"reply/cue TTS backend mismatch: {reply_backend}->{cue_backend}"
+                    if reply_backend and cue_backend and reply_backend != cue_backend
+                    else ""
+                ),
+            )
+            return stitched_audio, stitched_format, backend_used, backend_note
+    except Exception as exc:
+        split_error = _text(exc)
+
+    combined = _continued_chat_spoken_reply_text(
+        reply,
+        continue_conversation=True,
+        followup_cue=cue,
+    )
+    audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
+        combined,
+        session=session,
+    )
+    if audio_bytes:
+        audio_bytes = _append_pcm_silence(
+            audio_bytes,
+            audio_format,
+            seconds=DEFAULT_CONTINUED_CHAT_CUE_TO_REOPEN_PAUSE_S,
+        )
+    backend_note = _merge_text_notes(
+        backend_note,
+        (f"followup split playback fallback: {split_error}" if split_error else ""),
+        "followup cue playback used single-pass fallback",
+    )
+    return audio_bytes, audio_format, backend_used, backend_note
 
 
 # -------------------- TTS URL Store --------------------
@@ -4779,14 +5057,11 @@ async def _finalize_session(
             continue_conversation = bool(await _response_is_followup_question(response_text))
             if continue_conversation:
                 followup_cue = await _generate_followup_cue(transcript, response_text)
-        spoken_response_text = _continued_chat_spoken_reply_text(
+        tts_audio, tts_format, tts_backend_used, tts_backend_note = await _synthesize_spoken_response_audio(
             response_text,
+            session=session,
             continue_conversation=continue_conversation,
             followup_cue=followup_cue,
-        )
-        tts_audio, tts_format, tts_backend_used, tts_backend_note = await _native_synthesize_text(
-            spoken_response_text,
-            session=session,
         )
 
         async with lock:
@@ -4912,13 +5187,14 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             else:
                 followup_conv = _claim_pending_followup(runtime)
         conv = explicit_conv or followup_conv or sid
+        continued_chat_reopen = bool(followup_conv) and not bool(explicit_conv) and not bool(wake_phrase)
         if followup_conv:
             _native_debug(
                 f"continued chat reuse selector={token} session_id={sid} conversation_id={followup_conv}"
             )
 
         try:
-            eou_engine = _build_eou_engine(fmt)
+            eou_engine = _build_eou_engine(fmt, continued_chat_reopen=continued_chat_reopen)
         except Exception as exc:
             msg = f"Failed to initialize Silero VAD: {exc}"
             logger.warning("[native-voice] %s selector=%s", msg, token)
@@ -5026,11 +5302,12 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         _schedule_audio_stall_watch(token, client, module, session_id=sid)
 
         logger.info(
-            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s area=%s stt=%s tts=%s rate=%s width=%s ch=%s",
+            "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s area=%s stt=%s tts=%s rate=%s width=%s ch=%s",
             token,
             conv,
             sid,
             _text(wake_word_phrase),
+            "1" if continued_chat_reopen else "0",
             area_name,
             effective_stt_backend,
             effective_tts_backend,
