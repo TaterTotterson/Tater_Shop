@@ -137,7 +137,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 load_dotenv()
 
-__version__ = "3.0.1"
+__version__ = "3.0.2"
 
 logger = logging.getLogger("voice_core")
 logger.setLevel(logging.INFO)
