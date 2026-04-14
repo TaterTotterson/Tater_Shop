@@ -137,7 +137,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 load_dotenv()
 
-__version__ = "3.0.6"
+__version__ = "3.0.7"
 
 logger = logging.getLogger("voice_core")
 logger.setLevel(logging.INFO)
@@ -5753,6 +5753,15 @@ async def _esphome_connect_selector(selector: str, *, host: str, port: Optional[
                 }
             )
             _esphome_native_clients[token] = row
+            logger.info(
+                "[native-voice] esphome connected selector=%s host=%s port=%s source=%s api_audio_supported=%s speaker_supported=%s",
+                token,
+                host_token,
+                connect_port,
+                source,
+                bool(row.get("voice_api_audio_supported")),
+                bool(row.get("voice_speaker_supported")),
+            )
             return dict(row)
 
     except Exception as exc:
@@ -5839,6 +5848,46 @@ async def _esphome_loop() -> None:
             _esphome_native_stats["last_run_ts"] = _now()
             logger.warning("[native-voice] esphome reconcile loop error: %s", exc)
         await asyncio.sleep(float(max(2, _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS))))
+
+
+async def _esphome_bootstrap_reconnect() -> None:
+    # After a core restart, satellites may still be unwinding the previous API
+    # session. Do one immediate force-reconcile and one short delayed pass so
+    # they can recover without needing a device reboot.
+    try:
+        status = await _esphome_reconcile_once(force=True)
+        logger.info(
+            "[native-voice] startup esphome reconcile selected=%s connected=%s",
+            len(status.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (status.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except Exception as exc:
+        logger.warning("[native-voice] startup esphome reconcile failed: %s", exc)
+
+    try:
+        await asyncio.sleep(2.0)
+        status = await _esphome_reconcile_once(force=True)
+        logger.info(
+            "[native-voice] delayed esphome reconcile selected=%s connected=%s",
+            len(status.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (status.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("[native-voice] delayed esphome reconcile failed: %s", exc)
 
 
 def _esphome_status() -> Dict[str, Any]:
@@ -6871,6 +6920,8 @@ async def _on_startup() -> None:
     # Ensure manual targets are represented before loops begin.
     _sync_manual_targets()
 
+    if "esphome_bootstrap" not in _background_tasks or _background_tasks["esphome_bootstrap"].done():
+        _background_tasks["esphome_bootstrap"] = asyncio.create_task(_esphome_bootstrap_reconnect())
     if "discovery" not in _background_tasks or _background_tasks["discovery"].done():
         _background_tasks["discovery"] = asyncio.create_task(_discovery_loop())
     if "esphome" not in _background_tasks or _background_tasks["esphome"].done():
@@ -7224,6 +7275,10 @@ def run(stop_event: Optional[threading.Event] = None) -> None:
         finally:
             with contextlib.suppress(Exception):
                 if not loop.is_closed():
+                    with contextlib.suppress(Exception):
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                    with contextlib.suppress(Exception):
+                        loop.run_until_complete(loop.shutdown_default_executor())
                     loop.stop()
                     loop.close()
 
