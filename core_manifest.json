@@ -75,7 +75,7 @@
       "id": "voice",
       "name": "Voice Core",
       "module_key": "voice_core",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "min_tater_version": "59",
       "description": "Tater Native Voice Pipeline",
       "settings_category": "Voice Core Settings",
