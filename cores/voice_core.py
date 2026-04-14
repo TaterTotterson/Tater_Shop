@@ -137,7 +137,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 load_dotenv()
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 
 logger = logging.getLogger("voice_core")
 logger.setLevel(logging.INFO)
@@ -201,15 +201,15 @@ DEFAULT_TTS_URL_TTL_S = 180
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "silero"
-DEFAULT_VAD_SILENCE_SECONDS = 0.68
+DEFAULT_VAD_SILENCE_SECONDS = 0.95
 DEFAULT_VAD_SPEECH_SECONDS = 0.20
-DEFAULT_VAD_TIMEOUT_SECONDS = 6.00
-DEFAULT_VAD_NO_SPEECH_TIMEOUT_S = 2.50
+DEFAULT_VAD_TIMEOUT_SECONDS = 10.00
+DEFAULT_VAD_NO_SPEECH_TIMEOUT_S = 4.00
 DEFAULT_SILERO_THRESHOLD = 0.24
 DEFAULT_SILERO_NEG_THRESHOLD = 0.20
 DEFAULT_SILERO_FRAME_SAMPLES = 512
 DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
-DEFAULT_SILERO_MIN_SILENCE_FRAMES = 3
+DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
 DEFAULT_PRE_ROLL_SECONDS = 0.50
 DEFAULT_PRE_ROLL_CHUNKS = 16
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
@@ -490,6 +490,112 @@ def _native_debug(message: str) -> None:
 
 def _continued_chat_enabled() -> bool:
     return _get_bool_setting("VOICE_CONTINUED_CHAT_ENABLED", DEFAULT_CONTINUED_CHAT_ENABLED)
+
+
+def _continued_chat_followup_cue(response_text: str) -> str:
+    cues = (
+        "I'm listening.",
+        "Go ahead.",
+        "Tell me.",
+        "Say it.",
+    )
+    tail = _text(response_text).strip().lower()[-240:]
+    if not tail:
+        return "I'm listening."
+    idx = sum(ord(ch) for ch in tail) % len(cues)
+    return cues[idx]
+
+
+def _sanitize_followup_cue_text(raw_text: str) -> str:
+    cue = _text(raw_text).replace("\n", " ").strip()
+    cue = re.sub(r"^[\s'\"`*#>-]+", "", cue)
+    cue = re.sub(r"[\s'\"`]+$", "", cue)
+    cue = cue.replace("?", "").strip()
+    if not cue:
+        return ""
+
+    words = cue.split()
+    if len(words) > 8:
+        cue = " ".join(words[:8]).strip()
+    if len(cue) > 80:
+        cue = cue[:80].rsplit(" ", 1)[0].strip() or cue[:80].strip()
+    if not cue:
+        return ""
+    if cue[-1:] not in ".!":
+        cue = f"{cue}."
+    return cue
+
+
+async def _generate_followup_cue(user_text: str, assistant_text: str) -> str:
+    transcript = _text(user_text).strip()
+    reply = _text(assistant_text).strip()
+    fallback = _continued_chat_followup_cue(reply)
+    if not reply:
+        return fallback
+
+    prompt = (
+        "You write the tiny spoken cue that plays right after an assistant asks a real follow-up question and just before the microphone reopens.\n"
+        "Write one short, natural cue that invites the user to continue.\n"
+        "Requirements:\n"
+        "- plain text only\n"
+        "- 2 to 6 words\n"
+        "- not a question\n"
+        "- do not repeat the assistant's question\n"
+        "- do not mention microphones, wake words, buttons, or devices\n"
+        "- sound warm and conversational, like 'Go ahead.' or 'Tell me.'\n"
+    )
+    user_prompt = (
+        "User's last spoken request:\n"
+        f"{transcript or '(not available)'}\n\n"
+        "Assistant reply that triggered continued chat:\n"
+        f"{reply}\n\n"
+        "Return only the short spoken cue."
+    )
+
+    try:
+        async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+            result = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.4,
+                max_tokens=20,
+                timeout=DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S,
+                activity="voice_followup_cue",
+            )
+        content = _text(((result or {}).get("message") or {}).get("content"))
+        cue = _sanitize_followup_cue_text(content)
+        if cue:
+            _native_debug(
+                f"continued chat cue generated cue={cue!r} transcript_tail={transcript[-80:]!r} reply_tail={reply[-80:]!r}"
+            )
+            return cue
+        _native_debug(
+            f"continued chat cue empty raw={content[:120]!r} fallback={fallback!r}"
+        )
+    except Exception as exc:
+        _native_debug(f"continued chat cue generation failed error={exc}")
+
+    return fallback
+
+
+def _continued_chat_spoken_reply_text(
+    response_text: str,
+    *,
+    continue_conversation: bool,
+    followup_cue: str = "",
+) -> str:
+    reply = _text(response_text)
+    if not continue_conversation:
+        return reply
+
+    cue = _sanitize_followup_cue_text(followup_cue) or _continued_chat_followup_cue(reply)
+    if not reply:
+        return cue
+    if reply[-1:] in ".!?":
+        return f"{reply} {cue}".strip()
+    return f"{reply}. {cue}".strip()
 
 
 def _response_followup_heuristic(text: str) -> bool:
@@ -1680,7 +1786,7 @@ class SegmenterState:
                 # sparse chunk cadence where 3 silent chunks can be only ~0.15s.
                 min_silence_elapsed = min(
                     float(self.silence_s),
-                    0.52 if self.speech_seconds_total >= 1.0 else 0.42,
+                    0.72 if self.speech_seconds_total >= 1.0 else 0.58,
                 )
                 if (
                     (
@@ -4554,18 +4660,9 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
         f"hydra turn result selector={session.selector} session_id={session.session_id} response_len={len(_text(response_text))}"
     )
 
-    tts_audio, tts_format, tts_backend_used, tts_backend_note = await _native_synthesize_text(
-        response_text,
-        session=session,
-    )
-
     return {
         "transcript": transcript,
         "response_text": _text(response_text),
-        "tts_audio": bytes(tts_audio),
-        "tts_format": tts_format if isinstance(tts_format, dict) else {},
-        "tts_backend": _text(tts_backend_used),
-        "tts_backend_note": _text(tts_backend_note),
     }
 
 
@@ -4676,13 +4773,21 @@ async def _finalize_session(
             return
 
         response_text = _text(result.get("response_text"))
-        tts_audio = bytes(result.get("tts_audio") or b"")
-        tts_format = result.get("tts_format") if isinstance(result.get("tts_format"), dict) else {}
-        tts_backend_used = _text(result.get("tts_backend")) or _text(session.tts_backend_effective)
-        tts_backend_note = _text(result.get("tts_backend_note"))
         continue_conversation = False
+        followup_cue = ""
         if _continued_chat_enabled():
             continue_conversation = bool(await _response_is_followup_question(response_text))
+            if continue_conversation:
+                followup_cue = await _generate_followup_cue(transcript, response_text)
+        spoken_response_text = _continued_chat_spoken_reply_text(
+            response_text,
+            continue_conversation=continue_conversation,
+            followup_cue=followup_cue,
+        )
+        tts_audio, tts_format, tts_backend_used, tts_backend_note = await _native_synthesize_text(
+            spoken_response_text,
+            session=session,
+        )
 
         async with lock:
             if continue_conversation:
