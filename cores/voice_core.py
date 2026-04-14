@@ -137,7 +137,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 load_dotenv()
 
-__version__ = "3.0.4"
+__version__ = "3.0.5"
 
 logger = logging.getLogger("voice_core")
 logger.setLevel(logging.INFO)
@@ -206,6 +206,7 @@ DEFAULT_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S = 5.00
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES = 4
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.66
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 0.82
+DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S = 0.40
 DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_STARTUP_GATE_S = 0.32
 DEFAULT_TTS_URL_TTL_S = 180
@@ -5225,6 +5226,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         startup_gate_s = float(DEFAULT_STARTUP_GATE_S)
         if wake_phrase:
             startup_gate_s = max(startup_gate_s, float(DEFAULT_WAKE_STARTUP_GATE_S))
+        if continued_chat_reopen:
+            startup_gate_s = max(startup_gate_s, float(DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S))
         requested_stt_backend = _selected_stt_backend()
         effective_stt_backend, stt_backend_note = _resolve_stt_backend()
         requested_tts_backend = _selected_tts_backend()
