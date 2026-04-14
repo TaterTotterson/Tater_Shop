@@ -137,7 +137,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 load_dotenv()
 
-__version__ = "3.0.5"
+__version__ = "3.0.6"
 
 logger = logging.getLogger("voice_core")
 logger.setLevel(logging.INFO)
@@ -208,13 +208,14 @@ DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S = 0.66
 DEFAULT_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S = 0.82
 DEFAULT_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S = 0.40
 DEFAULT_STARTUP_GATE_S = 0.0
-DEFAULT_WAKE_STARTUP_GATE_S = 0.32
+DEFAULT_WAKE_STARTUP_GATE_S = 0.40
+DEFAULT_WAKE_MIN_SPEECH_FRAMES = 3
+DEFAULT_WAKE_MIN_SILENCE_LONG_S = 0.74
 DEFAULT_TTS_URL_TTL_S = 180
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "silero"
 DEFAULT_VAD_SILENCE_SECONDS = 0.78
-DEFAULT_VAD_SPEECH_SECONDS = 0.20
 DEFAULT_VAD_TIMEOUT_SECONDS = 8.50
 DEFAULT_VAD_NO_SPEECH_TIMEOUT_S = 3.50
 DEFAULT_SILERO_THRESHOLD = 0.24
@@ -224,10 +225,7 @@ DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
 DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
 DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.50
 DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.62
-DEFAULT_PRE_ROLL_SECONDS = 0.50
-DEFAULT_PRE_ROLL_CHUNKS = 16
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
-DEFAULT_NO_SPEECH_TIMEOUT_S = 15.00
 DEFAULT_AUDIO_STALL_TIMEOUT_S = 1.20
 DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S = 6.00
 DEFAULT_BLANK_WAKE_TIMEOUT_S = 3.00
@@ -1205,7 +1203,6 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "mode": DEFAULT_EOU_MODE,
             "backend": DEFAULT_VAD_BACKEND,
             "silence_s": float(DEFAULT_VAD_SILENCE_SECONDS),
-            "speech_s": float(DEFAULT_VAD_SPEECH_SECONDS),
             "timeout_s": float(DEFAULT_VAD_TIMEOUT_SECONDS),
             "startup_gate_s": float(DEFAULT_STARTUP_GATE_S),
             "no_speech_timeout_s": float(DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
@@ -1673,7 +1670,6 @@ class SileroVadBackend(VadBackendBase):
 @dataclass
 class SegmenterState:
     silence_s: float
-    speech_s: float
     timeout_s: float
     no_speech_timeout_s: float
     threshold: float
@@ -1879,7 +1875,12 @@ class EouEngine:
             self.backend.reset_state()
 
 
-def _build_eou_engine(audio_format: Dict[str, int], *, continued_chat_reopen: bool = False) -> EouEngine:
+def _build_eou_engine(
+    audio_format: Dict[str, int],
+    *,
+    continued_chat_reopen: bool = False,
+    wake_word_session: bool = False,
+) -> EouEngine:
     cfg = _voice_config_snapshot()
     eou = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
     backend_name = DEFAULT_VAD_BACKEND
@@ -1891,7 +1892,6 @@ def _build_eou_engine(audio_format: Dict[str, int], *, continued_chat_reopen: bo
     backend: VadBackendBase = SileroVadBackend(eou)
 
     segmenter = SegmenterState(
-        speech_s=float(eou.get("speech_s") or DEFAULT_VAD_SPEECH_SECONDS),
         silence_s=float(eou.get("silence_s") or DEFAULT_VAD_SILENCE_SECONDS),
         timeout_s=float(eou.get("timeout_s") or DEFAULT_VAD_TIMEOUT_SECONDS),
         no_speech_timeout_s=float(eou.get("no_speech_timeout_s") or DEFAULT_VAD_NO_SPEECH_TIMEOUT_S),
@@ -1902,6 +1902,19 @@ def _build_eou_engine(audio_format: Dict[str, int], *, continued_chat_reopen: bo
         min_silence_short_s=float(DEFAULT_VAD_MIN_SILENCE_SHORT_S),
         min_silence_long_s=float(DEFAULT_VAD_MIN_SILENCE_LONG_S),
     )
+    if wake_word_session:
+        # Wake-triggered turns are the most likely to catch wake tail or room
+        # noise at the front, so require a slightly more confident speech
+        # start and allow a touch more pause tolerance once the user is in a
+        # real utterance.
+        segmenter.min_speech_frames = max(
+            int(segmenter.min_speech_frames),
+            int(DEFAULT_WAKE_MIN_SPEECH_FRAMES),
+        )
+        segmenter.min_silence_long_s = max(
+            float(segmenter.min_silence_long_s),
+            float(DEFAULT_WAKE_MIN_SILENCE_LONG_S),
+        )
     if continued_chat_reopen:
         segmenter.silence_s = max(float(segmenter.silence_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS))
         segmenter.timeout_s = max(float(segmenter.timeout_s), float(DEFAULT_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS))
@@ -1945,10 +1958,6 @@ class VoiceSessionRuntime:
     audio_chunks: int = 0
     audio_bytes: int = 0
     dropped_startup_chunks: int = 0
-    pre_roll_chunks: Any = field(default_factory=deque)
-    pre_roll_bytes: int = 0
-    pre_roll_target_bytes: int = 0
-    pre_roll_target_chunks: int = DEFAULT_PRE_ROLL_CHUNKS
     capture_started: bool = False
     last_audio_ts: float = 0.0
     state: str = VOICE_STATE_LISTENING
@@ -5195,7 +5204,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
 
         try:
-            eou_engine = _build_eou_engine(fmt, continued_chat_reopen=continued_chat_reopen)
+            eou_engine = _build_eou_engine(
+                fmt,
+                continued_chat_reopen=continued_chat_reopen,
+                wake_word_session=bool(wake_phrase),
+            )
         except Exception as exc:
             msg = f"Failed to initialize Silero VAD: {exc}"
             logger.warning("[native-voice] %s selector=%s", msg, token)
@@ -5286,15 +5299,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             tts_backend_effective=effective_tts_backend,
             eou_engine=eou_engine,
         )
-        frame_bps = max(
-            1,
-            int(session.audio_format.get("rate") or DEFAULT_VOICE_SAMPLE_RATE_HZ)
-            * int(session.audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
-            * int(session.audio_format.get("channels") or DEFAULT_VOICE_CHANNELS),
-        )
-        session.pre_roll_target_bytes = int(max(0, round(float(frame_bps) * float(DEFAULT_PRE_ROLL_SECONDS))))
-        session.pre_roll_target_chunks = int(max(4, DEFAULT_PRE_ROLL_CHUNKS))
-
         async with lock:
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
@@ -5341,7 +5345,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             _native_debug(
                 "esphome vad tuning "
                 f"selector={token} backend={eou_engine.backend_name} "
-                f"speech_s={seg.speech_s:.2f} silence_s={seg.silence_s:.2f} timeout_s={seg.timeout_s:.2f} "
+                f"silence_s={seg.silence_s:.2f} timeout_s={seg.timeout_s:.2f} "
                 f"no_speech_timeout_s={seg.no_speech_timeout_s:.2f} "
                 f"threshold={seg.threshold:.2f} neg_threshold={seg.neg_threshold:.2f} "
                 f"min_speech_frames={seg.min_speech_frames} min_silence_frames={seg.min_silence_frames} "
