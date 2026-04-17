@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
 from helpers import get_tater_name, redis_client
-from speech_settings import DEFAULT_ANNOUNCEMENT_TTS_ENTITY, get_speech_settings
+from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
@@ -213,10 +213,9 @@ class BroadcastPlugin(ToolVerba):
             )
 
         speech = get_speech_settings()
-        announcement_backend = str(speech.get("announcement_tts_backend") or "homeassistant_api")
+        announcement_backend = str(speech.get("announcement_tts_backend") or speech.get("tts_backend") or "wyoming")
         announcement_model = str(speech.get("announcement_tts_model") or "")
         announcement_voice = str(speech.get("announcement_tts_voice") or "")
-        announcement_entity = str(speech.get("announcement_tts_entity") or DEFAULT_ANNOUNCEMENT_TTS_ENTITY)
         direct_tts_backend = str(speech.get("tts_backend") or "")
         direct_tts_model = str(speech.get("tts_model") or "")
         direct_tts_voice = str(speech.get("tts_voice") or "")
@@ -229,7 +228,6 @@ class BroadcastPlugin(ToolVerba):
                 token=token,
                 targets=targets,
                 public_base_url=str(speech.get("tts_public_base_url") or ""),
-                tts_entity=announcement_entity,
                 model=announcement_model,
                 voice=announcement_voice,
                 wyoming_host=str(speech.get("wyoming_tts_host") or ""),
@@ -267,9 +265,8 @@ class BroadcastPlugin(ToolVerba):
         facts = {
             "announcement": announcement,
             "tts_backend": backend_used,
-            "tts_model": announcement_model if backend_used not in {"homeassistant_api", "wyoming"} else announcement_model,
+            "tts_model": announcement_model,
             "tts_voice": announcement_voice,
-            "tts_entity": announcement_entity if backend_used == "homeassistant_api" else "",
             "target_count": target_count,
             "ok_count": sent_count,
             "failed_targets": warnings[:10],

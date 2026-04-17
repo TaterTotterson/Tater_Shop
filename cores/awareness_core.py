@@ -2694,10 +2694,9 @@ def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
 def _shared_announcement_tts_settings() -> Dict[str, Any]:
     shared = get_shared_speech_settings()
     return {
-        "backend": _text(shared.get("announcement_tts_backend") or "homeassistant_api"),
+        "backend": _text(shared.get("announcement_tts_backend") or shared.get("tts_backend") or "wyoming"),
         "model": _text(shared.get("announcement_tts_model")),
         "voice": _text(shared.get("announcement_tts_voice")),
-        "entity": _text(shared.get("announcement_tts_entity") or "tts.piper"),
         "public_base_url": _text(shared.get("tts_public_base_url")),
         "wyoming_host": _text(shared.get("wyoming_tts_host")),
         "wyoming_port": shared.get("wyoming_tts_port"),
@@ -2850,10 +2849,9 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     )
     players = _normalize_players(rule.get("players"))
     shared_tts = _shared_announcement_tts_settings()
-    tts_backend = _text(shared_tts.get("backend") or "homeassistant_api")
+    tts_backend = _text(shared_tts.get("backend") or "wyoming")
     tts_model = _text(shared_tts.get("model"))
     tts_voice = _text(shared_tts.get("voice"))
-    tts_entity = _text(shared_tts.get("entity") or "tts.piper")
     jpeg: bytes = b""
     try:
         if provider == "unifi_protect":
@@ -2886,7 +2884,6 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
                 token=ha["token"],
                 targets=players,
                 public_base_url=_text(shared_tts.get("public_base_url")),
-                tts_entity=tts_entity,
                 model=tts_model,
                 voice=tts_voice,
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
@@ -2917,7 +2914,6 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             "tts_backend": tts_backend,
             "tts_model": tts_model,
             "tts_voice": tts_voice,
-            "tts_entity": tts_entity if tts_backend == "homeassistant_api" else "",
             "reason": reason,
             "trigger_entity": _text(event.get("entity_id")),
             "provider": provider,
@@ -2986,10 +2982,9 @@ async def _execute_entry_sensor_rule(
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
     shared_tts = _shared_announcement_tts_settings()
-    tts_backend = _text(shared_tts.get("backend") or "homeassistant_api")
+    tts_backend = _text(shared_tts.get("backend") or "wyoming")
     tts_model = _text(shared_tts.get("model"))
     tts_voice = _text(shared_tts.get("voice"))
-    tts_entity = _text(shared_tts.get("entity") or "tts.piper")
     snapshot_store: Dict[str, Any] = {}
     if camera:
         try:
@@ -3022,7 +3017,6 @@ async def _execute_entry_sensor_rule(
             "tts_backend": tts_backend,
             "tts_model": tts_model,
             "tts_voice": tts_voice,
-            "tts_entity": tts_entity if tts_backend == "homeassistant_api" else "",
         },
     }
     if camera:
@@ -3053,7 +3047,6 @@ async def _execute_entry_sensor_rule(
                 token=ha["token"],
                 targets=players,
                 public_base_url=_text(shared_tts.get("public_base_url")),
-                tts_entity=tts_entity,
                 model=tts_model,
                 voice=tts_voice,
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
