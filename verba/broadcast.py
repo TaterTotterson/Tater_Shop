@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 
 
 class BroadcastPlugin(ToolVerba):
-    """Broadcast a spoken announcement to configured Home Assistant and Voice Core targets."""
+    """Broadcast a spoken announcement to configured Voice Core targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
@@ -39,7 +39,7 @@ class BroadcastPlugin(ToolVerba):
             "label": "Broadcast Targets",
             "type": "multiselect",
             "default": [],
-            "description": "Choose Home Assistant media players and/or Voice Core satellites.",
+            "description": "Choose one or more Voice Core satellites.",
             "options": [],
         },
     }
@@ -84,19 +84,16 @@ class BroadcastPlugin(ToolVerba):
             (values.get("DEVICE_4") or "").strip(),
             (values.get("DEVICE_5") or "").strip(),
         ]
-        return normalize_announcement_targets([item for item in legacy if item.startswith("media_player.")])
+        return normalize_announcement_targets([item for item in legacy if item])
 
     def webui_settings_fields(self, fields, current_settings=None, redis_client=None, notifier_destination_catalog=None):
         rows = [dict(field) if isinstance(field, dict) else field for field in list(fields or [])]
         current = dict(current_settings or {})
         current_targets = self._targets(current)
 
-        ha_settings = self._decode_redis_map((redis_client or globals().get("redis_client")).hgetall("homeassistant_settings") or {})
-        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        token = (ha_settings.get("HA_TOKEN") or "").strip()
         target_options = build_announcement_target_options(
-            homeassistant_base_url=ha_base,
-            homeassistant_token=token,
+            homeassistant_base_url="",
+            homeassistant_token="",
             current_values=current_targets,
         )
 
@@ -198,20 +195,6 @@ class BroadcastPlugin(ToolVerba):
                 say_hint="Ask what announcement text should be broadcast.",
             )
 
-        ha_settings = self._decode_redis_map(redis_client.hgetall("homeassistant_settings") or {})
-        ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        token = (ha_settings.get("HA_TOKEN") or "").strip()
-        if not token:
-            return action_failure(
-                code="missing_ha_token",
-                message=(
-                    "Home Assistant token is not set. Open WebUI Settings Home Assistant Settings "
-                    "and add a Long-Lived Access Token."
-                ),
-                needs=["Please set HA_TOKEN in Home Assistant settings."],
-                say_hint="Explain Home Assistant token is missing and ask to configure it.",
-            )
-
         speech = get_speech_settings()
         announcement_backend = str(speech.get("announcement_tts_backend") or speech.get("tts_backend") or "wyoming")
         announcement_model = str(speech.get("announcement_tts_model") or "")
@@ -224,10 +207,9 @@ class BroadcastPlugin(ToolVerba):
             tts_result = await speak_announcement_targets(
                 text=announcement,
                 backend=announcement_backend,
-                ha_base=ha_base,
-                token=token,
+                ha_base="",
+                token="",
                 targets=targets,
-                public_base_url=str(speech.get("tts_public_base_url") or ""),
                 model=announcement_model,
                 voice=announcement_voice,
                 wyoming_host=str(speech.get("wyoming_tts_host") or ""),

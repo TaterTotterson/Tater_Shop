@@ -2697,7 +2697,6 @@ def _shared_announcement_tts_settings() -> Dict[str, Any]:
         "backend": _text(shared.get("announcement_tts_backend") or shared.get("tts_backend") or "wyoming"),
         "model": _text(shared.get("announcement_tts_model")),
         "voice": _text(shared.get("announcement_tts_voice")),
-        "public_base_url": _text(shared.get("tts_public_base_url")),
         "wyoming_host": _text(shared.get("wyoming_tts_host")),
         "wyoming_port": shared.get("wyoming_tts_port"),
         "wyoming_voice": _text(shared.get("wyoming_tts_voice")),
@@ -2876,14 +2875,12 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     tts_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "no_players", "backend": tts_backend}
     if players:
         try:
-            ha = _ha_config()
             tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
-                ha_base=ha["base"],
-                token=ha["token"],
+                ha_base="",
+                token="",
                 targets=players,
-                public_base_url=_text(shared_tts.get("public_base_url")),
                 model=tts_model,
                 voice=tts_voice,
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
@@ -3039,14 +3036,12 @@ async def _execute_entry_sensor_rule(
     }
     if action_token == "open" and players:
         try:
-            ha = _ha_config()
             tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
-                ha_base=ha["base"],
-                token=ha["token"],
+                ha_base="",
+                token="",
                 targets=players,
-                public_base_url=_text(shared_tts.get("public_base_url")),
                 model=tts_model,
                 voice=tts_voice,
                 wyoming_host=_text(shared_tts.get("wyoming_host")),
@@ -3575,8 +3570,6 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
         unit = _text(attrs.get("unit_of_measurement")).lower()
         if lower.startswith("camera."):
             catalog["cameras"].append((entity_id, label))
-        if lower.startswith("media_player."):
-            catalog["media_players"].append((entity_id, label))
         if lower.startswith("tts."):
             catalog["tts"].append((entity_id, label))
         if lower.startswith("input_text."):
@@ -3670,11 +3663,11 @@ def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[s
     catalog = _empty_entity_catalog()
     # Keep weather/tts/notify/input_text sourced from Home Assistant so briefs and notifications still work.
     ha_support = _ha_entity_catalog(force_refresh=force_refresh)
-    if not any(ha_support.get(key) for key in ("media_players", "tts", "notify_services", "input_text")):
+    if not any(ha_support.get(key) for key in ("tts", "notify_services", "input_text")):
         stale_ha_support = _stale_cached_catalog("homeassistant")
         if stale_ha_support is not None:
             ha_support = stale_ha_support
-    for key in ("media_players", "tts", "input_text", "notify_services", "weather_sensors", "weather_temp", "weather_wind", "weather_rain"):
+    for key in ("tts", "input_text", "notify_services", "weather_sensors", "weather_temp", "weather_wind", "weather_rain"):
         catalog[key] = list(ha_support.get(key) or [])
     try:
         cameras = _unifi_list_cameras()
@@ -3787,18 +3780,9 @@ def _players_text(value: Any) -> str:
 def _announcement_target_pairs(
     homeassistant_pairs: List[Tuple[str, str]],
 ) -> List[Tuple[str, str]]:
+    del homeassistant_pairs
     pairs: List[Tuple[str, str]] = []
     seen: set[str] = set()
-
-    for value, label in homeassistant_pairs or []:
-        token = _text(value)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        pretty = _text(label) or token
-        if not pretty.lower().startswith("home assistant:"):
-            pretty = f"Home Assistant: {pretty}"
-        pairs.append((token, pretty))
 
     for option in get_voice_core_satellite_target_options():
         if not isinstance(option, dict):
@@ -4244,7 +4228,7 @@ def _doorbell_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Speak the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
+                    players_description="Speak the shared announcement voice on selected Voice Core satellites.",
                 ),
             },
             {
@@ -4363,7 +4347,7 @@ def _entry_sensor_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites.",
                 ),
             },
             {
@@ -4689,7 +4673,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected Home Assistant media players or Voice Core satellites.",
+        players_description="Speak using the shared announcement voice on selected Voice Core satellites.",
     )
     return {
         "kind": "settings_manager",
