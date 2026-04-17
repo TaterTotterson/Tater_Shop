@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "1f2911eed7a2878b257bd8f803cc68081c5bc4ec643a9f1b7d7539d6991249e4"
+      "sha256": "6f19abce56527ccd3728a7365c88e41c2a795808a86f980ee2a49b02e7b7c1da"
     },
     {
       "id": "memory",

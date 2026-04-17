@@ -41,7 +41,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "133f80c612150038649eb0cc97314b3f39ec7a2a835df45ab9e56ddd05a263bc"
+      "sha256": "bb0d7698a6de0c8c4dcee4b1ee22924afeabe9cf98f0e099d60386f8ca042f04"
     },
     {
       "id": "comfyui_audio_ace",
