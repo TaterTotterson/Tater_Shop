@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import get_voice_core_satellite_target_options
 
-__version__ = "3.1.8"
+__version__ = "3.1.9"
 
 load_dotenv()
 
@@ -3812,16 +3812,19 @@ def _announcement_tts_fields(
     *,
     players_description: str,
 ) -> List[Dict[str, Any]]:
+    del catalog
+    playback_options = [
+        dict(option)
+        for option in get_voice_core_satellite_target_options(current_values=rule.get("players"))
+        if isinstance(option, dict)
+    ]
     return [
         {
             "key": "players",
             "label": "Playback Targets",
             "type": "multiselect",
             "description": players_description,
-            "options": _multiselect_choices_from_pairs(
-                catalog.get("media_players") or [],
-                current_values=rule.get("players"),
-            ),
+            "options": playback_options,
             "value": _normalize_players(rule.get("players")),
         },
     ]
