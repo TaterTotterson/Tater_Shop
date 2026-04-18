@@ -23,7 +23,7 @@ class BroadcastPlugin(ToolVerba):
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.7"
+    version = "1.1.8"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (

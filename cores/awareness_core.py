@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import get_voice_core_satellite_target_options
 
-__version__ = "3.1.7"
+__version__ = "3.1.8"
 
 load_dotenv()
 
