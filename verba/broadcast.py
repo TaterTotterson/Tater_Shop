@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
+from ha_ws import load_homeassistant_config
 from helpers import get_tater_name, redis_client
 from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
@@ -19,11 +20,11 @@ logger.setLevel(logging.INFO)
 
 
 class BroadcastPlugin(ToolVerba):
-    """Broadcast a spoken announcement to configured Voice Core targets."""
+    """Broadcast a spoken announcement to configured Voice Core or UniFi Protect speaker targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.8"
+    version = "1.1.9"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -39,7 +40,7 @@ class BroadcastPlugin(ToolVerba):
             "label": "Broadcast Targets",
             "type": "multiselect",
             "default": [],
-            "description": "Choose one or more Voice Core satellites.",
+            "description": "Choose one or more Voice Core satellites or UniFi Protect Home Assistant speakers.",
             "options": [],
         },
     }
@@ -90,10 +91,13 @@ class BroadcastPlugin(ToolVerba):
         rows = [dict(field) if isinstance(field, dict) else field for field in list(fields or [])]
         current = dict(current_settings or {})
         current_targets = self._targets(current)
+        ha = load_homeassistant_config(required=False)
 
         target_options = build_announcement_target_options(
-            homeassistant_base_url="",
-            homeassistant_token="",
+            homeassistant_base_url=ha.get("base", ""),
+            homeassistant_token=ha.get("token", ""),
+            include_homeassistant=True,
+            homeassistant_platforms=("unifiprotect",),
             current_values=current_targets,
         )
 
@@ -202,13 +206,14 @@ class BroadcastPlugin(ToolVerba):
         direct_tts_backend = str(speech.get("tts_backend") or "")
         direct_tts_model = str(speech.get("tts_model") or "")
         direct_tts_voice = str(speech.get("tts_voice") or "")
+        ha = load_homeassistant_config(required=False)
 
         try:
             tts_result = await speak_announcement_targets(
                 text=announcement,
                 backend=announcement_backend,
-                ha_base="",
-                token="",
+                ha_base=str(ha.get("base") or ""),
+                token=str(ha.get("token") or ""),
                 targets=targets,
                 model=announcement_model,
                 voice=announcement_voice,

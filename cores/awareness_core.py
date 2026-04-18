@@ -23,9 +23,9 @@ from notify import dispatch_notification
 from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
-from announcement_targets import get_voice_core_satellite_target_options
+from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.10"
+__version__ = "3.1.11"
 
 load_dotenv()
 
@@ -856,6 +856,13 @@ def _ha_config() -> Dict[str, str]:
 def _ha_configured() -> bool:
     settings = redis_client.hgetall("homeassistant_settings") or {}
     return bool(_text(settings.get("HA_TOKEN")))
+
+
+def _ha_config_optional() -> Dict[str, str]:
+    try:
+        return _ha_config()
+    except Exception:
+        return {"base": "", "token": ""}
 
 
 def _unifi_protect_config() -> Dict[str, str]:
@@ -2837,6 +2844,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         default_model="qwen2.5-vl-7b-instruct",
     )
     players = _normalize_players(rule.get("players"))
+    ha_for_playback = _ha_config_optional()
     shared_tts = _shared_announcement_tts_settings()
     tts_backend = _text(shared_tts.get("backend") or "wyoming")
     tts_model = _text(shared_tts.get("model"))
@@ -2868,8 +2876,8 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
-                ha_base="",
-                token="",
+                ha_base=_text(ha_for_playback.get("base")),
+                token=_text(ha_for_playback.get("token")),
                 targets=players,
                 model=tts_model,
                 voice=tts_voice,
@@ -2966,6 +2974,7 @@ async def _execute_entry_sensor_rule(
     spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
     title = _compact(f"{sensor_name} {action_label}", limit=90)
     area = _text(rule.get("area")) or sensor_name
+    ha_for_playback = _ha_config_optional()
     shared_tts = _shared_announcement_tts_settings()
     tts_backend = _text(shared_tts.get("backend") or "wyoming")
     tts_model = _text(shared_tts.get("model"))
@@ -3027,8 +3036,8 @@ async def _execute_entry_sensor_rule(
             tts_result = await speak_announcement_targets(
                 text=spoken_line,
                 backend=tts_backend,
-                ha_base="",
-                token="",
+                ha_base=_text(ha_for_playback.get("base")),
+                token=_text(ha_for_playback.get("token")),
                 targets=players,
                 model=tts_model,
                 voice=tts_voice,
@@ -3792,6 +3801,17 @@ def _catalog_with_announcement_targets(
     return _finalize_catalog(next_catalog)
 
 
+def _awareness_playback_target_options(*, current_values: Any = None) -> List[Dict[str, str]]:
+    ha = _ha_config_optional()
+    return build_announcement_target_options(
+        homeassistant_base_url=ha.get("base", ""),
+        homeassistant_token=ha.get("token", ""),
+        include_homeassistant=True,
+        homeassistant_platforms=("unifiprotect",),
+        current_values=current_values,
+    )
+
+
 def _announcement_tts_fields(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
@@ -3801,7 +3821,7 @@ def _announcement_tts_fields(
     del catalog
     playback_options = [
         dict(option)
-        for option in get_voice_core_satellite_target_options(current_values=rule.get("players"))
+        for option in _awareness_playback_target_options(current_values=rule.get("players"))
         if isinstance(option, dict)
     ]
     return [
@@ -4221,7 +4241,7 @@ def _doorbell_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Speak the shared announcement voice on selected Voice Core satellites.",
+                    players_description="Speak the shared announcement voice on selected Voice Core satellites or UniFi Protect Home Assistant speakers.",
                 ),
             },
             {
@@ -4334,7 +4354,7 @@ def _entry_sensor_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites or UniFi Protect Home Assistant speakers.",
                 ),
             },
             {
@@ -4654,7 +4674,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected Voice Core satellites.",
+        players_description="Speak using the shared announcement voice on selected Voice Core satellites or UniFi Protect Home Assistant speakers.",
     )
     return {
         "kind": "settings_manager",
