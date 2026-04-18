@@ -20,11 +20,11 @@ logger.setLevel(logging.INFO)
 
 
 class BroadcastPlugin(ToolVerba):
-    """Broadcast a spoken announcement to configured Voice Core or UniFi Protect speaker targets."""
+    """Broadcast a spoken announcement to configured Voice Core or Home Assistant media-player targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.9"
+    version = "1.1.10"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -40,7 +40,7 @@ class BroadcastPlugin(ToolVerba):
             "label": "Broadcast Targets",
             "type": "multiselect",
             "default": [],
-            "description": "Choose one or more Voice Core satellites or UniFi Protect Home Assistant speakers.",
+            "description": "Choose one or more Voice Core satellites or Home Assistant media players.",
             "options": [],
         },
     }
@@ -97,7 +97,6 @@ class BroadcastPlugin(ToolVerba):
             homeassistant_base_url=ha.get("base", ""),
             homeassistant_token=ha.get("token", ""),
             include_homeassistant=True,
-            homeassistant_platforms=("unifiprotect",),
             current_values=current_targets,
         )
 

@@ -22,7 +22,7 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.9",
+      "version": "1.1.10",
       "min_tater_version": "59",
       "description": "Send a one-time spoken announcement to your configured broadcast targets.",
       "portals": [
@@ -41,7 +41,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "cad1a6abbfff8746a629842b8fd8744e1bbdd06a1bb24ada2ca8345a6dd4edbd"
+      "sha256": "7f525e065007036dac868f4193a1917e81cf68ae5eb6d13f6655166334771f89"
     },
     {
       "id": "comfyui_audio_ace",
