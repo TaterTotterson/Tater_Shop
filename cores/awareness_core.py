@@ -3511,7 +3511,7 @@ def _finalize_catalog(catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Li
 def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
     cached = _cached_catalog("homeassistant", force_refresh=force_refresh)
     if cached is not None:
-        return cached
+        return _catalog_with_announcement_targets(cached)
     catalog = _empty_entity_catalog()
     try:
         ha = _ha_config()
@@ -3525,8 +3525,8 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
     except Exception:
         stale = _stale_cached_catalog("homeassistant")
         if stale is not None:
-            return stale
-        catalog = _finalize_catalog(catalog)
+            return _catalog_with_announcement_targets(stale)
+        catalog = _catalog_with_announcement_targets(catalog)
         _set_cached_catalog("homeassistant", catalog)
         return catalog
 
@@ -3632,8 +3632,7 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
     except Exception:
         logger.debug("[awareness] notify service discovery failed", exc_info=True)
 
-    catalog["media_players"] = _announcement_target_pairs(catalog.get("media_players") or [])
-    catalog = _finalize_catalog(catalog)
+    catalog = _catalog_with_announcement_targets(catalog)
     _set_cached_catalog("homeassistant", catalog)
     return catalog
 
@@ -3794,6 +3793,17 @@ def _announcement_target_pairs(
         pairs.append((token, _text(option.get("label")) or token))
 
     return pairs
+
+
+def _catalog_with_announcement_targets(
+    catalog: Dict[str, List[Tuple[str, str]]],
+) -> Dict[str, List[Tuple[str, str]]]:
+    next_catalog = _empty_entity_catalog()
+    source = catalog if isinstance(catalog, dict) else {}
+    for key in next_catalog:
+        next_catalog[key] = list(source.get(key) or [])
+    next_catalog["media_players"] = _announcement_target_pairs(next_catalog.get("media_players") or [])
+    return _finalize_catalog(next_catalog)
 
 
 def _announcement_tts_fields(
