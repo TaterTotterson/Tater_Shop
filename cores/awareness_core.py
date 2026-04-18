@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.11"
+__version__ = "3.1.12"
 
 load_dotenv()
 
@@ -3778,7 +3778,7 @@ def _announcement_target_pairs(
     pairs: List[Tuple[str, str]] = []
     seen: set[str] = set()
 
-    for option in get_voice_core_satellite_target_options():
+    for option in _awareness_playback_target_options():
         if not isinstance(option, dict):
             continue
         token = _text(option.get("value"))
