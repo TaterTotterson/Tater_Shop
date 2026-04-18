@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import get_voice_core_satellite_target_options
 
-__version__ = "3.1.9"
+__version__ = "3.1.10"
 
 load_dotenv()
 
@@ -650,7 +650,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "priority": "high"
                 if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
                 else "normal",
-                "api_notification": _bool(raw.get("api_notification"), False),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
@@ -695,7 +694,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), True),
-                "api_notification": _bool(raw.get("api_notification"), False),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
@@ -727,7 +725,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), False),
-                "api_notification": _bool(raw.get("api_notification"), False),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
             }
         )
@@ -1706,12 +1703,11 @@ async def _notify_homeassistant(
     title: str,
     message: str,
     priority: str,
-    api_notification: bool,
     device_services: Any,
     origin: Dict[str, Any],
 ) -> Dict[str, Any]:
     services = _normalize_device_services(device_services)
-    if not (services or api_notification):
+    if not services:
         return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     meta = {"priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal"}
     sent_count = 0
@@ -1737,16 +1733,12 @@ async def _notify_homeassistant(
             return
         errors.append(result_text or "homeassistant notifier returned empty result")
 
-    # Keep persistent notifications off in Awareness routing; this path is for
-    # VoicePE/API notifications and explicit notify services selected in rule.
-    if api_notification:
-        await _dispatch_once({"persistent": False, "api_notification": True})
-
+    # Keep persistent notifications off in Awareness routing; this path only
+    # targets explicit notify services selected in the rule.
     for service in services:
         await _dispatch_once(
             {
                 "persistent": False,
-                "api_notification": False,
                 "device_service": service,
             }
         )
@@ -2799,9 +2791,8 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
 
     notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-    api_notification = _bool(rule.get("api_notification"), False)
     notification_cooldown_seconds = _as_int(rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400)
-    if api_notification or device_services:
+    if device_services:
         notify_key = _camera_notify_cooldown_key(camera)
         if notification_cooldown_seconds > 0 and not _acquire_cooldown(notify_key, notification_cooldown_seconds):
             notify_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
@@ -2810,7 +2801,6 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 title=_text(rule.get("title") or "Camera Event"),
                 message=summary,
                 priority=_text(rule.get("priority") or "high"),
-                api_notification=api_notification,
                 device_services=device_services,
                 origin={
                     "platform": "awareness_core",
@@ -2928,12 +2918,10 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
         device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-        api_notification = _bool(rule.get("api_notification"), False)
         notify_result = await _notify_homeassistant(
             title=_text(rule.get("title") or "Doorbell"),
             message=spoken_line,
             priority=_text(rule.get("priority") or "normal"),
-            api_notification=api_notification,
             device_services=device_services,
             origin={
                 "platform": "awareness_core",
@@ -3065,12 +3053,10 @@ async def _execute_entry_sensor_rule(
         notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     else:
         device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-        api_notification = _bool(rule.get("api_notification"), False)
         notify_result = await _notify_homeassistant(
             title=_text(rule.get("title") or "Entry Sensor"),
             message=summary,
             priority=_text(rule.get("priority") or "normal"),
-            api_notification=api_notification,
             device_services=device_services,
             origin={
                 "platform": "awareness_core",
@@ -4145,12 +4131,6 @@ def _camera_form(
                         "value": _text(rule.get("priority") or "high"),
                     },
                     {
-                        "key": "api_notification",
-                        "label": "VoicePE Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("api_notification"), False),
-                    },
-                    {
                         "key": "device_services",
                         "label": "Phone Notify Services",
                         "type": "multiselect",
@@ -4254,12 +4234,6 @@ def _doorbell_form(
                         "type": "select",
                         "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                         "value": _text(rule.get("priority") or "normal"),
-                    },
-                    {
-                        "key": "api_notification",
-                        "label": "VoicePE Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("api_notification"), False),
                     },
                     {
                         "key": "device_services",
@@ -4378,12 +4352,6 @@ def _entry_sensor_form(
                         "type": "select",
                         "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
                         "value": _text(rule.get("priority") or "normal"),
-                    },
-                    {
-                        "key": "api_notification",
-                        "label": "VoicePE Notifications",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("api_notification"), False),
                     },
                     {
                         "key": "device_services",
@@ -4893,13 +4861,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
-                    "key": "api_notification",
-                    "label": "VoicePE Notifications",
-                    "type": "checkbox",
-                    "value": True,
-                    "show_when": show_camera_or_doorbell_or_entry,
-                },
-                {
                     "key": "device_services",
                     "label": "Phone Notify Services",
                     "type": "multiselect",
@@ -5160,10 +5121,6 @@ def _build_rule_from_values(
             ),
             "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
             "priority": "high" if priority_value in {"critical", "high"} else "normal",
-            "api_notification": _bool(
-                _value(values, payload, "api_notification", previous.get("api_notification", False)),
-                False,
-            ),
             "device_services": _normalize_device_services(device_services_value),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
