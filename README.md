@@ -5,6 +5,9 @@
     width="300"
   />
 </p>
+<h3 align="center">
+  <a href="https://taterassistant.com">taterassistant.com</a>
+</h3>
 
 <!-- AUTO:VERBA_TABLES:BEGIN -->
 ## 🧠 Core Store
