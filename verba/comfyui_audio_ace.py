@@ -34,7 +34,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.12"
+    version = "1.0.13"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -195,6 +195,23 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         return await self.generate_tags_and_lyrics(user_prompt, llm_client)
 
     @staticmethod
+    def _repair_llm_json_string_escapes(raw: str) -> str:
+        text = str(raw or "")
+        if not text:
+            return ""
+        return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
+
+    @staticmethod
+    def _normalize_generated_lyrics(value: str) -> str:
+        lyrics = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        # Any literal backslashes that survive parsing are almost always broken
+        # newline escapes from the model, so recover them as line breaks.
+        lyrics = lyrics.replace("\\n", "\n")
+        lyrics = re.sub(r"\\+", "\n", lyrics)
+        lyrics = re.sub(r"\n{3,}", "\n\n", lyrics)
+        return lyrics.strip()
+
+    @staticmethod
     async def generate_tags_and_lyrics(user_prompt, llm_client):
         if llm_client is None:
             safe = (user_prompt or "a warm uplifting song").strip()
@@ -220,15 +237,19 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         content = response.get("message", {}).get("content", "").strip()
         try:
             cleaned = re.sub(r"^```(?:json)?\s*|```$", "", content, flags=re.MULTILINE).strip()
+            repaired = ComfyUIAudioAcePlugin._repair_llm_json_string_escapes(cleaned)
             try:
                 result = json.loads(cleaned)
             except json.JSONDecodeError:
-                result = yaml.safe_load(cleaned)
-                cleaned = json.dumps(result)
-                result = json.loads(cleaned)
+                try:
+                    result = json.loads(repaired)
+                except json.JSONDecodeError:
+                    result = yaml.safe_load(repaired)
+                    repaired = json.dumps(result)
+                    result = json.loads(repaired)
 
             tags = result.get("tags", "").strip()
-            lyrics = result.get("lyrics", "").strip()
+            lyrics = ComfyUIAudioAcePlugin._normalize_generated_lyrics(result.get("lyrics", ""))
 
             allowed_sections = ["[verse]", "[chorus]", "[bridge]", "[outro]"]
             if not tags or "[inst]" not in lyrics or not any(tag in lyrics for tag in allowed_sections):
