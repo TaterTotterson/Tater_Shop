@@ -2,6 +2,7 @@
 import json
 import asyncio
 import base64
+import os
 import re
 import yaml
 import random
@@ -33,7 +34,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.11"
+    version = "1.0.12"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -591,20 +592,14 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             return
 
     @staticmethod
-    def _voice_core_settings() -> dict:
-        row = redis_client.hgetall("voice_core_settings") or {}
-        return row if isinstance(row, dict) else {}
-
-    @staticmethod
     def _voice_core_base_url() -> str:
-        settings = ComfyUIAudioAcePlugin._voice_core_settings()
-        raw_port = str(settings.get("bind_port") or "8502").strip()
+        raw_port = str(os.getenv("HTMLUI_PORT") or "8501").strip()
         try:
             port = int(raw_port)
         except Exception:
-            port = 8502
+            port = 8501
         if port < 1 or port > 65535:
-            port = 8502
+            port = 8501
         return f"http://127.0.0.1:{port}"
 
     def _voice_core_selector(self, context: dict | None) -> str:
