@@ -62,7 +62,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "265e442e8253222ce992ab7861631b41d3e633c8a0d75855774e9dc3677cfae7"
+      "sha256": "2fae929703dfda18f44f286621e6540e94e30961344b94efd1e621f8563192ec"
     },
     {
       "id": "comfyui_image_plugin",
