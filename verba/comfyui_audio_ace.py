@@ -12,7 +12,7 @@ import requests
 from typing import Any
 from urllib.parse import quote
 from verba_base import ToolVerba
-from helpers import redis_client, run_comfy_prompt
+from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
 from verba_result import action_failure, action_success
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -33,7 +33,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.10"
+    version = "1.0.11"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -67,6 +67,17 @@ class ComfyUIAudioAcePlugin(ToolVerba):
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
+
+    @staticmethod
+    def _background_llm_client(llm_client=None):
+        host = str(getattr(llm_client, "host", "") or "").strip()
+        model = str(getattr(llm_client, "model", "") or "").strip()
+        kwargs = {"redis_conn": redis_client}
+        if host:
+            kwargs["host"] = host
+        if model:
+            kwargs["model"] = model
+        return get_llm_client_from_env(**kwargs)
 
 
     # ---------------------------
@@ -561,7 +572,8 @@ class ComfyUIAudioAcePlugin(ToolVerba):
          - play on media_player
         """
         try:
-            tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
+            async with self._background_llm_client(llm_client) as bg_llm_client:
+                tags, lyrics = await self.generate_tags_and_lyrics(prompt, bg_llm_client)
             media_url, _audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
         except Exception as e:
             logger.exception("ComfyUI generation failed: %s", e)
@@ -638,7 +650,8 @@ class ComfyUIAudioAcePlugin(ToolVerba):
 
     async def _bg_generate_and_play_voice_core(self, prompt: str, llm_client, selector: str):
         try:
-            tags, lyrics = await self.generate_tags_and_lyrics(prompt, llm_client)
+            async with self._background_llm_client(llm_client) as bg_llm_client:
+                tags, lyrics = await self.generate_tags_and_lyrics(prompt, bg_llm_client)
             media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
         except Exception as e:
             logger.exception("ComfyUI Voice Core generation failed: %s", e)

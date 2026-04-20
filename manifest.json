@@ -46,7 +46,7 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.10",
+      "version": "1.0.11",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
