@@ -1213,9 +1213,9 @@
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
-      "description": "Create Premiumize transfers from explicit magnet or HTTP(S) source links.",
+      "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths.",
       "portals": [
         "discord",
         "webui",
@@ -1231,7 +1231,7 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "8627aaf3ea7ac8cde41ce3ad9f777aa965c007213127669c4a06adca767dc404"
+      "sha256": "f185e99397ed1ebdf6b5eea14a14b08442f3ca025d22327b12b82b62f3597b7f"
     },
     {
       "id": "premiumize_check_transfer",
@@ -1259,9 +1259,9 @@
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
-      "description": "Get Premiumize stream/download links by magnet/URL.",
+      "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths.",
       "portals": [
         "discord",
         "webui",
@@ -1277,7 +1277,7 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "d45e57858334eb57cf0393e29fb5f9ba2ea3d12d43ed46960bac8e320557712e"
+      "sha256": "80fd55a66b1c36923d3b9de38f8fc9ab8b875137eda70c08925d82614e4524bd"
     },
     {
       "id": "premiumize_list_files",

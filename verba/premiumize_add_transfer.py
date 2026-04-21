@@ -1,11 +1,14 @@
 import aiohttp
+import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
-from helpers import redis_client
+from helpers import redis_blob_client, redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -17,7 +20,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeAddTransferPlugin(ToolVerba):
     name = "premiumize_add_transfer"
     verba_name = "Premiumize Add Transfer"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Premiumize Add Transfer"
     settings_category = "Premiumize"
@@ -27,10 +30,10 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
     )
     description = (
-        "Add a magnet or URL as a new Premiumize transfer."
+        "Add a magnet, a remote .torrent URL, an attached .torrent file, or a local .torrent file path as a new Premiumize transfer."
     )
     verba_dec = (
-        "Create Premiumize transfers from explicit magnet or HTTP(S) source links."
+        "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths."
     )
     waiting_prompt_template = (
         "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
@@ -58,19 +61,21 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         },
     }
     when_to_use = (
-        "Use when the request is to add/send/download a magnet or URL in Premiumize."
+        "Use when the request is to add/send/download a magnet, a remote .torrent link, an attached .torrent file, or a local .torrent file in Premiumize."
     )
     how_to_use = (
-        "Set `query` to an add-transfer request and include the full literal `magnet:?` or `http(s)://...` URI."
+        "Set `query` to an add-transfer request and include the full literal `magnet:?`, `http(s)://...`, an attached `.torrent` file, or a local `.torrent` file path."
     )
     common_needs = [
         "An add-transfer request in query.",
-        "The exact `magnet:?` or `http(s)://` URI.",
+        "The exact `magnet:?`, `http(s)://`, attached `.torrent` file, or local `.torrent` file path source.",
     ]
-    missing_info_prompts = ["What exact magnet or URL should I send to Premiumize?"]
+    missing_info_prompts = ["What exact magnet, torrent URL, attached .torrent file, or local .torrent file path should I send to Premiumize?"]
     example_calls = [
         '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
         '{"function":"premiumize_add_transfer","arguments":{"query":"send this URL to Premiumize https://example.com/file.torrent"}}',
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this torrent file to Premiumize /downloads/c_0.torrent"}}',
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this attached torrent file to Premiumize"}}',
     ]
     routing_keywords = [
         "premiumize",
@@ -80,25 +85,26 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         "transfer",
         "magnet",
         "torrent",
+        "file",
     ]
     argument_schema = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The add-transfer request containing a full magnet:? or http(s):// URI.",
+                "description": "The add-transfer request containing a full magnet URI, remote torrent URL, an attached .torrent file, or local .torrent file path.",
             },
             "source": {
                 "type": "string",
-                "description": "Optional explicit source URI (magnet or URL).",
+                "description": "Optional explicit source value (magnet, URL, attached/local .torrent file path).",
             },
             "src": {
                 "type": "string",
-                "description": "Alias of source URI.",
+                "description": "Alias of source value.",
             },
             "url": {
                 "type": "string",
-                "description": "Optional HTTP(S) source URI.",
+                "description": "Optional HTTP(S) source URI, including .torrent links.",
             },
             "magnet": {
                 "type": "string",
@@ -106,7 +112,23 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             },
             "link": {
                 "type": "string",
-                "description": "Optional source URI alias.",
+                "description": "Optional source alias.",
+            },
+            "torrent_file": {
+                "type": "string",
+                "description": "Optional local .torrent file path.",
+            },
+            "torrent_path": {
+                "type": "string",
+                "description": "Alias of local .torrent file path.",
+            },
+            "file_path": {
+                "type": "string",
+                "description": "Optional local .torrent file path using Tater's common exported-artifact field name.",
+            },
+            "artifact_path": {
+                "type": "string",
+                "description": "Optional local .torrent file path using Tater's artifact status field name.",
             },
         },
         "required": [],
@@ -116,6 +138,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
     CACHE_TTL_SECONDS = 6 * 60 * 60
     SOURCE_URL_RE = re.compile(r"(https?://[^\s\"'<>]+)", re.IGNORECASE)
     SOURCE_MAGNET_RE = re.compile(r"(magnet:\?[^\s\"'<>]+)", re.IGNORECASE)
+    LOCAL_TORRENT_PATH_RE = re.compile(r"((?:/|\./|\.\./)[^\s\"'<>]+\.torrent)\b", re.IGNORECASE)
 
     def _diagnosis(self) -> Dict[str, str]:
         hash_diag = diagnose_hash_fields(
@@ -251,6 +274,222 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         return ""
 
     @staticmethod
+    def _looks_like_local_torrent_path(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text or "://" in text or not text.lower().endswith(".torrent"):
+            return False
+        return text.startswith("/") or text.startswith("./") or text.startswith("../")
+
+    def _extract_first_local_torrent_path(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        m = self.LOCAL_TORRENT_PATH_RE.search(raw)
+        if not m:
+            return ""
+        path = (m.group(1) or "").strip().rstrip(".,);]>")
+        return path if self._looks_like_local_torrent_path(path) else ""
+
+    def _explicit_torrent_path_from_args(self, args: Dict[str, Any]) -> str:
+        data = args or {}
+        for key in ("torrent_file", "torrent_path", "path", "file_path", "artifact_path", "source", "src", "link"):
+            value = self._safe_text(data.get(key))
+            if not value:
+                continue
+            extracted = self._extract_first_local_torrent_path(value)
+            if extracted:
+                return extracted
+            if self._looks_like_local_torrent_path(value):
+                return value
+        return ""
+
+    @staticmethod
+    def _blob_client():
+        return redis_blob_client
+
+    @classmethod
+    def _read_blob_bytes(cls, blob_key: str) -> bytes:
+        key = str(blob_key or "").strip()
+        if not key:
+            return b""
+        try:
+            raw = cls._blob_client().get(key.encode("utf-8"))
+        except Exception:
+            return b""
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        return b""
+
+    @staticmethod
+    def _artifact_is_torrent(artifact: Dict[str, Any]) -> bool:
+        name = str(artifact.get("name") or "").strip().lower()
+        if name.endswith(".torrent"):
+            return True
+        mimetype = str(artifact.get("mimetype") or "").strip().lower()
+        if mimetype in {
+            "application/x-bittorrent",
+            "application/x-torrent",
+            "application/torrent",
+        }:
+            return True
+        return False
+
+    @staticmethod
+    def _artifact_bytes(artifact: Dict[str, Any]) -> bytes:
+        if not isinstance(artifact, dict):
+            return b""
+        if isinstance(artifact.get("bytes"), (bytes, bytearray)):
+            return bytes(artifact.get("bytes"))
+        blob_key = str(artifact.get("blob_key") or "").strip()
+        if blob_key:
+            return PremiumizeAddTransferPlugin._read_blob_bytes(blob_key)
+        path_value = str(artifact.get("path") or artifact.get("file_path") or artifact.get("artifact_path") or "").strip()
+        if path_value and os.path.isfile(path_value):
+            try:
+                with open(path_value, "rb") as handle:
+                    return handle.read()
+            except Exception:
+                return b""
+        return b""
+
+    @staticmethod
+    def _bdecode(data: bytes, idx: int = 0) -> Tuple[Any, int]:
+        if idx >= len(data):
+            raise ValueError("Unexpected end of bencode data.")
+        token = data[idx : idx + 1]
+        if token == b"i":
+            end = data.index(b"e", idx)
+            return int(data[idx + 1 : end]), end + 1
+        if token == b"l":
+            idx += 1
+            out: List[Any] = []
+            while data[idx : idx + 1] != b"e":
+                item, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                out.append(item)
+            return out, idx + 1
+        if token == b"d":
+            idx += 1
+            out: Dict[bytes, Any] = {}
+            while data[idx : idx + 1] != b"e":
+                key, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                if not isinstance(key, (bytes, bytearray)):
+                    raise ValueError("Invalid bencode dictionary key.")
+                value, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                out[bytes(key)] = value
+            return out, idx + 1
+        if token.isdigit():
+            colon = data.index(b":", idx)
+            size = int(data[idx:colon])
+            start = colon + 1
+            end = start + size
+            return data[start:end], end
+        raise ValueError("Invalid bencode token.")
+
+    @staticmethod
+    def _flatten_tracker_values(value: Any) -> List[str]:
+        trackers: List[str] = []
+        if isinstance(value, (bytes, bytearray)):
+            text = bytes(value).decode("utf-8", "ignore").strip()
+            if text:
+                trackers.append(text)
+            return trackers
+        if isinstance(value, list):
+            for item in value:
+                trackers.extend(PremiumizeAddTransferPlugin._flatten_tracker_values(item))
+        return trackers
+
+    def _parse_torrent_file(self, raw: bytes) -> Tuple[Dict[bytes, Any], bytes, str]:
+        try:
+            if not raw.startswith(b"d"):
+                return {}, b"", "Torrent file did not decode to a dictionary."
+            idx = 1
+            root: Dict[bytes, Any] = {}
+            info_bytes = b""
+            while raw[idx : idx + 1] != b"e":
+                key, idx = self._bdecode(raw, idx)
+                if not isinstance(key, (bytes, bytearray)):
+                    return {}, b"", "Invalid torrent dictionary key."
+                value_start = idx
+                value, idx = self._bdecode(raw, idx)
+                key_bytes = bytes(key)
+                root[key_bytes] = value
+                if key_bytes == b"info":
+                    info_bytes = raw[value_start:idx]
+            if idx + 1 != len(raw):
+                return {}, b"", "Unexpected trailing data."
+            if not info_bytes:
+                return {}, b"", "Torrent file is missing an info dictionary."
+            return root, info_bytes, ""
+        except Exception as exc:
+            return {}, b"", f"Could not parse torrent file: {exc}"
+
+    def _magnet_from_torrent_bytes(self, raw: bytes, *, origin_label: str = "", origin_path: str = "") -> Tuple[str, Dict[str, Any], str]:
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            return "", {}, "No torrent file bytes were provided."
+        root, info_bytes, err = self._parse_torrent_file(raw)
+        if err:
+            return "", {}, err
+        info = root.get(b"info")
+        if not isinstance(info, dict):
+            return "", {}, "Torrent file is missing an info dictionary."
+        info_hash = hashlib.sha1(info_bytes).hexdigest()
+        name = self._safe_text(info.get(b"name"), "")
+        trackers: List[str] = []
+        trackers.extend(self._flatten_tracker_values(root.get(b"announce")))
+        trackers.extend(self._flatten_tracker_values(root.get(b"announce-list")))
+        deduped_trackers: List[str] = []
+        seen = set()
+        for tracker in trackers:
+            if tracker in seen:
+                continue
+            seen.add(tracker)
+            deduped_trackers.append(tracker)
+
+        magnet_parts = [f"magnet:?xt=urn:btih:{info_hash}"]
+        if name:
+            magnet_parts.append(f"dn={quote(name, safe='')}")
+        for tracker in deduped_trackers[:20]:
+            magnet_parts.append(f"tr={quote(tracker, safe='')}")
+
+        metadata = {
+            "torrent_path": origin_path,
+            "torrent_label": origin_label,
+            "info_hash": info_hash,
+            "display_name": name,
+            "tracker_count": len(deduped_trackers),
+        }
+        return "&".join(magnet_parts), metadata, ""
+
+    def _magnet_from_torrent_file(self, torrent_path: str) -> Tuple[str, Dict[str, Any], str]:
+        path = self._safe_text(torrent_path)
+        if not path:
+            return "", {}, "No local .torrent file path was provided."
+        if not os.path.isfile(path):
+            return "", {}, f"Torrent file was not found: {path}"
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            return "", {}, f"Could not read torrent file: {exc}"
+        return self._magnet_from_torrent_bytes(raw, origin_label=os.path.basename(path), origin_path=path)
+
+    def _torrent_artifacts_from_inputs(self, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        refs: List[Dict[str, Any]] = []
+        for source in (
+            args if isinstance(args, dict) else {},
+            (args or {}).get("origin") if isinstance((args or {}).get("origin"), dict) else {},
+            context if isinstance(context, dict) else {},
+            (context or {}).get("origin") if isinstance((context or {}).get("origin"), dict) else {},
+        ):
+            items = source.get("input_artifacts") if isinstance(source, dict) else None
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    refs.append(item)
+        return [item for item in refs if self._artifact_is_torrent(item)]
+
+    @staticmethod
     def _first_match(text: str, patterns: List[str]) -> str:
         for pattern in patterns:
             m = re.search(pattern, text or "", flags=re.IGNORECASE)
@@ -320,6 +559,9 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             source = self._extract_first_source(source) or source
 
         source_type = self._source_type(source) if source else ""
+        local_torrent_path = self._extract_first_local_torrent_path(query)
+        if not local_torrent_path:
+            local_torrent_path = self._explicit_torrent_path_from_args(args or {})
         name_query = self._safe_text((args or {}).get("name_query"))
         transfer_id = self._safe_text((args or {}).get("transfer_id")) or self._extract_transfer_id_from_query(query)
         folder_id = self._safe_text((args or {}).get("folder_id")) or self._extract_folder_id_from_query(query)
@@ -342,6 +584,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             "folder_id": folder_id,
             "item_id": item_id,
             "index": index,
+            "local_torrent_path": local_torrent_path,
         }
 
     def _load_cache(self) -> Dict[str, Any]:
@@ -373,6 +616,51 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         explicit = self._explicit_source_from_args(args or {})
         if explicit:
             return {"source": explicit, "source_type": self._source_type(explicit)}
+
+        torrent_path = self._safe_text(intent.get("local_torrent_path")) or self._explicit_torrent_path_from_args(args or {})
+        if not torrent_path:
+            torrent_path = self._extract_first_local_torrent_path(self._query_from_args(args or {}, context=context))
+        if torrent_path:
+            magnet, torrent_meta, err = self._magnet_from_torrent_file(torrent_path)
+            if magnet:
+                return {
+                    "source": magnet,
+                    "source_type": "torrent file",
+                    "torrent_path": torrent_meta.get("torrent_path"),
+                    "info_hash": torrent_meta.get("info_hash"),
+                    "display_name": torrent_meta.get("display_name"),
+                    "tracker_count": torrent_meta.get("tracker_count"),
+                    "resolved_from": "local_torrent_file",
+                }
+            return {"source": "", "source_type": "torrent file", "torrent_path": torrent_path, "resolve_error": err}
+
+        for artifact in self._torrent_artifacts_from_inputs(args or {}, context):
+            raw = self._artifact_bytes(artifact)
+            magnet, torrent_meta, err = self._magnet_from_torrent_bytes(
+                raw,
+                origin_label=self._safe_text(artifact.get("name")),
+                origin_path=self._safe_text(artifact.get("path")),
+            )
+            if magnet:
+                return {
+                    "source": magnet,
+                    "source_type": "torrent attachment",
+                    "torrent_name": self._safe_text(artifact.get("name")),
+                    "mimetype": self._safe_text(artifact.get("mimetype")),
+                    "blob_key": self._safe_text(artifact.get("blob_key")),
+                    "info_hash": torrent_meta.get("info_hash"),
+                    "display_name": torrent_meta.get("display_name"),
+                    "tracker_count": torrent_meta.get("tracker_count"),
+                    "resolved_from": "input_artifact",
+                }
+            if err:
+                return {
+                    "source": "",
+                    "source_type": "torrent attachment",
+                    "torrent_name": self._safe_text(artifact.get("name")),
+                    "blob_key": self._safe_text(artifact.get("blob_key")),
+                    "resolve_error": err,
+                }
 
         return {}
 
@@ -691,11 +979,12 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         source = self._safe_text(source_info.get("source"))
         source_type = self._safe_text(source_info.get("source_type"), "unknown")
         if not source:
+            resolve_error = self._safe_text(source_info.get("resolve_error"))
             return action_failure(
                 code="missing_source",
-                message="No explicit magnet or URL was provided for Premiumize transfer.",
-                needs=["Pass the full magnet:? or http(s):// URI directly in query or source arguments."],
-                say_hint="Explain that a literal source URI is required and paraphrases like 'this magnet' are not valid.",
+                message=resolve_error or "No explicit magnet, URL, attached .torrent file, or local .torrent file path was provided for Premiumize transfer.",
+                needs=["Pass the full magnet:? URI, http(s):// URI, attach a .torrent file, or provide a local .torrent file path directly in query or source arguments."],
+                say_hint="Explain that a literal magnet, URL, attached .torrent file, or local .torrent path is required and paraphrases like 'this magnet' are not valid.",
             )
 
         created, create_err = await self._api_transfer_create(settings, source)
@@ -1036,14 +1325,15 @@ class PremiumizeAddTransferPlugin(ToolVerba):
 
         query = self._query_from_args(args or {}, context=context)
         explicit_source = self._explicit_source_from_args(args or {})
-        if not query and explicit_source:
-            query = explicit_source
+        explicit_torrent_path = self._explicit_torrent_path_from_args(args or {})
+        if not query:
+            query = explicit_source or explicit_torrent_path
         if not query:
             return action_failure(
                 code="missing_request",
                 message="No Premiumize request text was provided.",
-                needs=["Provide a Premiumize request. For transfers/links by source, include the exact magnet or URL URI."],
-                say_hint="Ask for a concrete Premiumize request and require a literal magnet/URL URI when needed.",
+                needs=["Provide a Premiumize request. For transfers/links by source, include the exact magnet, URL, attached .torrent file, or local .torrent file path."],
+                say_hint="Ask for a concrete Premiumize request and require a literal magnet, URL, attached .torrent file, or local .torrent path when needed.",
             )
 
         intent = await self._resolve_intent(query, args or {}, llm_client)
