@@ -20,7 +20,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeGetLinksPlugin(ToolVerba):
     name = "premiumize_get_links"
     verba_name = "Premiumize Get Links"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     pretty_name = "Premiumize Get Links"
     settings_category = "Premiumize"
@@ -1335,6 +1335,13 @@ class PremiumizeGetLinksPlugin(ToolVerba):
                     message="Torrent is not cached on Premiumize.",
                     needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
                     say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
+                )
+            if "unsupported link for direct download" in err_l:
+                return action_failure(
+                    code="premiumize_source_unsupported",
+                    message="Premiumize rejected that source for direct link retrieval.",
+                    needs=["Use Premiumize add transfer if this torrent needs to be cached first, or retry with a literal magnet, attached .torrent file, local .torrent file path, or supported torrent URL."],
+                    say_hint="Explain that Premiumize rejected the source itself for direct link retrieval; do not claim the API key or base URL is missing.",
                 )
             return action_failure(
                 code="premiumize_directdl_failed",
