@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from helpers import redis_blob_client, redis_client
 from verba_base import ToolVerba
@@ -20,7 +20,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeAddTransferPlugin(ToolVerba):
     name = "premiumize_add_transfer"
     verba_name = "Premiumize Add Transfer"
-    version = "1.0.3"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "Premiumize Add Transfer"
     settings_category = "Premiumize"
@@ -252,12 +252,22 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         return ""
 
     @staticmethod
+    def _looks_like_remote_torrent_url(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text.lower().startswith(("http://", "https://")):
+            return False
+        parts = urlsplit(text)
+        path = (parts.path or "").lower()
+        query = (parts.query or "").lower()
+        return path.endswith(".torrent") or ".torrent" in query
+
+    @staticmethod
     def _source_type(source: str) -> str:
         src = str(source or "").strip().lower()
         if src.startswith("magnet:?"):
             return "magnet"
         if src.startswith("http://") or src.startswith("https://"):
-            return "url"
+            return "torrent url" if PremiumizeAddTransferPlugin._looks_like_remote_torrent_url(src) else "url"
         return "unknown"
 
     def _explicit_source_from_args(self, args: Dict[str, Any]) -> str:
@@ -473,6 +483,61 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             return "", {}, f"Could not read torrent file: {exc}"
         return self._magnet_from_torrent_bytes(raw, origin_label=os.path.basename(path), origin_path=path)
 
+    async def _remote_torrent_to_magnet(self, torrent_url: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        url = self._safe_text(torrent_url)
+        if not url:
+            return {"source": "", "source_type": "torrent url", "resolve_error": "No remote .torrent URL was provided."}
+
+        timeout = aiohttp.ClientTimeout(total=settings["timeout_seconds"])
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=True) as resp:
+                    raw = await resp.read()
+                    if resp.status != 200:
+                        preview = raw[:220].decode("utf-8", "ignore")
+                        return {
+                            "source": "",
+                            "source_type": "torrent url",
+                            "remote_torrent_url": url,
+                            "resolve_error": f"Could not download remote torrent file: HTTP {resp.status}: {preview}",
+                        }
+        except Exception as exc:
+            return {
+                "source": "",
+                "source_type": "torrent url",
+                "remote_torrent_url": url,
+                "resolve_error": f"Could not download remote torrent file: {exc}",
+            }
+
+        if not raw:
+            return {
+                "source": "",
+                "source_type": "torrent url",
+                "remote_torrent_url": url,
+                "resolve_error": "Remote torrent download returned no bytes.",
+            }
+
+        label = os.path.basename(urlsplit(url).path) or url
+        magnet, torrent_meta, err = self._magnet_from_torrent_bytes(raw, origin_label=label, origin_path=url)
+        if magnet:
+            return {
+                "source": magnet,
+                "source_type": "torrent url",
+                "remote_torrent_url": url,
+                "torrent_name": label,
+                "info_hash": torrent_meta.get("info_hash"),
+                "display_name": torrent_meta.get("display_name"),
+                "tracker_count": torrent_meta.get("tracker_count"),
+                "resolved_from": "remote_torrent_url",
+            }
+        return {
+            "source": "",
+            "source_type": "torrent url",
+            "remote_torrent_url": url,
+            "torrent_name": label,
+            "resolve_error": err or "Could not parse remote torrent file.",
+        }
+
     def _torrent_artifacts_from_inputs(self, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         refs: List[Dict[str, Any]] = []
         for source in (
@@ -608,14 +673,26 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         except Exception as exc:
             logger.debug("[premiumize] cache save skipped: %s", exc)
 
-    async def _resolve_source(self, args: Dict[str, Any], intent: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _resolve_source(
+        self,
+        args: Dict[str, Any],
+        intent: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        settings: Dict[str, Any],
+    ) -> Dict[str, Any]:
         src = self._safe_text(intent.get("source"))
         if src:
-            return {"source": src, "source_type": intent.get("source_type") or self._source_type(src)}
+            source_type = self._safe_text(intent.get("source_type")) or self._source_type(src)
+            if source_type == "torrent url" and self._looks_like_remote_torrent_url(src):
+                return await self._remote_torrent_to_magnet(src, settings)
+            return {"source": src, "source_type": source_type}
 
         explicit = self._explicit_source_from_args(args or {})
         if explicit:
-            return {"source": explicit, "source_type": self._source_type(explicit)}
+            source_type = self._source_type(explicit)
+            if source_type == "torrent url" and self._looks_like_remote_torrent_url(explicit):
+                return await self._remote_torrent_to_magnet(explicit, settings)
+            return {"source": explicit, "source_type": source_type}
 
         torrent_path = self._safe_text(intent.get("local_torrent_path")) or self._explicit_torrent_path_from_args(args or {})
         if not torrent_path:
@@ -975,7 +1052,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         settings: Dict[str, Any],
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        source_info = await self._resolve_source(args, intent, context)
+        source_info = await self._resolve_source(args, intent, context, settings)
         source = self._safe_text(source_info.get("source"))
         source_type = self._safe_text(source_info.get("source_type"), "unknown")
         if not source:
@@ -1228,11 +1305,19 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         settings: Dict[str, Any],
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        source_info = await self._resolve_source(args, intent, context)
+        source_info = await self._resolve_source(args, intent, context, settings)
         source = self._safe_text(source_info.get("source"))
         if source:
             links, err = await self._api_directdl(settings, source)
             if err:
+                err_l = err.lower()
+                if any(token in err_l for token in ("not cached", "not in cache", "cache")):
+                    return action_failure(
+                        code="torrent_not_cached",
+                        message="Torrent is not cached on Premiumize.",
+                        needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                        say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
+                    )
                 return action_failure(
                     code="premiumize_directdl_failed",
                     message=err,
@@ -1242,9 +1327,10 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             normalized_links = self._normalize_direct_links(links)
             if not normalized_links:
                 return action_failure(
-                    code="no_links_available",
-                    message="Premiumize did not return direct links for that source yet.",
-                    say_hint="Explain no direct links are available yet and suggest checking transfer progress.",
+                    code="torrent_not_cached",
+                    message="Torrent is not cached on Premiumize.",
+                    needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                    say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
                 )
             self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
             summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."

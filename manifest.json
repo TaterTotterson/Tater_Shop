@@ -1213,7 +1213,7 @@
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.0.3",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths.",
       "portals": [
@@ -1231,12 +1231,12 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "f185e99397ed1ebdf6b5eea14a14b08442f3ca025d22327b12b82b62f3597b7f"
+      "sha256": "99380112a02cf70cb1939fa51feaafdc971e16b8011f492f924ea57f50b16817"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
@@ -1254,12 +1254,12 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "c29f5a87068c23de40627cea89c9a04337beae6152422fd710fe9647a0ad9202"
+      "sha256": "d388c6c94da97c531fb67b3b49d815121b7f27c84d8e7f20f094699e0b4fcdc6"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.0.5",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths.",
       "portals": [
@@ -1277,12 +1277,12 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "80fd55a66b1c36923d3b9de38f8fc9ab8b875137eda70c08925d82614e4524bd"
+      "sha256": "2aa87d94ae728baa2879dbcdfd4492ca278b1d9e5214dfb2b0a737ce44669834"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
@@ -1300,12 +1300,12 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "2f184f536cdd826bf788107addf3d37b7a2470268bfa4bb5a088c87109515e8b"
+      "sha256": "05ee6bed2e32ef5e2ca898b6f87af035fb8610b43cbfce66774db5ef3bb6f3b6"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
@@ -1323,7 +1323,7 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "08e3e57698827f45ae4fb8a54e058a914f3094e3ddb0b0840e93756c8da7ff7d"
+      "sha256": "1865b2b477b55717f478e10e18542536e4d638fcb7f40956d79b52ae4af530b9"
     },
     {
       "id": "sftpgo_account",

@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeCheckTransferPlugin(ToolVerba):
     name = "premiumize_check_transfer"
     verba_name = "Premiumize Check Transfer"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Premiumize Check Transfer"
     settings_category = "Premiumize"
@@ -934,6 +934,14 @@ class PremiumizeCheckTransferPlugin(ToolVerba):
         if source:
             links, err = await self._api_directdl(settings, source)
             if err:
+                err_l = err.lower()
+                if any(token in err_l for token in ("not cached", "not in cache", "cache")):
+                    return action_failure(
+                        code="torrent_not_cached",
+                        message="Torrent is not cached on Premiumize.",
+                        needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                        say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
+                    )
                 return action_failure(
                     code="premiumize_directdl_failed",
                     message=err,
@@ -943,9 +951,10 @@ class PremiumizeCheckTransferPlugin(ToolVerba):
             normalized_links = self._normalize_direct_links(links)
             if not normalized_links:
                 return action_failure(
-                    code="no_links_available",
-                    message="Premiumize did not return direct links for that source yet.",
-                    say_hint="Explain no direct links are available yet and suggest checking transfer progress.",
+                    code="torrent_not_cached",
+                    message="Torrent is not cached on Premiumize.",
+                    needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                    say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
                 )
             self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
             summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
