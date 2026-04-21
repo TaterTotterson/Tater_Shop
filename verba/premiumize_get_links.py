@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
@@ -20,7 +21,7 @@ logger.setLevel(logging.INFO)
 class PremiumizeGetLinksPlugin(ToolVerba):
     name = "premiumize_get_links"
     verba_name = "Premiumize Get Links"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     pretty_name = "Premiumize Get Links"
     settings_category = "Premiumize"
@@ -128,6 +129,10 @@ class PremiumizeGetLinksPlugin(ToolVerba):
             "artifact_path": {
                 "type": "string",
                 "description": "Optional local .torrent file path using Tater's artifact status field name.",
+            },
+            "artifact_id": {
+                "type": "string",
+                "description": "Optional available conversation artifact id for a downloaded or uploaded .torrent file.",
             },
             "item_id": {
                 "type": "string",
@@ -325,6 +330,129 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         return ""
 
     @staticmethod
+    def _artifact_id_from_args(args: Dict[str, Any]) -> str:
+        return str((args or {}).get("artifact_id") or "").strip()
+
+    @staticmethod
+    def _origin_available_artifacts(origin: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(origin, dict):
+            return []
+        raw = origin.get("available_artifacts")
+        if not isinstance(raw, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(dict(item))
+        return out
+
+    def _find_available_artifact(self, *, origin: Optional[Dict[str, Any]], artifact_id: Any) -> Optional[Dict[str, Any]]:
+        target = str(artifact_id or "").strip()
+        if not target:
+            return None
+        for item in self._origin_available_artifacts(origin):
+            if str(item.get("artifact_id") or "").strip() == target:
+                return item
+        return None
+
+    @staticmethod
+    def _agent_lab_dir() -> Optional[Path]:
+        candidates: List[Path] = []
+        env_root = str(os.getenv("TATER_AGENT_ROOT", "") or "").strip()
+        if env_root:
+            candidates.append(Path(env_root).expanduser())
+
+        file_path = Path(__file__).resolve()
+        for base in (
+            Path.cwd(),
+            file_path.parent,
+            file_path.parent.parent,
+            file_path.parent.parent.parent if len(file_path.parents) >= 3 else file_path.parent.parent,
+        ):
+            candidates.append(base / "agent_lab")
+            candidates.append(base / "Tater" / "agent_lab")
+        candidates.append(Path("/app/agent_lab"))
+
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            token = str(resolved)
+            if token in seen:
+                continue
+            seen.add(token)
+            if resolved.exists() and resolved.is_dir():
+                return resolved
+        return None
+
+    @classmethod
+    def _resolve_safe_torrent_path(cls, path: str) -> Optional[Path]:
+        if not path:
+            return None
+
+        raw = str(path).strip()
+        if not raw:
+            return None
+
+        direct = Path(raw)
+        try:
+            direct_resolved = direct.resolve()
+        except Exception:
+            direct_resolved = direct
+        if direct_resolved.exists() and direct_resolved.is_file():
+            return direct_resolved
+
+        agent_lab_dir = cls._agent_lab_dir()
+        if agent_lab_dir is None:
+            return None
+
+        normalized = raw.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+
+        if normalized in {"download", "downloads"}:
+            normalized = "downloads"
+        elif normalized.startswith("download/"):
+            normalized = "downloads/" + normalized[len("download/") :]
+        elif normalized in {"document", "documents"}:
+            normalized = "documents"
+        elif normalized.startswith("document/"):
+            normalized = "documents/" + normalized[len("document/") :]
+        elif normalized in {"/download", "/downloads"}:
+            normalized = "/downloads"
+        elif normalized.startswith("/download/"):
+            normalized = "/downloads/" + normalized[len("/download/") :]
+        elif normalized in {"/document", "/documents"}:
+            normalized = "/documents"
+        elif normalized.startswith("/document/"):
+            normalized = "/documents/" + normalized[len("/document/") :]
+
+        if normalized in {"/", "/."}:
+            candidate = agent_lab_dir
+        elif normalized == "/agent_lab":
+            candidate = agent_lab_dir
+        elif normalized.startswith("/agent_lab/"):
+            candidate = agent_lab_dir / normalized[len("/agent_lab/") :]
+        elif normalized.startswith("/"):
+            candidate = agent_lab_dir / normalized.lstrip("/")
+        else:
+            candidate = agent_lab_dir / normalized
+
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        try:
+            root_resolved = agent_lab_dir.resolve()
+        except Exception:
+            root_resolved = agent_lab_dir
+        if resolved != root_resolved and root_resolved not in resolved.parents:
+            return None
+        return resolved
+
+    @staticmethod
     def _blob_client():
         return redis_blob_client
 
@@ -361,14 +489,16 @@ class PremiumizeGetLinksPlugin(ToolVerba):
             return b""
         if isinstance(artifact.get("bytes"), (bytes, bytearray)):
             return bytes(artifact.get("bytes"))
+        if isinstance(artifact.get("data"), (bytes, bytearray)):
+            return bytes(artifact.get("data"))
         blob_key = str(artifact.get("blob_key") or "").strip()
         if blob_key:
             return PremiumizeGetLinksPlugin._read_blob_bytes(blob_key)
         path_value = str(artifact.get("path") or artifact.get("file_path") or artifact.get("artifact_path") or "").strip()
-        if path_value and os.path.isfile(path_value):
+        resolved = PremiumizeGetLinksPlugin._resolve_safe_torrent_path(path_value)
+        if resolved and resolved.exists() and resolved.is_file():
             try:
-                with open(path_value, "rb") as handle:
-                    return handle.read()
+                return resolved.read_bytes()
             except Exception:
                 return b""
         return b""
@@ -485,14 +615,16 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         path = self._safe_text(torrent_path)
         if not path:
             return "", {}, "No local .torrent file path was provided."
-        if not os.path.isfile(path):
+        resolved = self._resolve_safe_torrent_path(path)
+        if resolved is None:
+            return "", {}, f"Torrent file path is outside the allowed workspace root: {path}"
+        if not resolved.exists() or not resolved.is_file():
             return "", {}, f"Torrent file was not found: {path}"
         try:
-            with open(path, "rb") as handle:
-                raw = handle.read()
+            raw = resolved.read_bytes()
         except Exception as exc:
             return "", {}, f"Could not read torrent file: {exc}"
-        return self._magnet_from_torrent_bytes(raw, origin_label=os.path.basename(path), origin_path=path)
+        return self._magnet_from_torrent_bytes(raw, origin_label=resolved.name, origin_path=path)
 
     async def _remote_torrent_to_magnet(self, torrent_url: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         url = self._safe_text(torrent_url)
@@ -557,12 +689,15 @@ class PremiumizeGetLinksPlugin(ToolVerba):
             context if isinstance(context, dict) else {},
             (context or {}).get("origin") if isinstance((context or {}).get("origin"), dict) else {},
         ):
-            items = source.get("input_artifacts") if isinstance(source, dict) else None
-            if not isinstance(items, list):
+            if not isinstance(source, dict):
                 continue
-            for item in items:
-                if isinstance(item, dict):
-                    refs.append(item)
+            for key in ("input_artifacts", "available_artifacts"):
+                items = source.get(key)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        refs.append(item)
         return [item for item in refs if self._artifact_is_torrent(item)]
 
     @staticmethod
@@ -691,6 +826,52 @@ class PremiumizeGetLinksPlugin(ToolVerba):
         context: Optional[Dict[str, Any]],
         settings: Dict[str, Any],
     ) -> Dict[str, Any]:
+        artifact_id = self._artifact_id_from_args(args or {})
+        if artifact_id:
+            origin = (args or {}).get("origin") if isinstance((args or {}).get("origin"), dict) else {}
+            if not origin and isinstance(context, dict):
+                maybe_origin = context.get("origin")
+                if isinstance(maybe_origin, dict):
+                    origin = maybe_origin
+            artifact = self._find_available_artifact(origin=origin, artifact_id=artifact_id)
+            if artifact is None:
+                return {
+                    "source": "",
+                    "source_type": "torrent artifact",
+                    "artifact_id": artifact_id,
+                    "resolve_error": f"Artifact `{artifact_id}` was not found for this conversation.",
+                }
+            if not self._artifact_is_torrent(artifact):
+                return {
+                    "source": "",
+                    "source_type": "torrent artifact",
+                    "artifact_id": artifact_id,
+                    "resolve_error": f"Artifact `{artifact_id}` is not a .torrent file.",
+                }
+            raw = self._artifact_bytes(artifact)
+            magnet, torrent_meta, err = self._magnet_from_torrent_bytes(
+                raw,
+                origin_label=self._safe_text(artifact.get("name")),
+                origin_path=self._safe_text(artifact.get("path")),
+            )
+            if magnet:
+                return {
+                    "source": magnet,
+                    "source_type": "torrent artifact",
+                    "artifact_id": artifact_id,
+                    "torrent_name": self._safe_text(artifact.get("name")),
+                    "info_hash": torrent_meta.get("info_hash"),
+                    "display_name": torrent_meta.get("display_name"),
+                    "tracker_count": torrent_meta.get("tracker_count"),
+                    "resolved_from": "available_artifact",
+                }
+            return {
+                "source": "",
+                "source_type": "torrent artifact",
+                "artifact_id": artifact_id,
+                "resolve_error": err or f"Artifact `{artifact_id}` could not be read as a torrent file.",
+            }
+
         src = self._safe_text(intent.get("source"))
         if src:
             source_type = self._safe_text(intent.get("source_type")) or self._source_type(src)
