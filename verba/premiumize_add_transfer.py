@@ -6,144 +6,65 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlsplit
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote, unquote, urlsplit
 
 from helpers import redis_blob_client, redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
+ToolVerbaAlias = ToolVerba
+
+
 logger = logging.getLogger("premiumize_add_transfer")
 logger.setLevel(logging.INFO)
 
+PREMIUMIZE_PLATFORMS = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
+PREMIUMIZE_REQUIRED_SETTINGS = {
+    "PREMIUMIZE_API_KEY": {
+        "label": "Premiumize API Key",
+        "type": "password",
+        "default": "",
+        "description": "Your Premiumize.me API key.",
+    },
+    "PREMIUMIZE_API_BASE": {
+        "label": "Premiumize API Base",
+        "type": "string",
+        "default": "https://www.premiumize.me/api",
+        "description": "Premiumize API base URL.",
+    },
+    "PREMIUMIZE_TIMEOUT_SECONDS": {
+        "label": "HTTP Timeout Seconds",
+        "type": "string",
+        "default": "30",
+        "description": "Timeout for Premiumize API requests.",
+    },
+}
+PREMIUMIZE_WAITING_PROMPT = (
+    "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
+    "Only output that message."
+)
 
-class PremiumizeAddTransferPlugin(ToolVerba):
-    name = "premiumize_add_transfer"
-    verba_name = "Premiumize Add Transfer"
-    version = "1.0.7"
+
+class PremiumizeBasePlugin(ToolVerbaAlias):
     min_tater_version = "59"
-    pretty_name = "Premiumize Add Transfer"
     settings_category = "Premiumize"
-    tags = ["premiumize", "add_transfer"]
-    fixed_action = "add_transfer"
-    usage = (
-        '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
-    )
-    description = (
-        "Add a magnet, a remote .torrent URL, an attached .torrent file, or a local .torrent file path as a new Premiumize transfer."
-    )
-    verba_dec = (
-        "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent/torrent download URLs, attached .torrent files, or local .torrent file paths."
-    )
-    waiting_prompt_template = (
-        "Tell {mention} you are checking Premiumize now and will report transfer status or links shortly. "
-        "Only output that message."
-    )
-    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
-    required_settings = {
-        "PREMIUMIZE_API_KEY": {
-            "label": "Premiumize API Key",
-            "type": "password",
-            "default": "",
-            "description": "Your Premiumize.me API key.",
-        },
-        "PREMIUMIZE_API_BASE": {
-            "label": "Premiumize API Base",
-            "type": "string",
-            "default": "https://www.premiumize.me/api",
-            "description": "Premiumize API base URL.",
-        },
-        "PREMIUMIZE_TIMEOUT_SECONDS": {
-            "label": "HTTP Timeout Seconds",
-            "type": "string",
-            "default": "30",
-            "description": "Timeout for Premiumize API requests.",
-        },
-    }
-    when_to_use = (
-        "Use when the request is to add/send/download a magnet, a remote .torrent link, an attached .torrent file, or a local .torrent file in Premiumize."
-    )
-    how_to_use = (
-        "Set `query` to an add-transfer request and include the full literal `magnet:?`, `http(s)://...`, an attached `.torrent` file, or a local `.torrent` file path."
-    )
-    common_needs = [
-        "An add-transfer request in query.",
-        "The exact `magnet:?`, `http(s)://`, attached `.torrent` file, or local `.torrent` file path source.",
-    ]
-    missing_info_prompts = ["What exact magnet, torrent URL, attached .torrent file, or local .torrent file path should I send to Premiumize?"]
-    example_calls = [
-        '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
-        '{"function":"premiumize_add_transfer","arguments":{"query":"send this URL to Premiumize https://example.com/file.torrent"}}',
-        '{"function":"premiumize_add_transfer","arguments":{"query":"add this torrent file to Premiumize /downloads/c_0.torrent"}}',
-        '{"function":"premiumize_add_transfer","arguments":{"query":"add this attached torrent file to Premiumize"}}',
-    ]
-    routing_keywords = [
-        "premiumize",
-        "add",
-        "send",
-        "download",
-        "transfer",
-        "magnet",
-        "torrent",
-        "file",
-    ]
-    argument_schema = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The add-transfer request containing a full magnet URI, remote torrent URL, an attached .torrent file, or local .torrent file path.",
-            },
-            "source": {
-                "type": "string",
-                "description": "Optional explicit source value (magnet, URL, attached/local .torrent file path).",
-            },
-            "src": {
-                "type": "string",
-                "description": "Alias of source value.",
-            },
-            "url": {
-                "type": "string",
-                "description": "Optional HTTP(S) source URI, including .torrent links.",
-            },
-            "magnet": {
-                "type": "string",
-                "description": "Optional magnet URI.",
-            },
-            "link": {
-                "type": "string",
-                "description": "Optional source alias.",
-            },
-            "torrent_file": {
-                "type": "string",
-                "description": "Optional local .torrent file path.",
-            },
-            "torrent_path": {
-                "type": "string",
-                "description": "Alias of local .torrent file path.",
-            },
-            "file_path": {
-                "type": "string",
-                "description": "Optional local .torrent file path using Tater's common exported-artifact field name.",
-            },
-            "artifact_path": {
-                "type": "string",
-                "description": "Optional local .torrent file path using Tater's artifact status field name.",
-            },
-            "artifact_id": {
-                "type": "string",
-                "description": "Optional available conversation artifact id for a downloaded or uploaded .torrent file.",
-            },
-        },
-        "required": [],
-    }
+    platforms = PREMIUMIZE_PLATFORMS
+    required_settings = PREMIUMIZE_REQUIRED_SETTINGS
+    waiting_prompt_template = PREMIUMIZE_WAITING_PROMPT
 
     CACHE_KEY = "tater:premiumize:last_context"
     CACHE_TTL_SECONDS = 6 * 60 * 60
     SOURCE_URL_RE = re.compile(r"(https?://[^\s\"'<>]+)", re.IGNORECASE)
     SOURCE_MAGNET_RE = re.compile(r"(magnet:\?[^\s\"'<>]+)", re.IGNORECASE)
     LOCAL_TORRENT_PATH_RE = re.compile(r"((?:/|\./|\.\./)[^\s\"'<>]+\.torrent)\b", re.IGNORECASE)
+    MAGNET_BTIH_RE = re.compile(r"(?:xt=urn:btih:)([a-zA-Z0-9]+)", re.IGNORECASE)
+    TORRENT_MIMETYPES = {
+        "application/x-bittorrent",
+        "application/x-torrent",
+        "application/torrent",
+    }
 
     def _diagnosis(self) -> Dict[str, str]:
         hash_diag = diagnose_hash_fields(
@@ -191,6 +112,18 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
 
     @staticmethod
+    def _dedupe_keep_order(values: Sequence[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        return out
+
+    @staticmethod
     def _normalize_action(value: Any) -> str:
         text = str(value or "").strip().lower()
         if text in {"add_transfer", "add", "download", "send", "create_transfer", "transfer"}:
@@ -232,18 +165,18 @@ class PremiumizeAddTransferPlugin(ToolVerba):
     @staticmethod
     def _query_from_args(args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
         data = args or {}
-        for key in ("query", "request", "text", "message", "content", "prompt", "instruction"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-        origin = data.get("origin")
-        if isinstance(origin, dict):
-            for key in ("request_text", "query", "text", "content", "message"):
-                value = origin.get(key)
+        for source in (
+            data,
+            data.get("origin") if isinstance(data.get("origin"), dict) else {},
+            context if isinstance(context, dict) else {},
+            (context or {}).get("origin") if isinstance((context or {}).get("origin"), dict) else {},
+        ):
+            if not isinstance(source, dict):
+                continue
+            for key in ("query", "request", "request_text", "text", "message", "content", "prompt", "instruction"):
+                value = source.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-
         return ""
 
     def _extract_first_source(self, text: str) -> str:
@@ -266,13 +199,13 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         query = (parts.query or "").lower()
         return path.endswith(".torrent") or ".torrent" in query
 
-    @staticmethod
-    def _source_type(source: str) -> str:
+    @classmethod
+    def _source_type(cls, source: str) -> str:
         src = str(source or "").strip().lower()
         if src.startswith("magnet:?"):
             return "magnet"
         if src.startswith("http://") or src.startswith("https://"):
-            return "torrent url" if PremiumizeAddTransferPlugin._looks_like_remote_torrent_url(src) else "url"
+            return "torrent url" if cls._looks_like_remote_torrent_url(src) else "url"
         return "unknown"
 
     def _explicit_source_from_args(self, args: Dict[str, Any]) -> str:
@@ -458,22 +391,16 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             return bytes(raw)
         return b""
 
-    @staticmethod
-    def _artifact_is_torrent(artifact: Dict[str, Any]) -> bool:
+    @classmethod
+    def _artifact_is_torrent(cls, artifact: Dict[str, Any]) -> bool:
         name = str(artifact.get("name") or "").strip().lower()
         if name.endswith(".torrent"):
             return True
-        mimetype = str(artifact.get("mimetype") or "").strip().lower()
-        if mimetype in {
-            "application/x-bittorrent",
-            "application/x-torrent",
-            "application/torrent",
-        }:
-            return True
-        return False
+        mimetype = str(artifact.get("mimetype") or artifact.get("mime_type") or "").strip().lower()
+        return mimetype in cls.TORRENT_MIMETYPES
 
-    @staticmethod
-    def _artifact_bytes(artifact: Dict[str, Any]) -> bytes:
+    @classmethod
+    def _artifact_bytes(cls, artifact: Dict[str, Any]) -> bytes:
         if not isinstance(artifact, dict):
             return b""
         if isinstance(artifact.get("bytes"), (bytes, bytearray)):
@@ -482,9 +409,9 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             return bytes(artifact.get("data"))
         blob_key = str(artifact.get("blob_key") or "").strip()
         if blob_key:
-            return PremiumizeAddTransferPlugin._read_blob_bytes(blob_key)
+            return cls._read_blob_bytes(blob_key)
         path_value = str(artifact.get("path") or artifact.get("file_path") or artifact.get("artifact_path") or "").strip()
-        resolved = PremiumizeAddTransferPlugin._resolve_safe_torrent_path(path_value)
+        resolved = cls._resolve_safe_torrent_path(path_value)
         if resolved and resolved.exists() and resolved.is_file():
             try:
                 return resolved.read_bytes()
@@ -504,17 +431,17 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             idx += 1
             out: List[Any] = []
             while data[idx : idx + 1] != b"e":
-                item, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                item, idx = PremiumizeBasePlugin._bdecode(data, idx)
                 out.append(item)
             return out, idx + 1
         if token == b"d":
             idx += 1
             out: Dict[bytes, Any] = {}
             while data[idx : idx + 1] != b"e":
-                key, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                key, idx = PremiumizeBasePlugin._bdecode(data, idx)
                 if not isinstance(key, (bytes, bytearray)):
                     raise ValueError("Invalid bencode dictionary key.")
-                value, idx = PremiumizeAddTransferPlugin._bdecode(data, idx)
+                value, idx = PremiumizeBasePlugin._bdecode(data, idx)
                 out[bytes(key)] = value
             return out, idx + 1
         if token.isdigit():
@@ -535,7 +462,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             return trackers
         if isinstance(value, list):
             for item in value:
-                trackers.extend(PremiumizeAddTransferPlugin._flatten_tracker_values(item))
+                trackers.extend(PremiumizeBasePlugin._flatten_tracker_values(item))
         return trackers
 
     def _parse_torrent_file(self, raw: bytes) -> Tuple[Dict[bytes, Any], bytes, str]:
@@ -577,13 +504,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         trackers: List[str] = []
         trackers.extend(self._flatten_tracker_values(root.get(b"announce")))
         trackers.extend(self._flatten_tracker_values(root.get(b"announce-list")))
-        deduped_trackers: List[str] = []
-        seen = set()
-        for tracker in trackers:
-            if tracker in seen:
-                continue
-            seen.add(tracker)
-            deduped_trackers.append(tracker)
+        deduped_trackers = self._dedupe_keep_order(trackers)
 
         magnet_parts = [f"magnet:?xt=urn:btih:{info_hash}"]
         if name:
@@ -600,26 +521,20 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         }
         return "&".join(magnet_parts), metadata, ""
 
-    def _magnet_from_torrent_file(self, torrent_path: str) -> Tuple[str, Dict[str, Any], str]:
-        path = self._safe_text(torrent_path)
-        if not path:
-            return "", {}, "No local .torrent file path was provided."
-        resolved = self._resolve_safe_torrent_path(path)
-        if resolved is None:
-            return "", {}, f"Torrent file path is outside the allowed workspace root: {path}"
-        if not resolved.exists() or not resolved.is_file():
-            return "", {}, f"Torrent file was not found: {path}"
-        try:
-            raw = resolved.read_bytes()
-        except Exception as exc:
-            return "", {}, f"Could not read torrent file: {exc}"
-        return self._magnet_from_torrent_bytes(raw, origin_label=resolved.name, origin_path=path)
+    def _extract_btih_from_magnet(self, magnet: str) -> str:
+        text = self._safe_text(magnet)
+        if not text.lower().startswith("magnet:?"):
+            return ""
+        match = self.MAGNET_BTIH_RE.search(text)
+        if not match:
+            return ""
+        info_hash = unquote(match.group(1) or "").strip()
+        return info_hash.lower() if len(info_hash) >= 32 else ""
 
-    async def _remote_torrent_to_magnet(self, torrent_url: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    async def _download_remote_torrent(self, torrent_url: str, settings: Dict[str, Any]) -> Tuple[bytes, str]:
         url = self._safe_text(torrent_url)
         if not url:
-            return {"source": "", "source_type": "torrent url", "resolve_error": "No remote .torrent URL was provided."}
-
+            return b"", "No remote .torrent URL was provided."
         timeout = aiohttp.ClientTimeout(total=settings["timeout_seconds"])
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -627,48 +542,10 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                     raw = await resp.read()
                     if resp.status != 200:
                         preview = raw[:220].decode("utf-8", "ignore")
-                        return {
-                            "source": "",
-                            "source_type": "torrent url",
-                            "remote_torrent_url": url,
-                            "resolve_error": f"Could not download remote torrent file: HTTP {resp.status}: {preview}",
-                        }
+                        return b"", f"Could not download remote torrent file: HTTP {resp.status}: {preview}"
+                    return raw, ""
         except Exception as exc:
-            return {
-                "source": "",
-                "source_type": "torrent url",
-                "remote_torrent_url": url,
-                "resolve_error": f"Could not download remote torrent file: {exc}",
-            }
-
-        if not raw:
-            return {
-                "source": "",
-                "source_type": "torrent url",
-                "remote_torrent_url": url,
-                "resolve_error": "Remote torrent download returned no bytes.",
-            }
-
-        label = os.path.basename(urlsplit(url).path) or url
-        magnet, torrent_meta, err = self._magnet_from_torrent_bytes(raw, origin_label=label, origin_path=url)
-        if magnet:
-            return {
-                "source": magnet,
-                "source_type": "torrent url",
-                "remote_torrent_url": url,
-                "torrent_name": label,
-                "info_hash": torrent_meta.get("info_hash"),
-                "display_name": torrent_meta.get("display_name"),
-                "tracker_count": torrent_meta.get("tracker_count"),
-                "resolved_from": "remote_torrent_url",
-            }
-        return {
-            "source": "",
-            "source_type": "torrent url",
-            "remote_torrent_url": url,
-            "torrent_name": label,
-            "resolve_error": err or "Could not parse remote torrent file.",
-        }
+            return b"", f"Could not download remote torrent file: {exc}"
 
     def _torrent_artifacts_from_inputs(self, args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         refs: List[Dict[str, Any]] = []
@@ -730,12 +607,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         )
 
     def _extract_folder_id_from_query(self, query: str) -> str:
-        return self._first_match(
-            query,
-            [
-                r"\bfolder(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b",
-            ],
-        )
+        return self._first_match(query, [r"\bfolder(?:\s+id)?\s*[:#]?\s*([a-zA-Z0-9_-]{4,})\b"])
 
     def _extract_item_id_from_query(self, query: str) -> str:
         return self._first_match(
@@ -764,15 +636,17 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             local_torrent_path = self._explicit_torrent_path_from_args(args or {})
         name_query = self._safe_text((args or {}).get("name_query"))
         transfer_id = self._safe_text((args or {}).get("transfer_id")) or self._extract_transfer_id_from_query(query)
-        folder_id = self._safe_text((args or {}).get("folder_id")) or self._extract_folder_id_from_query(query)
+        folder_id = self._safe_text((args or {}).get("folder_id"))
         item_id = self._safe_text((args or {}).get("item_id")) or self._extract_item_id_from_query(query)
         index = self._clamp_int((args or {}).get("index"), 0, 500, self._extract_index_from_query(query))
 
-        # Accept explicit source args but do not force route changes; action is fixed by this dedicated verba.
         explicit_source = self._explicit_source_from_args(args or {})
         if explicit_source and not source:
             source = explicit_source
             source_type = self._source_type(source)
+
+        if not folder_id:
+            folder_id = self._extract_folder_id_from_query(query)
 
         return {
             "action": action,
@@ -808,6 +682,137 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         except Exception as exc:
             logger.debug("[premiumize] cache save skipped: %s", exc)
 
+    def _make_create_route(
+        self,
+        *,
+        kind: str,
+        src: str = "",
+        filename: str = "",
+        content: Optional[bytes] = None,
+        folder_id: str = "",
+    ) -> Dict[str, Any]:
+        route = {
+            "kind": kind,
+            "src": self._safe_text(src),
+            "filename": self._safe_text(filename),
+            "content": bytes(content) if isinstance(content, (bytes, bytearray)) else b"",
+            "folder_id": self._safe_text(folder_id),
+        }
+        return route
+
+    def _finalize_source_info(self, base: Dict[str, Any]) -> Dict[str, Any]:
+        info = dict(base or {})
+        info["source_type"] = self._safe_text(info.get("source_type"), "unknown")
+        info["source"] = self._safe_text(info.get("source"))
+        info["display_name"] = self._safe_text(info.get("display_name"))
+        info["info_hash"] = self._safe_text(info.get("info_hash")).lower()
+        info["resolved_from"] = self._safe_text(info.get("resolved_from"))
+        info["resolve_error"] = self._safe_text(info.get("resolve_error"))
+        info["resolve_warning"] = self._safe_text(info.get("resolve_warning"))
+        info["directdl_candidates"] = self._dedupe_keep_order(info.get("directdl_candidates") or [])
+        info["cache_candidates"] = self._dedupe_keep_order(info.get("cache_candidates") or info.get("directdl_candidates") or [])
+        info["cache_required"] = bool(info.get("cache_required"))
+        return info
+
+    def _public_source_info(self, source_info: Dict[str, Any]) -> Dict[str, Any]:
+        info = dict(source_info or {})
+        primary = info.pop("create_primary", None)
+        fallback = info.pop("create_fallback", None)
+        if isinstance(primary, dict):
+            info["create_primary"] = {
+                "kind": self._safe_text(primary.get("kind")),
+                "src": self._safe_text(primary.get("src")),
+                "filename": self._safe_text(primary.get("filename")),
+                "folder_id": self._safe_text(primary.get("folder_id")),
+                "upload_bytes": len(primary.get("content") or b""),
+            }
+        if isinstance(fallback, dict):
+            info["create_fallback"] = {
+                "kind": self._safe_text(fallback.get("kind")),
+                "src": self._safe_text(fallback.get("src")),
+                "filename": self._safe_text(fallback.get("filename")),
+                "folder_id": self._safe_text(fallback.get("folder_id")),
+                "upload_bytes": len(fallback.get("content") or b""),
+            }
+        return info
+
+    async def _resolve_remote_torrent_source(self, torrent_url: str, settings: Dict[str, Any], folder_id: str = "") -> Dict[str, Any]:
+        url = self._safe_text(torrent_url)
+        label = os.path.basename(urlsplit(url).path) or "remote.torrent"
+        info: Dict[str, Any] = {
+            "source": url,
+            "source_type": "torrent url",
+            "remote_torrent_url": url,
+            "torrent_name": label,
+            "resolved_from": "remote_torrent_url",
+            "cache_required": True,
+            "create_primary": self._make_create_route(kind="src", src=url, folder_id=folder_id),
+            "directdl_candidates": [url],
+            "cache_candidates": [url],
+        }
+        raw, download_err = await self._download_remote_torrent(url, settings)
+        if download_err:
+            info["resolve_warning"] = download_err
+            return self._finalize_source_info(info)
+
+        magnet, torrent_meta, magnet_err = self._magnet_from_torrent_bytes(raw, origin_label=label, origin_path=url)
+        if magnet:
+            info["magnet"] = magnet
+            info["info_hash"] = torrent_meta.get("info_hash")
+            info["display_name"] = torrent_meta.get("display_name") or label
+            info["tracker_count"] = torrent_meta.get("tracker_count")
+            info["directdl_candidates"] = [magnet, url]
+            info["cache_candidates"] = [magnet, url]
+            info["create_fallback"] = self._make_create_route(kind="src", src=magnet, folder_id=folder_id)
+        elif magnet_err:
+            info["resolve_warning"] = magnet_err
+        return self._finalize_source_info(info)
+
+    def _resolve_torrent_bytes_source(
+        self,
+        *,
+        raw: bytes,
+        source_type: str,
+        filename: str,
+        origin_path: str = "",
+        resolved_from: str,
+        folder_id: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        safe_name = self._safe_text(filename, "upload.torrent")
+        info: Dict[str, Any] = {
+            "source": "",
+            "source_type": source_type,
+            "torrent_name": safe_name,
+            "display_name": safe_name,
+            "torrent_path": self._safe_text(origin_path),
+            "resolved_from": resolved_from,
+            "cache_required": True,
+            "create_primary": self._make_create_route(
+                kind="file",
+                filename=safe_name,
+                content=raw,
+                folder_id=folder_id,
+            ),
+            "directdl_candidates": [],
+            "cache_candidates": [],
+        }
+        if isinstance(extra, dict):
+            info.update(extra)
+        magnet, torrent_meta, magnet_err = self._magnet_from_torrent_bytes(raw, origin_label=safe_name, origin_path=origin_path)
+        if magnet:
+            info["source"] = magnet
+            info["magnet"] = magnet
+            info["info_hash"] = torrent_meta.get("info_hash")
+            info["display_name"] = torrent_meta.get("display_name") or safe_name
+            info["tracker_count"] = torrent_meta.get("tracker_count")
+            info["directdl_candidates"] = [magnet]
+            info["cache_candidates"] = [magnet]
+            info["create_fallback"] = self._make_create_route(kind="src", src=magnet, folder_id=folder_id)
+        elif magnet_err:
+            info["resolve_warning"] = magnet_err
+        return self._finalize_source_info(info)
+
     async def _resolve_source(
         self,
         args: Dict[str, Any],
@@ -815,6 +820,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         context: Optional[Dict[str, Any]],
         settings: Dict[str, Any],
     ) -> Dict[str, Any]:
+        folder_id = self._safe_text(intent.get("folder_id") or (args or {}).get("folder_id"))
         artifact_id = self._artifact_id_from_args(args or {})
         if artifact_id:
             origin = (args or {}).get("origin") if isinstance((args or {}).get("origin"), dict) else {}
@@ -824,103 +830,156 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                     origin = maybe_origin
             artifact = self._find_available_artifact(origin=origin, artifact_id=artifact_id)
             if artifact is None:
-                return {
-                    "source": "",
-                    "source_type": "torrent artifact",
-                    "artifact_id": artifact_id,
-                    "resolve_error": f"Artifact `{artifact_id}` was not found for this conversation.",
-                }
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent artifact",
+                        "artifact_id": artifact_id,
+                        "resolve_error": f"Artifact `{artifact_id}` was not found for this conversation.",
+                    }
+                )
             if not self._artifact_is_torrent(artifact):
-                return {
-                    "source": "",
-                    "source_type": "torrent artifact",
-                    "artifact_id": artifact_id,
-                    "resolve_error": f"Artifact `{artifact_id}` is not a .torrent file.",
-                }
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent artifact",
+                        "artifact_id": artifact_id,
+                        "resolve_error": f"Artifact `{artifact_id}` is not a .torrent file.",
+                    }
+                )
             raw = self._artifact_bytes(artifact)
-            magnet, torrent_meta, err = self._magnet_from_torrent_bytes(
-                raw,
-                origin_label=self._safe_text(artifact.get("name")),
-                origin_path=self._safe_text(artifact.get("path")),
-            )
-            if magnet:
-                return {
-                    "source": magnet,
-                    "source_type": "torrent artifact",
+            if not raw:
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent artifact",
+                        "artifact_id": artifact_id,
+                        "resolve_error": f"Artifact `{artifact_id}` could not be read as a torrent file.",
+                    }
+                )
+            return self._resolve_torrent_bytes_source(
+                raw=raw,
+                source_type="torrent artifact",
+                filename=self._safe_text(artifact.get("name"), "artifact.torrent"),
+                origin_path=self._safe_text(artifact.get("path") or artifact.get("file_path") or artifact.get("artifact_path")),
+                resolved_from="available_artifact",
+                folder_id=folder_id,
+                extra={
                     "artifact_id": artifact_id,
-                    "torrent_name": self._safe_text(artifact.get("name")),
-                    "info_hash": torrent_meta.get("info_hash"),
-                    "display_name": torrent_meta.get("display_name"),
-                    "tracker_count": torrent_meta.get("tracker_count"),
-                    "resolved_from": "available_artifact",
-                }
-            return {
-                "source": "",
-                "source_type": "torrent artifact",
-                "artifact_id": artifact_id,
-                "resolve_error": err or f"Artifact `{artifact_id}` could not be read as a torrent file.",
-            }
+                    "blob_key": self._safe_text(artifact.get("blob_key")),
+                    "mimetype": self._safe_text(artifact.get("mimetype")),
+                },
+            )
 
         src = self._safe_text(intent.get("source"))
         if src:
             source_type = self._safe_text(intent.get("source_type")) or self._source_type(src)
             if source_type == "torrent url" and self._looks_like_remote_torrent_url(src):
-                return await self._remote_torrent_to_magnet(src, settings)
-            return {"source": src, "source_type": source_type}
+                return await self._resolve_remote_torrent_source(src, settings, folder_id=folder_id)
+            if source_type == "magnet":
+                info_hash = self._extract_btih_from_magnet(src)
+                return self._finalize_source_info(
+                    {
+                        "source": src,
+                        "source_type": "magnet",
+                        "magnet": src,
+                        "info_hash": info_hash,
+                        "resolved_from": "query_or_args",
+                        "cache_required": True,
+                        "create_primary": self._make_create_route(kind="src", src=src, folder_id=folder_id),
+                        "directdl_candidates": [src],
+                        "cache_candidates": [src],
+                    }
+                )
+            if source_type == "url":
+                return self._finalize_source_info(
+                    {
+                        "source": src,
+                        "source_type": "url",
+                        "resolved_from": "query_or_args",
+                        "cache_required": False,
+                        "create_primary": self._make_create_route(kind="src", src=src, folder_id=folder_id),
+                        "directdl_candidates": [src],
+                        "cache_candidates": [],
+                    }
+                )
 
         explicit = self._explicit_source_from_args(args or {})
         if explicit:
-            source_type = self._source_type(explicit)
-            if source_type == "torrent url" and self._looks_like_remote_torrent_url(explicit):
-                return await self._remote_torrent_to_magnet(explicit, settings)
-            return {"source": explicit, "source_type": source_type}
+            temp_intent = dict(intent or {})
+            temp_intent["source"] = explicit
+            temp_intent["source_type"] = self._source_type(explicit)
+            return await self._resolve_source({}, temp_intent, context, settings)
 
         torrent_path = self._safe_text(intent.get("local_torrent_path")) or self._explicit_torrent_path_from_args(args or {})
         if not torrent_path:
             torrent_path = self._extract_first_local_torrent_path(self._query_from_args(args or {}, context=context))
         if torrent_path:
-            magnet, torrent_meta, err = self._magnet_from_torrent_file(torrent_path)
-            if magnet:
-                return {
-                    "source": magnet,
-                    "source_type": "torrent file",
-                    "torrent_path": torrent_meta.get("torrent_path"),
-                    "info_hash": torrent_meta.get("info_hash"),
-                    "display_name": torrent_meta.get("display_name"),
-                    "tracker_count": torrent_meta.get("tracker_count"),
-                    "resolved_from": "local_torrent_file",
-                }
-            return {"source": "", "source_type": "torrent file", "torrent_path": torrent_path, "resolve_error": err}
+            resolved = self._resolve_safe_torrent_path(torrent_path)
+            if resolved is None:
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent file",
+                        "torrent_path": torrent_path,
+                        "resolve_error": f"Torrent file path is outside the allowed workspace root: {torrent_path}",
+                    }
+                )
+            if not resolved.exists() or not resolved.is_file():
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent file",
+                        "torrent_path": torrent_path,
+                        "resolve_error": f"Torrent file was not found: {torrent_path}",
+                    }
+                )
+            try:
+                raw = resolved.read_bytes()
+            except Exception as exc:
+                return self._finalize_source_info(
+                    {
+                        "source": "",
+                        "source_type": "torrent file",
+                        "torrent_path": torrent_path,
+                        "resolve_error": f"Could not read torrent file: {exc}",
+                    }
+                )
+            return self._resolve_torrent_bytes_source(
+                raw=raw,
+                source_type="torrent file",
+                filename=resolved.name,
+                origin_path=torrent_path,
+                resolved_from="local_torrent_file",
+                folder_id=folder_id,
+            )
 
         for artifact in self._torrent_artifacts_from_inputs(args or {}, context):
             raw = self._artifact_bytes(artifact)
-            magnet, torrent_meta, err = self._magnet_from_torrent_bytes(
-                raw,
-                origin_label=self._safe_text(artifact.get("name")),
-                origin_path=self._safe_text(artifact.get("path")),
+            if not raw:
+                continue
+            return self._resolve_torrent_bytes_source(
+                raw=raw,
+                source_type="torrent attachment",
+                filename=self._safe_text(artifact.get("name"), "attachment.torrent"),
+                origin_path=self._safe_text(artifact.get("path") or artifact.get("file_path") or artifact.get("artifact_path")),
+                resolved_from="input_artifact",
+                folder_id=folder_id,
+                extra={
+                    "blob_key": self._safe_text(artifact.get("blob_key")),
+                    "mimetype": self._safe_text(artifact.get("mimetype") or artifact.get("mime_type")),
+                },
             )
-            if magnet:
-                return {
-                    "source": magnet,
-                    "source_type": "torrent attachment",
-                    "torrent_name": self._safe_text(artifact.get("name")),
-                    "mimetype": self._safe_text(artifact.get("mimetype")),
-                    "blob_key": self._safe_text(artifact.get("blob_key")),
-                    "info_hash": torrent_meta.get("info_hash"),
-                    "display_name": torrent_meta.get("display_name"),
-                    "tracker_count": torrent_meta.get("tracker_count"),
-                    "resolved_from": "input_artifact",
-                }
-            if err:
-                return {
-                    "source": "",
-                    "source_type": "torrent attachment",
-                    "torrent_name": self._safe_text(artifact.get("name")),
-                    "blob_key": self._safe_text(artifact.get("blob_key")),
-                    "resolve_error": err,
-                }
 
-        return {}
+        return self._finalize_source_info({})
+
+    @staticmethod
+    def _merge_auth_pairs(payload: Any, api_key: str) -> Any:
+        if isinstance(payload, list):
+            return list(payload) + [("apikey", api_key)]
+        data = dict(payload or {})
+        data["apikey"] = api_key
+        return data
 
     async def _pm_request(
         self,
@@ -928,14 +987,13 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         method: str,
         endpoint: str,
         settings: Dict[str, Any],
-        params: Optional[Dict[str, Any]] = None,
-        data: Optional[Dict[str, Any]] = None,
+        params: Optional[Any] = None,
+        data: Optional[Any] = None,
+        upload_file: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         url = f"{settings['api_base'].rstrip('/')}/{endpoint.lstrip('/')}"
-        params = dict(params or {})
-        data = dict(data or {})
-        params["apikey"] = settings["api_key"]
-        data["apikey"] = settings["api_key"]
+        params = self._merge_auth_pairs(params, settings["api_key"])
+        data = self._merge_auth_pairs(data, settings["api_key"])
 
         timeout = aiohttp.ClientTimeout(total=settings["timeout_seconds"])
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -946,7 +1004,21 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                         if resp.status != 200:
                             return None, f"Premiumize API HTTP {resp.status}: {text[:220]}"
                 else:
-                    async with session.post(url, data=data) as resp:
+                    payload = data
+                    if isinstance(upload_file, dict) and isinstance(upload_file.get("content"), (bytes, bytearray)):
+                        form = aiohttp.FormData()
+                        for key, value in (data.items() if isinstance(data, dict) else data or []):
+                            if value is None or value == "":
+                                continue
+                            form.add_field(str(key), str(value))
+                        form.add_field(
+                            self._safe_text(upload_file.get("field"), "file"),
+                            bytes(upload_file.get("content") or b""),
+                            filename=self._safe_text(upload_file.get("filename"), "upload.torrent"),
+                            content_type=self._safe_text(upload_file.get("content_type"), "application/octet-stream"),
+                        )
+                        payload = form
+                    async with session.post(url, params=params if method.upper() == "POST" and not isinstance(payload, aiohttp.FormData) else None, data=payload) as resp:
                         text = await resp.text()
                         if resp.status != 200:
                             return None, f"Premiumize API HTTP {resp.status}: {text[:220]}"
@@ -973,8 +1045,36 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         message = str(payload.get("message") or payload.get("error") or "").strip()
         return message or default_message
 
-    async def _api_transfer_create(self, settings: Dict[str, Any], source: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        payload, err = await self._pm_request(method="POST", endpoint="transfer/create", settings=settings, data={"src": source})
+    async def _api_transfer_create(self, settings: Dict[str, Any], source: str, folder_id: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        data: Dict[str, Any] = {"src": source}
+        if folder_id:
+            data["folder_id"] = folder_id
+        payload, err = await self._pm_request(method="POST", endpoint="transfer/create", settings=settings, data=data)
+        if err:
+            return None, err
+        if not self._api_success(payload):
+            return None, self._api_error(payload, "Premiumize transfer/create failed.")
+        return payload, None
+
+    async def _api_transfer_create_file(
+        self,
+        settings: Dict[str, Any],
+        *,
+        filename: str,
+        content: bytes,
+        folder_id: str = "",
+        content_type: str = "application/x-bittorrent",
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        data: Dict[str, Any] = {}
+        if folder_id:
+            data["folder_id"] = folder_id
+        payload, err = await self._pm_request(
+            method="POST",
+            endpoint="transfer/create",
+            settings=settings,
+            data=data,
+            upload_file={"field": "file", "filename": filename, "content": content, "content_type": content_type},
+        )
         if err:
             return None, err
         if not self._api_success(payload):
@@ -1020,6 +1120,34 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             content = []
         return [x for x in content if isinstance(x, dict)], None
 
+    async def _api_cache_check(self, settings: Dict[str, Any], items: Sequence[str]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        clean_items = self._dedupe_keep_order(items)
+        if not clean_items:
+            return [], None
+        params: List[Tuple[str, str]] = [("items[]", item) for item in clean_items]
+        payload, err = await self._pm_request(method="GET", endpoint="cache/check", settings=settings, params=params)
+        if err:
+            return [], err
+        if not self._api_success(payload):
+            return [], self._api_error(payload, "Premiumize cache/check failed.")
+
+        response = payload.get("response") or []
+        transcoded = payload.get("transcoded") or []
+        filenames = payload.get("filename") or []
+        filesizes = payload.get("filesize") or []
+        out: List[Dict[str, Any]] = []
+        for idx, item in enumerate(clean_items):
+            out.append(
+                {
+                    "item": item,
+                    "cached": bool(response[idx]) if idx < len(response) else False,
+                    "transcoded": bool(transcoded[idx]) if idx < len(transcoded) else False,
+                    "filename": self._safe_text(filenames[idx]) if idx < len(filenames) else "",
+                    "filesize": self._safe_text(filesizes[idx]) if idx < len(filesizes) else "",
+                }
+            )
+        return out, None
+
     @staticmethod
     def _coerce_progress(raw: Any) -> Optional[float]:
         if raw is None:
@@ -1037,7 +1165,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
     @staticmethod
     def _status_bucket(status: str, progress: Optional[float]) -> str:
         s = str(status or "").strip().lower()
-        if any(x in s for x in ("error", "fail")):
+        if any(x in s for x in ("error", "fail", "timeout", "banned", "deleted")):
             return "failed"
         if any(x in s for x in ("finished", "complete", "done", "success")):
             return "finished"
@@ -1095,7 +1223,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         }
 
     def _extract_folder_items(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        candidates = []
+        candidates: List[Any] = []
         content = payload.get("content")
         if isinstance(content, list):
             candidates = content
@@ -1112,7 +1240,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         elif isinstance(payload.get("items"), list):
             candidates = payload.get("items")
 
-        out = []
+        out: List[Dict[str, Any]] = []
         for entry in candidates or []:
             if not isinstance(entry, dict):
                 continue
@@ -1158,9 +1286,9 @@ class PremiumizeAddTransferPlugin(ToolVerba):
     def _select_transfer(self, transfers: List[Dict[str, Any]], intent: Dict[str, Any], cache: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         transfer_id = self._safe_text(intent.get("transfer_id"))
         if transfer_id:
-            for t in transfers:
-                if self._safe_text(t.get("transfer_id")) == transfer_id:
-                    return t
+            for transfer in transfers:
+                if self._safe_text(transfer.get("transfer_id")) == transfer_id:
+                    return transfer
 
         index = self._clamp_int(intent.get("index"), 0, 500, 0)
         if index > 0 and index <= len(transfers):
@@ -1170,32 +1298,32 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         if name_query:
             tokens = self._tokenize(name_query)
             scored = []
-            for t in transfers:
-                hay = self._slug(t.get("name")) + self._slug(t.get("source"))
+            for transfer in transfers:
+                hay = self._slug(transfer.get("name")) + self._slug(transfer.get("source"))
                 score = len([tok for tok in tokens if tok in hay])
                 if score > 0:
-                    scored.append((score, t))
+                    scored.append((score, transfer))
             if scored:
-                scored.sort(key=lambda x: x[0], reverse=True)
+                scored.sort(key=lambda item: item[0], reverse=True)
                 return scored[0][1]
 
         last_id = self._safe_text(cache.get("last_transfer_id"))
         if last_id:
-            for t in transfers:
-                if self._safe_text(t.get("transfer_id")) == last_id:
-                    return t
+            for transfer in transfers:
+                if self._safe_text(transfer.get("transfer_id")) == last_id:
+                    return transfer
 
-        for t in transfers:
-            if t.get("status") == "active":
-                return t
+        for transfer in transfers:
+            if transfer.get("status") == "active":
+                return transfer
         return transfers[0] if transfers else None
 
     def _select_file(self, files: List[Dict[str, Any]], intent: Dict[str, Any], cache: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         item_id = self._safe_text(intent.get("item_id"))
         if item_id:
-            for f in files:
-                if self._safe_text(f.get("item_id")) == item_id:
-                    return f
+            for file_item in files:
+                if self._safe_text(file_item.get("item_id")) == item_id:
+                    return file_item
 
         index = self._clamp_int(intent.get("index"), 0, 500, 0)
         if index > 0 and index <= len(files):
@@ -1205,25 +1333,62 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         if name_query:
             tokens = self._tokenize(name_query)
             scored = []
-            for f in files:
-                hay = self._slug(f.get("name")) + self._slug(f.get("path"))
+            for file_item in files:
+                hay = self._slug(file_item.get("name")) + self._slug(file_item.get("path"))
                 score = len([tok for tok in tokens if tok in hay])
                 if score > 0:
-                    scored.append((score, f))
+                    scored.append((score, file_item))
             if scored:
-                scored.sort(key=lambda x: x[0], reverse=True)
+                scored.sort(key=lambda item: item[0], reverse=True)
                 return scored[0][1]
 
         last_item_id = self._safe_text(cache.get("last_item_id"))
         if last_item_id:
-            for f in files:
-                if self._safe_text(f.get("item_id")) == last_item_id:
-                    return f
+            for file_item in files:
+                if self._safe_text(file_item.get("item_id")) == last_item_id:
+                    return file_item
 
-        for f in files:
-            if not f.get("is_folder"):
-                return f
+        for file_item in files:
+            if not file_item.get("is_folder"):
+                return file_item
         return files[0] if files else None
+
+    async def _create_transfer_from_route(self, settings: Dict[str, Any], route: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        route_kind = self._safe_text((route or {}).get("kind"))
+        folder_id = self._safe_text((route or {}).get("folder_id"))
+        if route_kind == "file":
+            content = route.get("content") or b""
+            if not isinstance(content, (bytes, bytearray)) or not content:
+                return None, "No torrent file bytes were available for Premiumize upload."
+            return await self._api_transfer_create_file(
+                settings,
+                filename=self._safe_text(route.get("filename"), "upload.torrent"),
+                content=bytes(content),
+                folder_id=folder_id,
+                content_type="application/x-bittorrent",
+            )
+        src = self._safe_text((route or {}).get("src"))
+        if not src:
+            return None, "No Premiumize source was available for transfer creation."
+        return await self._api_transfer_create(settings, src, folder_id=folder_id)
+
+    async def _cached_directdl_candidates(
+        self, settings: Dict[str, Any], source_info: Dict[str, Any]
+    ) -> Tuple[List[str], Optional[str], List[Dict[str, Any]]]:
+        directdl_candidates = self._dedupe_keep_order(source_info.get("directdl_candidates") or [])
+        if not directdl_candidates:
+            return [], None, []
+        if not source_info.get("cache_required"):
+            return directdl_candidates, None, []
+        cache_targets = self._dedupe_keep_order(source_info.get("cache_candidates") or directdl_candidates)
+        if not cache_targets:
+            return directdl_candidates, None, []
+        cache_rows, cache_err = await self._api_cache_check(settings, cache_targets)
+        if cache_err:
+            return directdl_candidates, cache_err, []
+        cached = {self._safe_text(row.get("item")) for row in cache_rows if row.get("cached")}
+        filtered = [candidate for candidate in directdl_candidates if candidate in cached]
+        return filtered, None, cache_rows
 
     async def _act_add_transfer(
         self,
@@ -1234,9 +1399,8 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         source_info = await self._resolve_source(args, intent, context, settings)
-        source = self._safe_text(source_info.get("source"))
-        source_type = self._safe_text(source_info.get("source_type"), "unknown")
-        if not source:
+        primary = source_info.get("create_primary") if isinstance(source_info.get("create_primary"), dict) else None
+        if not primary:
             resolve_error = self._safe_text(source_info.get("resolve_error"))
             return action_failure(
                 code="missing_source",
@@ -1245,7 +1409,12 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                 say_hint="Explain that a literal magnet, URL, attached .torrent file, or local .torrent path is required and paraphrases like 'this magnet' are not valid.",
             )
 
-        created, create_err = await self._api_transfer_create(settings, source)
+        created, create_err = await self._create_transfer_from_route(settings, primary)
+        create_route_used = "primary"
+        fallback = source_info.get("create_fallback") if isinstance(source_info.get("create_fallback"), dict) else None
+        if create_err and fallback:
+            created, create_err = await self._create_transfer_from_route(settings, fallback)
+            create_route_used = "fallback"
         if create_err:
             return action_failure(
                 code="premiumize_transfer_create_failed",
@@ -1256,38 +1425,59 @@ class PremiumizeAddTransferPlugin(ToolVerba):
 
         transfer_id = self._safe_text(created.get("id") or created.get("transfer_id"))
         transfer_name = self._safe_text(created.get("name") or created.get("filename"))
-        links, link_err = await self._api_directdl(settings, source)
-        normalized_links = self._normalize_direct_links(links) if not link_err else []
+
+        direct_links: List[Dict[str, Any]] = []
+        directdl_error = ""
+        cache_rows: List[Dict[str, Any]] = []
+        cache_candidates, cache_err, cache_rows = await self._cached_directdl_candidates(settings, source_info)
+        if cache_err:
+            directdl_error = cache_err
+        for candidate in cache_candidates:
+            links, link_err = await self._api_directdl(settings, candidate)
+            if link_err:
+                directdl_error = link_err
+                continue
+            normalized_links = self._normalize_direct_links(links)
+            if normalized_links:
+                direct_links = normalized_links
+                break
 
         self._save_cache(
             {
                 "last_action": "add_transfer",
-                "last_source": {"source": source, "source_type": source_type},
+                "last_source": self._public_source_info(source_info),
                 "last_transfer_id": transfer_id,
                 "last_transfer_name": transfer_name,
             }
         )
 
+        source_type = self._safe_text(source_info.get("source_type"), "unknown")
         summary = f"Sent {source_type or 'source'} to Premiumize."
         if transfer_id:
             summary += f" Transfer id: {transfer_id}."
-        if normalized_links:
-            summary += f" Direct links are already available for {len(normalized_links)} file(s)."
+        if create_route_used == "fallback":
+            summary += " Used the magnet fallback route."
+        if direct_links:
+            summary += f" Direct links are already available for {len(direct_links)} file(s)."
+        elif source_info.get("cache_required"):
+            summary += " Direct links are not ready yet."
 
         return action_success(
             facts={
                 "action": "add_transfer",
-                "source": source,
                 "source_type": source_type,
                 "transfer_id": transfer_id,
+                "info_hash": source_info.get("info_hash"),
+                "create_route_used": create_route_used,
             },
             data={
-                "source": source_info,
+                "source": self._public_source_info(source_info),
                 "transfer_create": created,
                 "transfer_id": transfer_id,
                 "transfer_name": transfer_name,
-                "direct_links": normalized_links,
-                "directdl_error": link_err or "",
+                "direct_links": direct_links,
+                "directdl_error": directdl_error,
+                "cache_check": cache_rows,
             },
             summary_for_user=summary,
             say_hint=(
@@ -1310,12 +1500,12 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                 say_hint="Explain Premiumize transfer listing failed and suggest retrying shortly.",
             )
 
-        transfers = [self._normalize_transfer(x) for x in raw_transfers]
+        transfers = [self._normalize_transfer(entry) for entry in raw_transfers]
         filtered = self._filter_transfers(transfers, intent.get("status_filter") or "all", intent.get("name_query") or "")
 
-        active_count = len([t for t in transfers if t.get("status") == "active"])
-        finished_count = len([t for t in transfers if t.get("status") == "finished"])
-        failed_count = len([t for t in transfers if t.get("status") == "failed"])
+        active_count = len([entry for entry in transfers if entry.get("status") == "active"])
+        finished_count = len([entry for entry in transfers if entry.get("status") == "finished"])
+        failed_count = len([entry for entry in transfers if entry.get("status") == "failed"])
 
         self._save_cache(
             {
@@ -1363,7 +1553,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                 say_hint="Explain transfer status check failed and suggest retrying shortly.",
             )
 
-        transfers = [self._normalize_transfer(x) for x in raw_transfers]
+        transfers = [self._normalize_transfer(entry) for entry in raw_transfers]
         cache = self._load_cache()
         target = self._select_transfer(transfers, intent, cache)
         if not target:
@@ -1396,7 +1586,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         if progress is not None:
             summary += f" Progress: {progress}%."
         if target.get("status") == "finished" and files:
-            ready = len([f for f in files if f.get("download_link") or f.get("stream_link")])
+            ready = len([entry for entry in files if entry.get("download_link") or entry.get("stream_link")])
             summary += f" {ready} file(s) have links ready."
 
         return action_success(
@@ -1408,10 +1598,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                 "progress": progress,
                 "file_count": len(files),
             },
-            data={
-                "transfer": target,
-                "files": files,
-            },
+            data={"transfer": target, "files": files},
             summary_for_user=summary,
             say_hint="Report transfer status and progress; if finished, mention available file links.",
         )
@@ -1423,7 +1610,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         if not folder_id and intent.get("name_query"):
             raw_transfers, err = await self._api_transfer_list(settings)
             if not err:
-                transfers = [self._normalize_transfer(x) for x in raw_transfers]
+                transfers = [self._normalize_transfer(entry) for entry in raw_transfers]
                 target = self._select_transfer(transfers, intent, cache)
                 if target:
                     folder_id = self._safe_text(target.get("folder_id"))
@@ -1442,8 +1629,10 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             tokens = self._tokenize(intent.get("name_query"))
             if tokens:
                 files = [
-                    f for f in files
-                    if len([tok for tok in tokens if tok in (self._slug(f.get("name")) + self._slug(f.get("path")))]) > 0
+                    entry
+                    for entry in files
+                    if len([token for token in tokens if token in (self._slug(entry.get("name")) + self._slug(entry.get("path")))])
+                    > 0
                 ]
 
         self._save_cache(
@@ -1455,7 +1644,7 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             }
         )
 
-        folder_count = len([f for f in files if f.get("is_folder")])
+        folder_count = len([entry for entry in files if entry.get("is_folder")])
         file_count = len(files) - folder_count
         summary = f"Premiumize folder has {file_count} file(s) and {folder_count} folder(s)."
         if not files:
@@ -1487,39 +1676,38 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         source_info = await self._resolve_source(args, intent, context, settings)
-        source = self._safe_text(source_info.get("source"))
-        if source:
-            links, err = await self._api_directdl(settings, source)
+        directdl_candidates = self._dedupe_keep_order(source_info.get("directdl_candidates") or [])
+        if not directdl_candidates:
+            resolve_error = self._safe_text(source_info.get("resolve_error") or source_info.get("resolve_warning"))
+            if source_info.get("source_type") in {"torrent file", "torrent attachment", "torrent artifact"}:
+                resolve_error = resolve_error or "Could not derive a usable magnet/info hash from the torrent file for Premiumize link retrieval."
+            return action_failure(
+                code="missing_source",
+                message=resolve_error or "No explicit magnet, URL, attached .torrent file, or local .torrent file path was provided for link retrieval.",
+                needs=["Pass the full magnet:? URI, http(s):// URI, attach a .torrent file, or provide a local .torrent file path directly in query or source arguments."],
+                say_hint="Explain that this action requires a literal magnet, URL, attached .torrent file, or local .torrent file path source.",
+            )
+
+        candidates, cache_err, cache_rows = await self._cached_directdl_candidates(settings, source_info)
+        if source_info.get("cache_required") and not candidates and not cache_err:
+            return action_failure(
+                code="torrent_not_cached",
+                message="Torrent is not cached on Premiumize.",
+                needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
+            )
+        if not candidates:
+            candidates = directdl_candidates
+
+        last_err = cache_err or ""
+        for candidate in candidates:
+            links, err = await self._api_directdl(settings, candidate)
             if err:
-                err_l = err.lower()
-                if any(token in err_l for token in ("not cached", "not in cache", "cache")):
-                    return action_failure(
-                        code="torrent_not_cached",
-                        message="Torrent is not cached on Premiumize.",
-                        needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
-                        say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
-                    )
-                if "unsupported link for direct download" in err_l:
-                    return action_failure(
-                        code="premiumize_source_unsupported",
-                        message="Premiumize rejected that source for direct link retrieval.",
-                        needs=["Use Premiumize add transfer if this torrent needs to be cached first, or retry with a literal magnet, attached .torrent file, local .torrent file path, or supported torrent URL."],
-                        say_hint="Explain that Premiumize rejected the source itself for direct link retrieval; do not claim the API key or base URL is missing.",
-                    )
-                return action_failure(
-                    code="premiumize_directdl_failed",
-                    message=err,
-                    diagnosis=self._diagnosis(),
-                    say_hint="Explain direct link retrieval failed and suggest retrying.",
-                )
+                last_err = err
+                continue
             normalized_links = self._normalize_direct_links(links)
             if not normalized_links:
-                return action_failure(
-                    code="torrent_not_cached",
-                    message="Torrent is not cached on Premiumize.",
-                    needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
-                    say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
-                )
+                continue
             self._save_cache({"last_action": "get_links", "last_files": normalized_links[:80]})
             summary = f"Found {len(normalized_links)} direct link(s) from Premiumize."
             return action_success(
@@ -1527,58 +1715,33 @@ class PremiumizeAddTransferPlugin(ToolVerba):
                     "action": "get_links",
                     "source_type": source_info.get("source_type"),
                     "link_count": len(normalized_links),
+                    "info_hash": source_info.get("info_hash"),
                 },
-                data={"links": normalized_links, "source": source_info},
+                data={"links": normalized_links, "source": self._public_source_info(source_info), "cache_check": cache_rows},
                 summary_for_user=summary,
                 say_hint="Return the direct/stream links and identify the best link-ready file.",
             )
 
-        cache = self._load_cache()
-        files = [f for f in cache.get("last_files") or [] if isinstance(f, dict)]
-        target = self._select_file(files, intent, cache) if files else None
-
-        if target and target.get("item_id") and not (target.get("download_link") or target.get("stream_link")):
-            payload, err = await self._api_item_details(settings, self._safe_text(target.get("item_id")))
-            if not err:
-                item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
-                if isinstance(item, dict):
-                    target = self._normalize_file_item(item)
-
-        if not target:
+        err_l = last_err.lower()
+        if source_info.get("cache_required") and (not cache_err or any(token in err_l for token in ("not cached", "not in cache", "cache"))):
             return action_failure(
-                code="link_target_not_found",
-                message="No Premiumize file or source could be resolved for link retrieval.",
-                needs=["Provide a file name/item id, or pass the exact magnet/URL URI in the request."],
-                say_hint="Explain a specific file target or literal source URI is required to fetch links.",
+                code="torrent_not_cached",
+                message="Torrent is not cached on Premiumize.",
+                needs=["Use Premiumize add transfer to start caching this torrent, then check links again after it finishes."],
+                say_hint="Explain that this torrent is not currently cached on Premiumize, offer to add it as a transfer to start caching, and suggest checking links again after the transfer completes.",
             )
-
-        self._save_cache(
-            {
-                "last_action": "get_links",
-                "last_item_id": target.get("item_id"),
-                "last_files": files[:80] if files else [target],
-            }
-        )
-
-        summary = f"Retrieved links for '{target.get('name')}'."
-        if target.get("stream_link"):
-            summary += " Stream link is available."
-        elif target.get("download_link"):
-            summary += " Download link is available."
-        else:
-            summary += " No direct link found yet."
-
-        return action_success(
-            facts={
-                "action": "get_links",
-                "item_id": target.get("item_id"),
-                "name": target.get("name"),
-                "has_download_link": bool(target.get("download_link")),
-                "has_stream_link": bool(target.get("stream_link")),
-            },
-            data={"file": target},
-            summary_for_user=summary,
-            say_hint="Return the requested file links and mention stream vs direct availability.",
+        if "unsupported" in err_l:
+            return action_failure(
+                code="premiumize_source_unsupported",
+                message="Premiumize rejected that source for direct link retrieval.",
+                needs=["Use Premiumize add transfer if this torrent needs to be cached first, or retry with a literal magnet, attached .torrent file, local .torrent file path, or supported torrent URL."],
+                say_hint="Explain that Premiumize rejected the source itself for direct link retrieval; do not claim the API key or base URL is missing.",
+            )
+        return action_failure(
+            code="premiumize_directdl_failed",
+            message=last_err or "Premiumize could not produce links for that source.",
+            diagnosis=self._diagnosis(),
+            say_hint="Explain direct link retrieval failed and suggest retrying.",
         )
 
     async def _run(self, args: Dict[str, Any], llm_client, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1611,15 +1774,12 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             )
 
         intent = await self._resolve_intent(query, args or {}, llm_client)
-
         action = self._safe_text(intent.get("action"))
         if not action:
             return action_failure(
                 code="intent_unresolved",
                 message="Could not determine the Premiumize action from the request.",
-                needs=[
-                    "Say one clear action: add transfer, list transfers, check transfer status, list files, or get links.",
-                ],
+                needs=["Say one clear action: add transfer, list transfers, check transfer status, list files, or get links."],
                 say_hint="Explain the request could not be routed and ask for a clearer Premiumize action.",
             )
 
@@ -1640,7 +1800,6 @@ class PremiumizeAddTransferPlugin(ToolVerba):
             say_hint="Explain that request intent could not be mapped and ask for a clearer Premiumize task.",
         )
 
-    # Platform handlers
     async def handle_discord(self, message, args, llm_client):
         ctx = {}
         try:
@@ -1713,5 +1872,108 @@ class PremiumizeAddTransferPlugin(ToolVerba):
         except Exception as exc:
             logger.exception("[premiumize handle_telegram] %s", exc)
             return action_failure(code="premiumize_exception", message=f"Premiumize request failed: {exc}")
+
+
+class PremiumizeAddTransferPlugin(PremiumizeBasePlugin):
+    name = "premiumize_add_transfer"
+    verba_name = "Premiumize Add Transfer"
+    version = "1.1.1"
+    min_tater_version = "59"
+    pretty_name = "Premiumize Add Transfer"
+    settings_category = "Premiumize"
+    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
+    tags = ["premiumize", "add_transfer"]
+    fixed_action = "add_transfer"
+    usage = (
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}'
+    )
+    description = (
+        "Add magnets, remote .torrent URLs, attached .torrent files, or local/downloaded .torrent files as Premiumize transfers."
+    )
+    verba_dec = (
+        "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files."
+    )
+    when_to_use = (
+        "Use when the request is to add/send/download a magnet, a remote .torrent link, an attached .torrent file, or a local/downloaded .torrent file in Premiumize."
+    )
+    how_to_use = (
+        "Set `query` to an add-transfer request and include the full literal `magnet:?`, `http(s)://...`, an attached `.torrent` file, or a local `.torrent` file path."
+    )
+    common_needs = [
+        "An add-transfer request in query.",
+        "The exact `magnet:?`, `http(s)://`, attached `.torrent` file, or local `.torrent` file path source.",
+    ]
+    missing_info_prompts = ["What exact magnet, torrent URL, attached .torrent file, or local .torrent file path should I send to Premiumize?"]
+    example_calls = [
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this to Premiumize magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}}',
+        '{"function":"premiumize_add_transfer","arguments":{"query":"send this URL to Premiumize https://example.com/file.torrent"}}',
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this torrent file to Premiumize /downloads/c_0.torrent"}}',
+        '{"function":"premiumize_add_transfer","arguments":{"query":"add this attached torrent file to Premiumize"}}',
+    ]
+    routing_keywords = [
+        "premiumize",
+        "add",
+        "send",
+        "download",
+        "transfer",
+        "magnet",
+        "torrent",
+        "file",
+    ]
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The add-transfer request containing a full magnet URI, remote torrent URL, an attached .torrent file, or local .torrent file path.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Optional explicit source value (magnet, URL, attached/local .torrent file path).",
+            },
+            "src": {
+                "type": "string",
+                "description": "Alias of source value.",
+            },
+            "url": {
+                "type": "string",
+                "description": "Optional HTTP(S) source URI, including .torrent links.",
+            },
+            "magnet": {
+                "type": "string",
+                "description": "Optional magnet URI.",
+            },
+            "link": {
+                "type": "string",
+                "description": "Optional source alias.",
+            },
+            "torrent_file": {
+                "type": "string",
+                "description": "Optional local .torrent file path.",
+            },
+            "torrent_path": {
+                "type": "string",
+                "description": "Alias of local .torrent file path.",
+            },
+            "file_path": {
+                "type": "string",
+                "description": "Optional local .torrent file path using Tater's common exported-artifact field name.",
+            },
+            "artifact_path": {
+                "type": "string",
+                "description": "Optional local .torrent file path using Tater's artifact status field name.",
+            },
+            "artifact_id": {
+                "type": "string",
+                "description": "Optional available conversation artifact id for a downloaded or uploaded .torrent file.",
+            },
+            "folder_id": {
+                "type": "string",
+                "description": "Optional Premiumize target folder id.",
+            },
+        },
+        "required": [],
+    }
+
 
 verba = PremiumizeAddTransferPlugin()
