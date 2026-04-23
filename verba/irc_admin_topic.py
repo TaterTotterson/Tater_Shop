@@ -45,10 +45,10 @@ class IrcAdminTopicPlugin(ToolVerba):
     name = "irc_admin_topic"
     verba_name = "IRC Admin Topic"
     pretty_name = "IRC Admin Topic"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     tags = ["irc", "admin"]
-    platforms = ["irc"]
+    platforms = ["irc", "meshtastic"]
     usage = '{"function":"irc_admin_topic","arguments":{"query":"set topic to hello world"}}'
     description = "Sets the current IRC channel topic to the requested text."
     verba_dec = "Sets the current IRC channel topic to the requested text."
@@ -147,6 +147,46 @@ class IrcAdminTopicPlugin(ToolVerba):
             return True
 
         return False
+
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         nick = str(user or "").strip()

@@ -10,7 +10,7 @@ from verba_result import action_failure, action_success
 class SFTPGoActivityPlugin(ToolVerba):
     name = "sftpgo_activity"
     verba_name = "SFTPGo Activity"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_activity","arguments":{}}'
     description = "Retrieves current connection activity from the SFTPGo server."
@@ -18,7 +18,7 @@ class SFTPGoActivityPlugin(ToolVerba):
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
+    platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",
@@ -139,6 +139,46 @@ class SFTPGoActivityPlugin(ToolVerba):
         return await self._get_activity_summary(llm_client)
 
     # IRC (return string; the platform will send it)
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
+
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return await self._get_activity_summary(llm_client)
 

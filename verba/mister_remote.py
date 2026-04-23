@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolVerba):
     name = "mister_remote"
     verba_name = "MiSTer Remote"
-    version = "1.1.8"
+    version = "1.1.9"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
     routing_keywords = [
@@ -87,7 +87,7 @@ class MisterRemotePlugin(ToolVerba):
     )
     verba_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
-    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
+    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     usage = (
         '{"function":"mister_remote","arguments":{"query":"ONE consolidated MiSTer request in natural language '
@@ -939,6 +939,46 @@ class MisterRemotePlugin(ToolVerba):
             return await self.handle_webui(args, llm_client, context=context)
         except TypeError:
             return await self.handle_webui(args, llm_client)
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
+
     async def handle_irc(self, bot, channel, user, raw, args, llm_client):
         args = args or {}
         if not self._extract_utterance(args):

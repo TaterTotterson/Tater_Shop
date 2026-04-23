@@ -31,7 +31,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -78,7 +78,7 @@ class FindMyPhonePlugin(ToolVerba):
         "Write a short, friendly message telling {mention} you're looking for their phone now. "
         "Only output that message."
     )
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc']
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     common_needs = []
     missing_info_prompts = []
 
@@ -358,6 +358,46 @@ class FindMyPhonePlugin(ToolVerba):
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         mention = str(sender or "you").strip() or "you"
         return await self._run(args or {}, llm_client, mention=mention)
+
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         mention = str(user or "you").strip() or "you"

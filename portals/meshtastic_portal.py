@@ -487,7 +487,7 @@ def _get_plugin_enabled(name: str) -> bool:
     enabled = redis_client.hget("verba_enabled", name)
     if not (enabled and str(enabled).lower() == "true"):
         return False
-    # Keep the IRC compatibility profile from exposing IRC moderation tools on radio.
+    # Keep radio chat from exposing IRC-specific moderation tools.
     return not str(name or "").startswith("irc_admin_")
 
 
@@ -689,11 +689,10 @@ def build_system_prompt() -> str:
     max_chars = max(40, _get_int_setting("max_outbound_length", DEFAULT_MAX_OUTBOUND_LENGTH))
     return (
         "You are replying over encrypted Meshtastic radio.\n"
-        "This is a low-bandwidth mesh, not IRC, even though the portal uses IRC-compatible tool filtering internally.\n"
         f"Keep the final answer under about {max_chars} ASCII characters whenever possible.\n"
         "Use plain ASCII text only. No markdown, no emoji, no tables, no long lists, and no code fences.\n"
         "Prefer one direct answer. If tools return too much information, summarize it for radio.\n"
-        "Do not mention IRC and do not use IRC admin or moderation actions.\n"
+        "Do not use IRC admin or moderation actions.\n"
     )
 
 
@@ -819,7 +818,7 @@ class MeshtasticPortalRuntime:
         try:
             result = await run_hydra_turn(
                 llm_client=self.llm_client,
-                platform="irc",
+                platform="meshtastic",
                 history_messages=history,
                 registry=registry,
                 enabled_predicate=_get_plugin_enabled,

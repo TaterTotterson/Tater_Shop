@@ -22,7 +22,7 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.10",
+      "version": "1.1.11",
       "min_tater_version": "59",
       "description": "Send a one-time spoken announcement to your configured broadcast targets.",
       "portals": [
@@ -35,13 +35,14 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "7f525e065007036dac868f4193a1917e81cf68ae5eb6d13f6655166334771f89"
+      "sha256": "75fe24a8a23124a3ba418e0f1458888f703d59383925a61abcafef5257f3c444"
     },
     {
       "id": "comfyui_audio_ace",
@@ -207,7 +208,7 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "portals": [
@@ -220,13 +221,14 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "verba/find_my_phone.py",
-      "sha256": "9d371eda892d4f4fcf0044732cdd78338e591b110b5507e8fd8c75f3128d26f4"
+      "sha256": "09471f3f413ad4922e6700cb04fdc3c5c3b47d93279f1456226c1ed6876afd5a"
     },
     {
       "id": "ftp_browser",
@@ -246,7 +248,7 @@
     {
       "id": "get_notifications",
       "name": "Get Notifications",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Fetch queued notifications from the Home Assistant bridge.",
       "portals": [
@@ -257,18 +259,19 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Notifications",
       "tags": [],
       "entry": "verba/get_notifications.py",
-      "sha256": "1ec5ac2dc2f9ac3a6f0c690f1897798a31d60dee79f643a9eb334a44ef989bb7"
+      "sha256": "f6ac44e9bdd45d6299f026fd613b2c7e6a1e0d75ba61d685eaa0f6811a68410b"
     },
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
@@ -281,7 +284,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -291,12 +295,12 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "8373cfe6c1c87347b230f088a484f65aa012f101f68a3986eac82058cf85cc44"
+      "sha256": "23da5e7f14a1f260b04178d4133ba2123bcb0cb4bf3467345932b48e690adcb8"
     },
     {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
-      "version": "2.1.1",
+      "version": "2.1.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
@@ -309,7 +313,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -318,12 +323,12 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "98d9e3984bc59b0a23e6a44589f69d838b731b9ad312d43dce7dcda026796725"
+      "sha256": "9c63c83de798b4e10fc2bb6ae9b98fcbb188f66fba0c5477569ad35a98a1a29a"
     },
     {
       "id": "ha_covers",
       "name": "Home Assistant Covers",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant covers and garage doors.",
       "portals": [
@@ -336,7 +341,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -345,12 +351,12 @@
         "cover"
       ],
       "entry": "verba/ha_covers.py",
-      "sha256": "2b31bde04a1ca2e458dfda0d210cd60458eb421dfd63c4f06d85f0aa094443cc"
+      "sha256": "0445d7587bf05907538281e25bac5af0b94cd4074d57870d71fb0898da598952"
     },
     {
       "id": "ha_fans",
       "name": "Home Assistant Fans",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant fans.",
       "portals": [
@@ -363,7 +369,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -372,12 +379,12 @@
         "fan"
       ],
       "entry": "verba/ha_fans.py",
-      "sha256": "718e111047baac1fb412d0e9c5ae114962c40f19802c89dc7bdf7b539f84140e"
+      "sha256": "78cbeec6f5113ebc8391c7a738ac9940333bf82e906837863273fda358b61347"
     },
     {
       "id": "ha_lights",
       "name": "Home Assistant Lights",
-      "version": "2.1.5",
+      "version": "2.1.6",
       "min_tater_version": "59",
       "description": "Control Home Assistant lights.",
       "portals": [
@@ -390,7 +397,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -399,12 +407,12 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "c5a81608e6c981c1b8fd505631bb9ba0f5860ee7b4bcbf090fede6fde1513397"
+      "sha256": "4e6ec82f6009fda30d6431e3be741c6afea220d215be6ebd170d7cac06288cf6"
     },
     {
       "id": "ha_locks",
       "name": "Home Assistant Locks",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant lock entities.",
       "portals": [
@@ -417,7 +425,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -426,12 +435,12 @@
         "lock"
       ],
       "entry": "verba/ha_locks.py",
-      "sha256": "fba63c2c342fb32f8d2f50ae8421a939d91d24fe81329269071320fd267ecb7d"
+      "sha256": "452b744a7a2078b2be539c5ee78a1cccb0cbba171e3c38bd030dbb09e61737ba"
     },
     {
       "id": "ha_media_players",
       "name": "Home Assistant Media Players",
-      "version": "2.0.5",
+      "version": "2.0.6",
       "min_tater_version": "59",
       "description": "Media-player control for Home Assistant.",
       "portals": [
@@ -444,7 +453,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -453,12 +463,12 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "3dd929ec8bd9feef63ff175d8e1991ecdb4fcfc16d9705c847193fe1d0107c68"
+      "sha256": "6c8bd07a7df45512283b73894a8bcf9e7f6c4d9e9f8f8f8720f85ad13770934c"
     },
     {
       "id": "ha_remotes",
       "name": "Home Assistant Remotes",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant remote entities.",
       "portals": [
@@ -471,7 +481,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -480,12 +491,12 @@
         "remote"
       ],
       "entry": "verba/ha_remotes.py",
-      "sha256": "0db911d62c25e008301e5a942c381d9e3cb362acbb5a4b461a574f6df4b6e191"
+      "sha256": "6819b0b5032a56affe45461248001d304ee63b9d8b6c4637cf0d58f09bb775fa"
     },
     {
       "id": "ha_scenes",
       "name": "Home Assistant Scenes",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant scenes.",
       "portals": [
@@ -498,7 +509,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -507,12 +519,12 @@
         "scene"
       ],
       "entry": "verba/ha_scenes.py",
-      "sha256": "2e52c431d9d7f39303b2097cff227cfdfe463995bb0ee718b53a7d5cfc594385"
+      "sha256": "67944d287ae8923e0e389e10209adc27896ef4005aebd00aae46caf30c508be5"
     },
     {
       "id": "ha_scripts",
       "name": "Home Assistant Scripts",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Control Home Assistant scripts.",
       "portals": [
@@ -525,7 +537,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -534,12 +547,12 @@
         "script"
       ],
       "entry": "verba/ha_scripts.py",
-      "sha256": "22e6e969b6034d647014db1e707ce5eee1de12585bfc7ab259ef2938337a439f"
+      "sha256": "d21676d7334734d1bc767a94cd40a431594baf0ad69391f20aaba7249a0a645c"
     },
     {
       "id": "ha_sensors",
       "name": "Home Assistant Sensors",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Read Home Assistant sensor and binary_sensor entities.",
       "portals": [
@@ -552,7 +565,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -561,12 +575,12 @@
         "sensor"
       ],
       "entry": "verba/ha_sensors.py",
-      "sha256": "0ee6c5d3028ac39abfec54563898dda03d8cb11637f9055da99c73107bf773b6"
+      "sha256": "5ffdd26dbf6d30a4fbfc956a9c5df40e1ca7553b1546119dd0240dc3dde5ddf1"
     },
     {
       "id": "ha_switches",
       "name": "Home Assistant Switches",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant switches and plugs.",
       "portals": [
@@ -579,7 +593,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -588,12 +603,12 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "a9f18124cdc0bc93feae2087f1b806cb4a28b0ed80b3dc235312f48699abd277"
+      "sha256": "72cc2b1e93b042ac1bd7314cfb8b3bce5adb922d969e5819b6d460186028fde3"
     },
     {
       "id": "ha_temperature",
       "name": "Home Assistant Temperature",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "min_tater_version": "59",
       "description": "Read Home Assistant ambient temperatures.",
       "portals": [
@@ -606,7 +621,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Home Assistant Control",
@@ -615,16 +631,17 @@
         "temperature"
       ],
       "entry": "verba/ha_temperature.py",
-      "sha256": "b600792d1561d59ebbdd3c8ef6a973b572376aa03224c4b768799f4002088b7a"
+      "sha256": "7f8bf7a4b195930867899cf1fec89afd0945110098674c91eeedefd59223499e"
     },
     {
       "id": "irc_admin_op",
       "name": "IRC Admin OP",
-      "version": "1.3.1",
+      "version": "1.3.2",
       "min_tater_version": "59",
       "description": "Gives the user op or voice in the current IRC channel.",
       "portals": [
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": null,
@@ -633,16 +650,17 @@
         "admin"
       ],
       "entry": "verba/irc_admin_op.py",
-      "sha256": "cd72156d57a097ee880813b261dea53c0bc223cf466a8bbef80f651927e60044"
+      "sha256": "cb538a11c2ac66d24970f8b3fd16f0c8375d8eb6f4c94fa49e770cfdd2b6bae8"
     },
     {
       "id": "irc_admin_slap",
       "name": "IRC Admin Slap",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Slaps the requested user in the current IRC channel.",
       "portals": [
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": null,
@@ -651,16 +669,17 @@
         "admin"
       ],
       "entry": "verba/irc_admin_slap.py",
-      "sha256": "4fa54b49352f9df2901aad3d20b86e4ea9ac32e6b1fb3ea3135491ffe8a7b462"
+      "sha256": "279f4c594b4b08330ecb910a5488fe71fdd6146cd83c59308c0fb3123fbcc320"
     },
     {
       "id": "irc_admin_topic",
       "name": "IRC Admin Topic",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Sets the current IRC channel topic to the requested text.",
       "portals": [
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": null,
@@ -669,12 +688,12 @@
         "admin"
       ],
       "entry": "verba/irc_admin_topic.py",
-      "sha256": "ba8d4a2ff7b5f4b6c005007efc460c266bfaeebd0f16edb341b58ebeb51ae12a"
+      "sha256": "1348b713893eabd94460330aeb6610c1847f230f6f69f5784ea95b330bc931e1"
     },
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
@@ -682,6 +701,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "homekit",
@@ -696,12 +716,12 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "86210c2f6e24364d498fb931c4a78b07a29b8a98017398068650837fcf1c7efa"
+      "sha256": "127e80b6a6c3f8ee9b9ea4abf0bb602fe60b124fe36145d8214e12ff1d85e4fa"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -709,6 +729,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "homekit",
@@ -723,12 +744,12 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "b4e5756372a78eb84ddee53cdbc3545678d6fa7e69182566e780d693fc02ca72"
+      "sha256": "ee26006019ff7932c5063a6208e0d8ee060cb38fd2e2733055bd583755c9459a"
     },
     {
       "id": "joke_api",
       "name": "Joke API",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Fetch one joke from JokeAPI.",
       "portals": [
@@ -741,13 +762,14 @@
         "telegram",
         "matrix",
         "irc",
+        "meshtastic",
         "xbmc"
       ],
       "notifier": false,
       "settings_category": "Joke API",
       "tags": [],
       "entry": "verba/joke_api.py",
-      "sha256": "e934e8b2e636c8bd7e515ebf5dc774726a6da59e4d740b96144f7615528b1835"
+      "sha256": "59c46e50e00f97b653238914571dffb23ad71f733d838e6eb74928c15972c085"
     },
     {
       "id": "lowfi_video",
@@ -768,7 +790,7 @@
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.8",
+      "version": "1.1.9",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "portals": [
@@ -776,6 +798,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "matrix",
@@ -786,12 +809,12 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "verba/mister_remote.py",
-      "sha256": "0cafe464f8e3a3bd4f13e944a365dd2b0341fb365ed882e9eafa06436c7eaeeb"
+      "sha256": "bd38cbf9595d6cb130049953dddf8c706015aef501e0ea8e3b60116141752ef8"
     },
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Moltbook account snapshot with profile link and key counters.",
       "portals": [
@@ -804,7 +827,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -813,12 +837,12 @@
         "account_summary"
       ],
       "entry": "verba/moltbook_account_summary.py",
-      "sha256": "d5b2673f554cc0fcd192d2e3746c076750d1f09235266175a33ae38fa0f5d50a"
+      "sha256": "a170c09fd0d8e818ecd35a36948551f75d614bd5599964ce0d1cf4c5ecd7c3a7"
     },
     {
       "id": "moltbook_activity_on_posts",
       "name": "Moltbook Activity On Posts",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Read /home activity buckets for your posts and summarize engagement.",
       "portals": [
@@ -831,7 +855,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -840,12 +865,12 @@
         "activity_on_my_posts"
       ],
       "entry": "verba/moltbook_activity_on_posts.py",
-      "sha256": "4fa3dfe3c38b4b29f1b4cf4c079b91e6d0e9600c9cd32b32cd55199cb9801d45"
+      "sha256": "ca5f339ba173ad2cc2a21da5e8c868b2c76c05abae262065d70b07c3909cd658"
     },
     {
       "id": "moltbook_agent_profile",
       "name": "Moltbook Agent Profile",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Lookup target Moltbook agent profile details.",
       "portals": [
@@ -858,7 +883,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -867,12 +893,12 @@
         "agent_profile"
       ],
       "entry": "verba/moltbook_agent_profile.py",
-      "sha256": "07525574ac247dfb3a526ff98019d2e6c896229ac6ac7cec7f6dc6ce34f5febe"
+      "sha256": "dc2e8185e39a0c3bc29d80073a7701a17c8ea96eb0679f3cd03e879d3a3ecb93"
     },
     {
       "id": "moltbook_fellow_taters",
       "name": "Moltbook Fellow Taters",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Show tracked fellow Tater Moltbook agents.",
       "portals": [
@@ -885,7 +911,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -894,12 +921,12 @@
         "fellow_taters"
       ],
       "entry": "verba/moltbook_fellow_taters.py",
-      "sha256": "f4c3a174387204c86a744e2166fd514cc25993b194c5f8258268958f45c61b1d"
+      "sha256": "b053e94fc627ad5c4c7fc10f3438b9636598a0438df095cfeaf56b6bd8487797"
     },
     {
       "id": "moltbook_following",
       "name": "Moltbook Following",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List known followed agents and active authors from following feed.",
       "portals": [
@@ -912,7 +939,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -921,12 +949,12 @@
         "following"
       ],
       "entry": "verba/moltbook_following.py",
-      "sha256": "139ed2597c2e0efb881ca9ee143d285cdde5f900777ece8d16969dc81a662dda"
+      "sha256": "69698dfa326f238d14d4b0b0ab4c586c52740d92fcc23457e3f940b186bc8c7c"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Moltbook /home dashboard overview with unread/activity counters.",
       "portals": [
@@ -939,7 +967,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -948,12 +977,12 @@
         "home_overview"
       ],
       "entry": "verba/moltbook_home_overview.py",
-      "sha256": "6f95656f5d32ccf815c3aa9c9cb950e550e825b2bd10f8088d2495ae4d84ad89"
+      "sha256": "1542a2a82407c5492ec32e29ca42f101fce33fb7e4465c8659972a39a5bbbd52"
     },
     {
       "id": "moltbook_latest_announcement",
       "name": "Moltbook Latest Announcement",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Get the newest Moltbook announcement/news entry.",
       "portals": [
@@ -966,7 +995,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -975,12 +1005,12 @@
         "latest_announcement"
       ],
       "entry": "verba/moltbook_latest_announcement.py",
-      "sha256": "a93777450eadba558f8a91f851034bfafa85c320206a27b8569d7c731493f77e"
+      "sha256": "de2dba631378e22b1fb396a01d1c5fbb39e33e3468219d9913dbbc15aadebf55"
     },
     {
       "id": "moltbook_latest_posts",
       "name": "Moltbook Latest Posts",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Fetch latest posts authored by this Moltbook agent.",
       "portals": [
@@ -993,7 +1023,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -1002,12 +1033,12 @@
         "latest_posts"
       ],
       "entry": "verba/moltbook_latest_posts.py",
-      "sha256": "23a1578042de80f7ad030052239371523563256fcfc33d07403bfe80e16329e7"
+      "sha256": "8b5c8dcfa2791812bc1a0026534ad463e7fc1c26165acec59b3efe47d774a40a"
     },
     {
       "id": "moltbook_monitoring_submolts",
       "name": "Moltbook Monitoring Submolts",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Read Moltbook portal settings for submolts to monitor/prefer/avoid.",
       "portals": [
@@ -1020,7 +1051,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -1029,12 +1061,12 @@
         "monitoring_submolts"
       ],
       "entry": "verba/moltbook_monitoring_submolts.py",
-      "sha256": "ff61b9bccae7f4e95e1ccbd62ad29cfcf039df3777d3d7e8088468cd9da451d1"
+      "sha256": "5765a039c55d49a5e0836d9f4a238d028049168c7bb2f57fa9ab6cd6363bd52f"
     },
     {
       "id": "moltbook_profile_link",
       "name": "Moltbook Profile Link",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Get the current Moltbook profile URL.",
       "portals": [
@@ -1047,7 +1079,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -1056,12 +1089,12 @@
         "profile_link"
       ],
       "entry": "verba/moltbook_profile_link.py",
-      "sha256": "8532999ba8b57b2257f13d1435e9d0549717f1ad295a97c928e4114cf4d9d33d"
+      "sha256": "ed8cf4ddd5cbdb8cbae2ea71277f66569500af6b98bdeb9cdca16a9caae89563"
     },
     {
       "id": "moltbook_subscriptions",
       "name": "Moltbook Subscriptions",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Show subscribed submolts from Moltbook portal state.",
       "portals": [
@@ -1074,7 +1107,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Moltbook Info",
@@ -1083,12 +1117,12 @@
         "subscriptions"
       ],
       "entry": "verba/moltbook_subscriptions.py",
-      "sha256": "1cae70312365315bac84ad849481b91a33b74d52354de3c4fa20e1db19cf1299"
+      "sha256": "1808edd4422fb209f1882c47ca98bf91305ff26c31163f4e39a3e323fefadbef"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.28",
+      "version": "1.0.29",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
@@ -1101,13 +1135,14 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "0dfda166d2adbd6f8ffdffa894c3012c0ee7df63dfd6e671aa6e831288524f4f"
+      "sha256": "1d8795909ea2557500b569f404ffa613d26a8315eab845e7e6bbf55c6840c56a"
     },
     {
       "id": "obsidian_note",
@@ -1144,7 +1179,7 @@
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "min_tater_version": "59",
       "description": "Fetch details for a specific movie or TV show from Overseerr.",
       "portals": [
@@ -1152,6 +1187,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "matrix",
@@ -1162,12 +1198,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_details.py",
-      "sha256": "67b8037225002b7720a5431b21f049704598c70873c8c17d4fb45bff7889be17"
+      "sha256": "3089e814d41436645b32c41a7a41b080e7bb812970294dcf2baa2eddac42efce"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Request a movie or TV show in Overseerr by title.",
       "portals": [
@@ -1179,18 +1215,19 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_request.py",
-      "sha256": "96f8b14eee2dea0338c5d7a9fb317ad99504dd883b467781c6ec9cbe8d8bcd45"
+      "sha256": "84b8963789c7638c640bd7b150bb911a92590ccc90d7bd58c546d037b1daabb1"
     },
     {
       "id": "overseerr_trending",
       "name": "Overseerr Trending",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "min_tater_version": "59",
       "description": "List trending or upcoming movies/TV from Overseerr.",
       "portals": [
@@ -1198,6 +1235,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "matrix",
@@ -1208,12 +1246,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_trending.py",
-      "sha256": "f1d78a868ad1e472b73a2e20596895fdee01c4a8263b9ea7635ed6d1af3bd52c"
+      "sha256": "9e61c5cc7011134eaabb7ab770fee729550e08fe0e594b0263fd8307d8232e12"
     },
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1221,6 +1259,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1231,12 +1270,12 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "aacd5697272494f21ff2bb5bb11473f14e09e9c15c5a4ed9676808a65845f669"
+      "sha256": "3359c2115395afdbfc8ba7fb295c02172753c92f38b00fb2a639d54dd4cb0234"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
@@ -1244,6 +1283,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1254,12 +1294,12 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "c1904bee4999ee91530cb97da96eda67fb1ca2ecb150d209cce3cafa06b6c0cb"
+      "sha256": "8cc8491a408ecd1eac58518981a76a7bf14136554549a474ea1629b212f6c796"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1267,6 +1307,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1277,12 +1318,12 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "67b6b2059f55f96c8a26b4d1cfd019c697de628c53ce16352961628a0c4ec41b"
+      "sha256": "5d3539e4d395877751b8e20904ebda78fa4b98c7c3c6e8340351ca65ae3235d4"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
@@ -1290,6 +1331,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1300,12 +1342,12 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "f0f1ebb8934028896fff9667f214470c3a28a4788f63446446b092644bb7c72f"
+      "sha256": "4c5d67a654eca1c6a8386e46ead5c398f5a3e5200b0c0e0cfe93fc587f977191"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
@@ -1313,6 +1355,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1323,12 +1366,12 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "6c36c61064e4935dcb475b46a693152f7017f623602c0f73288d9b19f1861786"
+      "sha256": "7c236ab35cc4cbc1862199b7a148cd4f5823f2dc3f81e508d5b1ea4a5d08472d"
     },
     {
       "id": "sftpgo_account",
       "name": "SFTPGo Account",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Create an SFTPGo account for the user and return login details.",
       "portals": [
@@ -1336,6 +1379,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1343,12 +1387,12 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_account.py",
-      "sha256": "40f2215accd3d18c50d62b5a860ab758d0042ac5e4b0918f5f4bcca91728622e"
+      "sha256": "817594a02512eec4c2abd9b395af4292e7f647be3954962f91ec260f07657212"
     },
     {
       "id": "sftpgo_activity",
       "name": "SFTPGo Activity",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Show current connection activity on the SFTPGo server.",
       "portals": [
@@ -1356,6 +1400,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1363,12 +1408,12 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_activity.py",
-      "sha256": "604faae063fcb6a87888dc4e3270a1a20652b7ad3b085fe834825ef88957bb45"
+      "sha256": "7c43f08eeeedc55d056a9563fe0c1eb74048e2093cf84bd755630d7588886fc8"
     },
     {
       "id": "tater_gits_add_feed",
       "name": "Tater Gits Add Feed",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Add a GitHub releases feed to the tater-gits watcher with smart naming.",
       "portals": [
@@ -1376,6 +1421,7 @@
         "macos",
         "discord",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1383,12 +1429,12 @@
       "settings_category": "Tater Gits",
       "tags": [],
       "entry": "verba/tater_gits_add_feed.py",
-      "sha256": "b4db292c256c03e47835683c1d553d37728eeccfff81c43fda3d7993e944c617"
+      "sha256": "d54189080f39fe6aa669074e5b31ae50de8e3adb37241f075c97bcadb3c45a4f"
     },
     {
       "id": "unifi_network_clients",
       "name": "UniFi Network Clients",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List UniFi clients with wired/wireless counts and client details.",
       "portals": [
@@ -1401,7 +1447,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Network",
@@ -1410,12 +1457,12 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "d9f9376ba5313b64765a394f33db1cdd6c6c2b51ea1f123ac379fed5af43a529"
+      "sha256": "60e2f2e203220be8307eca424f60a7f164bc69b2c19658c6423073f9329ebf7d"
     },
     {
       "id": "unifi_network_devices",
       "name": "UniFi Network Devices",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List UniFi devices with online/offline status and core details.",
       "portals": [
@@ -1428,7 +1475,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Network",
@@ -1437,12 +1485,12 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "acbbf74a4a89aa9582a04ff91be45f9cf08de56be909a8b075c73333df2d280e"
+      "sha256": "393b9fe12ccfe64b4b775943b7e1f5f967e5bd10812b77ee86745d0968eba4f1"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
@@ -1455,7 +1503,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Network",
@@ -1464,12 +1513,12 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "efcbbe27e2fbe23f274d33a1bf7b401624027cc06fb11ec1ccccfc32d1af8f9c"
+      "sha256": "cb08d427f9bc78e8c7d4b159b6685d35c5c1de7d4418c3ee5b49ea78a93f6e71"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
@@ -1482,7 +1531,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Network",
@@ -1491,12 +1541,12 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "a0bb57b2edd218b98a79dd0d7328b623487d6336b224e56cf118634b73c0b3a6"
+      "sha256": "80e480a348e2de9e21404ca212172d781fd5b12f5d803029fe4a83c7affe6cd7"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
@@ -1509,7 +1559,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Protect",
@@ -1518,12 +1569,12 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "1130d2d27bc40098daf7f55957debbe8789c3566cf1a7beb35edcaddd6b43955"
+      "sha256": "1c223891e00dd203f2119ac937e86ec3ebdb3d10938ecaa7136cfd7fbd40ecd6"
     },
     {
       "id": "unifi_protect_camera",
       "name": "UniFi Protect Camera",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Describe a single UniFi Protect camera snapshot.",
       "portals": [
@@ -1536,7 +1587,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Protect",
@@ -1545,12 +1597,12 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "5ce2f4f431e2f315ac36df94048d488ced23fa1ed0f55b2afed63914592d842a"
+      "sha256": "6c03f18916e5e4479a4bcf1ca9961d5cad9427d85849679b45f97df7ccc77343"
     },
     {
       "id": "unifi_protect_camera_info",
       "name": "UniFi Protect Camera Info",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "List UniFi Protect cameras.",
       "portals": [
@@ -1563,7 +1615,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Protect",
@@ -1572,12 +1625,12 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "9a718ecf4e944074961dcabe21a0b035552f043cf079c608b283bea58f7efdc2"
+      "sha256": "9dcec17f0cbae8619fb2b9fe638e08633087c3ff3a5cfd68744dd8f90925eeec"
     },
     {
       "id": "unifi_protect_sensors",
       "name": "UniFi Protect Sensors",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Check UniFi Protect sensor status and single-sensor detail.",
       "portals": [
@@ -1590,7 +1643,8 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "UniFi Protect",
@@ -1599,12 +1653,12 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "80f499a3e0e92b1fa7c34fb1ae923c9586a32ad3f8f920f07a9b289034349b64"
+      "sha256": "6c09cae68b7400ce6eaca03c53e3ff029839fc35f0fcff380937af2072394a5c"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
@@ -1617,18 +1671,19 @@
         "discord",
         "telegram",
         "matrix",
-        "irc"
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "1ffe1fd07bd27bf94d85b570362cc2695dce2cfacbab3badd7aed7c2f25d0ebd"
+      "sha256": "854bd934052c802044db3b00819b37a5990f43f6f80605d4995e2774717312de"
     },
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.7",
+      "version": "1.1.8",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
       "portals": [
@@ -1636,6 +1691,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "voice_core",
         "homeassistant",
         "matrix",
@@ -1647,7 +1703,7 @@
       "settings_category": "Weather Forecast",
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "7f91d67eba8aa581174fc2b43d8c079a495c71eaacc2d737ea3c53f01e83aca8"
+      "sha256": "04c6818ee8f0cc17828bb41f2d1a361f02ce0a59fc7346d82c36a24fa04d7113"
     },
     {
       "id": "webdav_browser",
@@ -1667,7 +1723,7 @@
     {
       "id": "youtube_summary",
       "name": "YouTube Summary",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Summarize a YouTube video using its transcript.",
       "portals": [
@@ -1675,6 +1731,7 @@
         "webui",
         "macos",
         "irc",
+        "meshtastic",
         "matrix",
         "telegram"
       ],
@@ -1682,7 +1739,7 @@
       "settings_category": "YouTube Summary",
       "tags": [],
       "entry": "verba/youtube_summary.py",
-      "sha256": "6e88de3f4ad92ec05bafc382cd3686bf8ce5e0462ddaaec8b784647d609aaf79"
+      "sha256": "b10f8b5684e64a467f48c01fdb17c5cb1e8c91b06cfcd3a96d63623786f3c454"
     }
   ]
 }

@@ -101,7 +101,7 @@
         "offgrid"
       ],
       "entry": "portals/meshtastic_portal.py",
-      "sha256": "f0c696895d7a67c5158eced75d32ce58af2b19dc9e1a6b961a3608a1d114f8f7"
+      "sha256": "31b6b298c7b2b87aaf30613392569e4834dcce3074a4f3b4d087fb0d12886bf5"
     },
     {
       "id": "moltbook",

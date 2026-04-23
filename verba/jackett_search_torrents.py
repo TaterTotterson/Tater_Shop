@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettSearchTorrentsPlugin(ToolVerba):
     name = "jackett_search_torrents"
     verba_name = "Jackett Search Torrents"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "Jackett Search Torrents"
     settings_category = "Jackett"
@@ -41,7 +41,7 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         "Tell {mention} you are querying Jackett now and will return ranked torrent results shortly. "
         "Only output that message."
     )
-    platforms = ['discord', 'webui', 'macos', 'irc', 'voice_core', 'homeassistant', 'homekit', 'matrix', 'telegram', 'xbmc']
+    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'homekit', 'matrix', 'telegram', 'xbmc']
     required_settings = {
         "JACKETT_BASE_URL": {
             "label": "Jackett Base URL",
@@ -1773,6 +1773,46 @@ class JackettSearchTorrentsPlugin(ToolVerba):
         except Exception as exc:
             logger.exception("[jackett] handle_macos error: %s", exc)
             return action_failure(code="jackett_exception", message=f"Jackett request failed: {exc}")
+
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
 
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         ctx = {}

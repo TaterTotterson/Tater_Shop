@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 class JokeAPIPlugin(ToolVerba):
     name = "joke_api"
     verba_name = "Joke API"
-    version = "1.1.2"
+    version = "1.1.3"
     min_tater_version = "59"
     pretty_name = "Joke API"
     usage = '{"function":"joke_api","arguments":{}}'
@@ -32,7 +32,7 @@ class JokeAPIPlugin(ToolVerba):
         '{"function":"joke_api","arguments":{}}',
     ]
     settings_category = "Joke API"
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'xbmc']
+    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic', 'xbmc']
     routing_keywords = [
         "joke",
         "jokes",
@@ -294,6 +294,46 @@ class JokeAPIPlugin(ToolVerba):
         llm_client: Any = None,
     ):
         return await self._handle(args, llm_client)
+
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        call_kwargs = {"args": args, "llm_client": llm_client}
+        try:
+            sig = __import__("inspect").signature(self.handle_irc)
+        except Exception:
+            sig = None
+        if sig is not None:
+            if "bot" in sig.parameters:
+                call_kwargs["bot"] = None
+            if "channel" in sig.parameters:
+                call_kwargs["channel"] = channel
+            if "user" in sig.parameters:
+                call_kwargs["user"] = user
+            if "raw_message" in sig.parameters:
+                call_kwargs["raw_message"] = raw_text
+            if "raw" in sig.parameters:
+                call_kwargs["raw"] = raw_text
+            if "context" in sig.parameters:
+                call_kwargs["context"] = ctx
+        return await self.handle_irc(**call_kwargs)
 
     async def handle_irc(
         self,
