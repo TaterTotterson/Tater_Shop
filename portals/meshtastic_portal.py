@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -34,7 +34,6 @@ DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_OUTBOUND_LENGTH = 160
 DEFAULT_MAX_CHUNKS = 3
-DEFAULT_DEFAULT_CHANNEL = 0
 DEFAULT_SESSION_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_GLOBAL_MAX_STORE = 20
 DEFAULT_GLOBAL_MAX_LLM = 8
@@ -95,17 +94,11 @@ PORTAL_SETTINGS = {
             "default": "node_channel",
             "description": "Choose whether memory is tracked per node or per node+channel.",
         },
-        "default_reply_channel": {
-            "label": "Default Reply Channel",
-            "type": "number",
-            "default": DEFAULT_DEFAULT_CHANNEL,
-            "description": "Fallback channel index when the incoming event has no channel value.",
-        },
         "allowed_channels": {
             "label": "Allowed Channels",
             "type": "string",
             "default": "",
-            "description": "Optional comma-separated allowlist of numeric mesh channels.",
+            "description": "Choose one or more mesh channels above 0 that Tater is allowed to answer on. Channel 0 is never allowed for assistant replies.",
         },
         "allow_direct_messages": {
             "label": "Allow Direct Messages",
@@ -204,6 +197,16 @@ def _coerce_channel_token(value: Any) -> str:
         return ""
 
 
+def _coerce_reply_channel_token(value: Any) -> str:
+    token = _coerce_channel_token(value)
+    if not token:
+        return ""
+    try:
+        return token if int(token) > 0 else ""
+    except Exception:
+        return ""
+
+
 def _coerce_allowed_channel_values(raw: Any) -> List[str]:
     if raw is None:
         values: List[Any] = []
@@ -215,7 +218,7 @@ def _coerce_allowed_channel_values(raw: Any) -> List[str]:
     out: List[str] = []
     seen = set()
     for value in values:
-        token = _coerce_channel_token(value)
+        token = _coerce_reply_channel_token(value)
         if not token or token in seen:
             continue
         seen.add(token)
@@ -253,7 +256,7 @@ def _channel_option_rows(*, channels_payload: Any, selected_values: Optional[Lis
     for row in channels:
         if not isinstance(row, dict):
             continue
-        value = _coerce_channel_token(row.get("index"))
+        value = _coerce_reply_channel_token(row.get("index"))
         if not value:
             continue
         name = str(row.get("name") or f"Channel {value}").strip()
@@ -286,9 +289,9 @@ def webui_settings_fields(
     current = current_settings if isinstance(current_settings, dict) else {}
 
     selected_allowed = _coerce_allowed_channel_values(current.get("allowed_channels"))
-    selected_default = _coerce_channel_token(
-        current.get("default_reply_channel", DEFAULT_DEFAULT_CHANNEL)
-    ) or str(DEFAULT_DEFAULT_CHANNEL)
+    legacy_default = _coerce_reply_channel_token(current.get("default_reply_channel"))
+    if not selected_allowed and legacy_default:
+        selected_allowed = [legacy_default]
 
     fetch_error = ""
     channel_options: List[Dict[str, str]] = []
@@ -296,11 +299,11 @@ def webui_settings_fields(
         bridge_client = _bridge_client_from_settings(current)
         channel_options = _channel_option_rows(
             channels_payload=bridge_client.get_channels(),
-            selected_values=[*selected_allowed, selected_default],
+            selected_values=selected_allowed,
         )
     except Exception as exc:
         fetch_error = str(exc).strip()
-        channel_options = _channel_option_rows(channels_payload=[], selected_values=[*selected_allowed, selected_default])
+        channel_options = _channel_option_rows(channels_payload=[], selected_values=selected_allowed)
 
     out: List[Dict[str, Any]] = []
     for item in base_fields:
@@ -310,23 +313,13 @@ def webui_settings_fields(
 
         key = str(item.get("key") or "").strip()
         updated = dict(item)
-        if key == "default_reply_channel":
-            updated["type"] = "select"
-            updated["options"] = channel_options
-            updated["value"] = selected_default
-            updated["default"] = str(DEFAULT_DEFAULT_CHANNEL)
-            base_desc = str(updated.get("description") or "").strip()
-            extra = "Choose from channels discovered on the bridge."
-            if fetch_error:
-                extra = f"{extra} Bridge lookup failed: {fetch_error}"
-            updated["description"] = f"{base_desc} {extra}".strip()
-        elif key == "allowed_channels":
+        if key == "allowed_channels":
             updated["type"] = "multiselect"
             updated["options"] = channel_options
             updated["value"] = selected_allowed
             updated["default"] = []
             base_desc = str(updated.get("description") or "").strip()
-            extra = "Leave empty to allow every channel, or pick only the encrypted channel(s) you want."
+            extra = "Pick one or more reply channels above 0. If nothing is selected, Tater will not answer on mesh channels."
             if fetch_error:
                 extra = f"{extra} Bridge lookup failed: {fetch_error}"
             updated["description"] = f"{base_desc} {extra}".strip()
@@ -337,12 +330,9 @@ def webui_settings_fields(
 
 def webui_prepare_settings_values(*, values: Any, **_kwargs) -> Dict[str, Any]:
     out = dict(values or {})
-    if "default_reply_channel" in out:
-        normalized_default = _coerce_channel_token(out.get("default_reply_channel"))
-        if normalized_default:
-            out["default_reply_channel"] = normalized_default
     if "allowed_channels" in out:
         out["allowed_channels"] = ",".join(_coerce_allowed_channel_values(out.get("allowed_channels")))
+    out["default_reply_channel"] = ""
     return out
 
 
@@ -606,27 +596,60 @@ def _sanitize_request_text(text: str) -> str:
     return output or str(text or "").strip()
 
 
-def _allowed_channels() -> Optional[set[int]]:
+def _allowed_channels() -> set[int]:
     raw = _get_str_setting("allowed_channels", "")
-    if not raw:
-        return None
     allowed: set[int] = set()
-    for token in raw.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            allowed.add(int(token))
-        except Exception:
-            logger.warning("[Meshtastic] Ignoring invalid allowed channel token: %s", token)
-    return allowed or None
+    if raw:
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                allowed.add(int(token))
+            except Exception:
+                logger.warning("[Meshtastic] Ignoring invalid allowed channel token: %s", token)
+        return allowed
+
+    legacy_default = _get_int_setting("default_reply_channel", 0)
+    if int(legacy_default) > 0:
+        return {int(legacy_default)}
+    return set()
 
 
 def _channel_allowed(channel: int) -> bool:
+    if int(channel) <= 0:
+        return False
     allowed = _allowed_channels()
-    if not allowed:
-        return True
     return int(channel) in allowed
+
+
+def _normalize_channel_value(raw: Any) -> Optional[int]:
+    if raw in (None, ""):
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except Exception:
+        return None
+
+
+def _message_channel(message: Dict[str, Any]) -> int:
+    normalized = _normalize_channel_value((message or {}).get("channel"))
+    if normalized is not None:
+        return int(normalized)
+    return _primary_allowed_channel()
+
+
+def _coalesce_channel_value(*raw_values: Any) -> int:
+    for raw in raw_values:
+        normalized = _normalize_channel_value(raw)
+        if normalized is not None and int(normalized) > 0:
+            return int(normalized)
+    return _primary_allowed_channel()
+
+
+def _primary_allowed_channel() -> int:
+    allowed = sorted(_allowed_channels())
+    return int(allowed[0]) if allowed else 0
 
 
 def _is_direct_message(message: Dict[str, Any]) -> bool:
@@ -638,7 +661,7 @@ def _is_direct_message(message: Dict[str, Any]) -> bool:
 
 
 def _should_respond_to_message(message: Dict[str, Any]) -> bool:
-    channel = int(message.get("channel") or _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL))
+    channel = _message_channel(message)
     if not _channel_allowed(channel):
         return False
 
@@ -666,13 +689,13 @@ def _session_key_for_message(message: Dict[str, Any]) -> str:
     session_mode = _get_str_setting("session_mode", "node_channel").lower()
     if session_mode == "node":
         return node_id
-    channel = int(message.get("channel") or _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL))
+    channel = _message_channel(message)
     return f"{node_id}:ch{channel}"
 
 
 def _mesh_origin_for_message(message: Dict[str, Any]) -> Dict[str, Any]:
     sender = message.get("from") or {}
-    channel = int(message.get("channel") or _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL))
+    channel = _message_channel(message)
     request_id = str(message.get("event_id") or message.get("message_id") or time.time())
     origin = {
         "platform": "meshtastic",
@@ -775,6 +798,12 @@ class MeshtasticPortalRuntime:
             self.last_event_id = 0
 
     async def _send_chunks(self, *, text: str, channel: int, destination: str) -> None:
+        if int(channel) <= 0:
+            logger.info("[Meshtastic] Skipping outbound reply on blocked channel %s", channel)
+            return
+        if not _channel_allowed(channel):
+            logger.info("[Meshtastic] Skipping outbound reply on unallowed channel %s", channel)
+            return
         for chunk in _shape_outbound_reply(text):
             await asyncio.to_thread(
                 self.bridge.send_message,
@@ -784,7 +813,9 @@ class MeshtasticPortalRuntime:
             )
 
     def _reply_route_for_message(self, message: Dict[str, Any]) -> Optional[Tuple[int, str]]:
-        channel = int(message.get("channel") or _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL))
+        channel = _message_channel(message)
+        if not _channel_allowed(channel):
+            return None
         sender = str(((message.get("from") or {}).get("node_id")) or "").strip()
 
         if _is_direct_message(message) and _get_bool_setting("allow_direct_messages", True) and sender:
@@ -921,10 +952,10 @@ class MeshtasticPortalRuntime:
                 str(targets.get("node_id") or targets.get("destination") or targets.get("to") or "broadcast").strip()
                 or "broadcast"
             )
-            try:
-                channel = int(targets.get("channel") or targets.get("channel_index") or _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL))
-            except Exception:
-                channel = _get_int_setting("default_reply_channel", DEFAULT_DEFAULT_CHANNEL)
+            channel = _coalesce_channel_value(
+                targets.get("channel"),
+                targets.get("channel_index"),
+            )
 
             title = str(item.get("title") or "").strip()
             message = str(item.get("message") or "").strip()

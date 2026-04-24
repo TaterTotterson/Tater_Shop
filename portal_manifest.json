@@ -89,11 +89,11 @@
       "id": "meshtastic",
       "name": "Meshtastic",
       "module_key": "meshtastic_portal",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "min_tater_version": "59",
       "description": "Meshtastic integration portal for Tater.",
       "settings_category": "Meshtastic Settings",
-      "required_settings_count": 16,
+      "required_settings_count": 15,
       "autostart_key": "meshtastic_portal_running",
       "tags": [
         "radio",
@@ -101,7 +101,7 @@
         "offgrid"
       ],
       "entry": "portals/meshtastic_portal.py",
-      "sha256": "31b6b298c7b2b87aaf30613392569e4834dcce3074a4f3b4d087fb0d12886bf5"
+      "sha256": "9a9a1b5035503a59a6f87d0e08d8f67bd7080a6846921414b218ceb267b61186"
     },
     {
       "id": "moltbook",
