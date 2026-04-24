@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -34,6 +34,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_OUTBOUND_LENGTH = 160
 DEFAULT_MAX_CHUNKS = 3
+BRIDGE_LOG_REMINDER_SECONDS = 300.0
 DEFAULT_SESSION_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_GLOBAL_MAX_STORE = 20
 DEFAULT_GLOBAL_MAX_LLM = 8
@@ -783,6 +784,73 @@ class MeshtasticPortalRuntime:
         )
         self.llm_client = get_llm_client_from_env()
         self.last_event_id = 0
+        self._bridge_error_active = False
+        self._bridge_error_message = ""
+        self._bridge_error_logged_at = 0.0
+        self._bridge_error_suppressed = 0
+
+    def _summarize_bridge_error(self, exc: Exception) -> str:
+        if isinstance(exc, requests.exceptions.Timeout):
+            return "request timed out"
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return "connection refused or host unreachable"
+        if isinstance(exc, requests.exceptions.HTTPError):
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if status:
+                return f"http {status}"
+        message = str(exc).strip()
+        if not message:
+            return exc.__class__.__name__
+        return message.splitlines()[0][:220]
+
+    def _note_bridge_failure(self, *, context: str, exc: Exception) -> None:
+        summary = self._summarize_bridge_error(exc)
+        now = time.time()
+        should_log = (
+            not self._bridge_error_active
+            or summary != self._bridge_error_message
+            or (now - self._bridge_error_logged_at) >= BRIDGE_LOG_REMINDER_SECONDS
+        )
+        if should_log:
+            if self._bridge_error_active and self._bridge_error_suppressed > 0:
+                logger.warning(
+                    "[Meshtastic] Bridge unavailable during %s at %s: %s (%d similar failures suppressed)",
+                    context,
+                    self.bridge.base_url.rstrip("/"),
+                    summary,
+                    self._bridge_error_suppressed,
+                )
+            else:
+                logger.warning(
+                    "[Meshtastic] Bridge unavailable during %s at %s: %s",
+                    context,
+                    self.bridge.base_url.rstrip("/"),
+                    summary,
+                )
+            self._bridge_error_logged_at = now
+            self._bridge_error_suppressed = 0
+        else:
+            self._bridge_error_suppressed += 1
+        self._bridge_error_active = True
+        self._bridge_error_message = summary
+
+    def _note_bridge_recovered(self, *, context: str) -> None:
+        if not self._bridge_error_active:
+            return
+        suffix = ""
+        if self._bridge_error_suppressed > 0:
+            suffix = f" after {self._bridge_error_suppressed} suppressed failures"
+        logger.info(
+            "[Meshtastic] Bridge reachable again during %s at %s%s",
+            context,
+            self.bridge.base_url.rstrip("/"),
+            suffix,
+        )
+        self._bridge_error_active = False
+        self._bridge_error_message = ""
+        self._bridge_error_logged_at = 0.0
+        self._bridge_error_suppressed = 0
 
     async def _prime_cursor(self) -> None:
         if _get_str_setting("resume_mode", "from_now").lower() != "from_now":
@@ -790,8 +858,9 @@ class MeshtasticPortalRuntime:
         try:
             status = await asyncio.to_thread(self.bridge.get_status)
         except Exception as exc:
-            logger.warning("[Meshtastic] Unable to prime cursor from bridge status: %s", exc)
+            self._note_bridge_failure(context="startup cursor prime", exc=exc)
             return
+        self._note_bridge_recovered(context="startup cursor prime")
         try:
             self.last_event_id = int(status.get("latest_event_id") or 0)
         except Exception:
@@ -902,6 +971,7 @@ class MeshtasticPortalRuntime:
                     since_id=self.last_event_id,
                     limit=50,
                 )
+                self._note_bridge_recovered(context="message poll")
                 messages = payload.get("messages") or []
                 for message in messages:
                     if not isinstance(message, dict):
@@ -919,7 +989,7 @@ class MeshtasticPortalRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("[Meshtastic] Bridge poll failed: %s", exc)
+                self._note_bridge_failure(context="message poll", exc=exc)
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2.0)
                 continue
