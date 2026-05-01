@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 
 logger = logging.getLogger("rss")
@@ -1109,8 +1109,6 @@ class RSSManager:
                             continue
 
                         feed_title = parsed_feed.feed.get("title", feed_url)
-                        new_last_ts = last_ts
-
                         def get_entry_ts(entry) -> float:
                             if "published_parsed" in entry and entry.published_parsed:
                                 return time.mktime(entry.published_parsed)
@@ -1123,33 +1121,28 @@ class RSSManager:
                             key=get_entry_ts,
                         )
 
-                        # If this feed has no known last_ts, only post the latest item once.
-                        if last_ts <= 0:
-                            latest_entry = None
-                            latest_ts = 0.0
-                            for entry in sorted_entries:
-                                ts = get_entry_ts(entry)
-                                if ts <= 0:
-                                    continue
-                                if ts > latest_ts:
-                                    latest_ts = ts
-                                    latest_entry = entry
-                            if latest_entry is not None and latest_ts > 0:
-                                await self.process_entry(feed_title, latest_entry, feed_platforms)
-                                update_feed(self.redis, feed_url, {"last_ts": latest_ts})
-                            continue
-
+                        new_entries = []
                         for entry in sorted_entries:
-                            if stop_event and stop_event.is_set():
-                                break
                             ts = get_entry_ts(entry)
                             if ts <= 0:
                                 continue
                             if ts > last_ts:
-                                await self.process_entry(feed_title, entry, feed_platforms)
-                                if ts > new_last_ts:
-                                    new_last_ts = ts
-                                    update_feed(self.redis, feed_url, {"last_ts": new_last_ts})
+                                new_entries.append((ts, entry))
+
+                        if not new_entries:
+                            continue
+
+                        latest_ts, latest_entry = max(new_entries, key=lambda row: row[0])
+                        if len(new_entries) > 1:
+                            logger.info(
+                                "[RSS] Feed %s has %d unseen entries; posting newest only and advancing last_ts.",
+                                feed_url,
+                                len(new_entries),
+                            )
+                        if stop_event and stop_event.is_set():
+                            break
+                        await self.process_entry(feed_title, latest_entry, feed_platforms)
+                        update_feed(self.redis, feed_url, {"last_ts": latest_ts})
                     except Exception as e:
                         logger.error(f"Error processing feed {feed_url}: {e}")
 

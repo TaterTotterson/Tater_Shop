@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -99,7 +99,7 @@ PORTAL_SETTINGS = {
             "label": "Allowed Channels",
             "type": "string",
             "default": "",
-            "description": "Choose one or more mesh channels above 0 that Tater is allowed to answer on. Channel 0 is never allowed for assistant replies.",
+            "description": "Choose one or more mesh channels that Tater is allowed to answer on, including channel 0 if you want to allow it.",
         },
         "allow_direct_messages": {
             "label": "Allow Direct Messages",
@@ -203,7 +203,7 @@ def _coerce_reply_channel_token(value: Any) -> str:
     if not token:
         return ""
     try:
-        return token if int(token) > 0 else ""
+        return token if int(token) >= 0 else ""
     except Exception:
         return ""
 
@@ -290,8 +290,8 @@ def webui_settings_fields(
     current = current_settings if isinstance(current_settings, dict) else {}
 
     selected_allowed = _coerce_allowed_channel_values(current.get("allowed_channels"))
-    legacy_default = _coerce_reply_channel_token(current.get("default_reply_channel"))
-    if not selected_allowed and legacy_default:
+    legacy_default = _coerce_channel_token(current.get("default_reply_channel"))
+    if not selected_allowed and legacy_default and int(legacy_default) > 0:
         selected_allowed = [legacy_default]
 
     fetch_error = ""
@@ -320,7 +320,7 @@ def webui_settings_fields(
             updated["value"] = selected_allowed
             updated["default"] = []
             base_desc = str(updated.get("description") or "").strip()
-            extra = "Pick one or more reply channels above 0. If nothing is selected, Tater will not answer on mesh channels."
+            extra = "Pick one or more reply channels. If nothing is selected, Tater will not answer on mesh channels."
             if fetch_error:
                 extra = f"{extra} Bridge lookup failed: {fetch_error}"
             updated["description"] = f"{base_desc} {extra}".strip()
@@ -606,9 +606,14 @@ def _allowed_channels() -> set[int]:
             if not token:
                 continue
             try:
-                allowed.add(int(token))
+                parsed = int(token)
             except Exception:
                 logger.warning("[Meshtastic] Ignoring invalid allowed channel token: %s", token)
+                continue
+            if parsed < 0:
+                logger.warning("[Meshtastic] Ignoring negative allowed channel token: %s", token)
+                continue
+            allowed.add(parsed)
         return allowed
 
     legacy_default = _get_int_setting("default_reply_channel", 0)
@@ -618,8 +623,6 @@ def _allowed_channels() -> set[int]:
 
 
 def _channel_allowed(channel: int) -> bool:
-    if int(channel) <= 0:
-        return False
     allowed = _allowed_channels()
     return int(channel) in allowed
 
@@ -643,7 +646,7 @@ def _message_channel(message: Dict[str, Any]) -> int:
 def _coalesce_channel_value(*raw_values: Any) -> int:
     for raw in raw_values:
         normalized = _normalize_channel_value(raw)
-        if normalized is not None and int(normalized) > 0:
+        if normalized is not None and int(normalized) >= 0:
             return int(normalized)
     return _primary_allowed_channel()
 
@@ -867,8 +870,8 @@ class MeshtasticPortalRuntime:
             self.last_event_id = 0
 
     async def _send_chunks(self, *, text: str, channel: int, destination: str) -> None:
-        if int(channel) <= 0:
-            logger.info("[Meshtastic] Skipping outbound reply on blocked channel %s", channel)
+        if int(channel) < 0:
+            logger.info("[Meshtastic] Skipping outbound reply on invalid channel %s", channel)
             return
         if not _channel_allowed(channel):
             logger.info("[Meshtastic] Skipping outbound reply on unallowed channel %s", channel)
