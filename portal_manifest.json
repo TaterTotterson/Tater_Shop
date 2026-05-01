@@ -89,7 +89,7 @@
       "id": "meshtastic",
       "name": "Meshtastic",
       "module_key": "meshtastic_portal",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "min_tater_version": "59",
       "description": "Meshtastic integration portal for Tater.",
       "settings_category": "Meshtastic Settings",
@@ -101,7 +101,7 @@
         "offgrid"
       ],
       "entry": "portals/meshtastic_portal.py",
-      "sha256": "d12a382ac2efff1d466908ec4cb7a5912874d694c87b5fac60019870ccf09c10"
+      "sha256": "c40070af84c31ce1da71d2c93e864cec5dd2f305cbe8d428e192497260daf7f3"
     },
     {
       "id": "moltbook",

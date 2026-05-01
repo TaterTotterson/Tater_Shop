@@ -18,7 +18,7 @@ from helpers import get_llm_client_from_env, redis_client
 from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -1041,6 +1041,18 @@ class MeshtasticPortalRuntime:
             except Exception:
                 logger.exception("[Meshtastic notifyq] failed to send queued message")
 
+    async def _close_llm_client(self) -> None:
+        close_fn = getattr(self.llm_client, "aclose", None)
+        if not callable(close_fn):
+            return
+        try:
+            await close_fn()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
+        except Exception:
+            logger.debug("[Meshtastic] LLM client cleanup failed", exc_info=True)
+
     async def run(self, stop_event: Optional[threading.Event]) -> None:
         await self._prime_cursor()
         notify_task = asyncio.create_task(self._notify_queue_worker(stop_event))
@@ -1058,6 +1070,7 @@ class MeshtasticPortalRuntime:
                 if task and not task.done():
                     task.cancel()
             await asyncio.gather(notify_task, poll_task, return_exceptions=True)
+            await self._close_llm_client()
             logger.info("[Meshtastic] Portal stopped")
 
 
