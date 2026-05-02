@@ -4,7 +4,7 @@
     {
       "id": "aladdin_connect",
       "name": "Aladdin Connect",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Control Aladdin Connect garage doors.",
       "portals": [
@@ -29,7 +29,7 @@
         "garage-door"
       ],
       "entry": "verba/aladdin_connect.py",
-      "sha256": "cb5bcbc81df9a406f452c90d7af7774c333575bd2a75a44a083c586f98e9c8cf"
+      "sha256": "3d401ed96fa1efaf9fc659d8547fe31d2f4e338624d08362ce05cd8d4b22fc75"
     },
     {
       "id": "automatic_plugin",

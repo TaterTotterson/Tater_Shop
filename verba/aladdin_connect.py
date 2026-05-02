@@ -1,21 +1,12 @@
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import requests
-
 from integrations.aladdin import (
     ALADDIN_DEFAULT_API_BASE_URL,
-    ALADDIN_DEFAULT_APP_VERSION,
-    ALADDIN_DEFAULT_CLIENT_ID,
-    ALADDIN_DEFAULT_CLIENT_SECRET,
-    ALADDIN_DEFAULT_COGNITO_REGION,
-    ALADDIN_DEFAULT_TIMEOUT_SECONDS,
+    AladdinConnectClient,
     normalize_aladdin_api_base,
     read_aladdin_settings,
 )
@@ -32,193 +23,33 @@ def _coerce_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _as_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
-    try:
-        number = int(float(str(value).strip()))
-    except Exception:
-        number = int(default)
-    return max(int(minimum), min(int(maximum), number))
-
-
-class AladdinClient:
-    DOOR_STATUS = {
-        0: "unknown",
-        1: "open",
-        2: "opening",
-        3: "unknown",
-        4: "closed",
-        5: "closing",
-        6: "unknown",
-        7: "unknown",
-    }
-    DOOR_LINK_STATUS = {
-        0: "Unknown",
-        1: "NotConfigured",
-        2: "Paired",
-        3: "Connected",
-    }
-
-    def __init__(self):
-        settings = read_aladdin_settings()
-        self.email = _coerce_text(settings.get("ALADDIN_EMAIL"))
-        self.password = _coerce_text(settings.get("ALADDIN_PASSWORD"))
-        self.api_base_url = normalize_aladdin_api_base(settings.get("ALADDIN_API_BASE_URL") or ALADDIN_DEFAULT_API_BASE_URL)
-        self.cognito_region = _coerce_text(settings.get("ALADDIN_COGNITO_REGION")) or ALADDIN_DEFAULT_COGNITO_REGION
-        self.client_id = _coerce_text(settings.get("ALADDIN_CLIENT_ID")) or ALADDIN_DEFAULT_CLIENT_ID
-        self.client_secret = _coerce_text(settings.get("ALADDIN_CLIENT_SECRET")) or ALADDIN_DEFAULT_CLIENT_SECRET
-        self.app_version = _coerce_text(settings.get("ALADDIN_APP_VERSION")) or ALADDIN_DEFAULT_APP_VERSION
-        self.timeout = _as_int(
-            settings.get("ALADDIN_TIMEOUT_SECONDS"),
-            ALADDIN_DEFAULT_TIMEOUT_SECONDS,
-            minimum=5,
-            maximum=120,
-        )
-        self.session = requests.Session()
-        self.access_token = ""
-        if not self.email or not self.password:
-            raise ValueError("Aladdin Connect email and password are missing in Tater Settings > Integrations.")
-
-    def _secret_hash(self) -> str:
-        message = f"{self.email}{self.client_id}".encode("utf-8")
-        digest = hmac.new(self.client_secret.encode("utf-8"), msg=message, digestmod=hashlib.sha256).digest()
-        return base64.b64encode(digest).decode("utf-8")
-
-    def _headers(self, *, json_body: bool = False) -> Dict[str, str]:
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "User-Agent": "okhttp/4.10.0",
-            "app_version": self.app_version,
-            "Content-Type": "application/json" if json_body else "application/x-www-form-urlencoded",
-        }
-        return headers
-
-    def login(self) -> bool:
-        url = f"https://cognito-idp.{self.cognito_region}.amazonaws.com/"
-        payload = {
-            "AuthFlow": "USER_PASSWORD_AUTH",
-            "AuthParameters": {
-                "SECRET_HASH": self._secret_hash(),
-                "USERNAME": self.email,
-                "PASSWORD": self.password,
-            },
-            "ClientId": self.client_id,
-        }
-        headers = {
-            "Content-Type": "application/x-amz-json-1.1",
-            "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
-        }
-        response = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
-        if response.status_code >= 400:
-            raise RuntimeError(self._error_message(response, "Aladdin Connect login failed"))
-        data = response.json()
-        auth = data.get("AuthenticationResult") if isinstance(data, dict) else {}
-        token = _coerce_text((auth or {}).get("AccessToken"))
-        if not token:
-            raise RuntimeError("Aladdin Connect login failed: no access token returned.")
-        self.access_token = token
-        return True
-
-    def _error_message(self, response: requests.Response, prefix: str) -> str:
-        detail = _coerce_text(response.text)
-        try:
-            payload = response.json()
-            if isinstance(payload, dict):
-                detail = _coerce_text(payload.get("message") or payload.get("error") or payload.get("__type") or detail)
-        except Exception:
-            pass
-        return f"{prefix}: HTTP {response.status_code}{(': ' + detail) if detail else ''}"
-
-    def _request(self, method: str, path: str, *, json_body: Optional[dict] = None) -> Any:
-        if not self.access_token:
-            self.login()
-        url = f"{self.api_base_url}{path}"
-        response = self.session.request(
-            method,
-            url,
-            headers=self._headers(json_body=json_body is not None),
-            json=json_body,
-            timeout=self.timeout,
-        )
-        if response.status_code in {401, 403}:
-            self.login()
-            response = self.session.request(
-                method,
-                url,
-                headers=self._headers(json_body=json_body is not None),
-                json=json_body,
-                timeout=self.timeout,
-            )
-        if response.status_code >= 400:
-            raise RuntimeError(self._error_message(response, f"Aladdin Connect API call failed for {path}"))
-        if not _coerce_text(response.text):
-            return None
-        try:
-            return response.json()
-        except Exception:
-            return response.text
-
-    def list_doors(self) -> List[dict]:
-        data = self._request("GET", "/devices")
-        rows: List[dict] = []
-        for device in (data or {}).get("devices", []) if isinstance(data, dict) else []:
-            if not isinstance(device, dict):
-                continue
-            device_id = device.get("id")
-            serial = _coerce_text(device.get("serial_number") or device.get("serial"))
-            for door in device.get("doors", []) if isinstance(device.get("doors"), list) else []:
-                if not isinstance(door, dict):
-                    continue
-                status_code = door.get("status", 0)
-                link_code = door.get("link_status", 0)
-                rows.append(
-                    {
-                        "device_id": device_id,
-                        "door_number": door.get("door_index"),
-                        "name": _coerce_text(door.get("name")) or f"Garage Door {door.get('door_index')}",
-                        "status": self.DOOR_STATUS.get(status_code, "unknown"),
-                        "status_code": status_code,
-                        "link_status": self.DOOR_LINK_STATUS.get(link_code, "Unknown"),
-                        "link_status_code": link_code,
-                        "battery_level": door.get("battery_level", 0),
-                        "rssi": device.get("rssi", 0),
-                        "serial": serial,
-                        "vendor": _coerce_text(device.get("vendor")),
-                        "model": _coerce_text(device.get("model")),
-                        "ble_strength": door.get("ble_strength", 0),
-                    }
-                )
-        return rows
-
-    def command_door(self, device_id: Any, door_number: Any, action: str) -> bool:
-        normalized = _coerce_text(action).lower()
-        if normalized not in {"open", "close"}:
-            raise ValueError(f"Unsupported Aladdin Connect door action: {action}")
-        command = "OPEN_DOOR" if normalized == "open" else "CLOSE_DOOR"
-        try:
-            self._request("POST", f"/command/devices/{device_id}/doors/{door_number}", json_body={"command": command})
-        except RuntimeError as exc:
-            text = str(exc).lower()
-            if f"already {normalized}" in text:
-                return True
-            raise
-        return True
-
-
 class AladdinConnectPlugin(ToolVerba):
     name = "aladdin_connect"
     verba_name = "Aladdin Connect"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Aladdin Connect"
     settings_category = "Aladdin Connect"
-    platforms = ["voice_core", "homeassistant", "webui", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc", "meshtastic"]
+    platforms = [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic",
+    ]
     tags = ["aladdin", "genie", "garage", "garage-door"]
     routing_keywords = ["aladdin", "aladdin connect", "genie", "garage door", "garage"]
     forced_route = "garage_door"
     forced_domain_hint = "aladdin connect garage door"
 
     usage = '{"function":"aladdin_connect","arguments":{"query":"is the garage door closed?"}}'
-    description = "Control Aladdin Connect garage doors and read open/closed status."
+    description = "Control Aladdin Connect garage doors directly with the Aladdin Connect cloud API."
     verba_dec = "Control Aladdin Connect garage doors."
     when_to_use = "Use for Aladdin Connect or Genie garage door status checks, open commands, and close commands."
     how_to_use = "Pass a natural-language garage door request with an action and optional door name."
@@ -274,19 +105,19 @@ class AladdinConnectPlugin(ToolVerba):
 
     def _diagnosis(self) -> dict:
         settings = read_aladdin_settings()
-        email = _coerce_text(settings.get("ALADDIN_EMAIL"))
+        username = _coerce_text(settings.get("ALADDIN_USERNAME"))
         password = _coerce_text(settings.get("ALADDIN_PASSWORD"))
         api_base = normalize_aladdin_api_base(settings.get("ALADDIN_API_BASE_URL") or ALADDIN_DEFAULT_API_BASE_URL)
         parsed = urlparse(api_base)
         return {
-            "aladdin_email": "set" if "@" in email else "missing",
-            "aladdin_password": "set" if len(password) >= 1 else "missing",
+            "aladdin_username": "set" if username else "missing",
+            "aladdin_password": "set" if password else "missing",
             "aladdin_api_base_url": "set" if parsed.scheme in {"http", "https"} and bool(parsed.netloc) else "invalid",
         }
 
-    def _get_client(self) -> Optional[AladdinClient]:
+    def _get_client(self) -> Optional[AladdinConnectClient]:
         try:
-            return AladdinClient()
+            return AladdinConnectClient()
         except Exception as exc:
             logger.error("[%s] Failed to initialize Aladdin client: %s", self.name, exc)
             return None
@@ -310,8 +141,12 @@ class AladdinConnectPlugin(ToolVerba):
             or " what " in text
             or " whether " in text
         )
-        command_open = bool(re.search(r"\b(open|raise|lift)\b", text)) and not bool(re.search(r"\b(is|are|status|state|check|whether)\b.*\bopen\b", text))
-        command_close = bool(re.search(r"\b(close|shut|lower)\b", text)) and not bool(re.search(r"\b(is|are|status|state|check|whether)\b.*\bclosed?\b", text))
+        command_open = bool(re.search(r"\b(open|raise|lift)\b", text)) and not bool(
+            re.search(r"\b(is|are|status|state|check|whether)\b.*\bopen\b", text)
+        )
+        command_close = bool(re.search(r"\b(close|shut|lower)\b", text)) and not bool(
+            re.search(r"\b(is|are|status|state|check|whether)\b.*\bclosed?\b", text)
+        )
         if command_close:
             return "close"
         if command_open:
@@ -326,15 +161,16 @@ class AladdinConnectPlugin(ToolVerba):
             return target
         text = self._coerce_text(query).lower()
         text = re.sub(r"\b(aladdin|connect|genie|garage|door|doors|please|can you|would you|the|my|a|an)\b", " ", text)
-        text = re.sub(r"\b(open|close|closed|shut|lower|raise|lift|status|state|check|is|are|what|whether|currently|right now)\b", " ", text)
+        text = re.sub(
+            r"\b(open|close|closed|shut|lower|raise|lift|status|state|check|is|are|what|whether|currently|right now)\b",
+            " ",
+            text,
+        )
         return " ".join(re.findall(r"[a-z0-9]+", text))
-
-    def _door_key(self, door: dict) -> Tuple[str, str]:
-        return (str(door.get("device_id")), str(door.get("door_number")))
 
     def _find_door(self, doors: List[dict], args: dict, query: str) -> Tuple[Optional[dict], List[str]]:
         device_id = self._coerce_text(args.get("device_id"))
-        door_number = self._coerce_text(args.get("door_number"))
+        door_number = self._coerce_text(args.get("door_number") or args.get("door_index"))
         if device_id and door_number:
             for door in doors:
                 if self._coerce_text(door.get("device_id")) == device_id and self._coerce_text(door.get("door_number")) == door_number:
@@ -397,9 +233,7 @@ class AladdinConnectPlugin(ToolVerba):
                 code="aladdin_not_configured",
                 message="Aladdin Connect is not configured.",
                 diagnosis=self._diagnosis(),
-                needs=[
-                    "Set Aladdin Connect email and password in Tater Settings > Integrations > Aladdin Connect.",
-                ],
+                needs=["Set Aladdin Connect username and password in Tater Settings > Integrations > Aladdin Connect."],
                 say_hint="Explain Aladdin Connect settings are missing and ask to configure them.",
             )
 
