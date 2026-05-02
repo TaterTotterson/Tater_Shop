@@ -8,12 +8,13 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from html import escape as html_escape
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and future sensor feeds."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -437,6 +438,185 @@ def _history_summary(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     return rows
 
 
+def _chart_time_label(snapshot: Dict[str, Any]) -> str:
+    ts = _as_float(snapshot.get("sample_time")) or _as_float(snapshot.get("received_at"))
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def _trend_points(history: List[Dict[str, Any]], key: str, *, samples: int = 72) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for item in reversed(history[: max(1, int(samples))]):
+        row = _reading(item, key)
+        if not row:
+            continue
+        value = _as_float(row.get("value"))
+        if value is None:
+            continue
+        unit = _text(row.get("unit"))
+        points.append(
+            {
+                "label": _chart_time_label(item),
+                "value": round(value, 3),
+                "display": _value_label(value, unit),
+            }
+        )
+    return points
+
+
+def _chart_color(token: str) -> str:
+    colors = {
+        "temperature": "#ef8a4c",
+        "humidity": "#5bd6c6",
+        "wind": "#79a7ff",
+        "rain": "#5aa9e6",
+        "lightning": "#f4d35e",
+        "solar": "#f6ae2d",
+    }
+    return colors.get(token, "#5bd6c6")
+
+
+def _line_chart_data_uri(title: str, points: List[Dict[str, Any]], *, unit: str = "", color: str = "#5bd6c6") -> str:
+    width = 800
+    height = 280
+    left = 58
+    right = 28
+    top = 36
+    bottom = 58
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    values = [_as_float(point.get("value")) for point in points]
+    values = [value for value in values if value is not None]
+
+    def label_value(value: float) -> str:
+        return _value_label(value, unit)
+
+    if not values:
+        svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="{width}" height="{height}" rx="16" fill="#101820"/>
+  <text x="{left}" y="52" fill="#edf3f0" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700">{html_escape(title)}</text>
+  <text x="{left}" y="142" fill="#8b9c9f" font-family="Inter, Arial, sans-serif" font-size="20">Waiting for trend data</text>
+</svg>
+""".strip()
+        return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+    min_v = min(values)
+    max_v = max(values)
+    if min_v == max_v:
+        min_v -= 1
+        max_v += 1
+    span = max(max_v - min_v, 0.000001)
+
+    def x_for(index: int) -> float:
+        if len(points) <= 1:
+            return left + plot_w / 2
+        return left + (index / (len(points) - 1)) * plot_w
+
+    def y_for(value: float) -> float:
+        return top + plot_h - ((value - min_v) / span) * plot_h
+
+    coords: List[Tuple[float, float]] = []
+    for index, point in enumerate(points):
+        value = _as_float(point.get("value"))
+        if value is None:
+            continue
+        coords.append((x_for(index), y_for(value)))
+
+    if not coords:
+        return _line_chart_data_uri(title, [], unit=unit, color=color)
+
+    path = " ".join(f"{'M' if index == 0 else 'L'} {x:.2f} {y:.2f}" for index, (x, y) in enumerate(coords))
+    first_x, _first_y = coords[0]
+    last_x, last_y = coords[-1]
+    area_path = f"{path} L {last_x:.2f} {top + plot_h:.2f} L {first_x:.2f} {top + plot_h:.2f} Z"
+    first_label = _text(points[0].get("label"))
+    last_label = _text(points[-1].get("label"))
+    latest_value = _as_float(points[-1].get("value")) or 0.0
+    latest_display = _text(points[-1].get("display")) or label_value(latest_value)
+    high_label = label_value(max(values))
+    low_label = label_value(min(values))
+    mid_y = top + plot_h / 2
+    grid_lines = "\n".join(
+        f'<line x1="{left}" y1="{y:.2f}" x2="{left + plot_w}" y2="{y:.2f}" stroke="#26323d" stroke-width="1"/>'
+        for y in (top, mid_y, top + plot_h)
+    )
+    dots = "\n".join(
+        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.2" fill="{html_escape(color)}" opacity="0.78"/>'
+        for x, y in coords[-12:]
+    )
+
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <defs>
+    <linearGradient id="area" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="{html_escape(color)}" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="{html_escape(color)}" stop-opacity="0.02"/>
+    </linearGradient>
+  </defs>
+  <rect width="{width}" height="{height}" rx="16" fill="#101820"/>
+  <text x="{left}" y="30" fill="#edf3f0" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="700">{html_escape(title)}</text>
+  <text x="{width - right}" y="30" text-anchor="end" fill="#edf3f0" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">{html_escape(latest_display)}</text>
+  {grid_lines}
+  <path d="{html_escape(area_path)}" fill="url(#area)"/>
+  <path d="{html_escape(path)}" fill="none" stroke="{html_escape(color)}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  {dots}
+  <circle cx="{last_x:.2f}" cy="{last_y:.2f}" r="5.2" fill="#edf3f0" stroke="{html_escape(color)}" stroke-width="3"/>
+  <text x="{left}" y="{height - 28}" fill="#8b9c9f" font-family="Inter, Arial, sans-serif" font-size="16">{html_escape(first_label)}</text>
+  <text x="{width - right}" y="{height - 28}" text-anchor="end" fill="#8b9c9f" font-family="Inter, Arial, sans-serif" font-size="16">{html_escape(last_label)}</text>
+  <text x="{left}" y="{height - 8}" fill="#8b9c9f" font-family="Inter, Arial, sans-serif" font-size="15">Low {html_escape(low_label)}</text>
+  <text x="{width - right}" y="{height - 8}" text-anchor="end" fill="#8b9c9f" font-family="Inter, Arial, sans-serif" font-size="15">High {html_escape(high_label)}</text>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
+def _trend_image_field(
+    history: List[Dict[str, Any]],
+    key: str,
+    label: str,
+    description: str,
+    *,
+    color_token: str,
+    samples: int = 72,
+) -> Dict[str, Any]:
+    unit = ""
+    for item in history:
+        row = _reading(item, key)
+        if row:
+            unit = _text(row.get("unit"))
+            break
+    points = _trend_points(history, key, samples=samples)
+    return {
+        "key": f"chart_{_clean_key(key)}",
+        "label": label,
+        "type": "image",
+        "src": _line_chart_data_uri(label, points, unit=unit, color=_chart_color(color_token)),
+        "alt": label,
+        "caption": f"{len(points)} recent sample{'s' if len(points) != 1 else ''}",
+        "description": description,
+        "read_only": True,
+    }
+
+
+def _trend_card(*, card_id: str, title: str, detail: str, fields: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "id": card_id,
+        "group": "trend",
+        "title": title,
+        "subtitle": "Recent history",
+        "detail": detail,
+        "sections": [
+            {
+                "label": "Graphs",
+                "inline": True,
+                "fields": fields,
+            }
+        ],
+    }
+
+
 def _environment_manager_ui(snapshot: Dict[str, Any], history: List[Dict[str, Any]], client: Any = None) -> Dict[str, Any]:
     settings = _load_settings(client)
     grouped = _readings_by_category(snapshot)
@@ -513,6 +693,48 @@ def _environment_manager_ui(snapshot: Dict[str, Any], history: List[Dict[str, An
         },
     ]
 
+    item_forms.extend(
+        [
+            _trend_card(
+                card_id="trend:temperature",
+                title="Temperature Graphs",
+                detail="Outdoor and indoor temperature over recent Ecowitt uploads.",
+                fields=[
+                    _trend_image_field(history, "tempf", "Outdoor Temperature", "Recent outdoor temperature trend.", color_token="temperature"),
+                    _trend_image_field(history, "tempinf", "Indoor Temperature", "Recent indoor temperature trend.", color_token="temperature"),
+                ],
+            ),
+            _trend_card(
+                card_id="trend:wind",
+                title="Wind Graphs",
+                detail="Sustained wind, gusts, and daily maximum gust over recent uploads.",
+                fields=[
+                    _trend_image_field(history, "windspeedmph", "Wind Speed", "Recent sustained wind speed.", color_token="wind"),
+                    _trend_image_field(history, "windgustmph", "Wind Gust", "Recent wind gust readings.", color_token="wind"),
+                    _trend_image_field(history, "maxdailygust", "Max Daily Gust", "Daily maximum gust reported by Ecowitt.", color_token="wind"),
+                ],
+            ),
+            _trend_card(
+                card_id="trend:rain",
+                title="Rain Graphs",
+                detail="Rain rate and daily accumulation over recent uploads.",
+                fields=[
+                    _trend_image_field(history, "rainratein", "Rain Rate", "Recent rain rate trend.", color_token="rain"),
+                    _trend_image_field(history, "dailyrainin", "Rain Today", "Daily rain accumulation trend.", color_token="rain"),
+                ],
+            ),
+            _trend_card(
+                card_id="trend:lightning",
+                title="Lightning Graphs",
+                detail="Lightning strike count and distance when supported by the station.",
+                fields=[
+                    _trend_image_field(history, "lightning_num", "Lightning Strikes", "Recent reported lightning strike count.", color_token="lightning"),
+                    _trend_image_field(history, "lightning", "Lightning Distance", "Recent distance to lightning activity.", color_token="lightning"),
+                ],
+            ),
+        ]
+    )
+
     for category in ("temperature", "humidity", "pressure", "wind", "rain", "solar", "air", "lightning", "soil", "leak", "other"):
         rows = grouped.get(category) or []
         if not rows:
@@ -573,7 +795,7 @@ def _environment_manager_ui(snapshot: Dict[str, Any], history: List[Dict[str, An
             "id": "raw:history",
             "group": "raw",
             "title": "Recent History",
-            "subtitle": f"{len(history)} retained sample{'s' if len(history) != 1 else ''} shown",
+            "subtitle": f"{min(len(history), 8)} of {len(history)} loaded sample{'s' if len(history) != 1 else ''} shown",
             "detail": "Most recent samples are kept in Redis for quick trend checks.",
             "sensor_title": "Recent Samples",
             "sensor_rows": _history_summary(history),
@@ -588,6 +810,7 @@ def _environment_manager_ui(snapshot: Dict[str, Any], history: List[Dict[str, An
         "empty_message": "No environment telemetry has been received yet.",
         "manager_tabs": [
             {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
+            {"key": "trends", "label": "Graphs", "source": "items", "item_group": "trend"},
             {"key": "readings", "label": "Measurements", "source": "items", "item_group": "sensor", "selector": True},
             {"key": "batteries", "label": "Batteries", "source": "items", "item_group": "battery"},
             {"key": "raw", "label": "Raw", "source": "items", "item_group": "raw", "selector": True},
@@ -600,7 +823,7 @@ def _environment_manager_ui(snapshot: Dict[str, Any], history: List[Dict[str, An
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
     snapshot = _load_json_key(LATEST_KEY, client)
-    history = _load_history(limit=24, client=client)
+    history = _load_history(limit=96, client=client)
     settings = _load_settings(client)
     received_at = snapshot.get("received_at") if snapshot else 0
     stale_after_s = int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES) * 60
