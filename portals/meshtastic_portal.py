@@ -1,12 +1,14 @@
 """Meshtastic integration portal for Tater."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import threading
 import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -38,6 +40,10 @@ BRIDGE_LOG_REMINDER_SECONDS = 300.0
 DEFAULT_SESSION_TTL_SECONDS = 6 * 60 * 60
 DEFAULT_GLOBAL_MAX_STORE = 20
 DEFAULT_GLOBAL_MAX_LLM = 8
+DEFAULT_MAX_INBOUND_AGE_SECONDS = 5 * 60
+DEFAULT_PROCESSED_MESSAGE_TTL_SECONDS = 14 * 24 * 60 * 60
+CURSOR_KEY = "tater:meshtastic:last_event_id"
+PROCESSED_MESSAGE_KEY_PREFIX = "tater:meshtastic:processed:"
 NOTIFY_QUEUE_KEY = "notifyq:meshtastic"
 NOTIFY_POLL_INTERVAL = 0.5
 
@@ -146,6 +152,12 @@ PORTAL_SETTINGS = {
             "options": ["from_now", "from_last_seen"],
             "default": "from_now",
             "description": "Choose whether the portal ignores existing bridge backlog on startup.",
+        },
+        "max_message_age_sec": {
+            "label": "Max Message Age (sec)",
+            "type": "number",
+            "default": DEFAULT_MAX_INBOUND_AGE_SECONDS,
+            "description": "Messages older than this are treated as backlog and will not trigger replies. Set 0 to disable.",
         },
     },
 }
@@ -361,6 +373,81 @@ def _global_history_store_limit() -> int:
 
 def _global_history_llm_limit() -> int:
     return _read_global_history_limit("tater:max_llm", DEFAULT_GLOBAL_MAX_LLM, min_value=1)
+
+
+def _load_saved_cursor() -> int:
+    try:
+        raw = redis_client.get(CURSOR_KEY)
+        return max(0, int(str(raw).strip())) if raw is not None and str(raw).strip() else 0
+    except Exception:
+        logger.debug("[Meshtastic] Failed to load saved cursor", exc_info=True)
+        return 0
+
+
+def _save_cursor(value: int) -> None:
+    try:
+        redis_client.set(CURSOR_KEY, str(max(0, int(value))))
+    except Exception:
+        logger.debug("[Meshtastic] Failed to save cursor", exc_info=True)
+
+
+def _message_node_id(message: Dict[str, Any], side: str) -> str:
+    ref = message.get(side) or {}
+    return str(ref.get("node_id") or "").strip()
+
+
+def _message_fingerprint(message: Dict[str, Any]) -> str:
+    message_id = str(message.get("message_id") or "").strip()
+    from_id = _message_node_id(message, "from").lower()
+    to_id = _message_node_id(message, "to").lower()
+    channel = _coerce_channel_token(message.get("channel")) or "0"
+    if message_id:
+        return f"packet:{message_id}:{from_id}:{to_id}:ch{channel}"
+
+    event_id = str(message.get("event_id") or "").strip()
+    if event_id:
+        return f"event:{event_id}"
+
+    basis = {
+        "channel": channel,
+        "direction": str(message.get("direction") or "").strip().lower(),
+        "from": from_id,
+        "text": str(message.get("text") or "").strip(),
+        "to": to_id,
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return f"digest:{digest[:32]}"
+
+
+def _message_age_seconds(message: Dict[str, Any]) -> Optional[float]:
+    raw = str((message or {}).get("timestamp") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return time.time() - parsed.timestamp()
+    except Exception:
+        return None
+
+
+def _message_is_current(message: Dict[str, Any]) -> bool:
+    max_age = max(0, _get_int_setting("max_message_age_sec", DEFAULT_MAX_INBOUND_AGE_SECONDS))
+    if max_age <= 0:
+        return True
+    age = _message_age_seconds(message)
+    return age is None or age <= float(max_age)
+
+
+def _claim_message_for_response(message: Dict[str, Any]) -> bool:
+    key = f"{PROCESSED_MESSAGE_KEY_PREFIX}{_message_fingerprint(message)}"
+    ttl = max(60, DEFAULT_PROCESSED_MESSAGE_TTL_SECONDS)
+    try:
+        return bool(redis_client.set(key, "1", ex=ttl, nx=True))
+    except Exception:
+        logger.debug("[Meshtastic] Failed to claim message dedupe key", exc_info=True)
+        return True
 
 
 def _history_key(session_key: str) -> str:
@@ -719,6 +806,7 @@ def build_system_prompt() -> str:
         f"Keep the final answer under about {max_chars} ASCII characters whenever possible.\n"
         "Use plain ASCII text only. No markdown, no emoji, no tables, no long lists, and no code fences.\n"
         "Prefer one direct answer. If tools return too much information, summarize it for radio.\n"
+        "Answer only the current mesh message. Treat prior chat history as context, not as a request to answer again.\n"
         "Do not use IRC admin or moderation actions.\n"
     )
 
@@ -786,11 +874,45 @@ class MeshtasticPortalRuntime:
             timeout=max(2.0, _get_float_setting("request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SECONDS)),
         )
         self.llm_client = get_llm_client_from_env()
-        self.last_event_id = 0
+        self.last_event_id = _load_saved_cursor()
+        self.local_node_ids = {"^local", "local", "^me"}
+        self.local_node_num = 0
+        self._cursor_prime_pending = _get_str_setting("resume_mode", "from_now").lower() == "from_now"
         self._bridge_error_active = False
         self._bridge_error_message = ""
         self._bridge_error_logged_at = 0.0
         self._bridge_error_suppressed = 0
+
+    def _set_last_event_id(self, value: Any, *, force: bool = False) -> None:
+        try:
+            parsed = max(0, int(value or 0))
+        except Exception:
+            return
+        if force or parsed > self.last_event_id:
+            self.last_event_id = parsed
+            _save_cursor(self.last_event_id)
+
+    def _apply_status_snapshot(self, status: Dict[str, Any]) -> None:
+        local_node = status.get("local_node") if isinstance(status, dict) else {}
+        if not isinstance(local_node, dict):
+            local_node = {}
+        node_id = str(local_node.get("node_id") or "").strip()
+        if node_id:
+            self.local_node_ids.add(node_id.lower())
+        try:
+            self.local_node_num = int(local_node.get("num") or self.local_node_num or 0)
+        except Exception:
+            pass
+
+    def _is_local_echo_message(self, message: Dict[str, Any]) -> bool:
+        sender_id = _message_node_id(message, "from").lower()
+        if sender_id and sender_id in self.local_node_ids:
+            return True
+        try:
+            sender_num = int(((message.get("from") or {}).get("num")) or 0)
+        except Exception:
+            sender_num = 0
+        return bool(sender_num and self.local_node_num and sender_num == self.local_node_num)
 
     def _summarize_bridge_error(self, exc: Exception) -> str:
         if isinstance(exc, requests.exceptions.Timeout):
@@ -857,6 +979,7 @@ class MeshtasticPortalRuntime:
 
     async def _prime_cursor(self) -> None:
         if _get_str_setting("resume_mode", "from_now").lower() != "from_now":
+            self._cursor_prime_pending = False
             return
         try:
             status = await asyncio.to_thread(self.bridge.get_status)
@@ -864,10 +987,12 @@ class MeshtasticPortalRuntime:
             self._note_bridge_failure(context="startup cursor prime", exc=exc)
             return
         self._note_bridge_recovered(context="startup cursor prime")
+        self._apply_status_snapshot(status)
         try:
-            self.last_event_id = int(status.get("latest_event_id") or 0)
+            self._set_last_event_id(int(status.get("latest_event_id") or 0), force=True)
         except Exception:
-            self.last_event_id = 0
+            self._set_last_event_id(0, force=True)
+        self._cursor_prime_pending = False
 
     async def _send_chunks(self, *, text: str, channel: int, destination: str) -> None:
         if int(channel) < 0:
@@ -904,7 +1029,15 @@ class MeshtasticPortalRuntime:
         text = str(message.get("text") or "").strip()
         if not text:
             return
+        if self._is_local_echo_message(message):
+            return
+        if not _message_is_current(message):
+            logger.info("[Meshtastic] Skipping stale message %s", _message_fingerprint(message))
+            return
         if not _should_respond_to_message(message):
+            return
+        if not _claim_message_for_response(message):
+            logger.info("[Meshtastic] Skipping already-processed message %s", _message_fingerprint(message))
             return
 
         session_key = _session_key_for_message(message)
@@ -969,6 +1102,13 @@ class MeshtasticPortalRuntime:
         backoff = 1.0
         while not (stop_event and stop_event.is_set()):
             try:
+                if self._cursor_prime_pending:
+                    await self._prime_cursor()
+                    if self._cursor_prime_pending:
+                        await asyncio.sleep(backoff)
+                        backoff = min(30.0, backoff * 2.0)
+                        continue
+
                 payload = await asyncio.to_thread(
                     self.bridge.get_messages,
                     since_id=self.last_event_id,
@@ -976,18 +1116,28 @@ class MeshtasticPortalRuntime:
                 )
                 self._note_bridge_recovered(context="message poll")
                 messages = payload.get("messages") or []
+                latest_id = int(payload.get("latest_event_id") or self.last_event_id or 0)
+                if latest_id < self.last_event_id:
+                    logger.info(
+                        "[Meshtastic] Bridge event cursor reset from %s to %s",
+                        self.last_event_id,
+                        latest_id,
+                    )
+                    self._set_last_event_id(latest_id, force=True)
+                    backoff = 1.0
+                    await asyncio.sleep(max(0.25, _get_float_setting("poll_interval_sec", DEFAULT_POLL_INTERVAL_SECONDS)))
+                    continue
+
                 for message in messages:
                     if not isinstance(message, dict):
                         continue
                     event_id = int(message.get("event_id") or 0)
-                    if event_id > self.last_event_id:
-                        self.last_event_id = event_id
+                    self._set_last_event_id(event_id)
                     if str(message.get("direction") or "inbound").lower() != "inbound":
                         continue
                     await self._handle_inbound_message(message)
 
-                latest_id = int(payload.get("latest_event_id") or self.last_event_id or 0)
-                self.last_event_id = max(self.last_event_id, latest_id)
+                self._set_last_event_id(latest_id)
                 backoff = 1.0
             except asyncio.CancelledError:
                 raise

@@ -93,7 +93,7 @@
       "min_tater_version": "59",
       "description": "Meshtastic integration portal for Tater.",
       "settings_category": "Meshtastic Settings",
-      "required_settings_count": 15,
+      "required_settings_count": 16,
       "autostart_key": "meshtastic_portal_running",
       "tags": [
         "radio",
@@ -101,7 +101,7 @@
         "offgrid"
       ],
       "entry": "portals/meshtastic_portal.py",
-      "sha256": "c40070af84c31ce1da71d2c93e864cec5dd2f305cbe8d428e192497260daf7f3"
+      "sha256": "29ac288d0291f305dea4c1a162f900ee8f8bb746be3382ba104d6cd5235cd0fa"
     },
     {
       "id": "moltbook",
