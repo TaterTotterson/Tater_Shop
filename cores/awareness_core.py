@@ -28,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.2"
+__version__ = "3.3.3"
 
 load_dotenv()
 
@@ -182,6 +182,15 @@ _AWARENESS_RUNTIME_SEQ_KEY = "awareness:integration_runtime:last_seq"
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _redis_field_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8").strip()
+        except Exception:
+            return ""
+    return _text(value)
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -911,22 +920,145 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     return base
 
 
+_RULE_FINGERPRINT_IGNORE_KEYS = {
+    "id",
+    "created_at",
+    "updated_at",
+    "last_run_ts",
+    "last_status",
+    "last_summary",
+    "last_error",
+    "next_run_ts",
+    "quote_history",
+}
+
+
+def _rule_canonical_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _rule_canonical_value(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        items = [_rule_canonical_value(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if isinstance(value, tuple):
+        items = [_rule_canonical_value(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if isinstance(value, str):
+        return value.strip().lower()
+    return value
+
+
+def _rule_fingerprint(rule: Dict[str, Any]) -> str:
+    stable = {
+        key: value
+        for key, value in (rule or {}).items()
+        if key not in _RULE_FINGERPRINT_IGNORE_KEYS
+    }
+    return json.dumps(_rule_canonical_value(stable), sort_keys=True, separators=(",", ":"))
+
+
+def _rule_migration_score(rule: Dict[str, Any]) -> float:
+    return max(
+        _as_float((rule or {}).get("updated_at"), 0.0),
+        _as_float((rule or {}).get("last_run_ts"), 0.0),
+        _as_float((rule or {}).get("created_at"), 0.0),
+    )
+
+
+def _migrate_loaded_rules(
+    redis_obj: Any,
+    candidates: List[Tuple[str, Dict[str, Any], bool, float]],
+) -> Dict[str, Dict[str, Any]]:
+    chosen_by_fingerprint: Dict[str, Tuple[str, Dict[str, Any], bool, float]] = {}
+    stale_fields: set[str] = set()
+
+    for field_name, normalized, needs_write, source_score in candidates:
+        fingerprint = _rule_fingerprint(normalized)
+        existing = chosen_by_fingerprint.get(fingerprint)
+        if existing is None:
+            chosen_by_fingerprint[fingerprint] = (field_name, normalized, needs_write, source_score)
+            continue
+        existing_field, existing_rule, existing_needs_write, existing_score = existing
+        if source_score > existing_score:
+            if existing_field:
+                stale_fields.add(existing_field)
+            chosen_by_fingerprint[fingerprint] = (field_name, normalized, needs_write, source_score)
+        else:
+            if field_name:
+                stale_fields.add(field_name)
+            if needs_write and not existing_needs_write:
+                chosen_by_fingerprint[fingerprint] = (existing_field, existing_rule, True, existing_score)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    fields_to_write: List[Tuple[str, Dict[str, Any]]] = []
+    scores_by_id: Dict[str, float] = {}
+    for field_name, normalized, needs_write, source_score in chosen_by_fingerprint.values():
+        rule_id = _text(normalized.get("id"))
+        if not rule_id:
+            continue
+        existing = out.get(rule_id)
+        if existing is not None and scores_by_id.get(rule_id, 0.0) > source_score:
+            if field_name:
+                stale_fields.add(field_name)
+            continue
+        out[rule_id] = normalized
+        scores_by_id[rule_id] = source_score
+        if needs_write or (field_name and field_name != rule_id):
+            fields_to_write.append((field_name, normalized))
+        if field_name and field_name != rule_id:
+            stale_fields.add(field_name)
+
+    if redis_obj is not None:
+        wrote = 0
+        removed = 0
+        for _field_name, normalized in fields_to_write:
+            rule_id = _text(normalized.get("id"))
+            if not rule_id:
+                continue
+            try:
+                redis_obj.hset(_RULES_KEY, rule_id, json.dumps(normalized))
+                wrote += 1
+            except Exception:
+                logger.debug("[awareness] failed to write migrated rule %s", rule_id, exc_info=True)
+        for field_name in sorted(field for field in stale_fields if field and field not in out):
+            try:
+                removed += int(redis_obj.hdel(_RULES_KEY, field_name) or 0)
+            except Exception:
+                logger.debug("[awareness] failed to remove stale rule field %s", field_name, exc_info=True)
+        if wrote or removed:
+            logger.info("[awareness] normalized stored rules (written=%d removed_stale=%d)", wrote, removed)
+
+    return out
+
+
 def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
     redis_obj = client or redis_client
     raw = redis_obj.hgetall(_RULES_KEY) if redis_obj else {}
     if not isinstance(raw, dict):
         return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    for _, row in raw.items():
+    candidates: List[Tuple[str, Dict[str, Any], bool, float]] = []
+    for field_name_raw, row in raw.items():
+        field_name = _redis_field_text(field_name_raw)
         try:
             payload = json.loads(row)
         except Exception:
             continue
+        if not isinstance(payload, dict):
+            continue
+        source_score = _rule_migration_score(payload)
+        if not _text(payload.get("id")) and field_name:
+            payload["id"] = field_name
         normalized = _normalize_rule(payload)
         if not normalized:
             continue
-        out[normalized["id"]] = normalized
-    return out
+        rule_id = _text(normalized.get("id"))
+        needs_write = field_name != rule_id
+        if not needs_write:
+            try:
+                needs_write = json.dumps(payload, sort_keys=True) != json.dumps(normalized, sort_keys=True)
+            except Exception:
+                needs_write = True
+        candidates.append((field_name, normalized, needs_write, source_score))
+    return _migrate_loaded_rules(redis_obj, candidates)
 
 
 def _get_rule(client: Any, rule_id: str) -> Optional[Dict[str, Any]]:
