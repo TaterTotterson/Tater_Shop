@@ -2,6 +2,36 @@
   "schema": 1,
   "verbas": [
     {
+      "id": "aladdin_connect",
+      "name": "Aladdin Connect",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Aladdin Connect garage doors.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Aladdin Connect",
+      "tags": [
+        "aladdin",
+        "genie",
+        "garage",
+        "garage-door"
+      ],
+      "entry": "verba/aladdin_connect.py",
+      "sha256": "364eea60cfbc6124e6cf5646b0d811d6c0f17f588ea539dbce3f9a570c90f9c4"
+    },
+    {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
       "version": "1.2.1",

@@ -41,6 +41,7 @@
 
 | Verba ID | Description | Portals |
 |------------|-------------|----------|
+| `aladdin_connect` | Control Aladdin Connect garage doors. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `automatic_plugin` | Create one image from a natural-language image request. | discord, webui, macos, telegram |
 | `broadcast` | Send a one-time spoken announcement to your configured broadcast targets. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
 | `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, macos, voice_core, homeassistant, matrix, telegram |
