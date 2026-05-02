@@ -1079,7 +1079,16 @@ def _hue_api_root(bridge_root: Any) -> str:
     if not text:
         return ""
     parsed = urlparse(text if "://" in text else f"http://{text}")
-    netloc = parsed.netloc or parsed.path
+    host = parsed.hostname or parsed.netloc or parsed.path
+    try:
+        port = int(parsed.port or 0)
+    except Exception:
+        port = 0
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if port and port not in {80, 443}:
+        netloc = f"{host}:{port}"
     return urlunparse(("https", netloc, "", "", "", "")).rstrip("/")
 
 
