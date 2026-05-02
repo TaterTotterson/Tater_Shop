@@ -236,6 +236,36 @@
       "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
     },
     {
+      "id": "ecobee_thermostat",
+      "name": "Ecobee Thermostat",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Ecobee thermostats.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Ecobee",
+      "tags": [
+        "ecobee",
+        "thermostat",
+        "climate",
+        "hvac"
+      ],
+      "entry": "verba/ecobee_thermostat.py",
+      "sha256": "2dffea2f9313cdc4daaf916b4316508632da83799c3b08bbbe886acb3590b003"
+    },
+    {
       "id": "find_my_phone",
       "name": "Find My Phone",
       "version": "1.0.8",
