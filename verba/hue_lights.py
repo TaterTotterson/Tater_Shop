@@ -2,11 +2,19 @@ import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import requests
 
 from helpers import extract_json, redis_client
+from integrations.hue import (
+    HUE_DEFAULT_BRIDGE_HOST,
+    HUE_DEFAULT_DEVICE_TYPE,
+    HUE_DEFAULT_TIMEOUT_SECONDS,
+    normalize_hue_bridge_root,
+    pair_hue_bridge,
+    read_hue_settings,
+)
 from verba_base import ToolVerba
 from verba_diagnostics import needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -14,17 +22,9 @@ from verba_result import action_failure, action_success
 logger = logging.getLogger("hue_lights")
 logger.setLevel(logging.INFO)
 
-SETTINGS_CATEGORY = "Philips Hue"
-DEFAULT_BRIDGE_HOST = "http://philips-hue.local"
-DEFAULT_DEVICE_TYPE = "tater_shop#tater"
-SHARED_SETTINGS_KEY = "hue_settings"
-
-SETTINGS_KEYS = (
-    f"verba_settings:Philips Hue Control",
-    f"verba_settings: Philips Hue Control",
-    f"verba_settings:{SETTINGS_CATEGORY}",
-    f"verba_settings: {SETTINGS_CATEGORY}",
-    SHARED_SETTINGS_KEY,
+PLUGIN_SETTINGS_KEYS = (
+    "verba_settings:Philips Hue Control",
+    "verba_settings: Philips Hue Control",
 )
 
 
@@ -45,57 +45,19 @@ def _decode_map(raw: Optional[dict]) -> dict:
     return out
 
 
-def _read_settings() -> dict:
-    merged: dict = {}
-    for key in SETTINGS_KEYS:
+def _read_plugin_settings() -> dict:
+    merged: dict = read_hue_settings()
+    for key in PLUGIN_SETTINGS_KEYS:
         try:
             decoded = _decode_map(redis_client.hgetall(key) or {})
         except Exception:
             continue
         for field, value in decoded.items():
+            if field != "HUE_MAX_CANDIDATES":
+                continue
             if _coerce_text(value) or field not in merged:
                 merged[field] = value
     return merged
-
-
-def _setting(settings: dict, key: str, default: str = "") -> str:
-    aliases = {
-        "HUE_BRIDGE_HOST": ("HUE_BRIDGE_HOST", "HUE_BRIDGE_URL", "HUE_HOST", "BRIDGE_HOST"),
-        "HUE_APP_KEY": ("HUE_APP_KEY", "HUE_USERNAME", "HUE_USER", "HUE_API_KEY"),
-        "HUE_DEVICE_TYPE": ("HUE_DEVICE_TYPE", "DEVICE_TYPE"),
-        "HUE_TIMEOUT_SECONDS": ("HUE_TIMEOUT_SECONDS", "TIMEOUT_SECONDS"),
-    }.get(key, (key,))
-    for name in aliases:
-        value = _coerce_text(settings.get(name))
-        if value:
-            return value
-    return default
-
-
-def _write_settings(values: dict) -> None:
-    clean = {str(k): "" if v is None else str(v) for k, v in (values or {}).items()}
-    if not clean:
-        return
-    redis_client.hset(SHARED_SETTINGS_KEY, mapping=clean)
-    try:
-        for legacy_key in (f"verba_settings:{SETTINGS_CATEGORY}", f"verba_settings: {SETTINGS_CATEGORY}"):
-            if redis_client.exists(legacy_key):
-                redis_client.hset(legacy_key, mapping=clean)
-    except Exception:
-        pass
-
-
-def _normalize_bridge_root(raw_host: Any) -> str:
-    text = _coerce_text(raw_host) or DEFAULT_BRIDGE_HOST
-    if "://" not in text:
-        text = f"http://{text}"
-    parsed = urlparse(text)
-    if not parsed.netloc and parsed.path:
-        parsed = urlparse(f"http://{text}")
-    scheme = parsed.scheme or "http"
-    netloc = parsed.netloc or parsed.path
-    root = urlunparse((scheme, netloc, "", "", "", "")).rstrip("/")
-    return root or DEFAULT_BRIDGE_HOST
 
 
 def _as_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
@@ -196,13 +158,15 @@ class HueClient:
     """Philips Hue Bridge v1 API adapter shaped like the HA light client."""
 
     def __init__(self, *, require_app_key: bool = True):
-        settings = _read_settings()
-        self.base_url = _normalize_bridge_root(_setting(settings, "HUE_BRIDGE_HOST", DEFAULT_BRIDGE_HOST))
-        self.app_key = _setting(settings, "HUE_APP_KEY", "")
-        self.device_type = _setting(settings, "HUE_DEVICE_TYPE", DEFAULT_DEVICE_TYPE)[:40] or DEFAULT_DEVICE_TYPE
+        settings = read_hue_settings()
+        self.base_url = normalize_hue_bridge_root(settings.get("HUE_BRIDGE_HOST") or HUE_DEFAULT_BRIDGE_HOST)
+        self.app_key = _coerce_text(settings.get("HUE_APP_KEY"))
+        self.device_type = (
+            _coerce_text(settings.get("HUE_DEVICE_TYPE")) or HUE_DEFAULT_DEVICE_TYPE
+        )[:40]
         self.timeout = _as_int(
-            _setting(settings, "HUE_TIMEOUT_SECONDS", "10"),
-            10,
+            settings.get("HUE_TIMEOUT_SECONDS"),
+            HUE_DEFAULT_TIMEOUT_SECONDS,
             minimum=2,
             maximum=60,
         )
@@ -212,46 +176,12 @@ class HueClient:
     @classmethod
     def pair_bridge(cls) -> str:
         client = cls(require_app_key=False)
-        payload = {"devicetype": client.device_type}
-        response = requests.post(f"{client.base_url}/api", json=payload, timeout=client.timeout)
-        if response.status_code >= 400:
-            return f"Hue Bridge pairing failed with HTTP {response.status_code}: {response.text}"
-        try:
-            data = response.json()
-        except Exception:
-            return f"Hue Bridge returned an unreadable pairing response: {response.text}"
-
-        username = ""
-        errors: List[str] = []
-        for item in data if isinstance(data, list) else [data]:
-            if not isinstance(item, dict):
-                continue
-            success = item.get("success") if isinstance(item.get("success"), dict) else {}
-            error = item.get("error") if isinstance(item.get("error"), dict) else {}
-            if success.get("username"):
-                username = _coerce_text(success.get("username"))
-                break
-            if error:
-                err_type = _coerce_text(error.get("type"))
-                desc = _coerce_text(error.get("description")) or json.dumps(error, ensure_ascii=False)
-                if err_type == "101" or "link button" in desc.lower():
-                    desc = "link button not pressed"
-                errors.append(desc)
-
-        if not username:
-            if errors:
-                return "Hue Bridge pairing failed: " + "; ".join(errors) + ". Press the bridge button and try again within 30 seconds."
-            return "Hue Bridge pairing failed: no username was returned. Press the bridge button and try again."
-
-        _write_settings(
-            {
-                "HUE_BRIDGE_HOST": client.base_url,
-                "HUE_APP_KEY": username,
-                "HUE_DEVICE_TYPE": client.device_type,
-                "HUE_TIMEOUT_SECONDS": str(client.timeout),
-            }
+        result = pair_hue_bridge(
+            bridge_host=client.base_url,
+            device_type=client.device_type,
+            timeout_seconds=client.timeout,
         )
-        return "Hue Bridge linked successfully. The Hue app key was saved in Philips Hue settings."
+        return _coerce_text(result.get("message")) or "Hue Bridge pairing finished."
 
     def _raise_hue_errors(self, payload: Any) -> None:
         errors: List[str] = []
@@ -403,7 +333,7 @@ class HueClient:
 class HueLightsPlugin(ToolVerba):
     name = "hue_lights"
     verba_name = "Philips Hue Lights"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Philips Hue Lights"
     settings_category = "Philips Hue Control"
@@ -906,16 +836,16 @@ class HueLightsPlugin(ToolVerba):
         }
 
     def _get_plugin_settings(self) -> dict:
-        return _read_settings()
+        return _read_plugin_settings()
 
     def _get_int_setting(self, key: str, default: int, minimum: int, maximum: int) -> int:
         return _as_int(self._get_plugin_settings().get(key), default, minimum=minimum, maximum=maximum)
 
     def _hue_diagnosis(self) -> dict:
-        settings = _read_settings()
-        bridge = _normalize_bridge_root(_setting(settings, "HUE_BRIDGE_HOST", DEFAULT_BRIDGE_HOST))
+        settings = read_hue_settings()
+        bridge = normalize_hue_bridge_root(settings.get("HUE_BRIDGE_HOST") or HUE_DEFAULT_BRIDGE_HOST)
         parsed = urlparse(bridge)
-        app_key = _setting(settings, "HUE_APP_KEY", "")
+        app_key = _coerce_text(settings.get("HUE_APP_KEY"))
         return {
             "hue_bridge_host": "set" if parsed.scheme in {"http", "https"} and bool(parsed.netloc) else "invalid",
             "hue_app_key": "set" if len(app_key.strip()) >= 8 else "missing",

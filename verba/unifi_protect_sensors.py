@@ -1,20 +1,15 @@
 # verba/unifi_protect_sensors.py
 import asyncio
-import base64
 import logging
-import mimetypes
 import os
 import re
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
-import requests
-import urllib3
-
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from helpers import redis_client
-from vision_settings import get_vision_settings as get_shared_vision_settings
+from integrations.unifi_protect import ProtectClient
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -64,12 +59,6 @@ def _strip_code_fences(s: str) -> str:
     if s.endswith("```"):
         s = re.sub(r"\s*```$", "", s, flags=re.MULTILINE).strip()
     return s
-
-
-def _to_data_url(image_bytes: bytes, filename: str = "image.jpg") -> str:
-    mime = mimetypes.guess_type(filename)[0] or "image/jpeg"
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
 
 
 def _extract_context_text(context: Optional[dict]) -> str:
@@ -165,169 +154,6 @@ def _platform_supports_media(platform: str) -> bool:
 
 
 # ----------------------------
-# UniFi Protect REST helper (Integration API via console proxy)
-# ----------------------------
-class ProtectClient:
-    def __init__(self):
-        base_url = (redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").strip()
-        api_key = (redis_client.get("tater:unifi_protect:api_key") or "").strip()
-
-        # Vision endpoint settings (OpenAI-compatible)
-        vision_settings = get_shared_vision_settings(
-            default_api_base="http://127.0.0.1:1234",
-            default_model="qwen2.5-vl-7b-instruct",
-        )
-        vision_api_base = str(vision_settings.get("api_base") or "http://127.0.0.1:1234").strip().rstrip("/")
-        vision_model = str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct").strip()
-        vision_api_key = str(vision_settings.get("api_key") or "").strip()
-
-        # Defaults (as requested)
-        self.verify_ssl = False
-        self.timeout = 20
-
-        if not base_url:
-            base_url = "https://10.4.20.127"
-
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-
-        self.vision_api_base = vision_api_base
-        self.vision_model = vision_model
-        self.vision_api_key = vision_api_key
-
-        if not self.api_key:
-            raise ValueError("UniFi Protect API key is missing. Set it in WebUI Settings -> Integrations -> UniFi Protect.")
-
-        self.headers = {
-            "X-API-KEY": self.api_key,
-            "Accept": "application/json",
-        }
-
-        # Silence warnings if verify_ssl is False (your environment uses -k in curl)
-        if not self.verify_ssl:
-            try:
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            except Exception:
-                pass
-
-    def _url(self, path: str) -> str:
-        if not path.startswith("/"):
-            path = "/" + path
-        return f"{self.base_url}{path}"
-
-    def _req(self, method: str, path: str, *, params=None, json_body=None, headers=None, stream=False) -> Any:
-        url = self._url(path)
-        hdrs = dict(self.headers)
-        if headers:
-            hdrs.update(headers)
-
-        resp = requests.request(
-            method,
-            url,
-            headers=hdrs,
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
-            verify=self.verify_ssl,
-            stream=stream,
-        )
-
-        if resp.status_code >= 400:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-
-        # stream responses (snapshots) return bytes
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if stream or "image/" in ctype:
-            return resp.content, resp.headers
-
-        try:
-            return resp.json()
-        except Exception:
-            return resp.text
-
-    # ---- Sensors
-    def list_sensors(self) -> List[dict]:
-        return self._req("GET", "/proxy/protect/integration/v1/sensors") or []
-
-    def get_sensor(self, sensor_id: str) -> dict:
-        return self._req("GET", f"/proxy/protect/integration/v1/sensors/{sensor_id}")
-
-    # ---- Cameras
-    def list_cameras(self) -> List[dict]:
-        return self._req("GET", "/proxy/protect/integration/v1/cameras") or []
-
-    def get_camera_snapshot(self, camera_id: str) -> Tuple[bytes, str]:
-        """
-        Returns (image_bytes, mimetype).
-        Tries multiple endpoints because Protect snapshot routes differ between releases/models.
-        """
-        candidates = [
-            f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot",
-            f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot.jpg",
-            f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot?format=jpeg",
-            f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot?force=true",
-            f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot?force=true&format=jpeg",
-        ]
-
-        last_err = None
-        for path in candidates:
-            try:
-                data, headers = self._req(
-                    "GET",
-                    path,
-                    headers={"Accept": "image/jpeg,image/png,image/*,*/*"},
-                    stream=True,
-                )
-                ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
-                if not ctype:
-                    ctype = "image/jpeg"
-                if isinstance(data, (bytes, bytearray)) and len(data) > 1000:
-                    return bytes(data), ctype
-            except Exception as e:
-                last_err = e
-                continue
-
-        raise RuntimeError(f"Snapshot not available for camera {camera_id}. Last error: {last_err}")
-
-    # ---- Vision (OpenAI-compatible)
-    def call_vision(self, image_bytes: bytes, *, prompt: str, filename: str = "image.jpg") -> str:
-        """
-        Call OpenAI-compatible vision endpoint (separate from UniFi).
-        """
-        url = f"{self.vision_api_base}/v1/chat/completions"
-        data_url = _to_data_url(image_bytes, filename)
-
-        payload = {
-            "model": self.vision_model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt or "Describe this image."},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
-            "temperature": 0.2,
-            "max_tokens": 500,
-        }
-
-        headers = {"Content-Type": "application/json"}
-        if self.vision_api_key:
-            headers["Authorization"] = f"Bearer {self.vision_api_key}"
-
-        resp = requests.post(url, json=payload, headers=headers, timeout=90)
-        if resp.status_code != 200:
-            return f"(vision error {resp.status_code}) {resp.text[:200]}"
-
-        j = resp.json()
-        try:
-            return (j["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
-            return "(vision error) Unexpected response"
-
-
-# ----------------------------
 # Plugin
 # ----------------------------
 class UniFiProtectSensorsPlugin(ToolVerba):
@@ -352,7 +178,7 @@ class UniFiProtectSensorsPlugin(ToolVerba):
 
     name = 'unifi_protect_sensors'
     verba_name = 'UniFi Protect Sensors'
-    version = '1.0.2'
+    version = '1.0.3'
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Sensors'
     settings_category = "UniFi Protect"

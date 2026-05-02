@@ -18,11 +18,12 @@ from helpers import (
     get_llm_client_from_env,
     redis_client,
 )
+from integrations.homeassistant import load_homeassistant_portal_config
 import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
 
 from dotenv import load_dotenv
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 load_dotenv()
 
@@ -477,22 +478,9 @@ def _flatten_to_text(res: Any) -> str:
 # -------------------- Minimal HA client (platform local) --------------------
 class _HA:
     def __init__(self):
-        # Prefer shared Home Assistant settings first
-        shared = redis_client.hgetall("homeassistant_settings") or {}
-        base = (shared.get("HA_BASE_URL") or "").strip()
-        token = (shared.get("HA_TOKEN") or "").strip()
-
-        # Backward-compatible fallback (legacy storage)
-        if not base or not token:
-            legacy = (
-                redis_client.hgetall("verba_settings: Home Assistant")
-                or redis_client.hgetall("verba_settings:Home Assistant")
-                or {}
-            )
-            base = base or (legacy.get("HA_BASE_URL") or "").strip()
-            token = token or (legacy.get("HA_TOKEN") or "").strip()
-
-        self.base = (base or "http://homeassistant.local:8123").rstrip("/")
+        config = load_homeassistant_portal_config()
+        self.base = config["base"]
+        token = config["token"]
         if not token:
             raise ValueError("HA_TOKEN missing in Home Assistant settings.")
         self.token = token

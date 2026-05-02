@@ -4,11 +4,23 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import redis_client, get_tater_name, get_tater_personality
+from integrations.unifi_network import (
+    get_unifi_clients_all,
+    get_unifi_devices_all,
+    get_unifi_paged,
+    get_unifi_sites,
+    pick_unifi_site,
+    read_unifi_network_settings,
+    unifi_network_api_key,
+    unifi_network_base,
+    unifi_network_headers,
+    unifi_network_integration_url,
+    unifi_network_request,
+)
 from verba_result import action_failure, action_success
 
 load_dotenv()
@@ -33,7 +45,7 @@ class UnifiNetworkLookupPlugin(ToolVerba):
 
     name = "unifi_network_lookup"
     verba_name = "UniFi Network Lookup"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "UniFi Network Lookup"
     tags = ["unifi", "lookup"]
@@ -131,122 +143,47 @@ class UnifiNetworkLookupPlugin(ToolVerba):
     # Settings / HTTP helpers
     # -------------------------
     def _get_settings(self) -> Dict[str, str]:
-        return {
-            "UNIFI_BASE_URL": (redis_client.get("tater:unifi_network:base_url") or "https://10.4.20.1").strip().rstrip("/"),
-            "UNIFI_API_KEY": (redis_client.get("tater:unifi_network:api_key") or "").strip(),
-        }
+        return read_unifi_network_settings()
 
     def _base(self, s: Dict[str, str]) -> str:
-        return (s.get("UNIFI_BASE_URL") or "https://10.4.20.1").rstrip("/")
+        return unifi_network_base(s)
 
     def _api_key(self, s: Dict[str, str]) -> str:
-        key = (s.get("UNIFI_API_KEY") or "").strip()
-        if not key:
-            raise ValueError("UNIFI API key is missing. Set it in WebUI Settings -> Integrations -> UniFi Network.")
-        return key
+        return unifi_network_api_key(s)
 
     def _headers(self, api_key: str) -> Dict[str, str]:
-        return {"X-API-KEY": api_key, "Accept": "application/json"}
+        return unifi_network_headers(api_key)
 
     def _request(self, method: str, url: str, *, headers: Dict[str, str], params: Optional[Dict[str, Any]] = None) -> Any:
-        verify = self._DEFAULT_VERIFY_SSL
-        timeout = self._DEFAULT_TIMEOUT
-
-        # Silence urllib3 "InsecureRequestWarning" when verify=False
-        if not verify:
-            try:
-                import urllib3
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            except Exception:
-                pass
-
-        r = requests.request(method, url, headers=headers, params=params, timeout=timeout, verify=verify)
-        if r.status_code >= 400:
-            snippet = (r.text or "")[:300]
-            raise RuntimeError(f"UniFi HTTP {r.status_code} calling {url} params={params}: {snippet}")
-        try:
-            return r.json()
-        except Exception:
-            return r.text
+        return unifi_network_request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            timeout=self._DEFAULT_TIMEOUT,
+            verify_ssl=self._DEFAULT_VERIFY_SSL,
+        )
 
     # -------------------------
     # UniFi Integration API calls
     # -------------------------
     def _integration_url(self, base: str, path: str) -> str:
-        path = path if path.startswith("/") else f"/{path}"
-        return f"{base}/proxy/network/integration{path}"
+        return unifi_network_integration_url(base, path)
 
     def _get_sites(self, base: str, headers: Dict[str, str]) -> Dict[str, Any]:
-        url = self._integration_url(base, "/v1/sites")
-        return self._request("GET", url, headers=headers)
+        return get_unifi_sites(base, headers)
 
     def _pick_site(self, sites_payload: Dict[str, Any]) -> Tuple[str, str]:
-        data = (sites_payload or {}).get("data") or []
-        if not isinstance(data, list) or not data:
-            raise RuntimeError("No UniFi sites returned from /v1/sites.")
-        first = data[0] or {}
-        site_id = (first.get("id") or "").strip()
-        site_name = (first.get("name") or first.get("internalReference") or "Unknown").strip()
-        if not site_id:
-            raise RuntimeError("UniFi sites response missing site id.")
-        return site_id, site_name or "Unknown"
+        return pick_unifi_site(sites_payload)
 
     def _get_paged(self, *, base: str, headers: Dict[str, str], path: str) -> Dict[str, Any]:
-        """
-        Page through endpoints shaped like:
-          {"offset":0,"limit":25,"count":25,"totalCount":66,"data":[...]}
-        and return a combined payload with all data.
-        """
-        url = self._integration_url(base, path)
-
-        all_items: List[Any] = []
-        offset = 0
-        total: Optional[int] = None
-        max_pages = 2000  # safety guard
-
-        for _ in range(max_pages):
-            params = {"offset": str(offset), "limit": str(self._PAGE_LIMIT)}
-            payload = self._request("GET", url, headers=headers, params=params)
-
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"Unexpected response type from {url}: {type(payload)}")
-
-            page_data = payload.get("data") or []
-            if isinstance(page_data, list) and page_data:
-                all_items.extend(page_data)
-
-            if total is None:
-                try:
-                    total = int(payload.get("totalCount"))
-                except Exception:
-                    total = None
-
-            try:
-                count = int(payload.get("count"))
-            except Exception:
-                count = len(page_data) if isinstance(page_data, list) else 0
-
-            # Stop conditions
-            if total is not None and len(all_items) >= total:
-                break
-            if count < self._PAGE_LIMIT:
-                break
-
-            offset += self._PAGE_LIMIT
-
-        return {
-            "offset": 0,
-            "limit": self._PAGE_LIMIT,
-            "count": len(all_items),
-            "totalCount": total if total is not None else len(all_items),
-            "data": all_items,
-        }
+        return get_unifi_paged(base=base, headers=headers, path=path, page_limit=self._PAGE_LIMIT)
 
     def _get_clients_all(self, base: str, headers: Dict[str, str], site_id: str) -> Dict[str, Any]:
-        return self._get_paged(base=base, headers=headers, path=f"/v1/sites/{site_id}/clients")
+        return get_unifi_clients_all(base, headers, site_id, page_limit=self._PAGE_LIMIT)
 
     def _get_devices_all(self, base: str, headers: Dict[str, str], site_id: str) -> Dict[str, Any]:
-        return self._get_paged(base=base, headers=headers, path=f"/v1/sites/{site_id}/devices")
+        return get_unifi_devices_all(base, headers, site_id, page_limit=self._PAGE_LIMIT)
 
     # -------------------------
     # Big-list optimization helpers

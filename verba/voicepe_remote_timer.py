@@ -9,6 +9,7 @@ import requests
 
 from verba_base import ToolVerba
 from helpers import redis_client
+from integrations.homeassistant import load_homeassistant_config
 from voice_core_entities import VoiceCoreEntityClient
 
 load_dotenv()
@@ -33,7 +34,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.2.1"
+    version = "1.2.2"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -131,9 +132,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         )
 
     def _ha_settings(self) -> dict:
-        settings = redis_client.hgetall("homeassistant_settings") or {}
-        base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        token = (settings.get("HA_TOKEN") or "").strip()
+        ha = load_homeassistant_config(required=False)
+        base_url = ha.get("base", "")
+        token = ha.get("token", "")
         return {"base_url": base_url, "token": token}
 
     def _ha_headers(self, token: str) -> dict:

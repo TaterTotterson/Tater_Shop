@@ -4,7 +4,7 @@
     {
       "id": "aladdin_connect",
       "name": "Aladdin Connect",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Control Aladdin Connect garage doors.",
       "portals": [
@@ -29,7 +29,7 @@
         "garage-door"
       ],
       "entry": "verba/aladdin_connect.py",
-      "sha256": "364eea60cfbc6124e6cf5646b0d811d6c0f17f588ea539dbce3f9a570c90f9c4"
+      "sha256": "cb5bcbc81df9a406f452c90d7af7774c333575bd2a75a44a083c586f98e9c8cf"
     },
     {
       "id": "automatic_plugin",
@@ -52,7 +52,7 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.11",
+      "version": "1.1.13",
       "min_tater_version": "59",
       "description": "Send a one-time spoken announcement to your configured broadcast targets.",
       "portals": [
@@ -72,12 +72,12 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "75fe24a8a23124a3ba418e0f1458888f703d59383925a61abcafef5257f3c444"
+      "sha256": "21c634a375f7eae443fe5b6f3c8ee7b5899c7c9ea3aad0bbeda4325a8ae4b957"
     },
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.13",
+      "version": "1.0.14",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
@@ -93,7 +93,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "2fae929703dfda18f44f286621e6540e94e30961344b94efd1e621f8563192ec"
+      "sha256": "f8b9b280b9762141c28a1fc8955cb1f9730f8e2d2366ba000697fb0d2460ec9a"
     },
     {
       "id": "comfyui_image_plugin",
@@ -238,7 +238,7 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "portals": [
@@ -258,7 +258,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "verba/find_my_phone.py",
-      "sha256": "09471f3f413ad4922e6700cb04fdc3c5c3b47d93279f1456226c1ed6876afd5a"
+      "sha256": "e41ff4bb32c06826b25bb8aa64efdbf195c8e6d9cadf3ce4a41bfa3909586b29"
     },
     {
       "id": "ftp_browser",
@@ -301,7 +301,7 @@
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
@@ -325,12 +325,12 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "23da5e7f14a1f260b04178d4133ba2123bcb0cb4bf3467345932b48e690adcb8"
+      "sha256": "1989ace231dd246d248efe261fe1b5055625005c006071bfeb43d9eb27bb7896"
     },
     {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
-      "version": "2.1.2",
+      "version": "2.1.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
@@ -353,12 +353,12 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "9c63c83de798b4e10fc2bb6ae9b98fcbb188f66fba0c5477569ad35a98a1a29a"
+      "sha256": "48d9603ca941d87fc85953ed561be6d3654d32c6eb213f0e0a4a22eff3bcb272"
     },
     {
       "id": "ha_covers",
       "name": "Home Assistant Covers",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant covers and garage doors.",
       "portals": [
@@ -381,12 +381,12 @@
         "cover"
       ],
       "entry": "verba/ha_covers.py",
-      "sha256": "0445d7587bf05907538281e25bac5af0b94cd4074d57870d71fb0898da598952"
+      "sha256": "da42dc7c0c7cde15c63741d1c5db9e218418902332e26bcbfb26f467f8827ba4"
     },
     {
       "id": "ha_fans",
       "name": "Home Assistant Fans",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant fans.",
       "portals": [
@@ -409,12 +409,12 @@
         "fan"
       ],
       "entry": "verba/ha_fans.py",
-      "sha256": "78cbeec6f5113ebc8391c7a738ac9940333bf82e906837863273fda358b61347"
+      "sha256": "04186dc2d904ab93456fcca1a5a89c05d3f4af6668ffe67f6637eff135d81dd0"
     },
     {
       "id": "ha_lights",
       "name": "Home Assistant Lights",
-      "version": "2.1.6",
+      "version": "2.1.7",
       "min_tater_version": "59",
       "description": "Control Home Assistant lights.",
       "portals": [
@@ -437,12 +437,12 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "4e6ec82f6009fda30d6431e3be741c6afea220d215be6ebd170d7cac06288cf6"
+      "sha256": "a7abdb08cf72fc2bd61118e522120aacc19aee7e99c3ff366ef82e7d475b58ff"
     },
     {
       "id": "ha_locks",
       "name": "Home Assistant Locks",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant lock entities.",
       "portals": [
@@ -465,12 +465,12 @@
         "lock"
       ],
       "entry": "verba/ha_locks.py",
-      "sha256": "452b744a7a2078b2be539c5ee78a1cccb0cbba171e3c38bd030dbb09e61737ba"
+      "sha256": "4f8665a88a792b542754c37a294f8351c92acafaad26c2e6c343a9c83d84ffe3"
     },
     {
       "id": "ha_media_players",
       "name": "Home Assistant Media Players",
-      "version": "2.0.6",
+      "version": "2.0.7",
       "min_tater_version": "59",
       "description": "Media-player control for Home Assistant.",
       "portals": [
@@ -493,12 +493,12 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "6c8bd07a7df45512283b73894a8bcf9e7f6c4d9e9f8f8f8720f85ad13770934c"
+      "sha256": "040e6046b9b9b0925e01f0f79a904316c3fd79dfb8a56f2c28ef2e92012f2aa8"
     },
     {
       "id": "ha_remotes",
       "name": "Home Assistant Remotes",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant remote entities.",
       "portals": [
@@ -521,12 +521,12 @@
         "remote"
       ],
       "entry": "verba/ha_remotes.py",
-      "sha256": "6819b0b5032a56affe45461248001d304ee63b9d8b6c4637cf0d58f09bb775fa"
+      "sha256": "cac26d431efd0f2ab8fec6ff623a4a4ad27ded216dcde0cedd00460823e26c44"
     },
     {
       "id": "ha_scenes",
       "name": "Home Assistant Scenes",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant scenes.",
       "portals": [
@@ -549,12 +549,12 @@
         "scene"
       ],
       "entry": "verba/ha_scenes.py",
-      "sha256": "67944d287ae8923e0e389e10209adc27896ef4005aebd00aae46caf30c508be5"
+      "sha256": "31f58d403961b3d2f1ea410082d9f258dae81fabec157b228d52bdf384b96a52"
     },
     {
       "id": "ha_scripts",
       "name": "Home Assistant Scripts",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Control Home Assistant scripts.",
       "portals": [
@@ -577,12 +577,12 @@
         "script"
       ],
       "entry": "verba/ha_scripts.py",
-      "sha256": "d21676d7334734d1bc767a94cd40a431594baf0ad69391f20aaba7249a0a645c"
+      "sha256": "3d5c53d64ecbf2b3585af6c2b83ee3c093a55a883328ce7f0cc803bd2ef35797"
     },
     {
       "id": "ha_sensors",
       "name": "Home Assistant Sensors",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Read Home Assistant sensor and binary_sensor entities.",
       "portals": [
@@ -605,12 +605,12 @@
         "sensor"
       ],
       "entry": "verba/ha_sensors.py",
-      "sha256": "5ffdd26dbf6d30a4fbfc956a9c5df40e1ca7553b1546119dd0240dc3dde5ddf1"
+      "sha256": "0337cc367558b13d5be5899e3f9d1011dcf554c128dd056543d0cc966040cb91"
     },
     {
       "id": "ha_switches",
       "name": "Home Assistant Switches",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "min_tater_version": "59",
       "description": "Control Home Assistant switches and plugs.",
       "portals": [
@@ -633,12 +633,12 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "72cc2b1e93b042ac1bd7314cfb8b3bce5adb922d969e5819b6d460186028fde3"
+      "sha256": "e682884016ac05c9179f31eb53a19b40ae73f01c56f7e132f78055e33aa75544"
     },
     {
       "id": "ha_temperature",
       "name": "Home Assistant Temperature",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Read Home Assistant ambient temperatures.",
       "portals": [
@@ -661,12 +661,12 @@
         "temperature"
       ],
       "entry": "verba/ha_temperature.py",
-      "sha256": "7f8bf7a4b195930867899cf1fec89afd0945110098674c91eeedefd59223499e"
+      "sha256": "feb71a3e37bfbc32c7d933844faa5a411c04e1bada8ff8d7deee609272bee26a"
     },
     {
       "id": "hue_lights",
       "name": "Philips Hue Lights",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Control Philips Hue Bridge lights.",
       "portals": [
@@ -690,7 +690,7 @@
         "light"
       ],
       "entry": "verba/hue_lights.py",
-      "sha256": "0d9580d805ee1d45b0edb5b907d56b29685baf9e88bafe59a0b5053ccc451dc9"
+      "sha256": "435f19b221106bc9c77cbca7b400cc8519672a2bba850d8249335ecc40c3daa1"
     },
     {
       "id": "irc_admin_op",
@@ -1181,7 +1181,7 @@
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.29",
+      "version": "1.0.30",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
@@ -1201,7 +1201,7 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "1d8795909ea2557500b569f404ffa613d26a8315eab845e7e6bbf55c6840c56a"
+      "sha256": "8fe9f63e731637600a200041190e8b728d05c5d83ba81c7eb14af171fbc8e073"
     },
     {
       "id": "obsidian_note",
@@ -1493,7 +1493,7 @@
     {
       "id": "unifi_network_clients",
       "name": "UniFi Network Clients",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List UniFi clients with wired/wireless counts and client details.",
       "portals": [
@@ -1516,12 +1516,12 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "60e2f2e203220be8307eca424f60a7f164bc69b2c19658c6423073f9329ebf7d"
+      "sha256": "8c08cda241795fd501f3801dbe7fbb02d818ae3cf18407ec83714cc8bacfb9b6"
     },
     {
       "id": "unifi_network_devices",
       "name": "UniFi Network Devices",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List UniFi devices with online/offline status and core details.",
       "portals": [
@@ -1544,12 +1544,12 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "393b9fe12ccfe64b4b775943b7e1f5f967e5bd10812b77ee86745d0968eba4f1"
+      "sha256": "32226f22f372b988b52274fd58ca4538cf84e1de08b1b416d451180b59c544a7"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
@@ -1572,12 +1572,12 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "cb08d427f9bc78e8c7d4b159b6685d35c5c1de7d4418c3ee5b49ea78a93f6e71"
+      "sha256": "092abcf5e00eca845c95d3a6ded934d1b0390687f54e0fd837e47155d57b4335"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
@@ -1600,12 +1600,12 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "80e480a348e2de9e21404ca212172d781fd5b12f5d803029fe4a83c7affe6cd7"
+      "sha256": "86ce7983fab281f834d48b479d38ddc180a09642df10b61acfe39fc6a946f0ad"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
@@ -1628,12 +1628,12 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "1c223891e00dd203f2119ac937e86ec3ebdb3d10938ecaa7136cfd7fbd40ecd6"
+      "sha256": "e2ad008166cc97e347b9a4e904acb1c2bd8477791930f60f1b4495af66440e92"
     },
     {
       "id": "unifi_protect_camera",
       "name": "UniFi Protect Camera",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Describe a single UniFi Protect camera snapshot.",
       "portals": [
@@ -1656,12 +1656,12 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "6c03f18916e5e4479a4bcf1ca9961d5cad9427d85849679b45f97df7ccc77343"
+      "sha256": "8b202d2b0a1adb830f280c24a7636b89a6582252f940a57b10b9a726e4b60e5b"
     },
     {
       "id": "unifi_protect_camera_info",
       "name": "UniFi Protect Camera Info",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List UniFi Protect cameras.",
       "portals": [
@@ -1684,12 +1684,12 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "9dcec17f0cbae8619fb2b9fe638e08633087c3ff3a5cfd68744dd8f90925eeec"
+      "sha256": "e17595a1f2948d363cdf211c1a90750cc42ffc485856f2b5fc3b00445223b450"
     },
     {
       "id": "unifi_protect_sensors",
       "name": "UniFi Protect Sensors",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Check UniFi Protect sensor status and single-sensor detail.",
       "portals": [
@@ -1712,12 +1712,12 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "6c09cae68b7400ce6eaca03c53e3ff029839fc35f0fcff380937af2072394a5c"
+      "sha256": "fb5cfa42e139c75eb822d122491dd9a132a18cb71b64a2819a5c14058cc9f7fd"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
@@ -1737,7 +1737,7 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "854bd934052c802044db3b00819b37a5990f43f6f80605d4995e2774717312de"
+      "sha256": "9798313ce1106dbe9f25e13d1149902db93e27bbcac9e8ac5ca13acb8e5b0b57"
     },
     {
       "id": "weather_forecast",

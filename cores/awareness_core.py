@@ -8,24 +8,28 @@ import re
 import threading
 import time
 import uuid
-import warnings
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import aiohttp
 import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+from integrations.homeassistant import load_homeassistant_config
+from integrations.unifi_protect import (
+    load_unifi_protect_config as _unifi_protect_config,
+    unifi_protect_configured as _unifi_protect_configured,
+    unifi_protect_request as _unifi_request,
+)
 from notify import dispatch_notification
 from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.15"
+__version__ = "3.1.17"
 
 load_dotenv()
 
@@ -845,19 +849,11 @@ def _dequeue_execution(client: Any) -> Optional[Dict[str, Any]]:
 
 
 def _ha_config() -> Dict[str, str]:
-    settings = redis_client.hgetall("homeassistant_settings") or {}
-    base = _text(settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").rstrip("/")
-    token = _text(settings.get("HA_TOKEN"))
-    if not token:
-        raise ValueError(
-            "Home Assistant token is not set. Open WebUI -> Settings -> Home Assistant Settings and add HA_TOKEN."
-        )
-    return {"base": base, "token": token}
+    return load_homeassistant_config(required=True)
 
 
 def _ha_configured() -> bool:
-    settings = redis_client.hgetall("homeassistant_settings") or {}
-    return bool(_text(settings.get("HA_TOKEN")))
+    return bool(_text(load_homeassistant_config(required=False).get("token")))
 
 
 def _ha_config_optional() -> Dict[str, str]:
@@ -865,68 +861,6 @@ def _ha_config_optional() -> Dict[str, str]:
         return _ha_config()
     except Exception:
         return {"base": "", "token": ""}
-
-
-def _unifi_protect_config() -> Dict[str, str]:
-    base = _text(redis_client.get("tater:unifi_protect:base_url") or "https://10.4.20.127").rstrip("/")
-    api_key = _text(redis_client.get("tater:unifi_protect:api_key"))
-    if not api_key:
-        raise ValueError(
-            "UniFi Protect API key is not set. Open WebUI -> Settings -> Integrations -> UniFi Protect and add API key."
-        )
-    if not base:
-        base = "https://10.4.20.127"
-    return {"base": base, "api_key": api_key}
-
-
-def _unifi_protect_configured() -> bool:
-    return bool(_text(redis_client.get("tater:unifi_protect:api_key")))
-
-
-def _unifi_headers(api_key: str, *, json_content: bool = True) -> Dict[str, str]:
-    headers = {"X-API-KEY": api_key, "Accept": "application/json"}
-    if json_content:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-
-def _unifi_request(
-    method: str,
-    path: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-    json_body: Optional[Dict[str, Any]] = None,
-    headers: Optional[Dict[str, str]] = None,
-    stream: bool = False,
-) -> Any:
-    conf = _unifi_protect_config()
-    url_path = path if str(path).startswith("/") else f"/{path}"
-    url = f"{conf['base']}{url_path}"
-    req_headers = _unifi_headers(conf["api_key"], json_content=not stream)
-    if headers:
-        req_headers.update(headers)
-    # UniFi Protect currently uses unverified TLS in this integration path.
-    # Suppress urllib3's repetitive warning spam for this known request flow.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", InsecureRequestWarning)
-        resp = requests.request(
-            method,
-            url,
-            headers=req_headers,
-            params=params,
-            json=json_body,
-            timeout=20,
-            verify=False,
-            stream=stream,
-        )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"UniFi Protect HTTP {resp.status_code}: {resp.text[:200]}")
-    if stream:
-        return resp.content, resp.headers
-    try:
-        return resp.json()
-    except Exception:
-        return {}
 
 
 def _unifi_camera_id_from_entity(camera_entity: str) -> str:
@@ -3809,6 +3743,7 @@ def _awareness_playback_target_options(*, current_values: Any = None) -> List[Di
         homeassistant_base_url=ha.get("base", ""),
         homeassistant_token=ha.get("token", ""),
         include_homeassistant=True,
+        include_sonos=True,
         include_unifi_protect=True,
         current_values=current_values,
     )
@@ -4243,7 +4178,7 @@ def _doorbell_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Speak the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
+                    players_description="Speak the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
                 ),
             },
             {
@@ -4356,7 +4291,7 @@ def _entry_sensor_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
                 ),
             },
             {
@@ -4676,7 +4611,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
+        players_description="Speak using the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
     )
     return {
         "kind": "settings_manager",

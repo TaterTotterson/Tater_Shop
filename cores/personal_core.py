@@ -16,9 +16,10 @@ import requests
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.33"
+__version__ = "1.0.34"
 
 load_dotenv()
 
@@ -949,10 +950,7 @@ def _platform_requires_target(platform: str, *, catalog: Optional[Dict[str, Any]
 
 
 def _ha_config() -> Dict[str, str]:
-    settings = redis_client.hgetall("homeassistant_settings") or {}
-    base = _text(settings.get("HA_BASE_URL")).rstrip("/")
-    token = _text(settings.get("HA_TOKEN"))
-    return {"base": base, "token": token}
+    return load_homeassistant_config(required=False)
 
 
 def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:

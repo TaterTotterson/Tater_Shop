@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import quote
 from verba_base import ToolVerba
 from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
+from integrations.homeassistant import load_homeassistant_config
 from verba_result import action_failure, action_success
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -34,7 +35,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.13"
+    version = "1.0.14"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -1132,9 +1133,9 @@ class ComfyUIAudioAcePlugin(ToolVerba):
 
     class _HA:
         def __init__(self):
-            s = redis_client.hgetall("homeassistant_settings") or {}
-            self.base = (s.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-            token = (s.get("HA_TOKEN") or "").strip()
+            ha = load_homeassistant_config(required=False)
+            self.base = ha.get("base", "")
+            token = ha.get("token", "")
             if not token:
                 raise ValueError(
                     "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "

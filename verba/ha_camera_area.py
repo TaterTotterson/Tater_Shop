@@ -10,6 +10,7 @@ import requests
 import urllib3
 
 from helpers import extract_json, redis_client
+from integrations.homeassistant import load_homeassistant_config
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from vision_settings import get_vision_settings as get_shared_vision_settings
@@ -72,9 +73,9 @@ class HAClient:
     """Simple Home Assistant REST helper."""
 
     def __init__(self):
-        settings = redis_client.hgetall("homeassistant_settings") or {}
-        self.base_url = (settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        self.token = (settings.get("HA_TOKEN") or "").strip()
+        ha = load_homeassistant_config(required=False)
+        self.base_url = ha.get("base", "")
+        self.token = ha.get("token", "")
         if not self.token:
             raise ValueError(
                 "Home Assistant token is not set. Open WebUI -> Settings -> Home Assistant Settings "
@@ -138,7 +139,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"

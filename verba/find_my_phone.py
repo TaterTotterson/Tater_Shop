@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import redis_client
+from integrations.homeassistant import load_homeassistant_config
 from verba_result import action_failure, action_success
 
 load_dotenv()
@@ -31,7 +32,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -125,7 +126,8 @@ class FindMyPhonePlugin(ToolVerba):
         return self._decode_map(raw)
 
     def _load_homeassistant_settings(self) -> Dict[str, str]:
-        return self._decode_map(redis_client.hgetall("homeassistant_settings") or {})
+        ha = load_homeassistant_config(required=False)
+        return {"HA_BASE_URL": ha.get("base", ""), "HA_TOKEN": ha.get("token", "")}
 
     def _load_default_notify_service(self) -> str:
         settings = self._decode_map(redis_client.hgetall("verba_settings:Home Assistant Notifier") or {})

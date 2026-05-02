@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
-from ha_ws import load_homeassistant_config
+from integrations.homeassistant import load_homeassistant_config
 from helpers import get_tater_name, redis_client
 from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
@@ -20,11 +20,11 @@ logger.setLevel(logging.INFO)
 
 
 class BroadcastPlugin(ToolVerba):
-    """Broadcast a spoken announcement to configured Voice Core or Home Assistant media-player targets."""
+    """Broadcast a spoken announcement to configured Voice Core, Sonos, or Home Assistant media-player targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.11"
+    version = "1.1.13"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -40,7 +40,7 @@ class BroadcastPlugin(ToolVerba):
             "label": "Broadcast Targets",
             "type": "multiselect",
             "default": [],
-            "description": "Choose one or more Voice Core satellites or Home Assistant media players.",
+            "description": "Choose one or more Voice Core satellites, Sonos speakers, or Home Assistant media players.",
             "options": [],
         },
     }
@@ -97,6 +97,7 @@ class BroadcastPlugin(ToolVerba):
             homeassistant_base_url=ha.get("base", ""),
             homeassistant_token=ha.get("token", ""),
             include_homeassistant=True,
+            include_sonos=True,
             current_values=current_targets,
         )
 

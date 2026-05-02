@@ -19,7 +19,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.1.15",
+      "version": "3.1.17",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "bd0d6407652ff3be4f96860ab558071a3b7132b647c645293104abd962702e1d"
+      "sha256": "b855dab39fe449da6adc13d6f85eb59ee0d87d8476ce066d153ed0e9f79fe56f"
     },
     {
       "id": "memory",
@@ -47,7 +47,7 @@
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.33",
+      "version": "1.0.34",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -55,7 +55,7 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "6ef5e97050b4666d700bd85314994dda17e0afbb0d3d52aaca106fea08156bfc"
+      "sha256": "b0047633971ed6b7bc93488ce636c4c78bb19d47f94f49f2db85bcaac52807a9"
     },
     {
       "id": "rss",

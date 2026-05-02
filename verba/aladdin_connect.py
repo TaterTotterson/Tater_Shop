@@ -5,11 +5,20 @@ import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import requests
 
-from helpers import redis_client
+from integrations.aladdin import (
+    ALADDIN_DEFAULT_API_BASE_URL,
+    ALADDIN_DEFAULT_APP_VERSION,
+    ALADDIN_DEFAULT_CLIENT_ID,
+    ALADDIN_DEFAULT_CLIENT_SECRET,
+    ALADDIN_DEFAULT_COGNITO_REGION,
+    ALADDIN_DEFAULT_TIMEOUT_SECONDS,
+    normalize_aladdin_api_base,
+    read_aladdin_settings,
+)
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -17,80 +26,10 @@ logger = logging.getLogger("aladdin_connect")
 logger.setLevel(logging.INFO)
 
 SETTINGS_CATEGORY = "Aladdin Connect"
-SHARED_SETTINGS_KEY = "aladdin_connect_settings"
-DEFAULT_API_BASE_URL = "https://api.smartgarage.systems"
-DEFAULT_COGNITO_REGION = "us-east-2"
-DEFAULT_CLIENT_ID = "27iic8c3bvslqngl3hso83t74b"
-DEFAULT_CLIENT_SECRET = "7bokto0ep96055k42fnrmuth84k7jdcjablestb7j53o8lp63v5"
-DEFAULT_APP_VERSION = "6.21"
-DEFAULT_TIMEOUT_SECONDS = 30
-
-SETTINGS_KEYS = (
-    SHARED_SETTINGS_KEY,
-    f"verba_settings:{SETTINGS_CATEGORY}",
-    f"verba_settings: {SETTINGS_CATEGORY}",
-)
 
 
 def _coerce_text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _decode_map(raw: Optional[dict]) -> dict:
-    out: dict = {}
-    for key, value in (raw or {}).items():
-        k = key.decode("utf-8", "ignore") if isinstance(key, (bytes, bytearray)) else str(key)
-        if isinstance(value, (bytes, bytearray)):
-            out[k] = value.decode("utf-8", "ignore")
-        elif value is None:
-            out[k] = ""
-        else:
-            out[k] = str(value)
-    return out
-
-
-def _read_settings() -> dict:
-    merged: dict = {}
-    for key in SETTINGS_KEYS:
-        try:
-            decoded = _decode_map(redis_client.hgetall(key) or {})
-        except Exception:
-            continue
-        for field, value in decoded.items():
-            if _coerce_text(value) or field not in merged:
-                merged[field] = value
-    return merged
-
-
-def _setting(settings: dict, key: str, default: str = "") -> str:
-    aliases = {
-        "ALADDIN_EMAIL": ("ALADDIN_EMAIL", "EMAIL", "USERNAME", "USER_EMAIL"),
-        "ALADDIN_PASSWORD": ("ALADDIN_PASSWORD", "PASSWORD"),
-        "ALADDIN_API_BASE_URL": ("ALADDIN_API_BASE_URL", "API_BASE_URL", "BASE_URL"),
-        "ALADDIN_COGNITO_REGION": ("ALADDIN_COGNITO_REGION", "COGNITO_REGION"),
-        "ALADDIN_CLIENT_ID": ("ALADDIN_CLIENT_ID", "CLIENT_ID"),
-        "ALADDIN_CLIENT_SECRET": ("ALADDIN_CLIENT_SECRET", "CLIENT_SECRET"),
-        "ALADDIN_APP_VERSION": ("ALADDIN_APP_VERSION", "APP_VERSION"),
-        "ALADDIN_TIMEOUT_SECONDS": ("ALADDIN_TIMEOUT_SECONDS", "TIMEOUT_SECONDS"),
-    }.get(key, (key,))
-    for name in aliases:
-        value = _coerce_text(settings.get(name))
-        if value:
-            return value
-    return default
-
-
-def _normalize_api_base(raw_url: Any) -> str:
-    text = _coerce_text(raw_url) or DEFAULT_API_BASE_URL
-    if "://" not in text:
-        text = f"https://{text}"
-    parsed = urlparse(text)
-    if not parsed.netloc and parsed.path:
-        parsed = urlparse(f"https://{text}")
-    scheme = parsed.scheme or "https"
-    netloc = parsed.netloc or parsed.path
-    root = urlunparse((scheme, netloc, "", "", "", "")).rstrip("/")
-    return root or DEFAULT_API_BASE_URL
 
 
 def _as_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
@@ -120,17 +59,17 @@ class AladdinClient:
     }
 
     def __init__(self):
-        settings = _read_settings()
-        self.email = _setting(settings, "ALADDIN_EMAIL", "")
-        self.password = _setting(settings, "ALADDIN_PASSWORD", "")
-        self.api_base_url = _normalize_api_base(_setting(settings, "ALADDIN_API_BASE_URL", DEFAULT_API_BASE_URL))
-        self.cognito_region = _setting(settings, "ALADDIN_COGNITO_REGION", DEFAULT_COGNITO_REGION)
-        self.client_id = _setting(settings, "ALADDIN_CLIENT_ID", DEFAULT_CLIENT_ID)
-        self.client_secret = _setting(settings, "ALADDIN_CLIENT_SECRET", DEFAULT_CLIENT_SECRET)
-        self.app_version = _setting(settings, "ALADDIN_APP_VERSION", DEFAULT_APP_VERSION)
+        settings = read_aladdin_settings()
+        self.email = _coerce_text(settings.get("ALADDIN_EMAIL"))
+        self.password = _coerce_text(settings.get("ALADDIN_PASSWORD"))
+        self.api_base_url = normalize_aladdin_api_base(settings.get("ALADDIN_API_BASE_URL") or ALADDIN_DEFAULT_API_BASE_URL)
+        self.cognito_region = _coerce_text(settings.get("ALADDIN_COGNITO_REGION")) or ALADDIN_DEFAULT_COGNITO_REGION
+        self.client_id = _coerce_text(settings.get("ALADDIN_CLIENT_ID")) or ALADDIN_DEFAULT_CLIENT_ID
+        self.client_secret = _coerce_text(settings.get("ALADDIN_CLIENT_SECRET")) or ALADDIN_DEFAULT_CLIENT_SECRET
+        self.app_version = _coerce_text(settings.get("ALADDIN_APP_VERSION")) or ALADDIN_DEFAULT_APP_VERSION
         self.timeout = _as_int(
-            _setting(settings, "ALADDIN_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)),
-            DEFAULT_TIMEOUT_SECONDS,
+            settings.get("ALADDIN_TIMEOUT_SECONDS"),
+            ALADDIN_DEFAULT_TIMEOUT_SECONDS,
             minimum=5,
             maximum=120,
         )
@@ -268,7 +207,7 @@ class AladdinClient:
 class AladdinConnectPlugin(ToolVerba):
     name = "aladdin_connect"
     verba_name = "Aladdin Connect"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Aladdin Connect"
     settings_category = "Aladdin Connect"
@@ -334,10 +273,10 @@ class AladdinConnectPlugin(ToolVerba):
         return {}
 
     def _diagnosis(self) -> dict:
-        settings = _read_settings()
-        email = _setting(settings, "ALADDIN_EMAIL", "")
-        password = _setting(settings, "ALADDIN_PASSWORD", "")
-        api_base = _normalize_api_base(_setting(settings, "ALADDIN_API_BASE_URL", DEFAULT_API_BASE_URL))
+        settings = read_aladdin_settings()
+        email = _coerce_text(settings.get("ALADDIN_EMAIL"))
+        password = _coerce_text(settings.get("ALADDIN_PASSWORD"))
+        api_base = normalize_aladdin_api_base(settings.get("ALADDIN_API_BASE_URL") or ALADDIN_DEFAULT_API_BASE_URL)
         parsed = urlparse(api_base)
         return {
             "aladdin_email": "set" if "@" in email else "missing",

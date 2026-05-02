@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import redis_client, get_tater_name
+from integrations.homeassistant import load_homeassistant_config
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
@@ -45,7 +46,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.29"
+    version = "1.0.30"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -99,13 +100,8 @@ class MusicAssistantPlugin(ToolVerba):
 
     # -------------------- HA helpers --------------------
     def _ha_settings(self) -> Dict[str, str]:
-        # IMPORTANT: decode HA settings too (hgetall often returns bytes)
-        ha_raw = redis_client.hgetall("homeassistant_settings") or {}
-        ha_settings = _decode_redis_map(ha_raw)
-
-        base_url = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
-        token = (ha_settings.get("HA_TOKEN") or "").strip()
-        return {"base_url": base_url, "token": token}
+        ha = load_homeassistant_config(required=False)
+        return {"base_url": ha.get("base", ""), "token": ha.get("token", "")}
 
     def _ha_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
