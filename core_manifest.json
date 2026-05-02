@@ -30,6 +30,25 @@
       "sha256": "b855dab39fe449da6adc13d6f85eb59ee0d87d8476ce066d153ed0e9f79fe56f"
     },
     {
+      "id": "environment",
+      "name": "Environment Core",
+      "module_key": "environment_core",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Local environment telemetry receiver for weather stations and future sensor feeds.",
+      "settings_category": "Environment Core Settings",
+      "required_settings_count": 4,
+      "autostart_key": "environment_core_running",
+      "tags": [
+        "environment",
+        "weather",
+        "ecowitt",
+        "telemetry"
+      ],
+      "entry": "cores/environment_core.py",
+      "sha256": "864d53268379bd5b6ff0aae99d8cc0bdbf1ad82841358560d3f6ee39fbff4420"
+    },
+    {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",

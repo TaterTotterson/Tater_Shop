@@ -16,6 +16,7 @@
 |-------------|--------|-------------|
 | `ai_task` | `ai_task_core` | AI Task Scheduler Core integration core for Tater. |
 | `awareness` | `awareness_core` | Awareness Core integration core for Tater. |
+| `environment` | `environment_core` | Local environment telemetry receiver for weather stations and future sensor feeds. |
 | `memory` | `memory_core` | Memory Core integration core for Tater. |
 | `personal` | `personal_core` | Personal Core integration core for Tater. |
 | `rss` | `rss_core` | RSS Core integration core for Tater. |
