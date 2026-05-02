@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-import aiohttp
 import requests
 from dotenv import load_dotenv
 
@@ -29,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 
 load_dotenv()
 
@@ -41,31 +40,6 @@ CORE_SETTINGS = {
     # Keep events_query kernel tool callable even if the background listener loop is stopped.
     "hydra_tools_require_running": False,
     "required": {
-        "ws_reconnect_seconds": {
-            "label": "HA WS Reconnect (sec)",
-            "type": "number",
-            "default": 5,
-            "description": "Seconds between Home Assistant websocket reconnect attempts in the shared integration runtime.",
-        },
-        "event_provider": {
-            "label": "Event Provider",
-            "type": "select",
-            "options": ["homeassistant", "unifi_protect"],
-            "default": "homeassistant",
-            "description": "Select which shared integration runtime provider powers camera/doorbell/sensor event rules.",
-        },
-        "unifi_ws_reconnect_seconds": {
-            "label": "UniFi WS Reconnect (sec)",
-            "type": "number",
-            "default": 5,
-            "description": "Seconds between UniFi Protect websocket reconnect attempts in the shared integration runtime.",
-        },
-        "unifi_ws_url": {
-            "label": "UniFi WS URL (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Optional full websocket URL override for UniFi Protect updates. Leave blank to auto-use /proxy/protect/integration/v1/subscribe/events.",
-        },
         "events_retention": {
             "label": "Events Retention",
             "type": "select",
@@ -115,7 +89,16 @@ _AWARENESS_WORKER_COUNT = 10
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
-_SUPPORTED_EVENT_PROVIDERS = {"homeassistant", "unifi_protect"}
+_SUPPORTED_EVENT_PROVIDERS = {
+    "all",
+    "homeassistant",
+    "unifi_protect",
+    "unifi_network",
+    "hue",
+    "ecobee_homekit",
+    "aladdin",
+    "sonos",
+}
 _AREA_PRESETS = [
     "camera",
     "doorbell",
@@ -166,16 +149,6 @@ _UNIFI_SMART_TYPE_LABELS = {
     "license_plate": "License Plate",
 }
 _UNIFI_SMART_TYPE_FALLBACK = ("person", "vehicle", "animal", "package")
-_UNIFI_HA_CAMERA_SUFFIXES = (
-    "_person_detected",
-    "_vehicle_detected",
-    "_animal_detected",
-    "_package_detected",
-    "_object_detected",
-    "_motion",
-    "_doorbell",
-    "_ring",
-)
 
 _ENTITY_CACHE_LOCK = threading.Lock()
 _ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
@@ -203,6 +176,7 @@ _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 180
 _INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
 _INTEGRATION_RUNTIME_EVENT_SEQ_KEY = "tater:integration_runtime:event_seq"
 _INTEGRATION_RUNTIME_STATUS_KEY = "tater:integration_runtime:status"
+_INTEGRATION_RUNTIME_STATES_KEY = "tater:integration_runtime:states"
 _AWARENESS_RUNTIME_SEQ_KEY = "awareness:integration_runtime:last_seq"
 
 
@@ -289,28 +263,76 @@ def _setting_int(client: Any, key: str, default: int, minimum: Optional[int] = N
 
 def _normalize_event_provider(value: Any) -> str:
     token = _text(value).lower()
+    if token in {"", "runtime", "integrations", "integration_runtime"}:
+        return "all"
     if token in {"unifi", "protect"}:
         token = "unifi_protect"
+    if token in {"network", "unifi_network"}:
+        token = "unifi_network"
+    if token in {"philips_hue", "phillips_hue"}:
+        token = "hue"
+    if token in {"ecobee", "homekit", "ecobee_homekit"}:
+        token = "ecobee_homekit"
     if token not in _SUPPORTED_EVENT_PROVIDERS:
-        return "homeassistant"
+        return "all"
     return token
 
 
-def _event_provider(client: Any = None) -> str:
-    return _normalize_event_provider(_settings(client).get("event_provider") or "homeassistant")
+def _provider_ref(provider: Any, value: Any) -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    provider_token = _normalize_event_provider(provider)
+    if provider_token == "all":
+        return token
+    return f"{provider_token}|{token}"
 
 
-def _rule_provider(rule: Dict[str, Any], *, fallback: str = "homeassistant") -> str:
+def _split_provider_ref(value: Any, fallback_provider: Any = "all") -> Tuple[str, str]:
+    token = _text(value)
+    if "|" in token:
+        left, right = token.split("|", 1)
+        provider = _normalize_event_provider(left)
+        if provider != "all" and _text(right):
+            return provider, _text(right)
+    return _normalize_event_provider(fallback_provider), token
+
+
+def _provider_from_rule_fields(rule: Dict[str, Any]) -> str:
+    for item in _normalize_trigger_entities((rule or {}).get("trigger_entities")):
+        provider, raw_value = _split_provider_ref(item, "")
+        if provider != "all" and raw_value:
+            return provider
+    for key in ("sensor_entity", "trigger_entity", "camera_entity"):
+        provider, raw_value = _split_provider_ref((rule or {}).get(key), "")
+        if provider != "all" and raw_value:
+            return provider
+    return ""
+
+
+def _rule_provider(rule: Dict[str, Any], *, fallback: str = "all") -> str:
     kind = _text((rule or {}).get("kind")).lower()
     if kind == "brief":
         return "homeassistant"
-    return _normalize_event_provider((rule or {}).get("provider") or fallback)
+    return _normalize_event_provider((rule or {}).get("provider") or _provider_from_rule_fields(rule) or fallback)
 
 
 def _provider_label(provider: str) -> str:
     token = _normalize_event_provider(provider)
+    if token == "all":
+        return "All Integrations"
     if token == "unifi_protect":
         return "UniFi Protect"
+    if token == "unifi_network":
+        return "UniFi Network"
+    if token == "hue":
+        return "Philips Hue"
+    if token == "ecobee_homekit":
+        return "Ecobee HomeKit"
+    if token == "aladdin":
+        return "Aladdin Connect"
+    if token == "sonos":
+        return "Sonos"
     return "Home Assistant"
 
 
@@ -432,6 +454,20 @@ def _integration_runtime_events(client: Any, *, after_seq: int, limit: int = 100
         events.append(event)
     events.sort(key=lambda item: _as_int(item.get("seq"), 0, minimum=0))
     return events[:max_rows]
+
+
+def _integration_runtime_state(client: Any, provider: Any, state_id: Any) -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    provider_token = _normalize_event_provider(provider)
+    entity_id = _text(state_id)
+    if redis_obj is None or provider_token == "all" or not entity_id:
+        return {}
+    try:
+        record = _redis_json_object(redis_obj.hget(_INTEGRATION_RUNTIME_STATES_KEY, f"{provider_token}:{entity_id}"))
+    except Exception:
+        logger.debug("[awareness] failed to read integration runtime state for %s:%s", provider_token, entity_id, exc_info=True)
+        return {}
+    return record or {}
 
 
 def _integration_runtime_connected(value: Any) -> bool:
@@ -729,7 +765,9 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     base: Dict[str, Any] = {
         "id": rule_id,
         "kind": kind,
-        "provider": "homeassistant" if kind == "brief" else _normalize_event_provider(raw.get("provider") or "homeassistant"),
+        "provider": "homeassistant"
+        if kind == "brief"
+        else _normalize_event_provider(raw.get("provider") or _provider_from_rule_fields(raw) or "all"),
         "name": _text(raw.get("name")) or f"{kind.title()} rule",
         "enabled": _bool(raw.get("enabled"), True),
         "created_at": _as_float(raw.get("created_at"), now_ts),
@@ -773,7 +811,9 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
         if not trigger_entities:
             trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
-        provider_token = _normalize_event_provider(raw.get("provider") or base.get("provider") or "homeassistant")
+        provider_token = _normalize_event_provider(
+            raw.get("provider") or base.get("provider") or _provider_from_rule_fields(raw) or "all"
+        )
         if provider_token == "unifi_protect" and camera_entity:
             camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
             if camera_id:
@@ -957,10 +997,6 @@ def _dequeue_execution(client: Any) -> Optional[Dict[str, Any]]:
 
 def _ha_config() -> Dict[str, str]:
     return load_homeassistant_config(required=True)
-
-
-def _ha_configured() -> bool:
-    return bool(_text(load_homeassistant_config(required=False).get("token")))
 
 
 def _ha_config_optional() -> Dict[str, str]:
@@ -1349,91 +1385,6 @@ def _unifi_camera_name_index() -> Dict[str, str]:
     return out
 
 
-def _unifi_camera_id_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -> str:
-    object_id = _entity_object_id(entity_id)
-    attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-
-    friendly = _text(attrs.get("friendly_name"))
-    cleaned = object_id
-    for suffix in _UNIFI_HA_CAMERA_SUFFIXES:
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
-            break
-    candidates = [friendly, object_id.replace("_", " "), cleaned.replace("_", " ")]
-    index = _unifi_camera_name_index()
-    if not index:
-        return ""
-    for candidate in candidates:
-        key = _unifi_name_key(candidate)
-        if not key:
-            continue
-        if key in index:
-            return index[key]
-        for known_key, camera_id in index.items():
-            if not known_key:
-                continue
-            if key in known_key or known_key in key:
-                return camera_id
-    return ""
-
-
-def _unifi_detect_type_from_ha_entity(entity_id: str, state_obj: Dict[str, Any]) -> str:
-    entity = _text(entity_id).lower()
-    object_id = _entity_object_id(entity)
-    attrs = state_obj.get("attributes") if isinstance(state_obj, dict) else {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-    device_class = _text(attrs.get("device_class")).lower()
-    source = " ".join(
-        [
-            entity,
-            _text(attrs.get("friendly_name")).lower(),
-            device_class,
-            _text(attrs.get("event_type")).lower(),
-            _text(attrs.get("event_types")).lower(),
-        ]
-    )
-    if "person" in source:
-        return "person"
-    if "animal" in source:
-        return "animal"
-    if "vehicle" in source:
-        return "vehicle"
-    if "package" in source:
-        return "package"
-    if "motion" in source:
-        return "motion"
-    if any(token in source for token in ("ring", "pressed")):
-        return "doorbell"
-    if "doorbell" in source:
-        if any(token in source for token in ("detect", "smart", "motion", "person", "animal", "vehicle", "package")):
-            return ""
-        if object_id.endswith("_doorbell") or object_id == "doorbell":
-            return "doorbell"
-        if device_class == "doorbell":
-            return "doorbell"
-    return ""
-
-
-def _unifi_translate_ha_entity_to_trigger(entity_id: str, state_obj: Dict[str, Any]) -> str:
-    entity = _text(entity_id).lower()
-    if not entity.startswith(("binary_sensor.", "sensor.")):
-        return ""
-    detect_type = _unifi_detect_type_from_ha_entity(entity, state_obj)
-    if not detect_type:
-        return ""
-    camera_id = _unifi_camera_id_from_ha_entity(entity, state_obj)
-    if not camera_id:
-        return ""
-    if detect_type == "doorbell":
-        return _unifi_camera_doorbell_trigger(camera_id)
-    if detect_type == "motion":
-        return _unifi_camera_motion_trigger(camera_id)
-    return _unifi_camera_smart_trigger(camera_id, detect_type)
-
-
 def _unifi_sensor_entity(sensor_id: str) -> str:
     return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
 
@@ -1452,27 +1403,6 @@ def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:
     if json_content:
         headers["Content-Type"] = "application/json"
     return headers
-
-
-def _ha_ws_url(base: str) -> str:
-    if base.startswith("https://"):
-        return base.replace("https://", "wss://", 1) + "/api/websocket"
-    return base.replace("http://", "ws://", 1) + "/api/websocket"
-
-
-def _unifi_ws_url(base: str, override: str = "") -> str:
-    candidate = _text(override)
-    if candidate.startswith(("ws://", "wss://")):
-        return candidate
-    if candidate:
-        path = candidate if candidate.startswith("/") else f"/{candidate}"
-    else:
-        path = "/proxy/protect/integration/v1/subscribe/events"
-    if base.startswith("https://"):
-        return base.replace("https://", "wss://", 1) + path
-    if base.startswith("http://"):
-        return base.replace("http://", "ws://", 1) + path
-    return f"wss://{base.lstrip('/')}{path}"
 
 
 def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
@@ -1501,14 +1431,34 @@ def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_s
     return attr_expected == attr_text or attr_expected in attr_text
 
 
-def _rule_matches_event(rule: Dict[str, Any], *, entity_id: str, new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
-    trigger_entities = [token.lower() for token in _normalize_trigger_entities(rule.get("trigger_entities"))]
+def _rule_matches_event(
+    rule: Dict[str, Any],
+    *,
+    provider: str,
+    entity_id: str,
+    new_state: Dict[str, Any],
+    old_state: Dict[str, Any],
+) -> bool:
+    provider_token = _normalize_event_provider(provider)
+    rule_provider = _rule_provider(rule)
+    trigger_entities = _normalize_trigger_entities(rule.get("trigger_entities"))
     if not trigger_entities:
-        legacy = _text(rule.get("trigger_entity")).lower()
+        legacy = _text(rule.get("trigger_entity"))
         if legacy:
             trigger_entities = [legacy]
     event_entity = _text(entity_id).lower()
-    if trigger_entities and event_entity not in trigger_entities:
+    if trigger_entities:
+        matched_entity = False
+        for trigger_entity in trigger_entities:
+            trigger_provider, trigger_raw = _split_provider_ref(trigger_entity, rule_provider)
+            if trigger_provider not in {"all", provider_token}:
+                continue
+            if _text(trigger_raw).lower() == event_entity:
+                matched_entity = True
+                break
+        if not matched_entity:
+            return False
+    elif rule_provider not in {"all", provider_token}:
         return False
     return _state_matches_custom(rule, new_state, old_state)
 
@@ -2715,16 +2665,29 @@ async def _ha_fetch_history(
     return await asyncio.to_thread(_ha_fetch_history_sync, ha_base, token, entities, start, end)
 
 
+def _numeric_value(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"-?\d+(?:\.\d+)?", _text(value))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
 def _extract_numeric(series: List[Dict[str, Any]]) -> List[float]:
     values: List[float] = []
     for item in series or []:
         state = _text((item or {}).get("state"))
         if not state or state in {"unknown", "unavailable"}:
             continue
-        try:
-            values.append(float(state))
-        except Exception:
-            continue
+        value = _numeric_value(state)
+        if value is not None:
+            values.append(value)
     return values
 
 
@@ -2732,6 +2695,43 @@ def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
     if not values:
         return None
     return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
+
+
+def _runtime_sensor_numeric(entity_ref: str, role: str) -> Optional[float]:
+    provider, state_id = _split_provider_ref(entity_ref, "homeassistant")
+    if provider in {"all", "homeassistant"} or not state_id:
+        return None
+    record = _integration_runtime_state(redis_client, provider, state_id)
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    candidates: List[Any] = []
+    role_token = _text(role).lower()
+    if role_token == "temperature":
+        candidates.extend(
+            [
+                payload.get("current_temperature_f"),
+                payload.get("current_temperature_c"),
+                details.get("current_temperature_f"),
+                details.get("current_temperature_c"),
+            ]
+        )
+        temperature = details.get("temperature") if isinstance(details.get("temperature"), dict) else {}
+        candidates.append(temperature.get("temperature"))
+    elif role_token == "wind":
+        candidates.extend(
+            [payload.get("wind"), payload.get("wind_speed"), payload.get("wind_speed_mph"), details.get("wind_speed")]
+        )
+    elif role_token == "rain":
+        candidates.extend(
+            [payload.get("rain"), payload.get("rain_total"), payload.get("rain_today"), details.get("rain")]
+        )
+    candidates.append(payload.get("state"))
+    for candidate in candidates:
+        value = _numeric_value(candidate)
+        if value is not None:
+            return value
+    return None
+
 
 def _shared_announcement_tts_settings() -> Dict[str, Any]:
     shared = get_shared_speech_settings()
@@ -2756,6 +2756,9 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "camera"
     provider = _rule_provider(rule)
+    camera_provider, camera_target = _split_provider_ref(camera, provider)
+    if camera_provider != "all":
+        provider = camera_provider
     if not camera:
         raise ValueError("Camera rule is missing camera_entity.")
 
@@ -2780,10 +2783,12 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
 
     try:
         if provider == "unifi_protect":
-            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
-        else:
+            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
+        elif provider == "homeassistant":
             ha = _ha_config()
-            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
+        else:
+            raise ValueError(f"{_provider_label(provider)} does not expose camera snapshots to Awareness yet.")
         summary = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -2880,6 +2885,9 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "front door"
     provider = _rule_provider(rule)
+    camera_provider, camera_target = _split_provider_ref(camera, provider)
+    if camera_provider != "all":
+        provider = camera_provider
     if not camera:
         raise ValueError("Doorbell rule is missing camera_entity.")
     vision = get_shared_vision_settings(
@@ -2895,10 +2903,12 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     jpeg: bytes = b""
     try:
         if provider == "unifi_protect":
-            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
-        else:
+            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
+        elif provider == "homeassistant":
             ha = _ha_config()
-            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
+        else:
+            raise ValueError(f"{_provider_label(provider)} does not expose doorbell camera snapshots to Awareness yet.")
         spoken_line = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -3007,6 +3017,8 @@ async def _execute_entry_sensor_rule(
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
     camera = _text(rule.get("camera_entity"))
+    camera_provider, camera_target = _split_provider_ref(camera, provider)
+    snapshot_provider = camera_provider if camera_provider != "all" else provider
     entity_id = _text(event.get("entity_id")) or _text(rule.get("sensor_entity"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
@@ -3026,11 +3038,13 @@ async def _execute_entry_sensor_rule(
     if camera:
         try:
             jpeg = b""
-            if provider == "unifi_protect":
-                jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera))
-            else:
+            if snapshot_provider == "unifi_protect":
+                jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
+            elif snapshot_provider == "homeassistant":
                 ha = _ha_config()
-                jpeg = await _camera_snapshot(ha["base"], ha["token"], camera)
+                jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
+            else:
+                raise ValueError(f"{_provider_label(snapshot_provider)} does not expose camera snapshots to Awareness yet.")
             snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
         except Exception as exc:
             logger.warning("[awareness] entry sensor snapshot failed for %s (%s): %s", camera, provider, exc)
@@ -3165,7 +3179,6 @@ async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, 
 
 async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     del llm_client
-    ha = _ha_config()
     max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
     core_settings = _settings(redis_client)
     # Legacy fallback keeps prior installs working after removing automation verbas.
@@ -3192,21 +3205,41 @@ async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str,
     hours = _as_int(rule.get("hours"), 12, minimum=1, maximum=72)
     now = datetime.now()
     start = now - timedelta(hours=hours)
-    entities = [entity for entity in [temp_entity, wind_entity, rain_entity] if entity]
-    if not entities:
-        raise ValueError("Weather Brief sensors are not configured in verba settings.")
-    history = await _ha_fetch_history(ha["base"], ha["token"], entities, start, now)
+    sensor_refs = [entity for entity in [temp_entity, wind_entity, rain_entity] if entity]
+    if not sensor_refs:
+        raise ValueError("Weather Brief sensors are not configured.")
+    ha_entities = []
+    for entity in sensor_refs:
+        provider, raw_entity = _split_provider_ref(entity, "homeassistant")
+        if provider in {"all", "homeassistant"} and raw_entity:
+            ha_entities.append(raw_entity)
+    ha = _ha_config() if ha_entities else {"base": "", "token": ""}
+    history = await _ha_fetch_history(ha["base"], ha["token"], ha_entities, start, now) if ha_entities else {}
     metrics: Dict[str, Any] = {"temperature": None, "wind": None, "rain": None}
-    if temp_entity and temp_entity in history:
-        summary = _summary_stats(_extract_numeric(history[temp_entity]))
+    if temp_entity:
+        provider, raw_entity = _split_provider_ref(temp_entity, "homeassistant")
+        values = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
+        runtime_value = _runtime_sensor_numeric(temp_entity, "temperature")
+        if runtime_value is not None:
+            values.append(runtime_value)
+        summary = _summary_stats(values)
         if summary:
             metrics["temperature"] = summary
-    if wind_entity and wind_entity in history:
-        summary = _summary_stats(_extract_numeric(history[wind_entity]))
+    if wind_entity:
+        provider, raw_entity = _split_provider_ref(wind_entity, "homeassistant")
+        values = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
+        runtime_value = _runtime_sensor_numeric(wind_entity, "wind")
+        if runtime_value is not None:
+            values.append(runtime_value)
+        summary = _summary_stats(values)
         if summary:
             metrics["wind"] = summary
-    if rain_entity and rain_entity in history:
-        vals = _extract_numeric(history[rain_entity])
+    if rain_entity:
+        provider, raw_entity = _split_provider_ref(rain_entity, "homeassistant")
+        vals = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
+        runtime_value = _runtime_sensor_numeric(rain_entity, "rain")
+        if runtime_value is not None:
+            vals.append(runtime_value)
         if vals:
             total = sum(v for v in vals if v >= 0)
             metrics["rain"] = {"total": total, "max": max(vals), "rained": total > 0}
@@ -3226,6 +3259,8 @@ async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str,
     summary_text = _compact(summary_text, limit=max_chars)
     input_text_entity = _text(rule.get("input_text_entity")) or _text(legacy_settings.get("INPUT_TEXT_ENTITY"))
     if input_text_entity:
+        if not ha.get("base") or not ha.get("token"):
+            ha = _ha_config()
         try:
             await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, summary_text)
         except Exception as exc:
@@ -3760,8 +3795,115 @@ def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[s
     return catalog
 
 
+def _prefixed_event_catalog(catalog: Dict[str, List[Tuple[str, str]]], provider: str) -> Dict[str, List[Tuple[str, str]]]:
+    out = _empty_entity_catalog()
+    provider_name = _provider_label(provider)
+    for key, pairs in (catalog or {}).items():
+        if key not in out:
+            continue
+        if key in {"cameras", "triggers", "doorbell_triggers", "entry_sensors", "entry_sensors_door", "entry_sensors_window", "entry_sensors_garage"}:
+            out[key] = [
+                (_provider_ref(provider, value), f"{provider_name}: {_text(label) or _text(value)}")
+                for value, label in pairs or []
+            ]
+        else:
+            out[key] = list(pairs or [])
+    return out
+
+
+def _catalog_extend(target: Dict[str, List[Tuple[str, str]]], source: Dict[str, List[Tuple[str, str]]]) -> None:
+    for key in target:
+        target[key].extend(source.get(key) or [])
+
+
+def _device_label(provider_name: str, device: Dict[str, Any], device_id: str) -> str:
+    name = _text(device.get("name")) or device_id
+    device_type = _text(device.get("type")).replace("_", " ")
+    suffix = f"{provider_name}: {name}"
+    if device_type:
+        suffix = f"{suffix} {device_type}"
+    return f"{suffix} ({device_id})"
+
+
+def _integration_devices_catalog() -> Dict[str, List[Tuple[str, str]]]:
+    catalog = _empty_entity_catalog()
+    from integration_registry import get_integration_catalog, get_integration_device_group
+
+    for integration in get_integration_catalog():
+        if not isinstance(integration, dict):
+            continue
+        integration_id = _text(integration.get("id"))
+        provider = _normalize_event_provider(integration_id)
+        if provider in {"all", "homeassistant", "unifi_protect"}:
+            continue
+        payload = get_integration_device_group(integration_id)
+        group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
+        provider_name = _text(group.get("name") or integration.get("name")) or _provider_label(provider)
+        devices = group.get("devices") if isinstance(group.get("devices"), list) else []
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            device_id = _text(device.get("id"))
+            if not device_id:
+                continue
+            device_type = _text(device.get("type")).lower()
+            details = device.get("details") if isinstance(device.get("details"), dict) else {}
+            if provider == "hue" and device_type in {"motion", "contact", "light", "temperature"}:
+                entity = f"{device_type}:{device_id}"
+            elif provider == "unifi_network":
+                entity = f"{'client' if device_type == 'client' else 'device'}:{device_id}"
+            elif provider == "aladdin" and device_type in {"garage", "garage_door"}:
+                entity = f"garage_door:{device_id}"
+            elif provider == "ecobee_homekit" and device_type == "thermostat":
+                entity = device_id
+            else:
+                entity = f"{device_type or 'device'}:{device_id}"
+            ref = _provider_ref(provider, entity)
+            label = _device_label(provider_name, device, entity)
+            if device_type == "motion":
+                catalog["triggers"].append((ref, label))
+            elif device_type == "contact":
+                catalog["entry_sensors"].append((ref, label))
+                name_hint = f"{_text(device.get('name')).lower()} {_text(details.get('resource_type')).lower()}"
+                if "window" in name_hint:
+                    catalog["entry_sensors_window"].append((ref, label))
+                else:
+                    catalog["entry_sensors_door"].append((ref, label))
+                catalog["triggers"].append((ref, label))
+            elif device_type in {"garage", "garage_door"}:
+                catalog["entry_sensors"].append((ref, label))
+                catalog["entry_sensors_garage"].append((ref, label))
+                catalog["triggers"].append((ref, label))
+            elif device_type == "temperature":
+                catalog["weather_sensors"].append((ref, label))
+                catalog["weather_temp"].append((ref, label))
+            elif device_type == "thermostat":
+                catalog["weather_sensors"].append((ref, label))
+                catalog["weather_temp"].append((ref, label))
+            elif provider == "unifi_network":
+                catalog["triggers"].append((ref, label))
+            elif device_type in {"light", "switch", "client", "network_device"}:
+                catalog["triggers"].append((ref, label))
+    return catalog
+
+
+def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
+    cached = _cached_catalog("all", force_refresh=force_refresh)
+    if cached is not None:
+        return cached
+    catalog = _empty_entity_catalog()
+    _catalog_extend(catalog, _prefixed_event_catalog(_ha_entity_catalog(force_refresh=force_refresh), "homeassistant"))
+    _catalog_extend(catalog, _prefixed_event_catalog(_unifi_entity_catalog(force_refresh=force_refresh), "unifi_protect"))
+    _catalog_extend(catalog, _integration_devices_catalog())
+    catalog = _catalog_with_announcement_targets(catalog)
+    _set_cached_catalog("all", catalog)
+    return catalog
+
+
 def _entity_catalog(force_refresh: bool = False, *, provider: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
-    active_provider = _normalize_event_provider(provider or _event_provider(redis_client))
+    active_provider = _normalize_event_provider(provider or "all")
+    if active_provider == "all":
+        return _all_integrations_entity_catalog(force_refresh=force_refresh)
     if active_provider == "unifi_protect":
         return _unifi_entity_catalog(force_refresh=force_refresh)
     return _ha_entity_catalog(force_refresh=force_refresh)
@@ -3956,7 +4098,8 @@ def _area_options(rules: Dict[str, Dict[str, Any]], *, current_value: str = "") 
 
 
 def _entity_object_id(entity_id: str) -> str:
-    token = _text(entity_id).lower()
+    _provider, raw_entity = _split_provider_ref(entity_id, "")
+    token = _text(raw_entity or entity_id).lower()
     if "." in token:
         return token.split(".", 1)[1]
     return token
@@ -3977,8 +4120,12 @@ def _camera_aliases(camera_entity: str) -> List[str]:
 
 
 def _trigger_matches_camera(camera_entity: str, trigger_entity: str) -> bool:
-    trigger_object = _entity_object_id(trigger_entity)
-    for alias in _camera_aliases(camera_entity):
+    camera_provider, raw_camera = _split_provider_ref(camera_entity, "all")
+    trigger_provider, raw_trigger = _split_provider_ref(trigger_entity, camera_provider)
+    if camera_provider != "all" and trigger_provider != "all" and camera_provider != trigger_provider:
+        return False
+    trigger_object = _entity_object_id(raw_trigger)
+    for alias in _camera_aliases(raw_camera):
         if alias and alias in trigger_object:
             return True
     return False
@@ -3999,10 +4146,13 @@ def _trigger_dependency_for_camera(
         # backend catalog heuristics fail to classify a camera as a doorbell.
         existing = {_text(pair[0]).lower() for pair in trigger_pairs}
         for camera_entity, camera_label in cameras:
-            camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
+            camera_provider, raw_camera_entity = _split_provider_ref(camera_entity, "all")
+            if camera_provider != "unifi_protect":
+                continue
+            camera_id = _text(_unifi_camera_id_from_entity(raw_camera_entity)).lower()
             if not camera_id:
                 continue
-            derived = _unifi_camera_doorbell_trigger(camera_id)
+            derived = _provider_ref("unifi_protect", _unifi_camera_doorbell_trigger(camera_id))
             if derived.lower() in existing:
                 continue
             label_name = _catalog_label_name(camera_label, camera_entity)
@@ -4010,7 +4160,7 @@ def _trigger_dependency_for_camera(
             existing.add(derived.lower())
         doorbell_only = [
             pair for pair in trigger_pairs
-            if _text(pair[0]).lower().endswith("_doorbell")
+            if _text(_split_provider_ref(pair[0], "")[1]).lower().endswith("_doorbell")
         ]
         if doorbell_only:
             trigger_pairs = doorbell_only
@@ -4629,16 +4779,8 @@ def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]])
 
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     all_rules = _load_rules(client)
-    active_provider = _event_provider(client)
-    rules: Dict[str, Dict[str, Any]] = {}
-    for rule_id, rule in all_rules.items():
-        kind = _text((rule or {}).get("kind")).lower()
-        if kind == "brief":
-            rules[rule_id] = rule
-            continue
-        if _rule_provider(rule) == active_provider:
-            rules[rule_id] = rule
-    catalog = _entity_catalog(provider=active_provider)
+    rules: Dict[str, Dict[str, Any]] = dict(all_rules)
+    catalog = _entity_catalog(provider="all")
     event_forms = _event_items_for_ui(client)
     forms: List[Dict[str, Any]] = []
     for rule in sorted(
@@ -4722,7 +4864,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     )
     return {
         "kind": "settings_manager",
-        "title": f"Awareness Rule Manager ({_provider_label(active_provider)} Events)",
+        "title": "Awareness Automations",
         "empty_message": "No awareness rules configured yet.",
         "stats_refresh_button": True,
         "stats_refresh_label": "Refresh",
@@ -5086,14 +5228,8 @@ def _build_rule_from_values(
 ) -> Dict[str, Any]:
     now_ts = time.time()
     previous = existing if isinstance(existing, dict) else {}
-    active_provider = _event_provider(redis_client)
-    provider_value = (
-        "homeassistant"
-        if kind == "brief"
-        else _normalize_event_provider(
-            _value(values, payload, "provider", previous.get("provider") or active_provider)
-        )
-    )
+    explicit_provider = "provider" in values or "provider" in payload
+    provider_value = "homeassistant" if kind == "brief" else _normalize_event_provider(previous.get("provider") or "all")
     base: Dict[str, Any] = {
         "id": _text(previous.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -5244,6 +5380,13 @@ def _build_rule_from_values(
             "quote_history": _normalize_quote_history(previous.get("quote_history") or previous.get("last_quotes"), limit=5),
         }
     )
+    if kind != "brief":
+        inferred_provider = _provider_from_rule_fields(base)
+        if explicit_provider:
+            provider_value = _normalize_event_provider(_value(values, payload, "provider", provider_value))
+        elif inferred_provider:
+            provider_value = inferred_provider
+        base["provider"] = provider_value
     if kind == "doorbell":
         base["trigger_to_state"] = "on"
         base["trigger_attribute"] = ""
@@ -5293,9 +5436,8 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     values = _payload_values(body)
     action_name = _text(action).lower()
     if action_name == "awareness_refresh_entities":
-        provider = _event_provider(client)
-        _entity_catalog(force_refresh=True, provider=provider)
-        return {"ok": True, "message": f"Entity catalog refreshed for {_provider_label(provider)}."}
+        _entity_catalog(force_refresh=True, provider="all")
+        return {"ok": True, "message": "Integration device catalog refreshed."}
     if action_name == "awareness_save_event_filters":
         current_filters = _event_type_filters(client)
         current_list_view = _event_list_view_enabled(client)
@@ -5377,9 +5519,6 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             continue
         if not _bool(rule.get("enabled"), True) and reason != "manual":
             continue
-        if _text(rule.get("kind")) != "brief" and reason != "manual":
-            if _rule_provider(rule) != _event_provider(redis_client):
-                continue
         try:
             result = await _execute_rule(rule, llm_client, reason, event_payload)
             now_ts = time.time()
@@ -5452,12 +5591,16 @@ async def _handle_trigger_state_change(
         kind = _text(rule.get("kind"))
         if kind not in {"camera", "doorbell", "entry_sensor"}:
             continue
-        if _rule_provider(rule) != provider_token:
-            continue
         if not _bool(rule.get("enabled"), True):
             continue
         try:
-            if not _rule_matches_event(rule, entity_id=entity_id, new_state=new_state, old_state=old_state):
+            if not _rule_matches_event(
+                rule,
+                provider=provider_token,
+                entity_id=entity_id,
+                new_state=new_state,
+                old_state=old_state,
+            ):
                 continue
         except Exception:
             logger.exception("[awareness] trigger match failed for rule %s", rule.get("id"))
@@ -5483,46 +5626,11 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
         return
     new_state = event_payload.get("new_state") if isinstance(event_payload.get("new_state"), dict) else {}
     old_state = event_payload.get("old_state") if isinstance(event_payload.get("old_state"), dict) else {}
-    active_provider = _event_provider(redis_client)
-    if active_provider == "homeassistant":
-        await _handle_trigger_state_change(
-            provider="homeassistant",
-            entity_id=entity_id,
-            new_state=new_state,
-            old_state=old_state,
-        )
-        return
-    if active_provider != "unifi_protect":
-        return
-    translated_entity = _unifi_translate_ha_entity_to_trigger(entity_id, new_state)
-    if not translated_entity:
-        translated_entity = _unifi_translate_ha_entity_to_trigger(entity_id, old_state)
-    if not translated_entity:
-        return
-    unifi_new = dict(new_state)
-    unifi_old = dict(old_state)
-    new_attrs = unifi_new.get("attributes") if isinstance(unifi_new.get("attributes"), dict) else {}
-    old_attrs = unifi_old.get("attributes") if isinstance(unifi_old.get("attributes"), dict) else {}
-    new_attrs = dict(new_attrs)
-    old_attrs = dict(old_attrs)
-    new_attrs["source_entity_id"] = entity_id
-    old_attrs["source_entity_id"] = entity_id
-    unifi_new["attributes"] = new_attrs
-    unifi_old["attributes"] = old_attrs
-    source_domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
-    new_state_token = _text(unifi_new.get("state")).lower()
-    old_state_token = _text(unifi_old.get("state")).lower()
-    binary_tokens = {"on", "off", "open", "closed", "opening", "closing", "locked", "unlocked"}
-    if source_domain == "event" or (new_state_token not in binary_tokens and old_state_token not in binary_tokens):
-        # HA event entities often use timestamp/state strings instead of on/off.
-        # Normalize to an edge event so trigger_to_state=on rules can match.
-        unifi_new["state"] = "on"
-        unifi_old["state"] = "off"
     await _handle_trigger_state_change(
-        provider="unifi_protect",
-        entity_id=translated_entity,
-        new_state=unifi_new,
-        old_state=unifi_old,
+        provider="homeassistant",
+        entity_id=entity_id,
+        new_state=new_state,
+        old_state=old_state,
     )
 
 
@@ -6043,13 +6151,67 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     return handled
 
 
+def _hue_resource_event_state(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    resource_type = _text(payload.get("resource_type") or payload.get("type")).lower()
+    resource = payload.get("resource") if isinstance(payload.get("resource"), dict) else {}
+    state_text = _text(payload.get("state"))
+    attrs = {
+        "friendly_name": _text(resource.get("metadata", {}).get("name")) if isinstance(resource.get("metadata"), dict) else "",
+        "resource_type": resource_type,
+    }
+    if resource_type == "motion":
+        motion = resource.get("motion") if isinstance(resource.get("motion"), dict) else {}
+        active = bool(motion.get("motion")) if "motion" in motion else state_text.lower() in {"motion", "on", "true", "1"}
+        return ("on" if active else "off"), attrs, {"state": "off" if active else "on", "attributes": attrs}
+    if resource_type == "contact":
+        contact = resource.get("contact") if isinstance(resource.get("contact"), dict) else {}
+        report = contact.get("contact_report") if isinstance(contact.get("contact_report"), dict) else {}
+        report_state = _text(report.get("state") or state_text).lower()
+        open_state = report_state in {"no_contact", "open", "opened", "on", "true", "1"}
+        return ("on" if open_state else "off"), attrs, {"state": "off" if open_state else "on", "attributes": attrs}
+    if resource_type == "light":
+        on = resource.get("on") if isinstance(resource.get("on"), dict) else {}
+        active = bool(on.get("on")) if "on" in on else state_text.lower() == "on"
+        return ("on" if active else "off"), attrs, {"state": "off" if active else "on", "attributes": attrs}
+    return state_text or "changed", attrs, {"state": "", "attributes": attrs}
+
+
+async def _handle_hue_runtime_event(payload: Dict[str, Any]) -> None:
+    resource_type = _text(payload.get("resource_type") or payload.get("type")).lower()
+    resource_id = _text(payload.get("id"))
+    if not resource_type or not resource_id:
+        return
+    state, attrs, old_state = _hue_resource_event_state(payload)
+    await _handle_trigger_state_change(
+        provider="hue",
+        entity_id=f"{resource_type}:{resource_id}",
+        new_state={"state": state, "attributes": attrs},
+        old_state=old_state,
+    )
+
+
+async def _handle_unifi_network_runtime_event(kind: str, payload: Dict[str, Any]) -> None:
+    category = _text(payload.get("category")).lower()
+    if category not in {"client", "device"}:
+        category = "client" if _text(kind).lower().startswith("client_") else "device"
+    row_id = _text(payload.get("id"))
+    if not row_id:
+        return
+    previous = payload.get("previous") if isinstance(payload.get("previous"), dict) else {}
+    event_kind = _text(kind).lower()
+    active = event_kind not in {"client_disconnected", "device_missing"}
+    await _handle_trigger_state_change(
+        provider="unifi_network",
+        entity_id=f"{category}:{row_id}",
+        new_state={"state": "on" if active else "off", "attributes": dict(payload)},
+        old_state={"state": "off" if active else "on", "attributes": dict(previous)},
+    )
+
+
 async def _handle_integration_runtime_event(event: Dict[str, Any]) -> None:
     if not isinstance(event, dict):
         return
     provider = _normalize_event_provider(event.get("provider"))
-    active_provider = _event_provider(redis_client)
-    if provider != active_provider:
-        return
     kind = _text(event.get("kind")).lower()
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     event_ts = _as_float(event.get("ts"), time.time())
@@ -6065,6 +6227,23 @@ async def _handle_integration_runtime_event(event: Dict[str, Any]) -> None:
             item = _unifi_ws_event_item(item) or {}
         if item:
             await _handle_unifi_ws_event(item)
+        return
+
+    if provider == "hue" and kind in {"resource_update", "hue_resource_update"}:
+        await _handle_hue_runtime_event(payload)
+        _runtime_set(redis_client, last_ws_event_ts=event_ts, last_error="")
+        return
+
+    if provider == "unifi_network" and kind in {
+        "client_connected",
+        "client_update",
+        "client_disconnected",
+        "device_seen",
+        "device_update",
+        "device_missing",
+    }:
+        await _handle_unifi_network_runtime_event(kind, payload)
+        _runtime_set(redis_client, last_ws_event_ts=event_ts, last_error="")
         return
 
 
@@ -6112,136 +6291,6 @@ async def _awareness_integration_runtime_loop(stop_event: Optional[object]) -> N
                     logger.debug("[awareness] failed to persist integration runtime cursor", exc_info=True)
         await asyncio.sleep(0)
     _sync_integration_runtime_status(redis_client)
-
-
-async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
-    while not (stop_event and stop_event.is_set()):
-        reconnect_seconds = _setting_int(redis_client, "unifi_ws_reconnect_seconds", 5, minimum=1, maximum=60)
-        if _event_provider(redis_client) != "unifi_protect":
-            _runtime_set(redis_client, unifi_connected=False, unifi_ws_connected=False, ws_connected=False, last_error="")
-            await asyncio.sleep(float(reconnect_seconds))
-            continue
-        if not _unifi_protect_configured():
-            _runtime_set(redis_client, unifi_connected=False, unifi_ws_connected=False, ws_connected=False, last_error="")
-            await asyncio.sleep(float(reconnect_seconds))
-            continue
-        try:
-            conf = _unifi_protect_config()
-            ws_override = _text(_settings(redis_client).get("unifi_ws_url"))
-            ws_url = _unifi_ws_url(conf["base"], ws_override)
-            headers = {"X-API-KEY": conf["api_key"], "Accept": "application/json"}
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(ws_url, headers=headers, heartbeat=30, ssl=False) as ws:
-                    logger.info("[awareness] UniFi websocket connected: %s", ws_url)
-                    _runtime_set(
-                        redis_client,
-                        unifi_connected=True,
-                        unifi_ws_connected=True,
-                        unifi_ws_url=ws_url,
-                        ws_connected=False,
-                        last_error="",
-                    )
-                    while not (stop_event and stop_event.is_set()):
-                        if _event_provider(redis_client) != "unifi_protect":
-                            break
-                        try:
-                            msg = await ws.receive(timeout=1.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            payload_text = _text(msg.data)
-                            if not payload_text:
-                                continue
-                            lowered = payload_text.lower()
-                            if lowered in {"ping", "pong"}:
-                                continue
-                            payload: Optional[Dict[str, Any]] = None
-                            try:
-                                maybe = json.loads(payload_text)
-                                payload = maybe if isinstance(maybe, dict) else None
-                            except Exception:
-                                payload = None
-                            if payload is None:
-                                continue
-                            item = _unifi_ws_event_item(payload)
-                            if item is None:
-                                continue
-                            await _handle_unifi_ws_event(item)
-                        elif msg.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}:
-                            raise RuntimeError("UniFi websocket connection closed")
-        except Exception as exc:
-            _runtime_set(redis_client, unifi_connected=False, unifi_ws_connected=False, ws_connected=False, last_error=str(exc))
-            if "api key is not set" in _text(exc).lower():
-                logger.debug("[awareness] unifi websocket loop waiting for UniFi config.")
-            else:
-                logger.warning("[awareness] unifi websocket loop error: %s", exc)
-            await asyncio.sleep(float(reconnect_seconds))
-    _runtime_set(redis_client, unifi_connected=False, unifi_ws_connected=False, ws_connected=False)
-
-
-async def _awareness_ws_loop(stop_event: Optional[object]) -> None:
-    while not (stop_event and stop_event.is_set()):
-        reconnect_seconds = _setting_int(redis_client, "ws_reconnect_seconds", 5, minimum=1, maximum=60)
-        active_provider = _event_provider(redis_client)
-        if active_provider != "homeassistant":
-            _runtime_set(redis_client, ws_connected=False, last_error="")
-            await asyncio.sleep(float(reconnect_seconds))
-            continue
-        if not _ha_configured():
-            _runtime_set(redis_client, ws_connected=False, last_error="")
-            await asyncio.sleep(float(reconnect_seconds))
-            continue
-        try:
-            ha = _ha_config()
-            ws_url = _ha_ws_url(ha["base"])
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(ws_url, heartbeat=30) as ws:
-                    first = await ws.receive(timeout=10)
-                    if first.type != aiohttp.WSMsgType.TEXT:
-                        raise RuntimeError("Unexpected HA websocket hello payload")
-                    hello = json.loads(first.data)
-                    if hello.get("type") != "auth_required":
-                        raise RuntimeError(f"Unexpected HA websocket hello: {hello}")
-                    await ws.send_json({"type": "auth", "access_token": ha["token"]})
-                    auth_resp = await ws.receive(timeout=10)
-                    if auth_resp.type != aiohttp.WSMsgType.TEXT:
-                        raise RuntimeError("Unexpected HA websocket auth payload")
-                    auth_data = json.loads(auth_resp.data)
-                    if auth_data.get("type") != "auth_ok":
-                        raise RuntimeError(f"HA websocket auth failed: {auth_data}")
-                    await ws.send_json({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})
-                    _runtime_set(redis_client, ws_connected=True, ws_url=ws_url)
-                    logger.info("[awareness] Home Assistant websocket connected: %s", ws_url)
-                    while not (stop_event and stop_event.is_set()):
-                        try:
-                            msg = await ws.receive(timeout=1.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            payload = json.loads(msg.data)
-                            if payload.get("type") == "event":
-                                event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-                                if _text(event.get("event_type")) != "state_changed":
-                                    continue
-                                data = event.get("data") if isinstance(event.get("data"), dict) else {}
-                                await _handle_state_change_event(data)
-                                _runtime_set(redis_client, last_ws_event_ts=time.time())
-                            elif (
-                                payload.get("type") == "result"
-                                and payload.get("id") == 1
-                                and not payload.get("success")
-                            ):
-                                raise RuntimeError(f"HA subscribe_events failed: {payload}")
-                        elif msg.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED}:
-                            raise RuntimeError("Home Assistant websocket connection closed")
-        except Exception as exc:
-            _runtime_set(redis_client, ws_connected=False, last_error=str(exc))
-            if "token is not set" in _text(exc).lower():
-                logger.debug("[awareness] websocket loop waiting for Home Assistant config.")
-            else:
-                logger.warning("[awareness] websocket loop error: %s", exc)
-            await asyncio.sleep(float(reconnect_seconds))
-    _runtime_set(redis_client, ws_connected=False)
 
 
 async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
