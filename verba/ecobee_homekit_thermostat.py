@@ -1,0 +1,392 @@
+import json
+import logging
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+from integrations.homekit import (
+    list_homekit_thermostats,
+    set_homekit_thermostat_mode,
+    set_homekit_thermostat_temperature,
+)
+from verba_base import ToolVerba
+from verba_result import action_failure, action_success
+
+logger = logging.getLogger("ecobee_homekit_thermostat")
+logger.setLevel(logging.INFO)
+
+
+def _coerce_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+class EcobeeHomeKitThermostatPlugin(ToolVerba):
+    name = "ecobee_homekit_thermostat"
+    verba_name = "Ecobee HomeKit Thermostat"
+    version = "1.0.0"
+    min_tater_version = "59"
+    pretty_name = "Ecobee HomeKit Thermostat"
+    settings_category = "Ecobee (HomeKit)"
+    platforms = [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic",
+    ]
+    tags = ["ecobee", "homekit", "thermostat", "climate"]
+    routing_keywords = ["ecobee", "thermostat", "temperature", "heat", "cool", "hvac"]
+    forced_route = "climate"
+    forced_domain_hint = "ecobee homekit thermostat"
+
+    usage = '{"function":"ecobee_homekit_thermostat","arguments":{"query":"set the ecobee to 72"}}'
+    description = "Control Ecobee thermostats paired directly through HomeKit."
+    verba_dec = "Control Ecobee thermostats through HomeKit pairing."
+    when_to_use = "Use for Ecobee thermostat status, target temperature, and HVAC mode changes without Home Assistant."
+    how_to_use = "Pass a natural-language thermostat request with an optional thermostat name, mode, and setpoint."
+    common_needs = ["Thermostat action: status, set temperature, or set mode."]
+    missing_info_prompts = ["Which Ecobee thermostat should I control?"]
+    example_calls = [
+        '{"function":"ecobee_homekit_thermostat","arguments":{"query":"what is the ecobee set to"}}',
+        '{"function":"ecobee_homekit_thermostat","arguments":{"query":"set the ecobee to 72"}}',
+        '{"function":"ecobee_homekit_thermostat","arguments":{"query":"set the ecobee to cool mode"}}',
+    ]
+
+    required_settings = {}
+
+    waiting_prompt_template = (
+        "Write a friendly message telling {mention} you are checking or controlling the Ecobee now. "
+        "Only output that message."
+    )
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        return _coerce_text(value)
+
+    def _normalize_handler_args(self, args: Any) -> Dict[str, Any]:
+        if isinstance(args, dict):
+            payload = dict(args)
+            nested = payload.get("arguments")
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                for key, value in payload.items():
+                    if key != "arguments":
+                        merged[key] = value
+                return merged
+            return payload
+        if isinstance(args, str):
+            text = self._coerce_text(args)
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    nested = parsed.get("arguments")
+                    if isinstance(nested, dict):
+                        merged = dict(nested)
+                        for key, value in parsed.items():
+                            if key != "arguments":
+                                merged[key] = value
+                        return merged
+                    return parsed
+            except Exception:
+                pass
+            return {"query": text}
+        return {}
+
+    def _normalize_mode(self, value: Any, query: str = "") -> str:
+        explicit = self._coerce_text(value).lower().replace("-", "_").replace(" ", "_")
+        if explicit in {"off", "heat", "cool", "auto", "heat_cool"}:
+            return explicit
+        if explicit in {"heating", "heater"}:
+            return "heat"
+        if explicit in {"cooling", "ac", "air_conditioning"}:
+            return "cool"
+
+        text = f" {self._coerce_text(query).lower()} "
+        if re.search(r"\b(turn|set|switch)\s+(the\s+)?[^.]*\boff\b", text) or re.search(r"\boff\s+mode\b", text):
+            return "off"
+        if re.search(r"\bheat(ing)?\b", text):
+            return "heat"
+        if re.search(r"\bcool(ing)?\b|\bac\b|\bair conditioning\b", text):
+            return "cool"
+        if re.search(r"\bauto(matic)?\b|\bheat cool\b", text):
+            return "auto"
+        return ""
+
+    def _temperature_unit(self, args: Dict[str, Any], query: str) -> str:
+        explicit = self._coerce_text(args.get("temperature_unit") or args.get("unit")).lower()
+        text = self._coerce_text(query).lower()
+        if explicit in {"c", "celsius"} or "celsius" in text or "°c" in text:
+            return "C"
+        return "F"
+
+    def _temperature_value(self, args: Dict[str, Any], query: str) -> Optional[float]:
+        for key in ("temperature", "target_temperature", "setpoint", "target"):
+            if key in args:
+                try:
+                    return float(args.get(key))
+                except Exception:
+                    pass
+        text = self._coerce_text(query).lower()
+        matches = re.findall(r"(?<![a-z0-9])(-?\d+(?:\.\d+)?)\s*(?:degrees?|deg|°)?\s*(?:f|c|fahrenheit|celsius)?", text)
+        candidates: List[float] = []
+        for raw in matches:
+            try:
+                number = float(raw)
+            except Exception:
+                continue
+            if 5 <= number <= 100:
+                candidates.append(number)
+        return candidates[-1] if candidates else None
+
+    def _normalize_action(self, args: Dict[str, Any], query: str) -> str:
+        explicit = self._coerce_text(args.get("action")).lower()
+        if explicit in {"status", "state", "get_state", "check"}:
+            return "status"
+        if explicit in {"set_temperature", "temperature", "set_temp", "setpoint"}:
+            return "set_temperature"
+        if explicit in {"set_hvac_mode", "mode", "hvac_mode", "turn_off", "turn_on"}:
+            return "set_hvac_mode"
+
+        has_temp = self._temperature_value(args, query) is not None
+        has_mode = bool(self._normalize_mode(args.get("mode") or args.get("hvac_mode"), query))
+        text = f" {self._coerce_text(query).lower()} "
+        if has_temp and re.search(r"\b(set|make|put|change|raise|lower|to)\b", text):
+            return "set_temperature"
+        if has_mode and re.search(r"\b(set|turn|switch|change|mode)\b", text):
+            return "set_hvac_mode"
+        if has_temp:
+            return "set_temperature"
+        return "status"
+
+    def _target_text(self, args: Dict[str, Any], query: str) -> str:
+        target = self._coerce_text(args.get("target") or args.get("thermostat") or args.get("thermostat_name"))
+        if target:
+            return target
+        text = self._coerce_text(query).lower()
+        text = re.sub(r"\b(ecobee|homekit|thermostat|temperature|degrees?|please|can you|would you|the|my|a|an)\b", " ", text)
+        text = re.sub(
+            r"\b(set|make|put|change|raise|lower|turn|switch|mode|heat|heating|cool|cooling|auto|automatic|off|status|state|check|is|what|to)\b",
+            " ",
+            text,
+        )
+        text = re.sub(r"\d+(?:\.\d+)?", " ", text)
+        return " ".join(re.findall(r"[a-z0-9]+", text))
+
+    def _select_thermostat(self, rows: List[dict], args: Dict[str, Any], query: str) -> Tuple[Optional[dict], List[str]]:
+        thermostat_id = self._coerce_text(args.get("thermostat_id") or args.get("entity_id") or args.get("id"))
+        if thermostat_id:
+            for row in rows:
+                if self._coerce_text(row.get("id")) == thermostat_id:
+                    return row, []
+            return None, [f"No Ecobee HomeKit thermostat matched id {thermostat_id}."]
+        if not rows:
+            return None, ["No Ecobee HomeKit thermostats were returned for the saved pairing."]
+        if len(rows) == 1:
+            return rows[0], []
+
+        target = self._target_text(args, query).lower()
+        if not target:
+            choices = [self._coerce_text(row.get("name")) or self._coerce_text(row.get("id")) for row in rows]
+            return None, ["Which Ecobee thermostat? Available thermostats: " + ", ".join(choices)]
+
+        target_tokens = {token for token in re.split(r"[^a-z0-9]+", target) if token}
+        scored: List[Tuple[int, dict]] = []
+        for row in rows:
+            haystack = f"{row.get('name', '')} {row.get('model', '')}".lower()
+            if target and target in haystack:
+                scored.append((100 + len(target), row))
+                continue
+            name_tokens = {token for token in re.split(r"[^a-z0-9]+", haystack) if token}
+            score = len(target_tokens & name_tokens)
+            if score:
+                scored.append((score, row))
+        if not scored:
+            choices = [self._coerce_text(row.get("name")) or self._coerce_text(row.get("id")) for row in rows]
+            return None, [f"I could not match '{target}' to an Ecobee thermostat. Available thermostats: " + ", ".join(choices)]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            tied = [row.get("name") for score, row in scored if score == scored[0][0]]
+            return None, ["That matched multiple Ecobee thermostats: " + ", ".join(self._coerce_text(name) for name in tied if name)]
+        return scored[0][1], []
+
+    def _temperature_for_user(self, row: dict, key: str) -> Optional[float]:
+        unit = self._coerce_text(row.get("temperature_unit")).upper() or "F"
+        value = row.get(f"{key}_{unit.lower()}")
+        if value is None and unit == "F":
+            value = row.get(f"{key}_c")
+        return value
+
+    def _thermostat_summary(self, row: dict) -> str:
+        name = self._coerce_text(row.get("name")) or "Ecobee"
+        unit = self._coerce_text(row.get("temperature_unit")).upper() or "F"
+        pieces: List[str] = []
+        mode = self._coerce_text(row.get("target_hvac_mode"))
+        state = self._coerce_text(row.get("current_hvac_state"))
+        if mode and state and state != mode:
+            pieces.append(f"mode {mode} ({state})")
+        elif mode:
+            pieces.append(f"mode {mode}")
+        current = self._temperature_for_user(row, "current_temperature")
+        target = self._temperature_for_user(row, "target_temperature")
+        if current is not None:
+            pieces.append(f"current {current}°{unit}")
+        if target is not None:
+            pieces.append(f"setpoint {target}°{unit}")
+        humidity = row.get("current_humidity")
+        if humidity is not None:
+            pieces.append(f"humidity {humidity}%")
+        if pieces:
+            return f"{name}: " + ", ".join(pieces) + "."
+        return f"{name} is available through HomeKit."
+
+    async def _handle(self, args, llm_client=None):
+        payload = self._normalize_handler_args(args)
+        query = self._coerce_text(payload.get("query") or payload.get("text") or payload.get("prompt"))
+        action = self._normalize_action(payload, query)
+
+        try:
+            thermostats = list_homekit_thermostats()
+        except Exception as exc:
+            return action_failure(
+                code="ecobee_homekit_unavailable",
+                message=f"Could not read Ecobee HomeKit thermostats: {exc}",
+                needs=["Pair Ecobee in Tater Settings > Integrations > Ecobee (HomeKit), then retry."],
+                say_hint="Explain that the Ecobee HomeKit pairing is not ready and ask to configure it.",
+            )
+
+        target, needs = self._select_thermostat(thermostats, payload, query)
+        if not target:
+            return action_failure(
+                code="thermostat_selection_failed",
+                message=needs[0] if needs else "Could not choose an Ecobee thermostat.",
+                needs=needs or ["Specify the Ecobee thermostat name."],
+                say_hint="Ask which Ecobee thermostat the user wants.",
+            )
+
+        thermostat_id = self._coerce_text(target.get("id"))
+        target_name = self._coerce_text(target.get("name")) or "Ecobee"
+
+        if action == "status":
+            return action_success(
+                facts={
+                    "action": "status",
+                    "thermostat_id": thermostat_id,
+                    "target_hvac_mode": target.get("target_hvac_mode"),
+                    "current_hvac_state": target.get("current_hvac_state"),
+                    "current_temperature_f": target.get("current_temperature_f"),
+                    "target_temperature_f": target.get("target_temperature_f"),
+                    "current_humidity": target.get("current_humidity"),
+                },
+                data={"thermostat": target},
+                summary_for_user=self._thermostat_summary(target),
+                say_hint="Report the Ecobee thermostat state from returned data.",
+            )
+
+        if action == "set_hvac_mode":
+            mode = self._normalize_mode(payload.get("mode") or payload.get("hvac_mode"), query)
+            if not mode:
+                return action_failure(
+                    code="missing_hvac_mode",
+                    message="Please include a thermostat mode: off, heat, cool, or auto.",
+                    needs=["Say off, heat, cool, or auto."],
+                    say_hint="Ask which HVAC mode should be used.",
+                )
+            try:
+                updated = set_homekit_thermostat_mode(mode, thermostat_id=thermostat_id)
+            except Exception as exc:
+                return action_failure(
+                    code="homekit_mode_failed",
+                    message=f"Could not set {target_name} to {mode}: {exc}",
+                    needs=["Retry or choose a different Ecobee thermostat."],
+                    say_hint="Explain the HomeKit mode update failed.",
+                )
+            return action_success(
+                facts={"action": "set_hvac_mode", "thermostat_id": thermostat_id, "hvac_mode": mode},
+                data={"thermostat": updated},
+                summary_for_user=self._thermostat_summary(updated),
+                say_hint="Confirm the Ecobee mode change using returned data.",
+            )
+
+        if action == "set_temperature":
+            temp = self._temperature_value(payload, query)
+            if temp is None:
+                return action_failure(
+                    code="missing_temperature",
+                    message="Please include the target temperature.",
+                    needs=["Say the thermostat setpoint, for example 72."],
+                    say_hint="Ask what temperature to set.",
+                )
+            mode = self._normalize_mode(payload.get("mode") or payload.get("hvac_mode"), query)
+            unit = self._temperature_unit(payload, query)
+            try:
+                updated = set_homekit_thermostat_temperature(temp, temperature_unit=unit, mode=mode, thermostat_id=thermostat_id)
+            except Exception as exc:
+                return action_failure(
+                    code="homekit_temperature_failed",
+                    message=f"Could not set {target_name} to {temp}°{unit}: {exc}",
+                    needs=["Retry or choose a different Ecobee thermostat."],
+                    say_hint="Explain the HomeKit temperature update failed.",
+                )
+            return action_success(
+                facts={
+                    "action": "set_temperature",
+                    "thermostat_id": thermostat_id,
+                    "temperature": temp,
+                    "temperature_unit": unit,
+                    "hvac_mode": mode,
+                },
+                data={"thermostat": updated},
+                summary_for_user=self._thermostat_summary(updated),
+                say_hint="Confirm the Ecobee temperature change using returned data.",
+            )
+
+        return action_failure(
+            code="unsupported_action",
+            message="Ecobee HomeKit supports status, set temperature, and set HVAC mode.",
+            needs=["Ask for Ecobee status, a target temperature, or mode off/heat/cool/auto."],
+            say_hint="Explain supported Ecobee HomeKit actions.",
+        )
+
+    async def handle_homeassistant(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_webui(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_macos(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_xbmc(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_homekit(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_discord(self, message=None, args=None, llm_client=None, *unused_args, **unused_kwargs):
+        payload = args if args is not None else {"query": self._coerce_text(message)}
+        return await self._handle(payload, llm_client)
+
+    async def handle_telegram(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_matrix(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_irc(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args, llm_client)
+
+
+verba = EcobeeHomeKitThermostatPlugin()

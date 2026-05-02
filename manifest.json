@@ -236,11 +236,11 @@
       "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
     },
     {
-      "id": "ecobee_thermostat",
-      "name": "Ecobee Thermostat",
+      "id": "ecobee_homekit_thermostat",
+      "name": "Ecobee HomeKit Thermostat",
       "version": "1.0.0",
       "min_tater_version": "59",
-      "description": "Control Ecobee thermostats.",
+      "description": "Control Ecobee thermostats through HomeKit pairing.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -255,15 +255,15 @@
         "meshtastic"
       ],
       "notifier": false,
-      "settings_category": "Ecobee",
+      "settings_category": "Ecobee (HomeKit)",
       "tags": [
         "ecobee",
+        "homekit",
         "thermostat",
-        "climate",
-        "hvac"
+        "climate"
       ],
-      "entry": "verba/ecobee_thermostat.py",
-      "sha256": "2dffea2f9313cdc4daaf916b4316508632da83799c3b08bbbe886acb3590b003"
+      "entry": "verba/ecobee_homekit_thermostat.py",
+      "sha256": "f7eac7611204f56c7ca57728dbe24106dafedd97ae00c68131c6d86c0daf8b8d"
     },
     {
       "id": "find_my_phone",

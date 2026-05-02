@@ -53,7 +53,7 @@
 | `discord_admin_response_mode` | Toggle always-respond mode for the current Discord channel only. | discord |
 | `discord_admin_roles` | Discord role listing and role assignment commands. | discord |
 | `discord_admin_setup` | Discord server setup and structural admin changes. | discord |
-| `ecobee_thermostat` | Control Ecobee thermostats. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
+| `ecobee_homekit_thermostat` | Control Ecobee thermostats through HomeKit pairing. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
 | `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, voice_core, homeassistant, discord, telegram, matrix, irc, meshtastic |
