@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.14"
+__version__ = "3.1.15"
 
 load_dotenv()
 
@@ -3809,6 +3809,7 @@ def _awareness_playback_target_options(*, current_values: Any = None) -> List[Di
         homeassistant_base_url=ha.get("base", ""),
         homeassistant_token=ha.get("token", ""),
         include_homeassistant=True,
+        include_unifi_protect=True,
         current_values=current_values,
     )
 
@@ -4242,7 +4243,7 @@ def _doorbell_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="Speak the shared announcement voice on selected Voice Core satellites or Home Assistant media players.",
+                    players_description="Speak the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
                 ),
             },
             {
@@ -4355,7 +4356,7 @@ def _entry_sensor_form(
                 "fields": _announcement_tts_fields(
                     rule,
                     catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites or Home Assistant media players.",
+                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
                 ),
             },
             {
@@ -4675,7 +4676,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected Voice Core satellites or Home Assistant media players.",
+        players_description="Speak using the shared announcement voice on selected Voice Core satellites, Home Assistant media players, or UniFi Protect camera speakers.",
     )
     return {
         "kind": "settings_manager",
