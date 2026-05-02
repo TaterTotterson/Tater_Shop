@@ -634,6 +634,35 @@
       "sha256": "7f8bf7a4b195930867899cf1fec89afd0945110098674c91eeedefd59223499e"
     },
     {
+      "id": "hue_lights",
+      "name": "Philips Hue Lights",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control Philips Hue Bridge lights.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Philips Hue Control",
+      "tags": [
+        "hue",
+        "philips-hue",
+        "light"
+      ],
+      "entry": "verba/hue_lights.py",
+      "sha256": "65af6f96deb834cf15c493f23e9bdd244680bc532e7ec2ff854020e91cf61e4a"
+    },
+    {
       "id": "irc_admin_op",
       "name": "IRC Admin OP",
       "version": "1.3.2",

@@ -25,7 +25,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.13"
+__version__ = "3.1.14"
 
 load_dotenv()
 
@@ -191,6 +191,8 @@ _EVENT_FILTER_DEFAULTS = {
 }
 _UNIFI_SENSOR_EVENT_LOCK = threading.Lock()
 _UNIFI_SENSOR_LAST_EVENT: Dict[str, Tuple[str, float, str]] = {}
+_UNIFI_CAMERA_EVENT_LOCK = threading.Lock()
+_UNIFI_CAMERA_LAST_EVENT: Dict[str, Tuple[float, str]] = {}
 _EVENTS_QUERY_MAX_EVENTS_PER_SOURCE = 1000
 _EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM = 320
 _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 180
@@ -5629,10 +5631,36 @@ def _unifi_ws_event_item(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     item = payload.get("item")
     if isinstance(item, dict):
-        return item
-    if _text(payload.get("modelKey")).lower() == "event":
-        return payload
+        out = dict(item)
+        # Preserve websocket lifecycle metadata so event close/idle updates do not look like fresh presses.
+        action = _text(payload.get("action"))
+        model_key = _text(payload.get("modelKey") or payload.get("model_key"))
+        event_id = _text(payload.get("id")) if model_key.lower() in {"event", "events"} else ""
+        if action:
+            out.setdefault("__ws_action", action)
+        if model_key:
+            out.setdefault("__ws_model_key", model_key)
+        if event_id:
+            out.setdefault("__ws_event_id", event_id)
+        return out
+    model_key = _text(payload.get("modelKey") or payload.get("model_key")).lower()
+    if model_key in {"event", "events"}:
+        out = dict(payload)
+        if _text(payload.get("action")):
+            out.setdefault("__ws_action", _text(payload.get("action")))
+        if _text(payload.get("id")):
+            out.setdefault("__ws_event_id", _text(payload.get("id")))
+        out.setdefault("__ws_model_key", model_key)
+        return out
     return None
+
+
+def _unifi_ws_action(item: Dict[str, Any]) -> str:
+    return _text(item.get("__ws_action") or item.get("action")).lower()
+
+
+def _unifi_ws_model_key(item: Dict[str, Any]) -> str:
+    return _text(item.get("__ws_model_key") or item.get("modelKey") or item.get("model_key")).lower()
 
 
 def _unifi_event_device_id(item: Dict[str, Any], *keys: str) -> str:
@@ -5667,6 +5695,71 @@ def _unifi_sensor_event_ts(item: Dict[str, Any]) -> float:
     if start > 0:
         return start
     return _as_float(item.get("end"), 0.0)
+
+
+def _unifi_event_id(item: Dict[str, Any]) -> str:
+    return _unifi_event_device_id(item, "id", "eventId", "event_id", "__ws_event_id")
+
+
+def _unifi_camera_event_ts(item: Dict[str, Any]) -> float:
+    for key in ("start", "timestamp", "time", "ts", "createdAt", "created_at"):
+        value = _as_float(item.get(key), 0.0)
+        if value > 0:
+            return value
+    return _as_float(item.get("end"), 0.0)
+
+
+def _unifi_should_emit_camera_ws_edge(*, camera_id: str, event_kind: str, event_ts: float, event_id: str) -> bool:
+    camera_token = _text(camera_id).lower()
+    kind_token = _slug(event_kind)
+    evt_id = _text(event_id)
+    evt_ts = _as_float(event_ts, 0.0)
+    if not camera_token or not kind_token:
+        return False
+    key = f"{camera_token}:{kind_token}"
+    with _UNIFI_CAMERA_EVENT_LOCK:
+        prev_ts, prev_id = _UNIFI_CAMERA_LAST_EVENT.get(key, (0.0, ""))
+        if evt_id and prev_id and evt_id == prev_id:
+            return False
+        if evt_ts > 0 and prev_ts > 0 and evt_ts <= prev_ts:
+            return False
+        _UNIFI_CAMERA_LAST_EVENT[key] = (max(prev_ts, evt_ts), evt_id)
+    return True
+
+
+def _unifi_doorbell_token(event_token: str) -> bool:
+    token = _text(event_token).lower()
+    return "ring" in token or "doorbell" in token
+
+
+def _unifi_truthy_marker(value: Any) -> bool:
+    marker = _unifi_marker_token(value).lower()
+    return bool(marker and marker not in {"0", "false", "off", "none", "null", "nan"})
+
+
+def _unifi_doorbell_ws_skip_reason(item: Dict[str, Any], event_token: str) -> str:
+    if not _unifi_doorbell_token(event_token):
+        return "not_doorbell"
+
+    action = _unifi_ws_action(item)
+    model_key = _unifi_ws_model_key(item)
+    if model_key in {"event", "events"} and action in {"update", "remove", "delete", "deleted"}:
+        return f"{model_key}_{action}"
+
+    for key in ("end", "endTime", "end_time", "endedAt", "ended_at", "stop", "stoppedAt", "completedAt"):
+        if key in item and _unifi_truthy_marker(item.get(key)):
+            return f"{key}_set"
+
+    for key in ("state", "status", "eventState", "event_state", "lifecycle", "stage"):
+        token = _slug(item.get(key))
+        if token in {"idle", "end", "ended", "complete", "completed", "done", "closed", "inactive", "stop", "stopped", "finished", "false", "off"}:
+            return f"{key}:{token}"
+
+    for key in ("isRinging", "is_ringing", "isDoorbellRinging", "is_doorbell_ringing", "doorbellRinging", "doorbell_ringing"):
+        if key in item and not _bool(item.get(key), False):
+            return f"{key}:false"
+
+    return ""
 
 
 def _unifi_should_emit_sensor_ws_edge(*, sensor_id: str, state: str, event_ts: float, event_id: str) -> bool:
@@ -5766,11 +5859,13 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
         "device_id",
     )
 
-    is_ring_event = ("ring" in event_token or "doorbell" in event_token)
+    doorbell_like_event = _unifi_doorbell_token(event_token)
+    doorbell_skip_reason = _unifi_doorbell_ws_skip_reason(item, event_token)
+    is_ring_event = doorbell_like_event and not doorbell_skip_reason
     is_sensor_event = ("sensor" in event_token)
     is_smart_event = ("smartdetect" in event_token)
 
-    if not camera_id and (is_ring_event or is_smart_event or ("camera" in event_token and not is_sensor_event)):
+    if not camera_id and (doorbell_like_event or is_smart_event or ("camera" in event_token and not is_sensor_event)):
         camera_id = device_id
     if not sensor_id and is_sensor_event:
         sensor_id = device_id
@@ -5788,12 +5883,41 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
 
     if is_ring_event and camera_id:
         doorbell_entity = _unifi_camera_doorbell_trigger(camera_id)
-        attrs = {"friendly_name": camera_name}
-        await _handle_trigger_state_change(
-            provider="unifi_protect",
-            entity_id=doorbell_entity,
-            new_state={"state": "on", "attributes": attrs},
-            old_state={"state": "off", "attributes": attrs},
+        event_id = _unifi_event_id(item)
+        event_ts = _unifi_camera_event_ts(item)
+        if _unifi_should_emit_camera_ws_edge(
+            camera_id=camera_id,
+            event_kind="doorbell",
+            event_ts=event_ts,
+            event_id=event_id,
+        ):
+            attrs = {"friendly_name": camera_name}
+            if event_id:
+                attrs["event_id"] = event_id
+            if event_ts > 0:
+                attrs["event_ts"] = event_ts
+            await _handle_trigger_state_change(
+                provider="unifi_protect",
+                entity_id=doorbell_entity,
+                new_state={"state": "on", "attributes": attrs},
+                old_state={"state": "off", "attributes": attrs},
+            )
+        else:
+            logger.debug(
+                "[awareness] suppressed UniFi doorbell ws edge entity=%s token=%s event_id=%s start=%s",
+                doorbell_entity,
+                event_token,
+                event_id,
+                event_ts,
+            )
+        handled = True
+    elif doorbell_skip_reason and doorbell_like_event and camera_id:
+        logger.debug(
+            "[awareness] ignored UniFi doorbell non-press entity=%s token=%s action=%s reason=%s",
+            _unifi_camera_doorbell_trigger(camera_id),
+            event_token,
+            _unifi_ws_action(item) or "n/a",
+            doorbell_skip_reason,
         )
         handled = True
 

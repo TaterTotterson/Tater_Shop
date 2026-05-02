@@ -68,6 +68,7 @@
 | `ha_sensors` | Read Home Assistant sensor and binary_sensor entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `ha_switches` | Control Home Assistant switches and plugs. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `ha_temperature` | Read Home Assistant ambient temperatures. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
+| `hue_lights` | Control Philips Hue Bridge lights. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `irc_admin_op` | Gives the user op or voice in the current IRC channel. | irc, meshtastic |
 | `irc_admin_slap` | Slaps the requested user in the current IRC channel. | irc, meshtastic |
 | `irc_admin_topic` | Sets the current IRC channel topic to the requested text. | irc, meshtastic |
