@@ -22,7 +22,7 @@ from helpers import (
 )
 import verba_registry as pr
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 
 logging.basicConfig(level=logging.INFO)
@@ -40,10 +40,10 @@ PORTAL_SETTINGS = {
     "category": "XBMC / Original Xbox Settings",
     "required": {
         "bind_port": {
-            "label": "Bind Port",
+            "label": "Legacy Bind Port",
             "type": "number",
             "default": 8790,
-            "description": "TCP port for the Tater ↔ XBMC bridge"
+            "description": "Deprecated. XBMC now uses Tater's main API path: /api/portals/xbmc_portal/api/tater-xbmc/v1"
         },
         "API_AUTH_ENABLED": {
             "label": "Require API Key",
@@ -340,9 +340,17 @@ _llm = None
 
 @app.on_event("startup")
 async def _on_startup():
+    ensure_portal_api_ready()
+
+
+def ensure_portal_api_ready(*_args, **_kwargs):
     global _llm
-    _llm = get_llm_client_from_env()
-    logger.info(f"[XBMC Bridge] LLM client → {build_llm_host_from_env()}")
+    if _llm is None:
+        try:
+            _llm = get_llm_client_from_env()
+            logger.info(f"[XBMC Bridge] LLM client → {build_llm_host_from_env()}")
+        except Exception as exc:
+            logger.warning("[XBMC Bridge] LLM client is not ready: %s", exc)
 
 @app.get("/tater-xbmc/v1/health")
 async def health(x_tater_token: Optional[str] = Header(None)):
@@ -424,54 +432,9 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
 
 # -------------------- Runner (WebUI-style) --------------------
 def run(stop_event: Optional[threading.Event] = None):
-    """Match other platforms’ run signature and graceful stop behavior."""
-    raw_port = redis_client.hget("xbmc_portal_settings", "bind_port")
-    try:
-        port = int(raw_port) if raw_port is not None else 8790
-    except (TypeError, ValueError):
-        logger.warning(f"[XBMC Bridge] Invalid bind_port value '{raw_port}', defaulting to 8790")
-        port = 8790
-
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
-    server = uvicorn.Server(config)
-
-    def _serve():
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        loop = asyncio.get_event_loop()
-
-        async def _start():
-            try:
-                await server.serve()
-            except SystemExit as exc:
-                code = getattr(exc, "code", 1)
-                if code not in (None, 0):
-                    logger.error(
-                        f"[XBMC Bridge] Server failed to start on {BIND_HOST}:{port} (likely already in use)."
-                    )
-            except Exception:
-                logger.exception(f"[XBMC Bridge] Server failed on {BIND_HOST}:{port}")
-
-        task = loop.create_task(_start())
-
-        def _watch():
-            if not stop_event:
-                return
-            while not stop_event.is_set():
-                time.sleep(0.5)
-            try:
-                server.should_exit = True
-            except Exception:
-                pass
-
-        if stop_event:
-            threading.Thread(target=_watch, daemon=True).start()
-
-        try:
-            loop.run_until_complete(task)
-        finally:
-            if not loop.is_closed():
-                loop.stop()
-                loop.close()
-
-    logger.info(f"[XBMC Bridge] Listening on http://{BIND_HOST}:{port}")
-    _serve()
+    """Keep the portal runtime alive while Tater's shared API gateway serves requests."""
+    ensure_portal_api_ready()
+    logger.info("[XBMC Bridge] Portal API available at /api/portals/xbmc_portal/api/tater-xbmc/v1")
+    while not (stop_event and stop_event.is_set()):
+        time.sleep(0.5)
+    logger.info("[XBMC Bridge] Portal stopped.")

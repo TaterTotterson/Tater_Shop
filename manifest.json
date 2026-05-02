@@ -306,29 +306,6 @@
       "sha256": "ef1a4f3db6acee4316313a34f69db0e7622ca0b318f50ad915353205190a63a0"
     },
     {
-      "id": "get_notifications",
-      "name": "Get Notifications",
-      "version": "1.1.4",
-      "min_tater_version": "59",
-      "description": "Fetch queued notifications from the Home Assistant bridge.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Notifications",
-      "tags": [],
-      "entry": "verba/get_notifications.py",
-      "sha256": "f6ac44e9bdd45d6299f026fd613b2c7e6a1e0d75ba61d685eaa0f6811a68410b"
-    },
-    {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
       "version": "1.0.5",

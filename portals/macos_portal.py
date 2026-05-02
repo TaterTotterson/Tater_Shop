@@ -30,7 +30,7 @@ from notify.queue import is_expired as notify_item_is_expired, queue_key as noti
 from verba_kernel import verba_supports_platform
 from verba_result import narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 
 load_dotenv()
@@ -72,10 +72,10 @@ PORTAL_SETTINGS = {
     "category": "macOS Settings",
     "required": {
         "bind_port": {
-            "label": "Bind Port",
+            "label": "Legacy Bind Port",
             "type": "number",
             "default": DEFAULT_PORT,
-            "description": "TCP port for the Tater macOS bridge.",
+            "description": "Deprecated. macOS now uses Tater's main API path: /api/portals/macos_portal/api/macos",
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL",
@@ -908,9 +908,17 @@ _llm = None
 
 @app.on_event("startup")
 async def _on_startup():
+    ensure_portal_api_ready()
+
+
+def ensure_portal_api_ready(*_args, **_kwargs):
     global _llm
-    _llm = get_llm_client_from_env()
-    logger.info(f"[macOS] LLM client -> {build_llm_host_from_env()}")
+    if _llm is None:
+        try:
+            _llm = get_llm_client_from_env()
+            logger.info(f"[macOS] LLM client -> {build_llm_host_from_env()}")
+        except Exception as exc:
+            logger.warning("[macOS] LLM client is not ready: %s", exc)
 
 
 @app.get("/macos/health")
@@ -1326,53 +1334,8 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
 
 def run(stop_event: Optional[threading.Event] = None):
     _configure_access_log_filters()
-    raw_port = redis_client.hget("macos_portal_settings", "bind_port")
-    try:
-        port = int(raw_port) if raw_port is not None else DEFAULT_PORT
-    except (TypeError, ValueError):
-        logger.warning(f"[macOS] Invalid bind_port '{raw_port}', defaulting to {DEFAULT_PORT}")
-        port = DEFAULT_PORT
-
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
-    server = uvicorn.Server(config)
-
-    def _serve():
-        import asyncio
-
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        loop = asyncio.get_event_loop()
-
-        async def _start():
-            try:
-                await server.serve()
-            except SystemExit as exc:
-                code = getattr(exc, "code", 1)
-                if code not in (None, 0):
-                    logger.error(f"[macOS] Server failed to start on {BIND_HOST}:{port}.")
-            except Exception:
-                logger.exception(f"[macOS] Server failed on {BIND_HOST}:{port}")
-
-        task = loop.create_task(_start())
-
-        def _watch():
-            if not stop_event:
-                return
-            while not stop_event.is_set():
-                time.sleep(0.5)
-            try:
-                server.should_exit = True
-            except Exception:
-                pass
-
-        if stop_event:
-            threading.Thread(target=_watch, daemon=True).start()
-
-        try:
-            loop.run_until_complete(task)
-        finally:
-            if not loop.is_closed():
-                loop.stop()
-                loop.close()
-
-    logger.info(f"[macOS] Listening on http://{BIND_HOST}:{port}")
-    _serve()
+    ensure_portal_api_ready()
+    logger.info("[macOS] Portal API available at /api/portals/macos_portal/api/macos")
+    while not (stop_event and stop_event.is_set()):
+        time.sleep(0.5)
+    logger.info("[macOS] Portal stopped.")

@@ -16,7 +16,7 @@
 |-------------|--------|-------------|
 | `ai_task` | `ai_task_core` | AI Task Scheduler Core integration core for Tater. |
 | `awareness` | `awareness_core` | Awareness Core integration core for Tater. |
-| `environment` | `environment_core` | Local environment telemetry receiver for weather stations and future sensor feeds. |
+| `environment` | `environment_core` | Local environment telemetry receiver for weather stations and configured sensor integrations. |
 | `memory` | `memory_core` | Memory Core integration core for Tater. |
 | `personal` | `personal_core` | Personal Core integration core for Tater. |
 | `rss` | `rss_core` | RSS Core integration core for Tater. |
@@ -26,7 +26,6 @@
 | Portal ID | Module | Description |
 |-------------|--------|-------------|
 | `discord` | `discord_portal` | Discord integration portal for Tater. |
-| `homeassistant` | `homeassistant_portal` | Home Assistant integration portal for Tater. |
 | `homekit` | `homekit_portal` | HomeKit / Siri integration portal for Tater. |
 | `irc` | `irc_portal` | IRC integration portal for Tater. |
 | `macos` | `macos_portal` | macOS integration portal for Tater. |
@@ -57,7 +56,6 @@
 | `ecobee_homekit_thermostat` | Control Ecobee thermostats through HomeKit pairing. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
 | `ftp_browser` | Browse and download files from the configured FTP server. | discord |
-| `get_notifications` | Fetch queued notifications from the Home Assistant bridge. | webui, macos, voice_core, homeassistant, discord, telegram, matrix, irc, meshtastic |
 | `ha_camera_area` | Find cameras in a Home Assistant area and describe what they see. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `ha_climate` | Control Home Assistant thermostats and HVAC entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
 | `ha_covers` | Control Home Assistant covers and garage doors. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |

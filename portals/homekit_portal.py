@@ -16,7 +16,7 @@ from helpers import (
     redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 
 load_dotenv()
@@ -37,10 +37,10 @@ PORTAL_SETTINGS = {
     "category": "HomeKit / Siri",
     "required": {
         "bind_port": {
-            "label": "Bind Port",
+            "label": "Legacy Bind Port",
             "type": "number",
             "default": DEFAULT_PORT,
-            "description": "TCP port for the Tater ↔ Siri / Shortcuts bridge"
+            "description": "Deprecated. Siri / Shortcuts now uses Tater's main API path: /api/portals/homekit_portal/api/tater-homekit/v1"
         },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL (seconds)",
@@ -269,9 +269,17 @@ _llm = None
 
 @app.on_event("startup")
 async def _on_startup():
+    ensure_portal_api_ready()
+
+
+def ensure_portal_api_ready(*_args, **_kwargs):
     global _llm
-    _llm = get_llm_client_from_env()
-    logger.info(f"[HomeKit] LLM client → {build_llm_host_from_env()}")
+    if _llm is None:
+        try:
+            _llm = get_llm_client_from_env()
+            logger.info(f"[HomeKit] LLM client → {build_llm_host_from_env()}")
+        except Exception as exc:
+            logger.warning("[HomeKit] LLM client is not ready: %s", exc)
 
 @app.post("/tater-homekit/v1/message")
 async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)):
@@ -348,53 +356,8 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
         return {"reply": "Sorry, I had a problem talking to Tater."}
 
 def run(stop_event: Optional[threading.Event] = None):
-    raw_port = redis_client.hget("homekit_portal_settings", "bind_port")
-    try:
-        port = int(raw_port) if raw_port is not None else DEFAULT_PORT
-    except (TypeError, ValueError):
-        logger.warning(f"[HomeKit] Invalid bind_port '{raw_port}', defaulting to {DEFAULT_PORT}")
-        port = DEFAULT_PORT
-
-    config = uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False)
-    server = uvicorn.Server(config)
-
-    def _serve():
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        loop = asyncio.get_event_loop()
-
-        async def _start():
-            try:
-                await server.serve()
-            except SystemExit as exc:
-                code = getattr(exc, "code", 1)
-                if code not in (None, 0):
-                    logger.error(
-                        f"[HomeKit] Server failed to start on {BIND_HOST}:{port} (likely already in use)."
-                    )
-            except Exception:
-                logger.exception(f"[HomeKit] Server failed on {BIND_HOST}:{port}")
-
-        task = loop.create_task(_start())
-
-        def _watch():
-            if not stop_event:
-                return
-            while not stop_event.is_set():
-                time.sleep(0.5)
-            try:
-                server.should_exit = True
-            except Exception:
-                pass
-
-        if stop_event:
-            threading.Thread(target=_watch, daemon=True).start()
-
-        try:
-            loop.run_until_complete(task)
-        finally:
-            if not loop.is_closed():
-                loop.stop()
-                loop.close()
-
-    logger.info(f"[HomeKit] Listening on http://{BIND_HOST}:{port}")
-    _serve()
+    ensure_portal_api_ready()
+    logger.info("[HomeKit] Portal API available at /api/portals/homekit_portal/api/tater-homekit/v1")
+    while not (stop_event and stop_event.is_set()):
+        time.sleep(0.5)
+    logger.info("[HomeKit] Portal stopped.")

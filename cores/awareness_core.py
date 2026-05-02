@@ -29,7 +29,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.1.17"
+__version__ = "3.2.0"
 
 load_dotenv()
 
@@ -45,20 +45,20 @@ CORE_SETTINGS = {
             "label": "HA WS Reconnect (sec)",
             "type": "number",
             "default": 5,
-            "description": "Seconds between Home Assistant websocket reconnect attempts.",
+            "description": "Seconds between Home Assistant websocket reconnect attempts in the shared integration runtime.",
         },
         "event_provider": {
             "label": "Event Provider",
             "type": "select",
             "options": ["homeassistant", "unifi_protect"],
             "default": "homeassistant",
-            "description": "Select which provider powers camera/doorbell/sensor event rules.",
+            "description": "Select which shared integration runtime provider powers camera/doorbell/sensor event rules.",
         },
         "unifi_ws_reconnect_seconds": {
             "label": "UniFi WS Reconnect (sec)",
             "type": "number",
             "default": 5,
-            "description": "Seconds between UniFi Protect websocket reconnect attempts while UniFi provider is active.",
+            "description": "Seconds between UniFi Protect websocket reconnect attempts in the shared integration runtime.",
         },
         "unifi_ws_url": {
             "label": "UniFi WS URL (optional)",
@@ -200,6 +200,10 @@ _UNIFI_CAMERA_LAST_EVENT: Dict[str, Tuple[float, str]] = {}
 _EVENTS_QUERY_MAX_EVENTS_PER_SOURCE = 1000
 _EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM = 320
 _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 180
+_INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
+_INTEGRATION_RUNTIME_EVENT_SEQ_KEY = "tater:integration_runtime:event_seq"
+_INTEGRATION_RUNTIME_STATUS_KEY = "tater:integration_runtime:status"
+_AWARENESS_RUNTIME_SEQ_KEY = "awareness:integration_runtime:last_seq"
 
 
 def _text(value: Any) -> str:
@@ -360,6 +364,109 @@ def _runtime_get(client: Any) -> Dict[str, Any]:
         else:
             out[key] = token
     return out
+
+
+def _redis_json_object(raw: Any) -> Optional[Dict[str, Any]]:
+    token = _text(raw)
+    if not token:
+        return None
+    try:
+        data = json.loads(token)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _integration_runtime_status(client: Any) -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return {}
+    raw = redis_obj.hgetall(_INTEGRATION_RUNTIME_STATUS_KEY) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        key_text = _text(key)
+        token = _text(value)
+        low = token.lower()
+        if low in _TRUE_TOKENS:
+            out[key_text] = True
+            continue
+        if low in _FALSE_TOKENS:
+            out[key_text] = False
+            continue
+        try:
+            out[key_text] = float(token)
+            continue
+        except Exception:
+            out[key_text] = token
+    return out
+
+
+def _integration_runtime_current_seq(client: Any) -> int:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return 0
+    return _as_int(redis_obj.get(_INTEGRATION_RUNTIME_EVENT_SEQ_KEY), 0, minimum=0)
+
+
+def _integration_runtime_events(client: Any, *, after_seq: int, limit: int = 100) -> List[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return []
+    max_rows = max(1, min(1000, int(limit or 100)))
+    try:
+        raw_rows = redis_obj.lrange(_INTEGRATION_RUNTIME_EVENTS_KEY, 0, 999) or []
+    except Exception:
+        logger.debug("[awareness] failed to read integration runtime events", exc_info=True)
+        return []
+    events: List[Dict[str, Any]] = []
+    for raw in raw_rows:
+        event = _redis_json_object(raw)
+        if not event:
+            continue
+        seq = _as_int(event.get("seq"), 0, minimum=0)
+        if seq <= after_seq:
+            continue
+        event["seq"] = seq
+        events.append(event)
+    events.sort(key=lambda item: _as_int(item.get("seq"), 0, minimum=0))
+    return events[:max_rows]
+
+
+def _integration_runtime_connected(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return _bool(value, False)
+
+
+def _sync_integration_runtime_status(client: Any) -> None:
+    status = _integration_runtime_status(client)
+    if not status:
+        _runtime_set(
+            client,
+            ws_connected=False,
+            unifi_connected=False,
+            unifi_ws_connected=False,
+            integration_runtime_connected=False,
+        )
+        return
+    last_error = (
+        _text(status.get("last_error"))
+        or _text(status.get("homeassistant_last_error"))
+        or _text(status.get("unifi_protect_last_error"))
+    )
+    _runtime_set(
+        client,
+        integration_runtime_connected=_integration_runtime_connected(status.get("running")),
+        integration_runtime_last_event_seq=_as_int(status.get("last_event_seq"), 0, minimum=0),
+        ws_connected=_integration_runtime_connected(status.get("homeassistant_ws_connected")),
+        ws_url=_text(status.get("homeassistant_ws_url")),
+        unifi_connected=_integration_runtime_connected(status.get("unifi_protect_connected")),
+        unifi_ws_connected=_integration_runtime_connected(status.get("unifi_protect_ws_connected")),
+        unifi_ws_url=_text(status.get("unifi_protect_ws_url")),
+        last_error=last_error,
+    )
 
 
 def _event_key(source: str) -> str:
@@ -5936,6 +6043,77 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     return handled
 
 
+async def _handle_integration_runtime_event(event: Dict[str, Any]) -> None:
+    if not isinstance(event, dict):
+        return
+    provider = _normalize_event_provider(event.get("provider"))
+    active_provider = _event_provider(redis_client)
+    if provider != active_provider:
+        return
+    kind = _text(event.get("kind")).lower()
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    event_ts = _as_float(event.get("ts"), time.time())
+
+    if provider == "homeassistant" and kind == "state_changed":
+        await _handle_state_change_event(payload)
+        _runtime_set(redis_client, last_ws_event_ts=event_ts, last_error="")
+        return
+
+    if provider == "unifi_protect" and kind in {"protect_event", "unifi_protect_event"}:
+        item = payload
+        if "item" in item or "modelKey" in item or "model_key" in item:
+            item = _unifi_ws_event_item(item) or {}
+        if item:
+            await _handle_unifi_ws_event(item)
+        return
+
+
+async def _awareness_integration_runtime_loop(stop_event: Optional[object]) -> None:
+    try:
+        stored_seq_raw = redis_client.get(_AWARENESS_RUNTIME_SEQ_KEY)
+    except Exception:
+        stored_seq_raw = None
+    if stored_seq_raw is None:
+        last_seq = _integration_runtime_current_seq(redis_client)
+        try:
+            redis_client.set(_AWARENESS_RUNTIME_SEQ_KEY, str(last_seq))
+        except Exception:
+            logger.debug("[awareness] failed to initialize integration runtime cursor", exc_info=True)
+    else:
+        last_seq = _as_int(stored_seq_raw, 0, minimum=0)
+
+    logger.info("[awareness] integration runtime event consumer started after seq=%s", last_seq)
+    next_status_sync = 0.0
+    while not (stop_event and stop_event.is_set()):
+        now_ts = time.time()
+        if now_ts >= next_status_sync:
+            _sync_integration_runtime_status(redis_client)
+            next_status_sync = now_ts + 5.0
+
+        events = _integration_runtime_events(redis_client, after_seq=last_seq, limit=100)
+        if not events:
+            await asyncio.sleep(0.5)
+            continue
+
+        for event in events:
+            seq = _as_int(event.get("seq"), last_seq, minimum=0)
+            if seq <= last_seq:
+                continue
+            try:
+                await _handle_integration_runtime_event(event)
+            except Exception as exc:
+                _runtime_set(redis_client, last_error=str(exc))
+                logger.warning("[awareness] integration runtime event failed seq=%s: %s", seq, exc)
+            finally:
+                last_seq = max(last_seq, seq)
+                try:
+                    redis_client.set(_AWARENESS_RUNTIME_SEQ_KEY, str(last_seq))
+                except Exception:
+                    logger.debug("[awareness] failed to persist integration runtime cursor", exc_info=True)
+        await asyncio.sleep(0)
+    _sync_integration_runtime_status(redis_client)
+
+
 async def _awareness_unifi_ws_loop(stop_event: Optional[object]) -> None:
     while not (stop_event and stop_event.is_set()):
         reconnect_seconds = _setting_int(redis_client, "unifi_ws_reconnect_seconds", 5, minimum=1, maximum=60)
@@ -6103,8 +6281,7 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
     tasks.extend(
         [
             asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
-            asyncio.create_task(_awareness_ws_loop(stop_event)),
-            asyncio.create_task(_awareness_unifi_ws_loop(stop_event)),
+            asyncio.create_task(_awareness_integration_runtime_loop(stop_event)),
             asyncio.create_task(_awareness_retention_loop(stop_event)),
         ]
     )

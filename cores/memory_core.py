@@ -846,7 +846,6 @@ _AUTO_STATE_KEYS = {
     "telegram": "telegram_portal_running",
     "irc": "irc_portal_running",
     "matrix": "matrix_portal_running",
-    "homeassistant": "homeassistant_portal_running",
     "homekit": "homekit_portal_running",
     "xbmc": "xbmc_portal_running",
 }
