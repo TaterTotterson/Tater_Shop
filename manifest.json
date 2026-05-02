@@ -636,7 +636,7 @@
     {
       "id": "hue_lights",
       "name": "Philips Hue Lights",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Control Philips Hue Bridge lights.",
       "portals": [
@@ -660,7 +660,7 @@
         "light"
       ],
       "entry": "verba/hue_lights.py",
-      "sha256": "65af6f96deb834cf15c493f23e9bdd244680bc532e7ec2ff854020e91cf61e4a"
+      "sha256": "0d9580d805ee1d45b0edb5b907d56b29685baf9e88bafe59a0b5053ccc451dc9"
     },
     {
       "id": "irc_admin_op",

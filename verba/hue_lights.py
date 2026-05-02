@@ -6,13 +6,8 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
-from helpers import redis_client
-
-try:
-    from ha_lights import HALightsPlugin
-except ImportError:  # pragma: no cover - package import fallback
-    from .ha_lights import HALightsPlugin
-
+from helpers import extract_json, redis_client
+from verba_base import ToolVerba
 from verba_diagnostics import needs_from_diagnosis
 from verba_result import action_failure, action_success
 
@@ -405,10 +400,10 @@ class HueClient:
         return self._req("PUT", f"/api/{self.app_key}/lights/{hue_id}/state", json_body=state_payload)
 
 
-class HueLightsPlugin(HALightsPlugin):
+class HueLightsPlugin(ToolVerba):
     name = "hue_lights"
     verba_name = "Philips Hue Lights"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Philips Hue Lights"
     settings_category = "Philips Hue Control"
@@ -432,6 +427,26 @@ class HueLightsPlugin(HALightsPlugin):
     ]
 
     entity_domains: List[str] = ["hue", "hue_group"]
+    interpret_actions: List[str] = ["get_state", "turn_on", "turn_off", "set_brightness", "set_color"]
+    service_map: Dict[str, Optional[str]] = {
+        "get_state": None,
+        "turn_on": "turn_on",
+        "turn_off": "turn_off",
+        "set_brightness": "turn_on",
+        "set_color": "turn_on",
+    }
+    required_action_params: Dict[str, List[str]] = {"set_brightness": ["brightness_pct"]}
+    optional_action_params: Dict[str, List[str]] = {
+        "turn_on": ["brightness_pct", "color_name", "rgb_color", "xy_color"],
+        "set_color": ["color_name", "rgb_color", "xy_color"],
+    }
+    param_payload_keys: Dict[str, str] = {}
+    interpret_focus: str = (
+        "- Use set_brightness when user asks for percent brightness.\n"
+        "- Use set_color when user asks for any color.\n"
+        "- Preserve named colors as color_name when available.\n"
+        "- For explicit rgb(...) or hex colors, set params.rgb_color as [r,g,b].\n"
+    )
     interpret_examples: List[str] = [
         "turn off office Hue lights -> action=turn_off, target=office Hue lights, read_target=none",
         "set kitchen Hue lights to 30 percent -> action=set_brightness, target=kitchen Hue lights, params.brightness_pct=30, read_target=none",
@@ -453,6 +468,442 @@ class HueLightsPlugin(HALightsPlugin):
         "Write a friendly message telling {mention} you are controlling Philips Hue lights now. "
         "Only output that message."
     )
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        return _coerce_text(value)
+
+    def _normalize_handler_args(self, args: Any) -> Dict[str, Any]:
+        if isinstance(args, dict):
+            payload = dict(args)
+            nested = payload.get("arguments")
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                for key, value in payload.items():
+                    if key != "arguments":
+                        merged[key] = value
+                return merged
+            return payload
+
+        if isinstance(args, str):
+            text = self._coerce_text(args)
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    nested = parsed.get("arguments")
+                    if isinstance(nested, dict):
+                        merged = dict(nested)
+                        for key, value in parsed.items():
+                            if key != "arguments":
+                                merged[key] = value
+                        return merged
+                    return dict(parsed)
+            except Exception:
+                pass
+            return {"query": text}
+
+        return {}
+
+    async def _llm_json(
+        self,
+        *,
+        llm_client,
+        system: str,
+        user_payload: dict,
+        max_tokens: int = 260,
+        temperature: float = 0.0,
+    ) -> dict:
+        if llm_client is None:
+            return {}
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            content = self._coerce_text((resp.get("message", {}) or {}).get("content", ""))
+            blob = extract_json(content) or ""
+            if not blob:
+                return {}
+            parsed = json.loads(blob)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.debug("[%s] llm_json failed: %s", self.name, exc)
+            return {}
+
+    def _normalize_number(self, value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            text = self._coerce_text(value)
+            if not text:
+                return None
+            try:
+                return float(text)
+            except Exception:
+                return None
+
+    def _normalize_int(self, value: Any) -> Optional[int]:
+        number = self._normalize_number(value)
+        if number is None:
+            return None
+        try:
+            return int(round(number))
+        except Exception:
+            return None
+
+    def _normalize_rgb_triplet(self, value: Any) -> Optional[List[int]]:
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            out: List[int] = []
+            for item in value:
+                number = self._normalize_int(item)
+                if number is None:
+                    return None
+                out.append(max(0, min(255, int(number))))
+            return out
+        return None
+
+    def _normalize_hex_color(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
+        if not text:
+            return ""
+        if text.startswith("hex "):
+            text = text[4:].strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) == 3 and all(ch in "0123456789abcdef" for ch in text):
+            text = "".join(ch * 2 for ch in text)
+        if len(text) == 6 and all(ch in "0123456789abcdef" for ch in text):
+            return text
+        return ""
+
+    def _hex_to_rgb(self, hex_color: str) -> Optional[List[int]]:
+        token = self._normalize_hex_color(hex_color)
+        if not token:
+            return None
+        try:
+            return [int(token[0:2], 16), int(token[2:4], 16), int(token[4:6], 16)]
+        except Exception:
+            return None
+
+    def _extract_rgb_from_text(self, text: str) -> Optional[List[int]]:
+        source = self._coerce_text(text)
+        if not source:
+            return None
+        patterns = [
+            r"\brgb\s*\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*\)",
+            r"\brgb\s*[:=]?\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, source, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                return [max(0, min(255, int(match.group(i)))) for i in (1, 2, 3)]
+            except Exception:
+                continue
+        return None
+
+    def _extract_hex_from_text(self, text: str) -> str:
+        source = self._coerce_text(text)
+        if not source:
+            return ""
+        match = re.search(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b", source)
+        if not match:
+            return ""
+        return self._normalize_hex_color(match.group(1))
+
+    def _normalize_color_name(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
+        return " ".join(text.split()) if text else ""
+
+    def _normalize_display_color_label(self, value: Any) -> str:
+        text = self._coerce_text(value).lower()
+        if not text:
+            return ""
+        text = text.replace("_", " ").replace("/", " ")
+        cleaned = "".join(ch for ch in text if ch.isalpha() or ch in {" ", "-"})
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            return ""
+        words = cleaned.split()
+        if len(words) > 4:
+            cleaned = " ".join(words[:4])
+        return cleaned
+
+    def _normalize_xy_pair(self, value: Any) -> Optional[List[float]]:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            out: List[float] = []
+            for item in value:
+                number = self._normalize_number(item)
+                if number is None:
+                    return None
+                out.append(max(0.0, min(1.0, float(number))))
+            return [round(out[0], 6), round(out[1], 6)]
+        return None
+
+    async def _resolve_color_spec_llm(self, *, query: str, params: dict, llm_client) -> dict:
+        source_color_name = self._normalize_color_name((params or {}).get("color_name"))
+        source_rgb = self._normalize_rgb_triplet((params or {}).get("rgb_color"))
+        source_xy = self._normalize_xy_pair((params or {}).get("xy_color"))
+        source_hex = self._normalize_hex_color((params or {}).get("hex_color"))
+        if source_rgb is None and source_hex:
+            source_rgb = self._hex_to_rgb(source_hex)
+
+        if llm_client is None:
+            xy = source_xy or (_rgb_to_xy(source_rgb) if source_rgb else _color_name_to_xy(source_color_name))
+            if source_rgb is None and xy is None:
+                return {}
+            return {
+                "color_name": self._normalize_display_color_label(source_color_name),
+                "rgb_color": source_rgb,
+                "xy_color": xy,
+            }
+
+        system = (
+            "Resolve a requested Philips Hue light color.\n"
+            "Return STRICT JSON only:\n"
+            "{\n"
+            '  "color_name": "<short lowercase display name>",\n'
+            '  "rgb_color": [<int 0-255>, <int 0-255>, <int 0-255>] or null,\n'
+            '  "xy_color": [<float 0-1>, <float 0-1>] or null\n'
+            "}\n"
+            "Rules:\n"
+            "- Resolve mixed or fuzzy color phrases to a concrete light color.\n"
+            "- Always return at least one of rgb_color or xy_color.\n"
+            "- color_name must be 1-3 words and should be user-friendly.\n"
+            "- Do not include prose.\n"
+        )
+        payload = await self._llm_json(
+            llm_client=llm_client,
+            system=system,
+            user_payload={
+                "query": self._coerce_text(query),
+                "source": {
+                    "color_name": source_color_name,
+                    "rgb_color": source_rgb,
+                    "xy_color": source_xy,
+                    "hex_color": source_hex,
+                },
+            },
+            max_tokens=140,
+            temperature=0.0,
+        )
+        if not isinstance(payload, dict):
+            return {}
+
+        color_name = self._normalize_display_color_label(payload.get("color_name"))
+        rgb_color = self._normalize_rgb_triplet(payload.get("rgb_color")) or source_rgb
+        xy_color = self._normalize_xy_pair(payload.get("xy_color")) or source_xy
+        if xy_color is None and rgb_color is not None:
+            xy_color = _rgb_to_xy(rgb_color)
+        if xy_color is None and color_name:
+            xy_color = _color_name_to_xy(color_name)
+        if not color_name:
+            color_name = self._normalize_display_color_label(source_color_name)
+
+        if rgb_color is None and xy_color is None:
+            return {}
+
+        return {"color_name": color_name, "rgb_color": rgb_color, "xy_color": xy_color}
+
+    def _normalize_interpret_result(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+
+        action = self._coerce_text(payload.get("action")).lower()
+        if action not in set(self.interpret_actions or []):
+            return {}
+
+        params_in = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        params: Dict[str, Any] = {}
+
+        brightness = self._normalize_int(params_in.get("brightness_pct"))
+        if brightness is not None:
+            brightness = max(0, min(100, brightness))
+        params["brightness_pct"] = brightness
+
+        params["color_name"] = self._normalize_color_name(params_in.get("color_name"))
+        params["rgb_color"] = self._normalize_rgb_triplet(params_in.get("rgb_color"))
+        params["xy_color"] = self._normalize_xy_pair(params_in.get("xy_color"))
+        params["hex_color"] = self._normalize_hex_color(params_in.get("hex_color"))
+
+        if params["rgb_color"] is None and params["hex_color"]:
+            params["rgb_color"] = self._hex_to_rgb(params["hex_color"])
+
+        if params["rgb_color"] is None:
+            rgb_from_color_name = self._extract_rgb_from_text(params["color_name"])
+            if rgb_from_color_name is not None:
+                params["rgb_color"] = rgb_from_color_name
+                params["color_name"] = ""
+            else:
+                hex_from_color_name = self._extract_hex_from_text(params["color_name"])
+                if hex_from_color_name:
+                    params["rgb_color"] = self._hex_to_rgb(hex_from_color_name)
+                    params["hex_color"] = hex_from_color_name
+                    params["color_name"] = ""
+
+        return {
+            "action": action,
+            "target": self._coerce_text(payload.get("target")),
+            "read_target": self._coerce_text(payload.get("read_target")).lower() or "state",
+            "params": params,
+        }
+
+    async def _interpret_query(self, query: str, llm_client) -> dict:
+        payload = await self._llm_json(
+            llm_client=llm_client,
+            system=self._interpret_system_prompt(),
+            user_payload={"query": self._coerce_text(query)},
+            max_tokens=260,
+            temperature=0.0,
+        )
+        return self._normalize_interpret_result(payload)
+
+    def _action_param_value(self, params: dict, key: str) -> Any:
+        if not isinstance(params, dict):
+            return None
+        return params.get(key)
+
+    def _build_service_payload(self, *, action: str, params: dict) -> Tuple[Optional[str], dict, Optional[str]]:
+        if action not in self.service_map:
+            return None, {}, f"Unsupported action '{action}' for {self.name}."
+
+        service = self.service_map.get(action)
+        if service is None:
+            return None, {}, None
+
+        payload: Dict[str, Any] = {}
+        for key in self.required_action_params.get(action, []):
+            value = self._action_param_value(params, key)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return None, {}, f"Action '{action}' requires parameter '{key}'."
+            payload_key = self.param_payload_keys.get(key, key)
+            payload[payload_key] = value
+
+        for key in self.optional_action_params.get(action, []):
+            value = self._action_param_value(params, key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            payload[self.param_payload_keys.get(key, key)] = value
+
+        if action == "set_color":
+            color_name = self._coerce_text(payload.get("color_name"))
+            rgb_color = payload.get("rgb_color")
+            xy_color = payload.get("xy_color")
+            has_rgb = isinstance(rgb_color, list) and len(rgb_color) == 3
+            has_xy = isinstance(xy_color, list) and len(xy_color) == 2
+            if not color_name and not has_rgb and not has_xy:
+                return None, {}, "Action 'set_color' requires color_name, rgb_color, or xy_color."
+
+        return service, payload, None
+
+    def _build_service_payload_attempts(self, *, action: str, params: dict, payload: dict) -> List[dict]:
+        base = dict(payload or {})
+        if action not in {"set_color", "turn_on"}:
+            return [base]
+
+        rgb_color = self._normalize_rgb_triplet(base.get("rgb_color"))
+        if rgb_color is None:
+            rgb_color = self._normalize_rgb_triplet((params or {}).get("rgb_color"))
+
+        xy_color = self._normalize_xy_pair(base.get("xy_color"))
+        if xy_color is None:
+            xy_color = self._normalize_xy_pair((params or {}).get("xy_color"))
+        if xy_color is None and rgb_color is not None:
+            xy_color = _rgb_to_xy(rgb_color)
+
+        color_name = self._normalize_color_name(base.get("color_name"))
+        if not color_name:
+            color_name = self._normalize_color_name((params or {}).get("color_name"))
+        if xy_color is None and color_name:
+            xy_color = _color_name_to_xy(color_name)
+
+        core = {k: v for k, v in base.items() if k not in {"rgb_color", "xy_color", "color_name"}}
+        attempts: List[dict] = []
+
+        if isinstance(xy_color, list) and len(xy_color) == 2:
+            item = dict(core)
+            item["xy_color"] = xy_color
+            attempts.append(item)
+        if isinstance(rgb_color, list) and len(rgb_color) == 3:
+            item = dict(core)
+            item["rgb_color"] = rgb_color
+            attempts.append(item)
+        if color_name:
+            item = dict(core)
+            item["color_name"] = color_name
+            attempts.append(item)
+
+        if not attempts:
+            return [base]
+
+        unique: List[dict] = []
+        seen: set[str] = set()
+        for item in attempts:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    def _state_summary(self, *, entity_id: str, state_payload: dict, read_target: str, color_label: str = "") -> str:
+        state_data = state_payload if isinstance(state_payload, dict) else {}
+        attrs = state_data.get("attributes") if isinstance(state_data.get("attributes"), dict) else {}
+        name = self._coerce_text(attrs.get("friendly_name")) or entity_id
+        state = self._coerce_text(state_data.get("state")) or "unknown"
+
+        extras: List[str] = []
+        brightness_raw = self._normalize_int(attrs.get("brightness"))
+        if brightness_raw is not None:
+            brightness_raw = max(0, min(255, int(brightness_raw)))
+            extras.append(f"brightness {int(round((brightness_raw / 255.0) * 100.0))}%")
+
+        label = self._normalize_display_color_label(color_label)
+        if label:
+            extras.append(f"color {label}")
+
+        if extras:
+            return f"{name} is {state}; " + ", ".join(extras) + "."
+        return f"{name} is {state}."
+
+    def _sanitize_state_for_hydra(self, *, entity_id: str, state_payload: dict, color_label: str = "") -> dict:
+        state_data = state_payload if isinstance(state_payload, dict) else {}
+        attrs = state_data.get("attributes") if isinstance(state_data.get("attributes"), dict) else {}
+
+        safe_attrs: Dict[str, Any] = {}
+        friendly = self._coerce_text(attrs.get("friendly_name"))
+        if friendly:
+            safe_attrs["friendly_name"] = friendly
+
+        brightness_raw = self._normalize_int(attrs.get("brightness"))
+        if brightness_raw is not None:
+            brightness_raw = max(0, min(255, int(brightness_raw)))
+            safe_attrs["brightness_pct"] = int(round((brightness_raw / 255.0) * 100.0))
+
+        label = self._normalize_display_color_label(color_label)
+        if label:
+            safe_attrs["color"] = label
+
+        color_mode = self._coerce_text(attrs.get("color_mode"))
+        if color_mode:
+            safe_attrs["color_mode"] = color_mode
+
+        return {
+            "entity_id": self._coerce_text(state_data.get("entity_id")) or entity_id,
+            "state": self._coerce_text(state_data.get("state")) or "unknown",
+            "attributes": safe_attrs,
+        }
 
     def _get_plugin_settings(self) -> dict:
         return _read_settings()
@@ -579,14 +1030,32 @@ class HueLightsPlugin(HALightsPlugin):
         return ""
 
     def _build_catalog(self, states: List[dict]) -> List[dict]:
-        rows = super()._build_catalog(states)
-        for row in rows:
-            attrs = {}
-            source = next((st for st in states or [] if self._coerce_text(st.get("entity_id")).lower() == row.get("entity_id")), None)
-            if isinstance(source, dict) and isinstance(source.get("attributes"), dict):
-                attrs = source["attributes"]
-            if _coerce_text(attrs.get("hue_type")):
-                row["hue_type"] = _coerce_text(attrs.get("hue_type"))
+        domains = {domain.strip().lower() for domain in (self.entity_domains or []) if str(domain).strip()}
+        rows: List[dict] = []
+        seen: set[str] = set()
+
+        for state in states or []:
+            if not isinstance(state, dict):
+                continue
+            entity_id = self._coerce_text(state.get("entity_id")).lower()
+            if not entity_id or entity_id in seen or "." not in entity_id:
+                continue
+
+            domain = entity_id.split(".", 1)[0]
+            if domains and domain not in domains:
+                continue
+
+            attrs = state.get("attributes") if isinstance(state.get("attributes"), dict) else {}
+            row = {
+                "entity_id": entity_id,
+                "domain": domain,
+                "name": self._coerce_text(attrs.get("friendly_name")) or entity_id,
+                "state": self._coerce_text(state.get("state")) or "unknown",
+                "hue_type": self._coerce_text(attrs.get("hue_type")),
+            }
+            rows.append(row)
+            seen.add(entity_id)
+
         rows.sort(key=lambda r: (0 if r.get("domain") == "hue_group" else 1, (r.get("name") or "").lower()))
         return rows
 
@@ -803,6 +1272,88 @@ class HueLightsPlugin(HALightsPlugin):
             summary_for_user=summary,
             say_hint="Reply briefly that the Hue light command is complete. Do not include rgb/xy/internal attribute dumps.",
         )
+
+    async def handle_homeassistant(self, args=None, llm_client=None, *unused_args, **unused_kwargs):
+        payload = self._normalize_handler_args(args)
+        if not self._coerce_text(payload.get("query")):
+            payload_query = self._coerce_text(unused_kwargs.get("query"))
+            if payload_query:
+                payload["query"] = payload_query
+        return await self._handle(payload, llm_client)
+
+    async def handle_voice_core(self, args=None, llm_client=None, *unused_args, **unused_kwargs):
+        payload = self._normalize_handler_args(args)
+        if not self._coerce_text(payload.get("query")):
+            payload_query = self._coerce_text(unused_kwargs.get("query"))
+            if payload_query:
+                payload["query"] = payload_query
+        return await self._handle(payload, llm_client)
+
+    async def handle_webui(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_macos(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client)
+
+    async def handle_xbmc(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_homekit(self, args, llm_client):
+        return await self._handle(args, llm_client)
+
+    async def handle_discord(self, message, args, llm_client):
+        payload = dict(args or {})
+        if not self._coerce_text(payload.get("query")):
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                payload["query"] = content.strip()
+        return await self._handle(payload, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        payload = dict(args or {})
+        if not self._coerce_text(payload.get("query")):
+            try:
+                if isinstance(update, dict):
+                    msg = update.get("message") or {}
+                    text = msg.get("text") or msg.get("caption") or ""
+                    if isinstance(text, str) and text.strip():
+                        payload["query"] = text.strip()
+            except Exception:
+                pass
+        return await self._handle(payload, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client):
+        payload = dict(args or {})
+        if not self._coerce_text(payload.get("query")) and isinstance(body, str) and body.strip():
+            payload["query"] = body.strip()
+        return await self._handle(payload, llm_client)
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        args = args or {}
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        sender = ""
+        source_from = origin.get("from")
+        if isinstance(source_from, dict):
+            sender = str(source_from.get("node_id") or source_from.get("long_name") or source_from.get("short_name") or "").strip()
+        channel = str(ctx.get("channel") or origin.get("channel") or origin.get("target") or origin.get("channel_id") or "").strip()
+        user = str(ctx.get("user") or origin.get("user") or origin.get("user_id") or sender or "").strip()
+        raw_text = str(
+            ctx.get("raw_message")
+            or ctx.get("raw")
+            or ctx.get("request_text")
+            or origin.get("text")
+            or origin.get("message")
+            or origin.get("body")
+            or ""
+        ).strip()
+        return await self.handle_irc(None, channel, user, raw_text, args, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        payload = dict(args or {})
+        if not self._coerce_text(payload.get("query")) and isinstance(raw_message, str) and raw_message.strip():
+            payload["query"] = raw_message.strip()
+        return await self._handle(payload, llm_client)
 
 
 verba = HueLightsPlugin()
