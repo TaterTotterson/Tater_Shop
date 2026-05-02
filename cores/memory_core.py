@@ -744,7 +744,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.19"
+__version__ = "1.0.20"
 
 
 load_dotenv()
@@ -839,7 +839,18 @@ CORE_WEBUI_TAB = {
     "requires_running": True,
 }
 
-_SUPPORTED_PLATFORMS = ("webui", "macos", "discord", "telegram", "irc", "matrix", "homeassistant", "homekit", "xbmc")
+_SUPPORTED_PLATFORMS = (
+    "webui",
+    "macos",
+    "discord",
+    "telegram",
+    "irc",
+    "matrix",
+    "homeassistant",
+    "homekit",
+    "xbmc",
+    "voice_core",
+)
 _AUTO_STATE_KEYS = {
     "macos": "macos_portal_running",
     "discord": "discord_portal_running",
@@ -858,6 +869,7 @@ _HISTORY_SCAN_SPECS = {
     "homeassistant": ("tater:ha:session:*:history", "tater:ha:session:", ":history"),
     "homekit": ("tater:homekit:session:*:history", "tater:homekit:session:", ":history"),
     "xbmc": ("tater:xbmc:session:*:history", "tater:xbmc:session:", ":history"),
+    "voice_core": ("tater:voice:conv:*:history", "tater:voice:conv:", ":history"),
 }
 _ROOM_LABEL_PREFIX = "tater:room_label"
 _USER_LABEL_PREFIX = "tater:user_label"
@@ -1243,11 +1255,86 @@ def _load_settings() -> Dict[str, Any]:
 
 
 def _resolve_enabled_platforms() -> List[str]:
-    auto_enabled = ["webui"]
+    auto_enabled = ["webui", "voice_core"]
     for platform, state_key in _AUTO_STATE_KEYS.items():
         if _as_text(redis_client.get(state_key)).strip().lower() == "true":
             auto_enabled.append(platform)
     return auto_enabled
+
+
+def _voice_history_context_key(conversation_id: Any) -> str:
+    conv_id = _as_text(conversation_id).strip()
+    if not conv_id:
+        return ""
+    return f"tater:voice:conv:{conv_id}:ctx"
+
+
+def _load_voice_history_context(conversation_id: Any) -> Dict[str, Any]:
+    key = _voice_history_context_key(conversation_id)
+    if not key:
+        return {}
+    try:
+        raw = redis_client.get(key)
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(_as_text(raw))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _voice_context_room_id(context: Dict[str, Any], fallback: Any) -> str:
+    if isinstance(context, dict):
+        for key in (
+            "area_id",
+            "area_name",
+            "room_id",
+            "room_name",
+            "device_id",
+            "satellite_selector",
+        ):
+            text = _as_text(context.get(key)).strip()
+            if text:
+                return text
+    return _as_text(fallback).strip()
+
+
+def _voice_context_room_name(context: Dict[str, Any]) -> str:
+    if not isinstance(context, dict):
+        return ""
+    for key in (
+        "area_name",
+        "room_name",
+        "device_name",
+        "satellite_name",
+        "device_id",
+        "satellite_selector",
+    ):
+        text = _as_text(context.get(key)).strip()
+        if text:
+            return text
+    return ""
+
+
+def _voice_context_user(context: Dict[str, Any]) -> Tuple[str, str]:
+    if not isinstance(context, dict):
+        return "", ""
+    speaker_id = _as_text(context.get("speaker_id")).strip()
+    speaker_name = _as_text(context.get("speaker_name")).strip()
+    if speaker_name:
+        return speaker_name, speaker_name
+    if speaker_id:
+        return speaker_id, speaker_id
+    return "", ""
+
+
+def _memory_scope_id_for_history(platform: str, history_scope_id: str) -> str:
+    if normalize_segment(platform, default="") != "voice_core":
+        return history_scope_id
+    return _voice_context_room_id(_load_voice_history_context(history_scope_id), history_scope_id)
 
 
 def _discover_scopes(platform: str) -> List[Tuple[str, str]]:
@@ -1356,6 +1443,7 @@ def _normalize_history_entry(
     *,
     platform: str,
     scope_id: str,
+    history_scope_id: Optional[str] = None,
     index: int,
     raw_entry: Any,
     now_ts: float,
@@ -1373,11 +1461,20 @@ def _normalize_history_entry(
     if not text:
         return None
 
+    source_scope_id = _as_text(history_scope_id or scope_id).strip()
+    voice_context = _load_voice_history_context(source_scope_id) if platform == "voice_core" else {}
+    voice_user_id, voice_user_name = _voice_context_user(voice_context)
+
     username = _as_text(entry.get("username")).strip()
     user_handle = _as_text(entry.get("user_handle")).strip()
     entry_user_id = _as_text(entry.get("user_id")).strip()
     if not username:
         username = entry_user_id or _as_text(entry.get("user")).strip()
+    if platform == "voice_core" and role_raw == "user":
+        if not entry_user_id and voice_user_id:
+            entry_user_id = voice_user_id
+        if not username and voice_user_name:
+            username = voice_user_name
 
     if platform == "telegram":
         handle_text = user_handle.strip()
@@ -1416,6 +1513,8 @@ def _normalize_history_entry(
         user_id = "unknown_user"
 
     room_name = _extract_room_label_from_entry(entry, platform=platform, scope_id=scope_id)
+    if platform == "voice_core" and not room_name:
+        room_name = _voice_context_room_name(voice_context)
 
     return {
         "platform": platform,
@@ -1426,7 +1525,7 @@ def _normalize_history_entry(
         "role": role,
         "timestamp": _message_timestamp(entry, now_ts),
         "text": text,
-        "message_id": _normalized_message_id(platform, scope_id, index),
+        "message_id": _normalized_message_id(platform, source_scope_id or scope_id, index),
     }
 
 
@@ -1784,7 +1883,10 @@ def _process_scope(
     write_room_memory = _as_bool(settings.get("write_room_memory"), True)
     auto_link_identities = _as_bool(settings.get("auto_link_identities"), False)
 
-    cursor_redis_key = cursor_key(platform, scope_id)
+    history_scope_id = _as_text(scope_id).strip()
+    memory_scope_id = _memory_scope_id_for_history(platform, history_scope_id) or history_scope_id
+
+    cursor_redis_key = cursor_key(platform, history_scope_id)
     raw_cursor = redis_client.get(cursor_redis_key)
     cursor_idx = _as_int(raw_cursor, 0, min_value=0)
 
@@ -1809,7 +1911,8 @@ def _process_scope(
         abs_index = cursor_idx + offset
         item = _normalize_history_entry(
             platform=platform,
-            scope_id=scope_id,
+            scope_id=memory_scope_id,
+            history_scope_id=history_scope_id,
             index=abs_index,
             raw_entry=raw_row,
             now_ts=ts_now,
@@ -1821,7 +1924,7 @@ def _process_scope(
         redis_client.set(cursor_redis_key, str(end_idx_exclusive))
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
-    _remember_scope_labels(platform, scope_id, normalized_messages)
+    _remember_scope_labels(platform, memory_scope_id, normalized_messages)
 
     known_user_ids = _candidate_user_ids(normalized_messages)
     user_display_names = _user_display_names(normalized_messages)
@@ -1834,14 +1937,14 @@ def _process_scope(
     )
     current_room_profile = _existing_room_profile_snapshot(
         platform,
-        scope_id,
+        memory_scope_id,
         now_ts=ts_now,
     )
 
     observations = _llm_extract_observations(
         llm_client,
         platform=platform,
-        scope_id=scope_id,
+        scope_id=memory_scope_id,
         messages=normalized_messages,
         current_user_profiles=current_user_profiles,
         current_room_profile=current_room_profile,
@@ -1854,7 +1957,7 @@ def _process_scope(
     updated_docs = 0
 
     if write_room_memory:
-        r_key = room_doc_key(platform, scope_id)
+        r_key = room_doc_key(platform, memory_scope_id)
         room_doc = load_doc(redis_client, r_key, now=ts_now)
         room_changed = False
         if _scrub_transient_facts(room_doc, now=ts_now) > 0:
@@ -2225,6 +2328,7 @@ def _memory_core_user_name(platform: Any, user_id: Any) -> str:
         "homeassistant": "tater:ha:session:*:history",
         "homekit": "tater:homekit:session:*:history",
         "xbmc": "tater:xbmc:session:*:history",
+        "voice_core": "tater:voice:conv:*:history",
         "webui": "webui:chat_history",
     }
     history_pattern = history_match_specs.get(platform_name)
@@ -4986,13 +5090,30 @@ def _hydra_user_target(
 ) -> Dict[str, Any]:
     user_id = _as_text(args.get("user_id") if isinstance(args, dict) else "").strip()
     if not user_id:
-        user_id = _hydra_origin_text(origin, "user_id", "user", "username", "sender")
+        user_id = _hydra_origin_text(
+            origin,
+            "user_id",
+            "speaker_name",
+            "speaker_id",
+            "user",
+            "username",
+            "sender",
+        )
     if not user_id:
         return {"ok": False, "error": "user_id is required for user memory."}
 
     display_name = _as_text(args.get("display_name") if isinstance(args, dict) else "").strip()
     if not display_name:
-        display_name = _hydra_origin_text(origin, "username", "user", "sender", "display_name", "nick", "nickname")
+        display_name = _hydra_origin_text(
+            origin,
+            "username",
+            "speaker_name",
+            "user",
+            "sender",
+            "display_name",
+            "nick",
+            "nickname",
+        )
     if not display_name:
         display_name = user_id
 
@@ -5376,6 +5497,20 @@ def _hydra_memory_context_room_id(platform: str, scope: str, origin: Optional[Di
     normalized_platform = _hydra_platform(platform)
     if normalized_platform == "webui":
         return "chat"
+
+    if normalized_platform == "voice_core":
+        voice_room = _hydra_origin_text(
+            origin,
+            "area_id",
+            "area_name",
+            "room_id",
+            "room",
+            "room_name",
+            "device_id",
+            "satellite_selector",
+        ).strip()
+        if voice_room and voice_room.lower() not in {"unknown", "unknown_scope", "chat", "general"}:
+            return voice_room
 
     raw_scope = _as_text(scope).strip()
     if raw_scope and ":" in raw_scope:
@@ -5822,9 +5957,27 @@ def get_hydra_memory_context_payload(
 
     out: Dict[str, Any] = {}
 
-    user_id = _hydra_origin_text(origin, "user_id", "dm_user_id", "user", "username", "sender")
+    user_id = _hydra_origin_text(
+        origin,
+        "user_id",
+        "dm_user_id",
+        "speaker_name",
+        "speaker_id",
+        "user",
+        "username",
+        "sender",
+    )
     if user_id:
-        display_name = _hydra_origin_text(origin, "username", "user", "sender", "display_name", "nick", "nickname")
+        display_name = _hydra_origin_text(
+            origin,
+            "username",
+            "speaker_name",
+            "user",
+            "sender",
+            "display_name",
+            "nick",
+            "nickname",
+        )
         target = _hydra_user_target(
             args={
                 "user_id": user_id,

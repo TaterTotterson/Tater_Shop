@@ -52,7 +52,7 @@
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.19",
+      "version": "1.0.20",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
@@ -60,7 +60,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "34b0b2d43388867c29c40b0ba45aa6a36e999ee13e7d0c8bed54db13cb5aa17e"
+      "sha256": "15352ba91b71cf004cecc2df159f1bed1495c311130cb0d70e3803c43ad7950b"
     },
     {
       "id": "personal",
