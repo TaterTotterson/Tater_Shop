@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.3"
+__version__ = "1.4.6"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -54,6 +54,24 @@ CORE_SETTINGS = {
             "type": "checkbox",
             "default": False,
             "description": "When enabled, Environment Core polls the WeatherAPI.com integration for current conditions and forecast data.",
+        },
+        "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE": {
+            "label": "Current Card Live Source",
+            "type": "select",
+            "default": "provider:ecowitt",
+            "description": "Integration or selected sensor used for the live readings on the Current Conditions card.",
+        },
+        "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE": {
+            "label": "Current Card Condition Source",
+            "type": "select",
+            "default": "provider:weather_api",
+            "description": "Integration or selected sensor used for the Current Conditions card condition text and artwork.",
+        },
+        "ENVIRONMENT_FORECAST_PROVIDER": {
+            "label": "Forecast Provider",
+            "type": "select",
+            "default": "weather_api",
+            "description": "Forecast provider shown in the Forecast tab.",
         },
         "ENVIRONMENT_HISTORY_LIMIT": {
             "label": "History Samples",
@@ -220,6 +238,9 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
             maximum=86400,
         ),
         "weather_api_enabled": _as_bool(raw.get("ENVIRONMENT_ENABLE_WEATHERAPI"), False),
+        "current_live_source": _text(raw.get("ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE")) or "provider:ecowitt",
+        "current_condition_source": _text(raw.get("ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE")) or "provider:weather_api",
+        "forecast_provider": _clean_key(raw.get("ENVIRONMENT_FORECAST_PROVIDER")) or "weather_api",
         "history_limit": _as_int(raw.get("ENVIRONMENT_HISTORY_LIMIT"), DEFAULT_HISTORY_LIMIT, minimum=1, maximum=10000),
         "stale_after_minutes": _as_int(
             raw.get("ENVIRONMENT_STALE_AFTER_MINUTES"),
@@ -230,7 +251,14 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
     }
 
 
-def _settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _settings_field_rows(
+    settings: Dict[str, Any],
+    *,
+    provider_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+    selected_sensors: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    provider_snapshots = provider_snapshots if isinstance(provider_snapshots, dict) else {}
+    selected_sensors = selected_sensors if isinstance(selected_sensors, list) else []
     return [
         {
             "key": "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
@@ -259,6 +287,30 @@ def _settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
             "type": "checkbox",
             "value": bool(settings.get("weather_api_enabled")),
             "description": "Poll WeatherAPI.com through Settings > Integrations and show forecast data in Environment Core.",
+        },
+        {
+            "key": "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
+            "label": "Current Card Live Source",
+            "type": "select",
+            "value": _text(settings.get("current_live_source")) or "provider:ecowitt",
+            "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=False),
+            "description": "Choose the integration or selected sensor used for the big temperature and live readings.",
+        },
+        {
+            "key": "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
+            "label": "Current Card Condition Source",
+            "type": "select",
+            "value": _text(settings.get("current_condition_source")) or "provider:weather_api",
+            "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=True),
+            "description": "Choose the source for condition text and sunny/rainy artwork.",
+        },
+        {
+            "key": "ENVIRONMENT_FORECAST_PROVIDER",
+            "label": "Forecast Provider",
+            "type": "select",
+            "value": _text(settings.get("forecast_provider")) or "weather_api",
+            "options": _forecast_provider_options(provider_snapshots),
+            "description": "WeatherAPI.com is the only forecast provider right now; this selector is ready for additional providers.",
         },
         {
             "key": "ENVIRONMENT_STALE_AFTER_MINUTES",
@@ -2371,6 +2423,126 @@ def _source_reading_points(provider_status_rows: List[Dict[str, str]]) -> List[D
     return points
 
 
+def _snapshot_has_category(snapshot: Dict[str, Any], category: str) -> bool:
+    wanted = _clean_key(category)
+    for row in snapshot.get("readings") or []:
+        if isinstance(row, dict) and _clean_key(row.get("category")) == wanted:
+            return True
+    return False
+
+
+def _provider_source_option(provider: str, provider_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    provider_key = _clean_key(provider)
+    snapshot = provider_snapshots.get(provider_key) or {}
+    suffix = "ready" if snapshot else "waiting"
+    return {"value": f"provider:{provider_key}", "label": f"{_provider_label(provider_key)} ({suffix})"}
+
+
+def _environment_display_source_options(
+    provider_snapshots: Dict[str, Dict[str, Any]],
+    selected_sensors: List[Dict[str, Any]],
+    *,
+    include_condition_only: bool,
+) -> List[Dict[str, Any]]:
+    provider_options: List[Dict[str, str]] = []
+    provider_order = ("ecowitt", "weather_api", "unifi_protect", "ecobee_homekit", "hue", "homeassistant")
+    for provider in provider_order:
+        snapshot = provider_snapshots.get(provider) or {}
+        if include_condition_only and provider != "weather_api" and not _snapshot_has_category(snapshot, "condition"):
+            continue
+        provider_options.append(_provider_source_option(provider, provider_snapshots))
+
+    sensor_options: List[Dict[str, str]] = []
+    for row in selected_sensors or []:
+        if not isinstance(row, dict) or not _as_bool(row.get("enabled"), True):
+            continue
+        category = _clean_key(row.get("category"))
+        if include_condition_only and category != "condition":
+            continue
+        key = _text(row.get("key"))
+        if not key:
+            continue
+        label = _text(row.get("label")) or key
+        area = _text(row.get("area"))
+        provider = _provider_label(row.get("provider"))
+        pieces = [label]
+        if area:
+            pieces.append(area)
+        if provider:
+            pieces.append(provider)
+        sensor_options.append({"value": f"sensor:{key}", "label": " - ".join(pieces)})
+    sensor_options.sort(key=lambda item: _text(item.get("label")).casefold())
+
+    groups: List[Dict[str, Any]] = [{"label": "Integrations", "options": provider_options}]
+    if sensor_options:
+        groups.append({"label": "Selected Sensors", "options": sensor_options})
+    return groups
+
+
+def _forecast_provider_options(provider_snapshots: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
+    weather_snapshot = provider_snapshots.get("weather_api") or {}
+    suffix = "ready" if weather_snapshot else "waiting"
+    return [{"value": "weather_api", "label": f"WeatherAPI.com ({suffix})"}]
+
+
+def _selected_sensor_display_snapshot(
+    selection_key: str,
+    combined_snapshot: Dict[str, Any],
+    selected_sensors: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    selection = next((row for row in selected_sensors or [] if _text(row.get("key")) == selection_key), None)
+    if not isinstance(selection, dict):
+        return {}
+    provider = _clean_key(selection.get("provider"))
+    sensor_clean = _clean_key(selection.get("sensor_id"))
+    selection_clean = _clean_key(selection.get("key"))
+    rows: List[Dict[str, Any]] = []
+    for row in combined_snapshot.get("readings") or []:
+        if not isinstance(row, dict):
+            continue
+        if provider and _clean_key(row.get("provider")) != provider:
+            continue
+        source_suffix = _text(row.get("source_id")).split(":", 1)[1] if ":" in _text(row.get("source_id")) else _text(row.get("source_id"))
+        source_clean = _clean_key(source_suffix)
+        row_key = _clean_key(row.get("key"))
+        if sensor_clean and (source_clean == sensor_clean or sensor_clean in source_clean or sensor_clean in row_key):
+            rows.append(row)
+            continue
+        if selection_clean and (row_key == selection_clean or selection_clean in row_key):
+            rows.append(row)
+    if not rows:
+        return {}
+    label = _text(selection.get("label")) or selection_key
+    return {
+        "provider": provider or "environment",
+        "source_id": f"display:{selection_key}",
+        "model": label,
+        "received_at": combined_snapshot.get("received_at"),
+        "sample_time": combined_snapshot.get("sample_time"),
+        "readings": rows,
+    }
+
+
+def _display_snapshot_for_source(
+    source: Any,
+    combined_snapshot: Dict[str, Any],
+    provider_snapshots: Dict[str, Dict[str, Any]],
+    selected_sensors: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    source_text = _text(source)
+    if source_text.startswith("sensor:"):
+        return _selected_sensor_display_snapshot(source_text.split(":", 1)[1], combined_snapshot, selected_sensors)
+    if source_text.startswith("provider:"):
+        provider = _clean_key(source_text.split(":", 1)[1])
+        if provider in {"environment", "all"}:
+            return combined_snapshot if isinstance(combined_snapshot, dict) else {}
+        return provider_snapshots.get(provider) or {}
+    provider = _clean_key(source_text)
+    if provider:
+        return provider_snapshots.get(provider) or {}
+    return {}
+
+
 def _overview_card(
     *,
     card_id: str,
@@ -2513,13 +2685,14 @@ def _weatherapi_forecast_days(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
     return days
 
 
-def _weather_current_card_data_uri(snapshot: Dict[str, Any], *, units: str) -> str:
-    condition = _reading_display(snapshot, "weather_api_condition", "Current Conditions")
+def _weather_current_card_data_uri(condition_snapshot: Dict[str, Any], *, live_snapshot: Optional[Dict[str, Any]] = None, units: str) -> str:
+    live = live_snapshot if isinstance(live_snapshot, dict) and live_snapshot else condition_snapshot
+    condition = _reading_display(condition_snapshot, "weather_api_condition", "Current Conditions")
     theme = _weather_condition_theme(condition)
-    temp = _reading_display(snapshot, "tempf" if units != "metric" else "tempc", _category_display(snapshot, "temperature"))
-    feels = _reading_display(snapshot, "weather_api_feelslike")
-    humidity = _reading_display(snapshot, "humidity")
-    wind = _reading_display(snapshot, "windspeedmph", _reading_display(snapshot, "weather_api_wind_kph"))
+    temp = _reading_display(live, "tempf", _reading_display(live, "tempc", _category_display(live, "temperature")))
+    feels = _reading_display(live, "feelslikef", _reading_display(condition_snapshot, "weather_api_feelslike"))
+    humidity = _reading_display(live, "humidity", _category_display(live, "humidity"))
+    wind = _reading_display(live, "windspeedmph", _category_display(live, "wind", _reading_display(condition_snapshot, "weather_api_wind_kph")))
     accent = theme["accent"]
     ink = theme["ink"]
     icon = _weather_condition_icon(theme["kind"], x=620, y=40, scale=0.92, ink="#ffffff", accent=accent)
@@ -2911,8 +3084,11 @@ def _environment_manager_ui(
     candidate_updated_at = candidate_cache.get("updated_at")
     provider_summaries = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
     weather_snapshot = provider_snapshots.get("weather_api") or {}
-    weather_units = _weatherapi_units(client)
     weather_enabled = _as_bool(settings.get("weather_api_enabled"), False)
+    forecast_provider = _clean_key(settings.get("forecast_provider")) or "weather_api"
+    forecast_snapshot = provider_snapshots.get(forecast_provider) or {}
+    forecast_enabled = weather_enabled if forecast_provider == "weather_api" else False
+    weather_units = _weatherapi_units(client)
     source_count = len(provider_summaries) if provider_summaries else (1 if snapshot else 0)
     grouped = _readings_by_category(snapshot)
     battery_rows = grouped.get("battery") or []
@@ -2969,20 +3145,31 @@ def _environment_manager_ui(
     air_light_rows = _reading_rows_by_categories(snapshot, ("solar", "air"), limit=18)
     source_health_rows = _source_health_rows(provider_status_rows)
     source_reading_points = _source_reading_points(provider_status_rows)
-    current_condition_snapshot = weather_snapshot if weather_snapshot else snapshot
+    current_condition_snapshot = _display_snapshot_for_source(
+        settings.get("current_condition_source"),
+        snapshot,
+        provider_snapshots,
+        selected_sensors,
+    )
+    live_station_snapshot = _display_snapshot_for_source(
+        settings.get("current_live_source"),
+        snapshot,
+        provider_snapshots,
+        selected_sensors,
+    )
     current_condition_fields = (
         [
             {
                 "key": "environment_current_condition_card",
                 "label": "Current Conditions",
                 "type": "image",
-                "src": _weather_current_card_data_uri(current_condition_snapshot, units=weather_units),
+                "src": _weather_current_card_data_uri(current_condition_snapshot, live_snapshot=live_station_snapshot, units=weather_units),
                 "alt": "Current environment conditions",
                 "hide_label": True,
                 "read_only": True,
             }
         ]
-        if current_condition_snapshot
+        if current_condition_snapshot or live_station_snapshot
         else []
     )
     current_condition_sections = (
@@ -2996,7 +3183,6 @@ def _environment_manager_ui(
         if current_condition_fields
         else []
     )
-
     overview_summary_rows = [
         {"label": "Outdoor", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
         {"label": "Feels Like", "value": _reading_display(snapshot, "weather_api_feelslike", _reading_display(snapshot, "feelslikef"))},
@@ -3004,7 +3190,7 @@ def _environment_manager_ui(
         {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
         {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
         {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
-        {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
+        {"label": "Forecast", "value": _reading_display(forecast_snapshot, "weather_api_condition")},
         {"label": "Batteries", "value": battery_summary},
     ]
     overview_badges = [
@@ -3013,6 +3199,25 @@ def _environment_manager_ui(
     ]
     if battery_rows:
         overview_badges.append({"label": "Low Battery" if low_battery_count else "Batteries OK", "tone": "danger" if low_battery_count else "good"})
+    current_condition_card = (
+        {
+            "id": "overview:current_conditions",
+            "group": "overview",
+            "title": "Current Conditions",
+            "subtitle": _reading_display(current_condition_snapshot, "weather_api_condition", "Live weather"),
+            "detail": f"Last sample {_age_label(received_at)}." if has_snapshot else "Waiting for environment telemetry.",
+            "hero_badges": overview_badges,
+            "summary_rows": [
+                {"label": "Outdoor", "value": _reading_display(live_station_snapshot, "tempf", _category_display(live_station_snapshot, "temperature"))},
+                {"label": "Feels Like", "value": _reading_display(live_station_snapshot, "feelslikef", _reading_display(current_condition_snapshot, "weather_api_feelslike"))},
+                {"label": "Humidity", "value": _reading_display(live_station_snapshot, "humidity", _category_display(live_station_snapshot, "humidity"))},
+                {"label": "Wind", "value": _reading_display(live_station_snapshot, "windspeedmph")},
+            ],
+            "sections": current_condition_sections,
+        }
+        if current_condition_sections
+        else None
+    )
 
     overview_cards: List[Dict[str, Any]] = []
     if area_rows:
@@ -3174,7 +3379,7 @@ def _environment_manager_ui(
         }
     )
 
-    item_forms: List[Dict[str, Any]] = [
+    item_forms: List[Dict[str, Any]] = ([current_condition_card] if current_condition_card else []) + [
         {
             "id": "overview",
             "group": "overview",
@@ -3189,36 +3394,35 @@ def _environment_manager_ui(
             "summary_rows": overview_summary_rows,
             "sensor_title": "At a Glance",
             "sensor_rows": _sensor_rows(current_condition_rows, include_meta=False),
-            "sections": current_condition_sections,
         },
         {
-            "id": "forecast:weather_api",
+            "id": f"forecast:{forecast_provider}",
             "group": "forecast",
-            "title": "WeatherAPI.com Forecast",
+            "title": f"{_provider_label(forecast_provider)} Forecast",
             "subtitle": (
-                f"Last forecast {_age_label(weather_snapshot.get('received_at'))}"
-                if weather_snapshot
-                else "Enabled, waiting for forecast" if weather_enabled else "Disabled"
+                f"Last forecast {_age_label(forecast_snapshot.get('received_at'))}"
+                if forecast_snapshot
+                else "Enabled, waiting for forecast" if forecast_enabled else "Disabled"
             ),
             "detail": (
-                _reading_display(weather_snapshot, "weather_api_condition")
-                if weather_snapshot
-                else "Enable WeatherAPI Forecast in Environment Core settings and configure WeatherAPI.com in Settings > Integrations."
+                _reading_display(forecast_snapshot, "weather_api_condition")
+                if forecast_snapshot
+                else f"Enable {_provider_label(forecast_provider)} in Environment Core settings and configure it in Settings > Integrations."
             ),
             "hero_badges": [
-                {"label": "Enabled" if weather_enabled else "Disabled", "tone": "good" if weather_enabled else "muted"},
+                {"label": "Enabled" if forecast_enabled else "Disabled", "tone": "good" if forecast_enabled else "muted"},
                 {
-                    "label": _text(weather_snapshot.get("model")) or "WeatherAPI.com",
+                    "label": _text(forecast_snapshot.get("model")) or _provider_label(forecast_provider),
                     "tone": "muted",
                 },
             ],
             "summary_rows": [
-                {"label": "Current", "value": _reading_display(weather_snapshot, "tempf", _reading_display(weather_snapshot, "tempc"))},
-                {"label": "Feels Like", "value": _reading_display(weather_snapshot, "weather_api_feelslike")},
-                {"label": "Humidity", "value": _reading_display(weather_snapshot, "humidity")},
-                {"label": "Wind", "value": _reading_display(weather_snapshot, "windspeedmph", _reading_display(weather_snapshot, "weather_api_wind_kph"))},
-                {"label": "UV", "value": _reading_display(weather_snapshot, "uv")},
-                {"label": "AQI", "value": _reading_display(weather_snapshot, "weather_api_aqi_us_epa")},
+                {"label": "Current", "value": _reading_display(forecast_snapshot, "tempf", _reading_display(forecast_snapshot, "tempc"))},
+                {"label": "Feels Like", "value": _reading_display(forecast_snapshot, "weather_api_feelslike")},
+                {"label": "Humidity", "value": _reading_display(forecast_snapshot, "humidity")},
+                {"label": "Wind", "value": _reading_display(forecast_snapshot, "windspeedmph", _reading_display(forecast_snapshot, "weather_api_wind_kph"))},
+                {"label": "UV", "value": _reading_display(forecast_snapshot, "uv")},
+                {"label": "AQI", "value": _reading_display(forecast_snapshot, "weather_api_aqi_us_epa")},
             ],
             "sections": [
                 {
@@ -3229,7 +3433,7 @@ def _environment_manager_ui(
                             "key": "weatherapi_daily_cards",
                             "label": "Daily Forecast Cards",
                             "type": "image",
-                            "src": _weather_forecast_cards_data_uri(weather_snapshot, units=weather_units),
+                            "src": _weather_forecast_cards_data_uri(forecast_snapshot, units=weather_units),
                             "alt": "Daily forecast cards",
                             "hide_label": True,
                             "read_only": True,
@@ -3257,7 +3461,7 @@ def _environment_manager_ui(
                                 {"key": "sunrise", "label": "Sunrise"},
                                 {"key": "sunset", "label": "Sunset"},
                             ],
-                            "rows": _weatherapi_daily_rows(weather_snapshot, units=weather_units),
+                            "rows": _weatherapi_daily_rows(forecast_snapshot, units=weather_units),
                             "read_only": True,
                         }
                     ],
@@ -3280,7 +3484,7 @@ def _environment_manager_ui(
                                 {"key": "humidity", "label": "Humidity"},
                                 {"key": "uv", "label": "UV"},
                             ],
-                            "rows": _weatherapi_hourly_rows(weather_snapshot, units=weather_units),
+                            "rows": _weatherapi_hourly_rows(forecast_snapshot, units=weather_units),
                             "read_only": True,
                         }
                     ],
@@ -3298,7 +3502,7 @@ def _environment_manager_ui(
                                 {"key": "metric", "label": "Metric"},
                                 {"key": "value", "label": "Value"},
                             ],
-                            "rows": _weatherapi_air_rows(weather_snapshot),
+                            "rows": _weatherapi_air_rows(forecast_snapshot),
                             "read_only": True,
                         },
                         {
@@ -3312,7 +3516,7 @@ def _environment_manager_ui(
                                 {"key": "effective", "label": "Effective"},
                                 {"key": "expires", "label": "Expires"},
                             ],
-                            "rows": _weatherapi_alert_rows(weather_snapshot),
+                            "rows": _weatherapi_alert_rows(forecast_snapshot),
                             "read_only": True,
                         },
                     ],
@@ -3352,7 +3556,11 @@ def _environment_manager_ui(
                 {
                     "label": "Settings",
                     "inline": True,
-                    "fields": _settings_field_rows(settings),
+                    "fields": _settings_field_rows(
+                        settings,
+                        provider_snapshots=provider_snapshots,
+                        selected_sensors=selected_sensors,
+                    ),
                 },
             ],
             "save_action": "environment_save_settings",
@@ -3418,7 +3626,8 @@ def _environment_manager_ui(
             "run_confirm": "Clear Environment Core weather history?",
         },
     ]
-    item_forms[1:1] = overview_cards
+    overview_insert_index = 2 if current_condition_card else 1
+    item_forms[overview_insert_index:overview_insert_index] = overview_cards
 
     for selection in selected_sensors:
         key = _text(selection.get("key"))
@@ -3599,6 +3808,9 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
     text_keys = (
         "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
         "ENVIRONMENT_ECOWITT_INDOOR_AREA",
+        "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
+        "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
+        "ENVIRONMENT_FORECAST_PROVIDER",
     )
     int_keys = {
         "ENVIRONMENT_INTEGRATION_POLL_SECONDS": (DEFAULT_INTEGRATION_POLL_SECONDS, 30, 86400),
