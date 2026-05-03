@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -2408,6 +2408,197 @@ def _weatherapi_units(client: Any = None) -> str:
     return units if units in {"us", "metric"} else "us"
 
 
+def _weather_condition_theme(condition: Any) -> Dict[str, str]:
+    text = _text(condition).lower()
+    if any(token in text for token in ("thunder", "storm", "lightning")):
+        return {"kind": "storm", "top": "#293047", "bottom": "#5d4f86", "accent": "#ffd166", "ink": "#f8fbff"}
+    if any(token in text for token in ("rain", "drizzle", "shower", "sleet")):
+        return {"kind": "rain", "top": "#2d6f9f", "bottom": "#12384f", "accent": "#8fe3ff", "ink": "#f8fbff"}
+    if any(token in text for token in ("snow", "ice", "blizzard", "flurr")):
+        return {"kind": "snow", "top": "#e8f7ff", "bottom": "#7fb7d9", "accent": "#ffffff", "ink": "#153046"}
+    if any(token in text for token in ("fog", "mist", "haze", "smoke")):
+        return {"kind": "fog", "top": "#cfd8dc", "bottom": "#7f8f95", "accent": "#f4fbff", "ink": "#20343a"}
+    if any(token in text for token in ("cloud", "overcast")):
+        return {"kind": "cloud", "top": "#6fa8dc", "bottom": "#456a86", "accent": "#dfeaf2", "ink": "#f8fbff"}
+    if any(token in text for token in ("wind", "breez")):
+        return {"kind": "wind", "top": "#60c3b4", "bottom": "#2e7973", "accent": "#e6fff9", "ink": "#f8fbff"}
+    if any(token in text for token in ("sun", "clear")):
+        return {"kind": "sun", "top": "#f7b733", "bottom": "#f26b38", "accent": "#fff2a8", "ink": "#24160d"}
+    return {"kind": "partly", "top": "#74b9ff", "bottom": "#5177c2", "accent": "#fff0a8", "ink": "#f8fbff"}
+
+
+def _weather_condition_icon(kind: str, *, x: int, y: int, scale: float = 1.0, ink: str = "#ffffff", accent: str = "#fff2a8") -> str:
+    def n(value: float) -> str:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+
+    def pt(dx: float, dy: float) -> Tuple[str, str]:
+        return n(x + dx * scale), n(y + dy * scale)
+
+    if kind == "sun":
+        cx, cy = pt(80, 78)
+        rays = []
+        for x1, y1, x2, y2 in ((80, 8, 80, 28), (80, 128, 80, 150), (10, 78, 34, 78), (126, 78, 150, 78), (30, 28, 46, 44), (114, 112, 132, 130), (30, 130, 48, 112), (114, 44, 132, 28)):
+            sx1, sy1 = pt(x1, y1)
+            sx2, sy2 = pt(x2, y2)
+            rays.append(f'<line x1="{sx1}" y1="{sy1}" x2="{sx2}" y2="{sy2}" stroke="{html_escape(accent)}" stroke-width="{n(8 * scale)}" stroke-linecap="round" opacity="0.86"/>')
+        return "".join(rays) + f'<circle cx="{cx}" cy="{cy}" r="{n(42 * scale)}" fill="{html_escape(accent)}" opacity="0.95"/>'
+
+    cloud = []
+    for cx0, cy0, r0 in ((70, 86, 34), (108, 78, 44), (150, 92, 32)):
+        cx1, cy1 = pt(cx0, cy0)
+        cloud.append(f'<circle cx="{cx1}" cy="{cy1}" r="{n(r0 * scale)}" fill="{html_escape(ink)}" opacity="0.9"/>')
+    rx, ry = pt(48, 88)
+    cloud.append(f'<rect x="{rx}" y="{ry}" width="{n(136 * scale)}" height="{n(48 * scale)}" rx="{n(24 * scale)}" fill="{html_escape(ink)}" opacity="0.9"/>')
+    cloud_svg = "".join(cloud)
+
+    if kind == "partly":
+        sun = _weather_condition_icon("sun", x=x - int(48 * scale), y=y - int(38 * scale), scale=scale * 0.62, ink=ink, accent=accent)
+        return f'<g opacity="0.95">{sun}</g>{cloud_svg}'
+    if kind == "rain":
+        drops = []
+        for dx in (62, 104, 146):
+            x1, y1 = pt(dx, 148)
+            x2, y2 = pt(dx - 16, 188)
+            drops.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{html_escape(accent)}" stroke-width="{n(8 * scale)}" stroke-linecap="round"/>')
+        return cloud_svg + "".join(drops)
+    if kind == "storm":
+        p1 = pt(106, 132)
+        p2 = pt(82, 188)
+        p3 = pt(116, 178)
+        p4 = pt(94, 230)
+        bolt = f'<polygon points="{p1[0]},{p1[1]} {p2[0]},{p2[1]} {p3[0]},{p3[1]} {p4[0]},{p4[1]}" fill="{html_escape(accent)}"/>'
+        return cloud_svg + bolt
+    if kind == "snow":
+        flakes = []
+        for dx, dy in ((72, 160), (112, 188), (150, 160)):
+            cx1, cy1 = pt(dx, dy)
+            r = n(7 * scale)
+            flakes.append(f'<circle cx="{cx1}" cy="{cy1}" r="{r}" fill="{html_escape(accent)}"/>')
+        return cloud_svg + "".join(flakes)
+    if kind == "fog":
+        lines = []
+        for dy in (70, 104, 138, 172):
+            x1, y1 = pt(30, dy)
+            x2, y2 = pt(178, dy)
+            lines.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{html_escape(accent)}" stroke-width="{n(10 * scale)}" stroke-linecap="round" opacity="0.72"/>')
+        return "".join(lines)
+    if kind == "wind":
+        lines = []
+        for dy, width in ((74, 150), (112, 118), (150, 160)):
+            x1, y1 = pt(26, dy)
+            x2, y2 = pt(width, dy)
+            lines.append(f'<path d="M {x1} {y1} C {n(x + 70 * scale)} {y1}, {n(x + 94 * scale)} {n(y + (dy - 24) * scale)}, {x2} {y2}" fill="none" stroke="{html_escape(accent)}" stroke-width="{n(10 * scale)}" stroke-linecap="round"/>')
+        return "".join(lines)
+    return cloud_svg
+
+
+def _weather_day_label(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return "Day"
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+        return parsed.strftime("%a")
+    except Exception:
+        return text[:10]
+
+
+def _weatherapi_forecast_days(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    forecast = raw.get("forecast") if isinstance(raw.get("forecast"), dict) else {}
+    days: List[Dict[str, Any]] = []
+    for item in forecast.get("forecastday") or []:
+        if isinstance(item, dict):
+            days.append(item)
+    return days
+
+
+def _weather_current_card_data_uri(snapshot: Dict[str, Any], *, units: str) -> str:
+    condition = _reading_display(snapshot, "weather_api_condition", "Current Conditions")
+    theme = _weather_condition_theme(condition)
+    temp = _reading_display(snapshot, "tempf" if units != "metric" else "tempc", _category_display(snapshot, "temperature"))
+    feels = _reading_display(snapshot, "weather_api_feelslike")
+    humidity = _reading_display(snapshot, "humidity")
+    wind = _reading_display(snapshot, "windspeedmph", _reading_display(snapshot, "weather_api_wind_kph"))
+    accent = theme["accent"]
+    ink = theme["ink"]
+    icon = _weather_condition_icon(theme["kind"], x=620, y=40, scale=0.92, ink="#ffffff", accent=accent)
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="{html_escape(theme['top'])}"/>
+      <stop offset="1" stop-color="{html_escape(theme['bottom'])}"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="360" rx="34" fill="url(#bg)"/>
+  <circle cx="850" cy="18" r="180" fill="url(#shine)"/>
+  <text x="54" y="76" fill="{html_escape(ink)}" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700" opacity="0.82">Current Conditions</text>
+  <text x="54" y="182" fill="{html_escape(ink)}" font-family="Inter, Arial, sans-serif" font-size="96" font-weight="800">{html_escape(temp)}</text>
+  <text x="58" y="238" fill="{html_escape(ink)}" font-family="Inter, Arial, sans-serif" font-size="36" font-weight="750">{html_escape(condition)}</text>
+  <text x="60" y="296" fill="{html_escape(ink)}" font-family="Inter, Arial, sans-serif" font-size="24" opacity="0.86">Feels {html_escape(feels)}   Humidity {html_escape(humidity)}   Wind {html_escape(wind)}</text>
+  <g>{icon}</g>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
+def _weather_forecast_cards_data_uri(snapshot: Dict[str, Any], *, units: str) -> str:
+    days = _weatherapi_forecast_days(snapshot)[:5]
+    width = 1080
+    height = 360
+    gap = 18
+    card_w = int((width - 72 - gap * max(0, len(days) - 1)) / max(1, len(days)))
+    cards: List[str] = []
+    for index, item in enumerate(days):
+        day = item.get("day") if isinstance(item.get("day"), dict) else {}
+        condition = day.get("condition") if isinstance(day.get("condition"), dict) else {}
+        condition_text = _text(condition.get("text")) or "Forecast"
+        theme = _weather_condition_theme(condition_text)
+        x = 36 + index * (card_w + gap)
+        y = 34
+        high = _weatherapi_temp(day, "maxtemp_f", "maxtemp_c", units)
+        low = _weatherapi_temp(day, "mintemp_f", "mintemp_c", units)
+        rain = f"{_text(day.get('daily_chance_of_rain')) or '0'}%"
+        wind = _weatherapi_speed(day, "maxwind_mph", "maxwind_kph", units)
+        icon = _weather_condition_icon(theme["kind"], x=x + int(card_w * 0.18), y=y + 50, scale=0.5, ink="#ffffff", accent=theme["accent"])
+        cards.append(
+            f"""
+  <g>
+    <rect x="{x}" y="{y}" width="{card_w}" height="292" rx="28" fill="{html_escape(theme['top'])}"/>
+    <rect x="{x}" y="{y}" width="{card_w}" height="292" rx="28" fill="{html_escape(theme['bottom'])}" opacity="0.58"/>
+    <text x="{x + 26}" y="{y + 44}" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800">{html_escape(_weather_day_label(item.get('date')))}</text>
+    <text x="{x + card_w - 24}" y="{y + 44}" text-anchor="end" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="18" opacity="0.82">{html_escape(_text(item.get('date'))[5:] or '')}</text>
+    <g opacity="0.95">{icon}</g>
+    <text x="{x + 26}" y="{y + 172}" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800">{html_escape(high)}</text>
+    <text x="{x + 26}" y="{y + 204}" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="20" opacity="0.88">Low {html_escape(low)}</text>
+    <text x="{x + 26}" y="{y + 238}" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">{html_escape(condition_text[:22])}</text>
+    <text x="{x + 26}" y="{y + 270}" fill="{html_escape(theme['ink'])}" font-family="Inter, Arial, sans-serif" font-size="16" opacity="0.84">Rain {html_escape(rain)}   Wind {html_escape(wind)}</text>
+  </g>
+""".strip()
+        )
+
+    if not cards:
+        cards.append(
+            """
+  <text x="540" y="180" text-anchor="middle" fill="#edf3f0" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Waiting for forecast data</text>
+""".strip()
+        )
+
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="{width}" height="{height}" rx="28" fill="#101820"/>
+  <text x="38" y="24" fill="#edf3f0" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="800">Daily Forecast</text>
+  {''.join(cards)}
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
 def _weatherapi_temp(day: Dict[str, Any], key_us: str, key_metric: str, units: str) -> str:
     value = day.get(key_metric if units == "metric" else key_us)
     unit = "C" if units == "metric" else "F"
@@ -2778,6 +2969,33 @@ def _environment_manager_ui(
     air_light_rows = _reading_rows_by_categories(snapshot, ("solar", "air"), limit=18)
     source_health_rows = _source_health_rows(provider_status_rows)
     source_reading_points = _source_reading_points(provider_status_rows)
+    current_condition_snapshot = weather_snapshot if weather_snapshot else snapshot
+    current_condition_fields = (
+        [
+            {
+                "key": "environment_current_condition_card",
+                "label": "Current Conditions",
+                "type": "image",
+                "src": _weather_current_card_data_uri(current_condition_snapshot, units=weather_units),
+                "alt": "Current environment conditions",
+                "hide_label": True,
+                "read_only": True,
+            }
+        ]
+        if current_condition_snapshot
+        else []
+    )
+    current_condition_sections = (
+        [
+            {
+                "label": "Current Conditions",
+                "inline": True,
+                "fields": current_condition_fields,
+            }
+        ]
+        if current_condition_fields
+        else []
+    )
 
     overview_summary_rows = [
         {"label": "Outdoor", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
@@ -2971,6 +3189,7 @@ def _environment_manager_ui(
             "summary_rows": overview_summary_rows,
             "sensor_title": "At a Glance",
             "sensor_rows": _sensor_rows(current_condition_rows, include_meta=False),
+            "sections": current_condition_sections,
         },
         {
             "id": "forecast:weather_api",
@@ -3002,6 +3221,21 @@ def _environment_manager_ui(
                 {"label": "AQI", "value": _reading_display(weather_snapshot, "weather_api_aqi_us_epa")},
             ],
             "sections": [
+                {
+                    "label": "Daily Cards",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "weatherapi_daily_cards",
+                            "label": "Daily Forecast Cards",
+                            "type": "image",
+                            "src": _weather_forecast_cards_data_uri(weather_snapshot, units=weather_units),
+                            "alt": "Daily forecast cards",
+                            "hide_label": True,
+                            "read_only": True,
+                        }
+                    ],
+                },
                 {
                     "label": "Daily Forecast",
                     "inline": True,
