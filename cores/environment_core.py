@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.7"
+__version__ = "1.4.8"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -3205,19 +3205,34 @@ def _environment_manager_ui(
             "group": "overview",
             "title": "Current Conditions",
             "subtitle": _reading_display(current_condition_snapshot, "weather_api_condition", "Live weather"),
-            "detail": f"Last sample {_age_label(received_at)}." if has_snapshot else "Waiting for environment telemetry.",
-            "hero_badges": overview_badges,
-            "summary_rows": [
-                {"label": "Outdoor", "value": _reading_display(live_station_snapshot, "tempf", _category_display(live_station_snapshot, "temperature"))},
-                {"label": "Feels Like", "value": _reading_display(live_station_snapshot, "feelslikef", _reading_display(current_condition_snapshot, "weather_api_feelslike"))},
-                {"label": "Humidity", "value": _reading_display(live_station_snapshot, "humidity", _category_display(live_station_snapshot, "humidity"))},
-                {"label": "Wind", "value": _reading_display(live_station_snapshot, "windspeedmph")},
-            ],
             "sections": current_condition_sections,
         }
         if current_condition_sections
         else None
     )
+    forecast_visual_card = {
+        "id": f"forecast:{forecast_provider}:cards",
+        "group": "forecast",
+        "title": "Daily Forecast",
+        "subtitle": _provider_label(forecast_provider),
+        "sections": [
+            {
+                "label": "Daily Cards",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "weatherapi_daily_cards",
+                        "label": "Daily Forecast Cards",
+                        "type": "image",
+                        "src": _weather_forecast_cards_data_uri(forecast_snapshot, units=weather_units),
+                        "alt": "Daily forecast cards",
+                        "hide_label": True,
+                        "read_only": True,
+                    }
+                ],
+            }
+        ],
+    }
 
     overview_cards: List[Dict[str, Any]] = []
     if area_rows:
@@ -3395,6 +3410,7 @@ def _environment_manager_ui(
             "sensor_title": "At a Glance",
             "sensor_rows": _sensor_rows(current_condition_rows, include_meta=False),
         },
+        forecast_visual_card,
         {
             "id": f"forecast:{forecast_provider}",
             "group": "forecast",
@@ -3425,21 +3441,6 @@ def _environment_manager_ui(
                 {"label": "AQI", "value": _reading_display(forecast_snapshot, "weather_api_aqi_us_epa")},
             ],
             "sections": [
-                {
-                    "label": "Daily Cards",
-                    "inline": True,
-                    "fields": [
-                        {
-                            "key": "weatherapi_daily_cards",
-                            "label": "Daily Forecast Cards",
-                            "type": "image",
-                            "src": _weather_forecast_cards_data_uri(forecast_snapshot, units=weather_units),
-                            "alt": "Daily forecast cards",
-                            "hide_label": True,
-                            "read_only": True,
-                        }
-                    ],
-                },
                 {
                     "label": "Daily Forecast",
                     "inline": True,
