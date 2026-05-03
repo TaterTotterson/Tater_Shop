@@ -28,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.5"
+__version__ = "3.3.6"
 
 load_dotenv()
 
@@ -161,6 +161,9 @@ _EVENT_FILTER_RUNTIME_KEYS = {
     "sensor": "events_filter_sensor",
 }
 _EVENT_LIST_VIEW_RUNTIME_KEY = "events_list_view"
+_EVENT_PAGE_RUNTIME_KEY = "events_page"
+_EVENT_PAGE_SIZE_DEFAULT = 24
+_EVENT_PAGE_SIZE_MAX = 100
 _EVENT_FILTER_DEFAULTS = {
     "camera": True,
     "doorbell": True,
@@ -2597,24 +2600,81 @@ def _event_filter_form(
     }
 
 
-def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
-    filters = _event_type_filters(client)
-    list_view = _event_list_view_enabled(client)
-    sources = _discover_event_sources(client)
-    if not sources:
+def _event_source_lengths(client: Any, sources: List[str]) -> Dict[str, int]:
+    redis_obj = client or redis_client
+    lengths: Dict[str, int] = {}
+    if redis_obj is None:
+        return {src: 0 for src in sources}
+    for src in sources:
+        try:
+            lengths[src] = max(0, int(redis_obj.llen(_event_key(src)) or 0))
+        except Exception:
+            lengths[src] = 0
+    return lengths
+
+
+def _event_sort_dt(event: Dict[str, Any]) -> datetime:
+    return _parse_iso(event.get("ha_time")) or datetime.min
+
+
+def _load_filtered_event_prefix(
+    client: Any,
+    *,
+    sources: List[str],
+    source_lengths: Dict[str, int],
+    filters: Dict[str, bool],
+    read_per_source: int,
+) -> List[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
         return []
-    events = _load_events_for_sources(
-        client,
-        sources=sources,
-        start=datetime(1970, 1, 1),
-        end=datetime.now() + timedelta(days=1),
-        limit_per_source=0,
+    read_count = max(0, int(read_per_source))
+    if read_count <= 0:
+        return []
+    start = datetime(1970, 1, 1)
+    end = datetime.now() + timedelta(days=1)
+    events: List[Dict[str, Any]] = []
+    for src in sources:
+        source_len = max(0, int(source_lengths.get(src, 0)))
+        if source_len <= 0:
+            continue
+        end_index = min(read_count, source_len) - 1
+        try:
+            rows = redis_obj.lrange(_event_key(src), 0, end_index) or []
+        except Exception:
+            continue
+        for row in rows:
+            try:
+                payload = json.loads(row)
+            except Exception:
+                continue
+            ts = _parse_iso(payload.get("ha_time"))
+            if ts is None or ts < start or ts > end:
+                continue
+            payload.setdefault("source", src)
+            event_bucket = _event_type_bucket(payload)
+            if not _event_allowed_by_filter(filters, event_bucket):
+                continue
+            events.append(payload)
+    events.sort(
+        key=lambda item: (
+            _event_sort_dt(item),
+            _text(item.get("id")),
+            _text(item.get("entity_id")),
+        ),
+        reverse=True,
     )
+    return events
+
+
+def _event_forms_from_events(
+    client: Any,
+    events: List[Dict[str, Any]],
+    *,
+    list_view: bool,
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for idx, event in enumerate(events):
-        event_bucket = _event_type_bucket(event)
-        if not _event_allowed_by_filter(filters, event_bucket):
-            continue
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         event_time = _event_time_display(event.get("ha_time"))
         source = _text(event.get("source"))
@@ -2706,6 +2766,82 @@ def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
             }
         )
     return items
+
+
+def _event_page_for_ui(
+    client: Any,
+    *,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    filters = _event_type_filters(client)
+    list_view = _event_list_view_enabled(client)
+    runtime = _runtime_get(client)
+    current_page = _as_int(
+        page if page is not None else runtime.get(_EVENT_PAGE_RUNTIME_KEY),
+        1,
+        minimum=1,
+    )
+    current_page_size = _as_int(
+        page_size if page_size is not None else _EVENT_PAGE_SIZE_DEFAULT,
+        _EVENT_PAGE_SIZE_DEFAULT,
+        minimum=1,
+        maximum=_EVENT_PAGE_SIZE_MAX,
+    )
+    sources = _discover_event_sources(client)
+    source_lengths = _event_source_lengths(client, sources)
+    raw_total = sum(source_lengths.values())
+    if not sources or raw_total <= 0:
+        return {
+            "items": [],
+            "page": 1,
+            "page_size": current_page_size,
+            "page_count": 1,
+            "total": 0,
+        }
+
+    max_source_len = max(source_lengths.values()) if source_lengths else 0
+    offset = (current_page - 1) * current_page_size
+    needed = offset + current_page_size
+    read_per_source = min(max_source_len, max(current_page_size, needed))
+    read_step = max(current_page_size * 4, 100)
+    events: List[Dict[str, Any]] = []
+
+    while True:
+        events = _load_filtered_event_prefix(
+            client,
+            sources=sources,
+            source_lengths=source_lengths,
+            filters=filters,
+            read_per_source=read_per_source,
+        )
+        exhausted = read_per_source >= max_source_len
+        if len(events) >= needed or exhausted:
+            break
+        next_read = min(max_source_len, max(read_per_source + read_step, int(read_per_source * 1.5)))
+        if next_read <= read_per_source:
+            break
+        read_per_source = next_read
+
+    exact_total = read_per_source >= max_source_len
+    total_for_pages = len(events) if exact_total else raw_total
+    page_count = max(1, (max(0, total_for_pages) + current_page_size - 1) // current_page_size)
+    if current_page > page_count:
+        current_page = page_count
+        offset = (current_page - 1) * current_page_size
+
+    page_events = events[offset : offset + current_page_size]
+    return {
+        "items": _event_forms_from_events(client, page_events, list_view=list_view),
+        "page": current_page,
+        "page_size": current_page_size,
+        "page_count": page_count,
+        "total": max(0, total_for_pages),
+    }
+
+
+def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
+    return list(_event_page_for_ui(client).get("items") or [])
 
 
 def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
@@ -4944,7 +5080,8 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     all_rules = _load_rules(client)
     rules: Dict[str, Dict[str, Any]] = dict(all_rules)
     catalog = _entity_catalog(provider="all")
-    event_forms = _event_items_for_ui(client)
+    event_page = _event_page_for_ui(client)
+    event_forms = list(event_page.get("items") or [])
     forms: List[Dict[str, Any]] = []
     for rule in sorted(
         rules.values(),
@@ -5073,6 +5210,14 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "item_group": "event",
                 "selector": False,
                 "page_size": 24,
+                "server_pagination": {
+                    "enabled": True,
+                    "action": "awareness_set_event_page",
+                    "page": _as_int(event_page.get("page"), 1, minimum=1),
+                    "page_size": _as_int(event_page.get("page_size"), _EVENT_PAGE_SIZE_DEFAULT, minimum=1),
+                    "page_count": _as_int(event_page.get("page_count"), 1, minimum=1),
+                    "total": _as_int(event_page.get("total"), 0, minimum=0),
+                },
                 "empty_message": "No stored awareness events found.",
             },
             {
@@ -5630,8 +5775,23 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             events_filter_doorbell=show_doorbell,
             events_filter_sensor=show_sensor,
             events_list_view=show_event_list_view,
+            events_page=1,
         )
         return {"ok": True, "message": "Event filters updated."}
+    if action_name == "awareness_set_event_page":
+        requested_page = _as_int(_value(values, body, "page", 1), 1, minimum=1)
+        requested_page_size = _as_int(
+            _value(values, body, "page_size", _EVENT_PAGE_SIZE_DEFAULT),
+            _EVENT_PAGE_SIZE_DEFAULT,
+            minimum=1,
+            maximum=_EVENT_PAGE_SIZE_MAX,
+        )
+        _runtime_set(client, events_page=requested_page)
+        return {
+            "ok": True,
+            "page": requested_page,
+            "page_size": requested_page_size,
+        }
     if action_name == "awareness_add_rule":
         kind = _text(_value(values, body, "kind")).lower()
         if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:

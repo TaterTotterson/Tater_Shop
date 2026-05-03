@@ -5,12 +5,15 @@ import re
 from datetime import datetime, date
 from typing import Any, Dict, Optional, Tuple, List
 
-import requests
 from dotenv import load_dotenv
 
 from verba_base import ToolVerba
-from helpers import redis_client, get_tater_name
-from verba_diagnostics import diagnose_hash_fields, needs_from_diagnosis
+from helpers import get_tater_name
+from integrations.weather_api import (
+    fetch_weatherapi_forecast,
+    read_weatherapi_settings,
+)
+from verba_diagnostics import needs_from_diagnosis
 from verba_result import action_failure, action_success
 
 load_dotenv()
@@ -36,7 +39,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.1.8"
+    version = "1.1.9"
     min_tater_version = "59"
     routing_keywords = [
         "weather",
@@ -51,84 +54,19 @@ class WeatherForecastPlugin(ToolVerba):
         "aqi",
         "pollen",
     ]
-    description = "Get current weather + forecast (and optional AQI/pollen/alerts) from WeatherAPI.com; always uses the default location if none is specified."
-    verba_dec = "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided)."
+    description = "Get current weather + forecast (and optional AQI/pollen/alerts) through the WeatherAPI.com integration; always uses the default location if none is specified."
+    verba_dec = "Fetch WeatherAPI.com weather through Tater integrations and answer only what the user asked (LLM-guided)."
     when_to_use = "Use for current conditions or forecasts based on the user's natural-language weather request."
     common_needs = ["weather request (e.g., current, tonight, tomorrow, multi-day)"]
     missing_info_prompts = [
         "What weather do you want (current conditions, tonight, tomorrow, or multi-day forecast)?",
     ]
     pretty_name = "Checking the Weather"
-    settings_category = "Weather Forecast"
+    settings_category = None
 
     usage = '{"function":"weather_forecast","arguments":{"request":"Weather request in natural language (what conditions or forecast details the user wants)."}}'
 
-    required_settings = {
-        "WEATHERAPI_KEY": {
-            "label": "WeatherAPI.com API Key",
-            "type": "string",
-            "default": "",
-            "description": "Your WeatherAPI.com key."
-        },
-        "DEFAULT_LOCATION": {
-            "label": "Default Location (zip/city/lat,lon)",
-            "type": "string",
-            "default": "60614",
-            "description": "Used unless the user explicitly specifies a location (city/zip/lat,lon)."
-        },
-        "DEFAULT_DAYS": {
-            "label": "Default Forecast Days",
-            "type": "number",
-            "default": 3,
-            "description": "Default number of forecast days to request (1–14)."
-        },
-        "DEFAULT_UNITS": {
-            "label": "Default Units",
-            "type": "select",
-            "options": ["us", "metric"],
-            "default": "us",
-            "description": "us = °F/mph/mi, metric = °C/kph/km."
-        },
-        "INCLUDE_AQI": {
-            "label": "Include Air Quality",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Adds air quality fields when available (aqi=yes)."
-        },
-        "INCLUDE_POLLEN": {
-            "label": "Include Pollen",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Adds pollen fields when available (pollen=yes). Some plans required."
-        },
-        "INCLUDE_ALERTS": {
-            "label": "Include Alerts",
-            "type": "select",
-            "options": ["true", "false"],
-            "default": "true",
-            "description": "Adds weather alerts when available (alerts=yes)."
-        },
-        "SHOW_HOURLY_PEEK": {
-            "label": "Show next N hours (0 disables)",
-            "type": "number",
-            "default": 6,
-            "description": "Optional: show a short next-hours preview."
-        },
-        "MAX_RESPONSE_CHARS": {
-            "label": "Max response characters",
-            "type": "number",
-            "default": 650,
-            "description": "Hard cap on returned text (helps Discord/HA voice output)."
-        },
-        "TIMEOUT_SECONDS": {
-            "label": "HTTP Timeout Seconds",
-            "type": "number",
-            "default": 12,
-            "description": "Request timeout for WeatherAPI calls."
-        },
-    }
+    required_settings = {}
 
     waiting_prompt_template = (
         "Write one short, natural status update to {mention} that you are checking weather now. "
@@ -162,14 +100,13 @@ class WeatherForecastPlugin(ToolVerba):
         return args2, req
 
     def _diagnosis(self) -> dict:
-        return diagnose_hash_fields(
-            "verba_settings:Weather Forecast",
-            fields={"weatherapi_key": "WEATHERAPI_KEY", "default_location": "DEFAULT_LOCATION"},
-            validators={
-                "weatherapi_key": lambda v: len(v.strip()) >= 10,
-                "default_location": lambda v: len(v.strip()) >= 3,
-            },
-        )
+        settings = read_weatherapi_settings()
+        api_key = str(settings.get("WEATHERAPI_KEY") or "").strip()
+        location = self._normalize_location_value(settings.get("DEFAULT_LOCATION"))
+        return {
+            "weatherapi_key": "set" if len(api_key) >= 10 else ("missing" if not api_key else "invalid"),
+            "default_location": "set" if len(location) >= 3 else ("missing" if not location else "invalid"),
+        }
 
     def _to_contract(self, message: str, request_text: str) -> dict:
         msg = (message or "").strip()
@@ -254,41 +191,9 @@ class WeatherForecastPlugin(ToolVerba):
     # -------------------- Settings helpers --------------------
 
     def _get_settings(self) -> Dict[str, Any]:
-        s = redis_client.hgetall("verba_settings:Weather Forecast") or {}
-
-        def _bool(v, default=False):
-            if isinstance(v, bool):
-                return v
-            if v is None:
-                return default
-            return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
-
-        def _int(v, default=0):
-            try:
-                return int(v)
-            except Exception:
-                return default
-
-        raw_default_location = s.get("DEFAULT_LOCATION", s.get("default_location", "60614"))
-        out = {
-            "WEATHERAPI_KEY": s.get("WEATHERAPI_KEY", ""),
-            "DEFAULT_LOCATION": self._normalize_location_value(raw_default_location),
-            "DEFAULT_DAYS": _int(s.get("DEFAULT_DAYS", 3), 3),
-            "DEFAULT_UNITS": (s.get("DEFAULT_UNITS", "us") or "us").strip().lower(),
-            "INCLUDE_AQI": _bool(s.get("INCLUDE_AQI", "true"), True),
-            "INCLUDE_POLLEN": _bool(s.get("INCLUDE_POLLEN", "true"), True),
-            "INCLUDE_ALERTS": _bool(s.get("INCLUDE_ALERTS", "true"), True),
-            "SHOW_HOURLY_PEEK": _int(s.get("SHOW_HOURLY_PEEK", 6), 6),
-            "MAX_RESPONSE_CHARS": _int(s.get("MAX_RESPONSE_CHARS", 650), 650),
-            "TIMEOUT_SECONDS": _int(s.get("TIMEOUT_SECONDS", 12), 12),
-        }
-
-        out["DEFAULT_DAYS"] = max(1, min(out["DEFAULT_DAYS"], 14))
-        out["SHOW_HOURLY_PEEK"] = max(0, min(out["SHOW_HOURLY_PEEK"], 48))
-        out["MAX_RESPONSE_CHARS"] = max(120, min(out["MAX_RESPONSE_CHARS"], 4000))
-        if out["DEFAULT_UNITS"] not in ("us", "metric"):
-            out["DEFAULT_UNITS"] = "us"
-        return out
+        settings = read_weatherapi_settings()
+        settings["DEFAULT_LOCATION"] = self._normalize_location_value(settings.get("DEFAULT_LOCATION"))
+        return settings
 
     # -------------------- Utility helpers --------------------
 
@@ -358,29 +263,6 @@ class WeatherForecastPlugin(ToolVerba):
             6: "Hazardous",
         }
         return mapping.get(idx)
-
-    # -------------------- WeatherAPI calls --------------------
-
-    def _request_weatherapi(
-        self,
-        endpoint: str,
-        params: Dict[str, Any],
-        timeout: int
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        url = f"https://api.weatherapi.com/v1/{endpoint}"
-        headers = {"User-Agent": "TaterTotterson/WeatherForecastPlugin"}
-        try:
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-            if resp.status_code != 200:
-                try:
-                    j = resp.json()
-                    msg = self._safe_get(j, "error", "message", default=resp.text)
-                except Exception:
-                    msg = resp.text
-                return None, f"WeatherAPI error (HTTP {resp.status_code}): {msg}"
-            return resp.json(), None
-        except Exception as e:
-            return None, f"Weather request failed: {e}"
 
     # -------------------- Request parsing --------------------
 
@@ -819,7 +701,7 @@ class WeatherForecastPlugin(ToolVerba):
         settings = self._get_settings()
         api_key = settings["WEATHERAPI_KEY"]
         if not api_key:
-            return "Weather is not configured. Please set your WeatherAPI.com API key in the plugin settings."
+            return "Weather is not configured. Please set your WeatherAPI.com API key in Settings > Integrations > WeatherAPI.com."
 
         args = args or {}
 
@@ -887,17 +769,16 @@ class WeatherForecastPlugin(ToolVerba):
             days = max(days, min(14, diff + 1))
         max_chars = settings["MAX_RESPONSE_CHARS"]
 
-        params = {
-            "key": api_key,
-            "q": location,
-            "days": days,
-            "aqi": "yes" if settings["INCLUDE_AQI"] else "no",
-            "alerts": "yes" if settings["INCLUDE_ALERTS"] else "no",
-            "pollen": "yes" if settings["INCLUDE_POLLEN"] else "no",
-        }
-
         timeout = settings["TIMEOUT_SECONDS"]
-        data, err = await asyncio.to_thread(self._request_weatherapi, "forecast.json", params, timeout)
+        data, err = await asyncio.to_thread(
+            fetch_weatherapi_forecast,
+            location=location,
+            days=days,
+            include_aqi=settings["INCLUDE_AQI"],
+            include_pollen=settings["INCLUDE_POLLEN"],
+            include_alerts=settings["INCLUDE_ALERTS"],
+            timeout_seconds=timeout,
+        )
         if err:
             return err
         if not data:

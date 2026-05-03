@@ -1749,9 +1749,9 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.8",
+      "version": "1.1.9",
       "min_tater_version": "59",
-      "description": "Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided).",
+      "description": "Fetch WeatherAPI.com weather through Tater integrations and answer only what the user asked (LLM-guided).",
       "portals": [
         "discord",
         "webui",
@@ -1766,10 +1766,10 @@
         "telegram"
       ],
       "notifier": false,
-      "settings_category": "Weather Forecast",
+      "settings_category": null,
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "04c6818ee8f0cc17828bb41f2d1a361f02ce0a59fc7346d82c36a24fa04d7113"
+      "sha256": "4c92f3dbeade5221ccf040ca1098934c25fba09d7d924c49e74873c92e9472a6"
     },
     {
       "id": "webdav_browser",

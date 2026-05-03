@@ -112,7 +112,7 @@
 | `unifi_protect_camera_info` | List UniFi Protect cameras. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
 | `unifi_protect_sensors` | Check UniFi Protect sensor status and single-sensor detail. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
 | `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
-| `weather_forecast` | Fetch WeatherAPI.com weather and answer only what the user asked (LLM-guided). | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, xbmc, telegram |
+| `weather_forecast` | Fetch WeatherAPI.com weather through Tater integrations and answer only what the user asked (LLM-guided). | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, xbmc, telegram |
 | `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |
 | `youtube_summary` | Summarize a YouTube video using its transcript. | discord, webui, macos, irc, meshtastic, matrix, telegram |
 

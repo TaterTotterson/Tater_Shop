@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -25,41 +25,11 @@ logger.setLevel(logging.INFO)
 CORE_SETTINGS = {
     "category": "Environment Core Settings",
     "required": {
-        "ECOWITT_ENABLED": {
-            "label": "Enable Ecowitt Receiver",
-            "type": "checkbox",
-            "default": "true",
-            "description": "Accept Ecowitt custom-server uploads on the Environment Core webhook.",
-        },
         "ECOWITT_PASSKEY": {
             "label": "Ecowitt PASSKEY",
             "type": "password",
             "default": "",
             "description": "Optional. If set, inbound Ecowitt uploads must include this PASSKEY.",
-        },
-        "ENVIRONMENT_UNIFI_PROTECT_ENABLED": {
-            "label": "Use UniFi Protect Sensors",
-            "type": "checkbox",
-            "default": "false",
-            "description": "When UniFi Protect is configured, poll Protect sensors for temperature, humidity, and battery readings.",
-        },
-        "ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED": {
-            "label": "Use Ecobee HomeKit Thermostats",
-            "type": "checkbox",
-            "default": "false",
-            "description": "When Ecobee HomeKit is paired, poll thermostats for current temperature and humidity readings.",
-        },
-        "ENVIRONMENT_HUE_ENABLED": {
-            "label": "Use Philips Hue Sensors",
-            "type": "checkbox",
-            "default": "false",
-            "description": "When Philips Hue is linked, poll selected Hue environment sensors.",
-        },
-        "ENVIRONMENT_HOMEASSISTANT_ENABLED": {
-            "label": "Use Home Assistant Sensors",
-            "type": "checkbox",
-            "default": "false",
-            "description": "When Home Assistant is configured, poll selected sensor entities.",
         },
         "ENVIRONMENT_ECOWITT_OUTDOOR_AREA": {
             "label": "Ecowitt Outdoor Area",
@@ -77,7 +47,13 @@ CORE_SETTINGS = {
             "label": "Integration Poll Seconds",
             "type": "number",
             "default": "300",
-            "description": "How often the Environment Core polls enabled integrations.",
+            "description": "How often the Environment Core polls selected integration sensors.",
+        },
+        "ENVIRONMENT_ENABLE_WEATHERAPI": {
+            "label": "Enable WeatherAPI Forecast",
+            "type": "checkbox",
+            "default": False,
+            "description": "When enabled, Environment Core polls the WeatherAPI.com integration for current conditions and forecast data.",
         },
         "ENVIRONMENT_HISTORY_LIMIT": {
             "label": "History Samples",
@@ -107,6 +83,7 @@ LATEST_UNIFI_PROTECT_KEY = "environment:latest:unifi_protect"
 LATEST_ECOBEE_HOMEKIT_KEY = "environment:latest:ecobee_homekit"
 LATEST_HUE_KEY = "environment:latest:hue"
 LATEST_HOMEASSISTANT_KEY = "environment:latest:homeassistant"
+LATEST_WEATHER_API_KEY = "environment:latest:weather_api"
 SOURCES_KEY = "environment:sources"
 HISTORY_KEY = "environment:history"
 HEARTBEAT_KEY = "environment:heartbeat"
@@ -123,6 +100,7 @@ LATEST_PROVIDER_KEYS = {
     "ecobee_homekit": LATEST_ECOBEE_HOMEKIT_KEY,
     "hue": LATEST_HUE_KEY,
     "homeassistant": LATEST_HOMEASSISTANT_KEY,
+    "weather_api": LATEST_WEATHER_API_KEY,
 }
 
 PROVIDER_LABELS = {
@@ -131,6 +109,7 @@ PROVIDER_LABELS = {
     "ecobee_homekit": "Ecobee HomeKit",
     "hue": "Philips Hue",
     "homeassistant": "Home Assistant",
+    "weather_api": "WeatherAPI.com",
     "environment": "Environment",
 }
 
@@ -175,6 +154,8 @@ CATEGORY_LABELS = {
     "rain": "Rain",
     "solar": "Solar & UV",
     "air": "Air Quality",
+    "condition": "Conditions",
+    "forecast": "Forecast",
     "lightning": "Lightning",
     "soil": "Soil",
     "leak": "Leak Sensors",
@@ -229,12 +210,7 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
     except Exception:
         raw = {}
     return {
-        "ecowitt_enabled": _as_bool(raw.get("ECOWITT_ENABLED"), True),
         "ecowitt_passkey": _text(raw.get("ECOWITT_PASSKEY")),
-        "unifi_protect_enabled": _as_bool(raw.get("ENVIRONMENT_UNIFI_PROTECT_ENABLED"), False),
-        "ecobee_homekit_enabled": _as_bool(raw.get("ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED"), False),
-        "hue_enabled": _as_bool(raw.get("ENVIRONMENT_HUE_ENABLED"), False),
-        "homeassistant_enabled": _as_bool(raw.get("ENVIRONMENT_HOMEASSISTANT_ENABLED"), False),
         "ecowitt_outdoor_area": _text(raw.get("ENVIRONMENT_ECOWITT_OUTDOOR_AREA")) or "Outside",
         "ecowitt_indoor_area": _text(raw.get("ENVIRONMENT_ECOWITT_INDOOR_AREA")) or "Inside",
         "integration_poll_seconds": _as_int(
@@ -243,6 +219,7 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
             minimum=30,
             maximum=86400,
         ),
+        "weather_api_enabled": _as_bool(raw.get("ENVIRONMENT_ENABLE_WEATHERAPI"), False),
         "history_limit": _as_int(raw.get("ENVIRONMENT_HISTORY_LIMIT"), DEFAULT_HISTORY_LIMIT, minimum=1, maximum=10000),
         "stale_after_minutes": _as_int(
             raw.get("ENVIRONMENT_STALE_AFTER_MINUTES"),
@@ -255,41 +232,6 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
 
 def _settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
-        {
-            "key": "ECOWITT_ENABLED",
-            "label": "Ecowitt Receiver",
-            "type": "checkbox",
-            "value": bool(settings.get("ecowitt_enabled", True)),
-            "description": "Accept custom-server uploads from Ecowitt devices.",
-        },
-        {
-            "key": "ENVIRONMENT_UNIFI_PROTECT_ENABLED",
-            "label": "UniFi Protect Sensors",
-            "type": "checkbox",
-            "value": bool(settings.get("unifi_protect_enabled", False)),
-            "description": "Use UniFi Protect sensors when the integration is configured.",
-        },
-        {
-            "key": "ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED",
-            "label": "Ecobee HomeKit Thermostats",
-            "type": "checkbox",
-            "value": bool(settings.get("ecobee_homekit_enabled", False)),
-            "description": "Use paired Ecobee HomeKit thermostat temperature and humidity.",
-        },
-        {
-            "key": "ENVIRONMENT_HUE_ENABLED",
-            "label": "Philips Hue Sensors",
-            "type": "checkbox",
-            "value": bool(settings.get("hue_enabled", False)),
-            "description": "Use selected Philips Hue environment sensors when Hue is linked.",
-        },
-        {
-            "key": "ENVIRONMENT_HOMEASSISTANT_ENABLED",
-            "label": "Home Assistant Sensors",
-            "type": "checkbox",
-            "value": bool(settings.get("homeassistant_enabled", False)),
-            "description": "Use selected Home Assistant environment sensor entities.",
-        },
         {
             "key": "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
             "label": "Ecowitt Outdoor Area",
@@ -309,7 +251,14 @@ def _settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
             "value": int(settings.get("integration_poll_seconds") or DEFAULT_INTEGRATION_POLL_SECONDS),
             "min": 30,
             "max": 86400,
-            "description": "How often enabled integrations are polled by the running core.",
+            "description": "How often selected integration sensors are polled by the running core.",
+        },
+        {
+            "key": "ENVIRONMENT_ENABLE_WEATHERAPI",
+            "label": "WeatherAPI Forecast",
+            "type": "checkbox",
+            "value": bool(settings.get("weather_api_enabled")),
+            "description": "Poll WeatherAPI.com through Settings > Integrations and show forecast data in Environment Core.",
         },
         {
             "key": "ENVIRONMENT_STALE_AFTER_MINUTES",
@@ -1072,6 +1021,18 @@ def _homeassistant_configured(client: Any = None) -> Tuple[bool, str]:
     return configured, "Configured" if configured else "Set up Home Assistant in Settings > Integrations."
 
 
+def _weather_api_configured(client: Any = None) -> Tuple[bool, str]:
+    try:
+        from integrations.weather_api import weatherapi_configured
+    except Exception as exc:
+        return False, f"WeatherAPI.com integration unavailable: {exc}"
+    try:
+        configured = bool(weatherapi_configured(client))
+    except Exception as exc:
+        return False, str(exc)
+    return configured, "Configured" if configured else "Set up WeatherAPI.com in Settings > Integrations."
+
+
 def _hue_api_root(bridge_root: Any) -> str:
     from urllib.parse import urlparse, urlunparse
 
@@ -1681,19 +1642,316 @@ def _poll_homeassistant(client: Any = None) -> Dict[str, Any]:
     }
 
 
-def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
+def _weatherapi_value(payload: Dict[str, Any], key_us: str, key_metric: str, units: str) -> Tuple[Any, str]:
+    if units == "metric":
+        return payload.get(key_metric), key_metric
+    return payload.get(key_us), key_us
+
+
+def _normalize_weatherapi_forecast(data: Dict[str, Any], settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+    location = data.get("location") if isinstance(data.get("location"), dict) else {}
+    units = _text(settings.get("DEFAULT_UNITS")).lower()
+    if units not in {"us", "metric"}:
+        units = "us"
+    source_name = ", ".join(
+        part
+        for part in (
+            _text(location.get("name")),
+            _text(location.get("region")),
+            _text(location.get("country")),
+        )
+        if part
+    ) or _text(settings.get("DEFAULT_LOCATION")) or "WeatherAPI.com"
+    source_id = f"weather_api:{_clean_key(source_name)}"
+    readings: List[Dict[str, Any]] = []
+
+    condition = current.get("condition") if isinstance(current.get("condition"), dict) else {}
+    condition_text = _text(condition.get("text"))
+    if condition_text:
+        readings.append(
+            _reading_row(
+                key="weather_api_condition",
+                label="Current Condition",
+                category="condition",
+                unit="",
+                value=condition_text,
+                display=condition_text,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+
+    temp_value, temp_key = _weatherapi_value(current, "temp_f", "temp_c", units)
+    temp_unit = "C" if temp_key.endswith("_c") else "F"
+    if _as_float(temp_value) is not None:
+        readings.append(
+            _reading_row(
+                key="tempc" if temp_unit == "C" else "tempf",
+                label="WeatherAPI Temperature",
+                category="temperature",
+                unit=temp_unit,
+                value=temp_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+
+    feels_value, feels_key = _weatherapi_value(current, "feelslike_f", "feelslike_c", units)
+    feels_unit = "C" if feels_key.endswith("_c") else "F"
+    if _as_float(feels_value) is not None:
+        readings.append(
+            _reading_row(
+                key="weather_api_feelslike",
+                label="Feels Like",
+                category="temperature",
+                unit=feels_unit,
+                value=feels_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+
+    for raw_key, label, category, unit in (
+        ("humidity", "Humidity", "humidity", "%"),
+        ("cloud", "Cloud Cover", "condition", "%"),
+        ("uv", "UV Index", "solar", ""),
+    ):
+        value = current.get(raw_key)
+        if value is not None:
+            readings.append(
+                _reading_row(
+                    key=raw_key if raw_key in {"humidity", "uv"} else f"weather_api_{raw_key}",
+                    label=label,
+                    category=category,
+                    unit=unit,
+                    value=value,
+                    provider="weather_api",
+                    source_id=source_id,
+                    source_name=source_name,
+                    area="Forecast",
+                )
+            )
+
+    wind_value, wind_key = _weatherapi_value(current, "wind_mph", "wind_kph", units)
+    if _as_float(wind_value) is not None:
+        readings.append(
+            _reading_row(
+                key="windspeedmph" if wind_key.endswith("_mph") else "weather_api_wind_kph",
+                label="Wind Speed",
+                category="wind",
+                unit="mph" if wind_key.endswith("_mph") else "kph",
+                value=wind_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    gust_value, gust_key = _weatherapi_value(current, "gust_mph", "gust_kph", units)
+    if _as_float(gust_value) is not None:
+        readings.append(
+            _reading_row(
+                key="windgustmph" if gust_key.endswith("_mph") else "weather_api_gust_kph",
+                label="Wind Gust",
+                category="wind",
+                unit="mph" if gust_key.endswith("_mph") else "kph",
+                value=gust_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    wind_dir = _text(current.get("wind_dir"))
+    if wind_dir:
+        readings.append(
+            _reading_row(
+                key="weather_api_wind_dir",
+                label="Wind Direction",
+                category="wind",
+                unit="",
+                value=wind_dir,
+                display=wind_dir,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+
+    pressure_value, pressure_key = _weatherapi_value(current, "pressure_in", "pressure_mb", units)
+    if _as_float(pressure_value) is not None:
+        readings.append(
+            _reading_row(
+                key="baromrelin" if pressure_key.endswith("_in") else "weather_api_pressure_mb",
+                label="Pressure",
+                category="pressure",
+                unit="inHg" if pressure_key.endswith("_in") else "mb",
+                value=pressure_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    precip_value, precip_key = _weatherapi_value(current, "precip_in", "precip_mm", units)
+    if _as_float(precip_value) is not None:
+        readings.append(
+            _reading_row(
+                key="rainratein" if precip_key.endswith("_in") else "weather_api_precip_mm",
+                label="Precipitation",
+                category="rain",
+                unit="in" if precip_key.endswith("_in") else "mm",
+                value=precip_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    visibility_value, visibility_key = _weatherapi_value(current, "vis_miles", "vis_km", units)
+    if _as_float(visibility_value) is not None:
+        readings.append(
+            _reading_row(
+                key="weather_api_visibility",
+                label="Visibility",
+                category="condition",
+                unit="mi" if visibility_key.endswith("_miles") else "km",
+                value=visibility_value,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+
+    air_quality = current.get("air_quality") if isinstance(current.get("air_quality"), dict) else {}
+    epa = air_quality.get("us-epa-index")
+    if epa is not None:
+        readings.append(
+            _reading_row(
+                key="weather_api_aqi_us_epa",
+                label="US EPA AQI",
+                category="air",
+                unit="",
+                value=epa,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    pm25 = air_quality.get("pm2_5")
+    if pm25 is not None:
+        readings.append(
+            _reading_row(
+                key="weather_api_pm25",
+                label="PM2.5",
+                category="air",
+                unit="ug/m3",
+                value=pm25,
+                provider="weather_api",
+                source_id=source_id,
+                source_name=source_name,
+                area="Forecast",
+            )
+        )
+    return readings
+
+
+def _poll_weather_api(client: Any = None) -> Dict[str, Any]:
     settings = _load_settings(client)
+    if not _as_bool(settings.get("weather_api_enabled"), False):
+        return {"ok": True, "provider": "weather_api", "reading_count": 0, "message": "WeatherAPI.com forecast is disabled."}
+    configured, message = _weather_api_configured(client)
+    if not configured:
+        return {"ok": False, "provider": "weather_api", "message": message}
+    try:
+        from integrations.weather_api import fetch_weatherapi_forecast, read_weatherapi_settings
+    except Exception as exc:
+        return {"ok": False, "provider": "weather_api", "message": f"WeatherAPI.com integration unavailable: {exc}"}
+    try:
+        weather_settings = read_weatherapi_settings(client)
+        data, error = fetch_weatherapi_forecast(
+            location=weather_settings.get("DEFAULT_LOCATION"),
+            days=weather_settings.get("DEFAULT_DAYS"),
+            include_aqi=weather_settings.get("INCLUDE_AQI"),
+            include_pollen=weather_settings.get("INCLUDE_POLLEN"),
+            include_alerts=weather_settings.get("INCLUDE_ALERTS"),
+            timeout_seconds=weather_settings.get("TIMEOUT_SECONDS"),
+            client=client,
+        )
+    except Exception as exc:
+        logger.warning("[Environment] WeatherAPI.com poll failed: %s", exc)
+        return {"ok": False, "provider": "weather_api", "message": str(exc)}
+    if error:
+        logger.warning("[Environment] WeatherAPI.com poll failed: %s", error)
+        return {"ok": False, "provider": "weather_api", "message": error}
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "provider": "weather_api", "message": "WeatherAPI.com returned no forecast data."}
+    readings = _normalize_weatherapi_forecast(data, weather_settings)
+    location = data.get("location") if isinstance(data.get("location"), dict) else {}
+    source_name = ", ".join(
+        part
+        for part in (
+            _text(location.get("name")),
+            _text(location.get("region")),
+            _text(location.get("country")),
+        )
+        if part
+    ) or _text(weather_settings.get("DEFAULT_LOCATION")) or "WeatherAPI.com"
+    snapshot = _snapshot_from_readings(
+        provider="weather_api",
+        source_id=f"weather_api:{_clean_key(source_name)}",
+        readings=readings,
+        raw=data,
+        model=source_name,
+        stationtype="WeatherAPI.com Forecast",
+    )
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+    last_updated_epoch = _as_float(current.get("last_updated_epoch"))
+    if last_updated_epoch:
+        snapshot["sample_time"] = last_updated_epoch
+        snapshot["sample_time_text"] = _format_ts(last_updated_epoch)
+    _store_snapshot(snapshot, client, provider_key="weather_api")
+    logger.info("[Environment] WeatherAPI.com poll stored %d readings.", len(readings))
+    return {
+        "ok": True,
+        "provider": "weather_api",
+        "reading_count": len(readings),
+        "source_count": 1,
+        "message": f"Stored WeatherAPI.com forecast for {source_name}.",
+    }
+
+
+def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
-    if settings.get("unifi_protect_enabled"):
-        results.append(_poll_unifi_protect(client))
-    if settings.get("ecobee_homekit_enabled"):
-        results.append(_poll_ecobee_homekit(client))
-    if settings.get("hue_enabled"):
-        results.append(_poll_hue(client))
-    if settings.get("homeassistant_enabled"):
-        results.append(_poll_homeassistant(client))
+    settings = _load_settings(client)
+    selected_providers = {
+        _clean_key(row.get("provider"))
+        for row in _load_selected_sensors(client)
+        if _as_bool(row.get("enabled"), True)
+    }
+    pollers = {
+        "unifi_protect": _poll_unifi_protect,
+        "ecobee_homekit": _poll_ecobee_homekit,
+        "hue": _poll_hue,
+        "homeassistant": _poll_homeassistant,
+    }
+    for provider, poller in pollers.items():
+        if provider in selected_providers:
+            results.append(poller(client))
+    if _as_bool(settings.get("weather_api_enabled"), False):
+        results.append(_poll_weather_api(client))
     if not results:
-        return {"ok": True, "message": "No integration sources are enabled.", "results": []}
+        return {"ok": True, "message": "No integration sensors or forecast providers are enabled.", "results": []}
     stored = sum(int(result.get("reading_count") or 0) for result in results if result.get("ok"))
     failures = [result for result in results if not result.get("ok")]
     pieces = [_text(result.get("message")) for result in results if _text(result.get("message"))]
@@ -1865,14 +2123,12 @@ def _category_display(snapshot: Dict[str, Any], category: str, default: str = "-
     return default
 
 
-def _status_word(*, enabled: bool, configured: bool) -> str:
-    if not enabled:
-        return "Off"
+def _status_word(*, configured: bool) -> str:
     return "Ready" if configured else "Needs setup"
 
 
 def _provider_status_rows(
-    settings: Dict[str, Any],
+    _settings: Dict[str, Any],
     provider_snapshots: Dict[str, Dict[str, Any]],
     client: Any = None,
 ) -> List[Dict[str, str]]:
@@ -1880,6 +2136,8 @@ def _provider_status_rows(
     ecobee_configured, ecobee_message = _ecobee_homekit_configured()
     hue_configured, hue_message = _hue_configured(client)
     ha_configured, ha_message = _homeassistant_configured(client)
+    weather_configured, weather_message = _weather_api_configured(client)
+    weather_enabled = _as_bool(_settings.get("weather_api_enabled"), False)
     selected = _load_selected_sensors(client)
     selected_counts: Dict[str, int] = {}
     for row in selected:
@@ -1890,33 +2148,34 @@ def _provider_status_rows(
     specs = [
         {
             "provider": "ecowitt",
-            "enabled": bool(settings.get("ecowitt_enabled", True)),
             "configured": True,
             "setup": "Webhook receiver",
         },
         {
             "provider": "unifi_protect",
-            "enabled": bool(settings.get("unifi_protect_enabled", False)),
             "configured": unifi_configured,
             "setup": "Configured" if unifi_configured else unifi_message,
         },
         {
             "provider": "ecobee_homekit",
-            "enabled": bool(settings.get("ecobee_homekit_enabled", False)),
             "configured": ecobee_configured,
             "setup": "Configured" if ecobee_configured else ecobee_message,
         },
         {
             "provider": "hue",
-            "enabled": bool(settings.get("hue_enabled", False)),
             "configured": hue_configured,
             "setup": "Configured" if hue_configured else hue_message,
         },
         {
             "provider": "homeassistant",
-            "enabled": bool(settings.get("homeassistant_enabled", False)),
             "configured": ha_configured,
             "setup": "Configured" if ha_configured else ha_message,
+        },
+        {
+            "provider": "weather_api",
+            "configured": weather_configured,
+            "setup": "Enabled" if weather_enabled and weather_configured else "Disabled" if not weather_enabled else weather_message,
+            "selected": "Enabled" if weather_enabled else "Disabled",
         },
     ]
     rows: List[Dict[str, str]] = []
@@ -1927,11 +2186,12 @@ def _provider_status_rows(
         rows.append(
             {
                 "source": _provider_label(provider),
-                "state": _status_word(enabled=bool(spec.get("enabled")), configured=bool(spec.get("configured"))),
+                "state": _status_word(configured=bool(spec.get("configured"))),
                 "setup": _text(spec.get("setup")) or "-",
                 "last_sample": _age_label(snapshot.get("received_at")) if snapshot else "never",
                 "readings": str(reading_count) if snapshot else "-",
-                "selected": str(selected_counts.get(provider, 0)) if provider != "ecowitt" else "Webhook",
+                "selected": _text(spec.get("selected"))
+                or (str(selected_counts.get(provider, 0)) if provider != "ecowitt" else "Webhook"),
             }
         )
     return rows
@@ -1969,6 +2229,134 @@ def _history_summary(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                 "meta": item.get("model") or item.get("stationtype") or _provider_label(item.get("provider") or "ecowitt"),
             }
         )
+    return rows
+
+
+def _weatherapi_units(client: Any = None) -> str:
+    try:
+        from integrations.weather_api import read_weatherapi_settings
+
+        settings = read_weatherapi_settings(client)
+    except Exception:
+        settings = {}
+    units = _text(settings.get("DEFAULT_UNITS")).lower()
+    return units if units in {"us", "metric"} else "us"
+
+
+def _weatherapi_temp(day: Dict[str, Any], key_us: str, key_metric: str, units: str) -> str:
+    value = day.get(key_metric if units == "metric" else key_us)
+    unit = "C" if units == "metric" else "F"
+    return _value_label(value, unit) if value is not None else "-"
+
+
+def _weatherapi_speed(day: Dict[str, Any], key_us: str, key_metric: str, units: str) -> str:
+    value = day.get(key_metric if units == "metric" else key_us)
+    unit = "kph" if units == "metric" else "mph"
+    return _value_label(value, unit) if value is not None else "-"
+
+
+def _weatherapi_precip(day: Dict[str, Any], key_us: str, key_metric: str, units: str) -> str:
+    value = day.get(key_metric if units == "metric" else key_us)
+    unit = "mm" if units == "metric" else "in"
+    return _value_label(value, unit) if value is not None else "-"
+
+
+def _weatherapi_daily_rows(snapshot: Dict[str, Any], *, units: str) -> List[Dict[str, str]]:
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    forecast = raw.get("forecast") if isinstance(raw.get("forecast"), dict) else {}
+    out: List[Dict[str, str]] = []
+    for item in forecast.get("forecastday") or []:
+        if not isinstance(item, dict):
+            continue
+        day = item.get("day") if isinstance(item.get("day"), dict) else {}
+        astro = item.get("astro") if isinstance(item.get("astro"), dict) else {}
+        condition = day.get("condition") if isinstance(day.get("condition"), dict) else {}
+        out.append(
+            {
+                "date": _text(item.get("date")) or "-",
+                "condition": _text(condition.get("text")) or "-",
+                "high": _weatherapi_temp(day, "maxtemp_f", "maxtemp_c", units),
+                "low": _weatherapi_temp(day, "mintemp_f", "mintemp_c", units),
+                "rain": f"{_text(day.get('daily_chance_of_rain')) or '0'}%",
+                "snow": f"{_text(day.get('daily_chance_of_snow')) or '0'}%",
+                "precip": _weatherapi_precip(day, "totalprecip_in", "totalprecip_mm", units),
+                "wind": _weatherapi_speed(day, "maxwind_mph", "maxwind_kph", units),
+                "uv": _text(day.get("uv")) or "-",
+                "sunrise": _text(astro.get("sunrise")) or "-",
+                "sunset": _text(astro.get("sunset")) or "-",
+            }
+        )
+    return out
+
+
+def _weatherapi_hourly_rows(snapshot: Dict[str, Any], *, units: str, limit: int = 24) -> List[Dict[str, str]]:
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    current = raw.get("current") if isinstance(raw.get("current"), dict) else {}
+    forecast = raw.get("forecast") if isinstance(raw.get("forecast"), dict) else {}
+    now_epoch = _as_float(current.get("last_updated_epoch")) or (time.time() - 3600)
+    out: List[Dict[str, str]] = []
+    for forecast_day in forecast.get("forecastday") or []:
+        if not isinstance(forecast_day, dict):
+            continue
+        for hour in forecast_day.get("hour") or []:
+            if not isinstance(hour, dict):
+                continue
+            epoch = _as_float(hour.get("time_epoch"))
+            if epoch is not None and epoch < now_epoch:
+                continue
+            condition = hour.get("condition") if isinstance(hour.get("condition"), dict) else {}
+            temp_value = hour.get("temp_c" if units == "metric" else "temp_f")
+            wind_value = hour.get("wind_kph" if units == "metric" else "wind_mph")
+            out.append(
+                {
+                    "time": datetime.fromtimestamp(epoch).strftime("%a %I %p").replace(" 0", " ") if epoch else _text(hour.get("time")) or "-",
+                    "temp": _value_label(temp_value, "C" if units == "metric" else "F") if temp_value is not None else "-",
+                    "condition": _text(condition.get("text")) or "-",
+                    "rain": f"{_text(hour.get('chance_of_rain')) or '0'}%",
+                    "snow": f"{_text(hour.get('chance_of_snow')) or '0'}%",
+                    "wind": _value_label(wind_value, "kph" if units == "metric" else "mph") if wind_value is not None else "-",
+                    "humidity": f"{_text(hour.get('humidity')) or '-'}%",
+                    "uv": _text(hour.get("uv")) or "-",
+                }
+            )
+            if len(out) >= max(1, int(limit)):
+                return out
+    return out
+
+
+def _weatherapi_alert_rows(snapshot: Dict[str, Any]) -> List[Dict[str, str]]:
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    alerts = raw.get("alerts") if isinstance(raw.get("alerts"), dict) else {}
+    out: List[Dict[str, str]] = []
+    for item in alerts.get("alert") or []:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "event": _text(item.get("event") or item.get("headline")) or "Alert",
+                "severity": _text(item.get("severity")) or "-",
+                "areas": _text(item.get("areas")) or "-",
+                "effective": _text(item.get("effective")) or "-",
+                "expires": _text(item.get("expires")) or "-",
+            }
+        )
+    return out
+
+
+def _weatherapi_air_rows(snapshot: Dict[str, Any]) -> List[Dict[str, str]]:
+    raw = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
+    current = raw.get("current") if isinstance(raw.get("current"), dict) else {}
+    air = current.get("air_quality") if isinstance(current.get("air_quality"), dict) else {}
+    pollen = current.get("pollen") if isinstance(current.get("pollen"), dict) else {}
+    rows: List[Dict[str, str]] = []
+    for key, value in air.items():
+        if value in (None, ""):
+            continue
+        rows.append({"metric": _humanize_key(_clean_key(key)), "value": _value_label(value), "source": "Air Quality"})
+    for key, value in pollen.items():
+        if value in (None, ""):
+            continue
+        rows.append({"metric": _humanize_key(_clean_key(key)), "value": _value_label(value), "source": "Pollen"})
     return rows
 
 
@@ -2166,6 +2554,9 @@ def _environment_manager_ui(
     candidate_options = _candidate_options(candidate_items, selected_sensors)
     candidate_updated_at = candidate_cache.get("updated_at")
     provider_summaries = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
+    weather_snapshot = provider_snapshots.get("weather_api") or {}
+    weather_units = _weatherapi_units(client)
+    weather_enabled = _as_bool(settings.get("weather_api_enabled"), False)
     source_count = len(provider_summaries) if provider_summaries else (1 if snapshot else 0)
     grouped = _readings_by_category(snapshot)
     has_snapshot = bool(snapshot)
@@ -2196,12 +2587,24 @@ def _environment_manager_ui(
         if not isinstance(row, dict):
             continue
         key = _clean_key(row.get("key"))
-        if key in seen_current_keys or _clean_key(row.get("category")) not in {"temperature", "humidity"}:
+        if key in seen_current_keys:
             continue
         current_condition_rows.append(row)
         seen_current_keys.add(key)
-        if len(current_condition_rows) >= 18:
-            break
+
+    overview_summary_rows = [
+        {"label": "Outdoor", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
+        {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
+        {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
+        {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+    ]
+    if weather_snapshot:
+        overview_summary_rows.extend(
+            [
+                {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
+                {"label": "Feels Like", "value": _reading_display(weather_snapshot, "weather_api_feelslike")},
+            ]
+        )
 
     item_forms: List[Dict[str, Any]] = [
         {
@@ -2218,21 +2621,131 @@ def _environment_manager_ui(
                 {"label": "Live" if has_snapshot and not is_stale else "Stale" if has_snapshot else "Waiting", "tone": "good" if has_snapshot and not is_stale else "warning"},
                 {"label": snapshot.get("model") or snapshot.get("stationtype") or "Environment", "tone": "muted"},
             ],
-            "summary_rows": [
-                {"label": "Outdoor", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
-                {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
-                {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
-                {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
-            ],
-            "sensor_title": "Current Conditions",
+            "summary_rows": overview_summary_rows,
+            "sensor_title": "Current Readings",
             "sensor_rows": _sensor_rows(current_condition_rows, include_meta=False),
+        },
+        {
+            "id": "forecast:weather_api",
+            "group": "forecast",
+            "title": "WeatherAPI.com Forecast",
+            "subtitle": (
+                f"Last forecast {_age_label(weather_snapshot.get('received_at'))}"
+                if weather_snapshot
+                else "Enabled, waiting for forecast" if weather_enabled else "Disabled"
+            ),
+            "detail": (
+                _reading_display(weather_snapshot, "weather_api_condition")
+                if weather_snapshot
+                else "Enable WeatherAPI Forecast in Environment Core settings and configure WeatherAPI.com in Settings > Integrations."
+            ),
+            "hero_badges": [
+                {"label": "Enabled" if weather_enabled else "Disabled", "tone": "good" if weather_enabled else "muted"},
+                {
+                    "label": _text(weather_snapshot.get("model")) or "WeatherAPI.com",
+                    "tone": "muted",
+                },
+            ],
+            "summary_rows": [
+                {"label": "Current", "value": _reading_display(weather_snapshot, "tempf", _reading_display(weather_snapshot, "tempc"))},
+                {"label": "Feels Like", "value": _reading_display(weather_snapshot, "weather_api_feelslike")},
+                {"label": "Humidity", "value": _reading_display(weather_snapshot, "humidity")},
+                {"label": "Wind", "value": _reading_display(weather_snapshot, "windspeedmph", _reading_display(weather_snapshot, "weather_api_wind_kph"))},
+                {"label": "UV", "value": _reading_display(weather_snapshot, "uv")},
+                {"label": "AQI", "value": _reading_display(weather_snapshot, "weather_api_aqi_us_epa")},
+            ],
+            "sections": [
+                {
+                    "label": "Daily Forecast",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "weatherapi_daily_forecast",
+                            "label": "Daily Forecast",
+                            "type": "table",
+                            "columns": [
+                                {"key": "date", "label": "Date"},
+                                {"key": "condition", "label": "Condition"},
+                                {"key": "high", "label": "High"},
+                                {"key": "low", "label": "Low"},
+                                {"key": "rain", "label": "Rain"},
+                                {"key": "snow", "label": "Snow"},
+                                {"key": "precip", "label": "Precip"},
+                                {"key": "wind", "label": "Wind"},
+                                {"key": "uv", "label": "UV"},
+                                {"key": "sunrise", "label": "Sunrise"},
+                                {"key": "sunset", "label": "Sunset"},
+                            ],
+                            "rows": _weatherapi_daily_rows(weather_snapshot, units=weather_units),
+                            "read_only": True,
+                        }
+                    ],
+                },
+                {
+                    "label": "Next Hours",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "weatherapi_hourly_forecast",
+                            "label": "Hourly Forecast",
+                            "type": "table",
+                            "columns": [
+                                {"key": "time", "label": "Time"},
+                                {"key": "temp", "label": "Temp"},
+                                {"key": "condition", "label": "Condition"},
+                                {"key": "rain", "label": "Rain"},
+                                {"key": "snow", "label": "Snow"},
+                                {"key": "wind", "label": "Wind"},
+                                {"key": "humidity", "label": "Humidity"},
+                                {"key": "uv", "label": "UV"},
+                            ],
+                            "rows": _weatherapi_hourly_rows(weather_snapshot, units=weather_units),
+                            "read_only": True,
+                        }
+                    ],
+                },
+                {
+                    "label": "Air, Pollen, Alerts",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "weatherapi_air_quality",
+                            "label": "Air and Pollen",
+                            "type": "table",
+                            "columns": [
+                                {"key": "source", "label": "Source"},
+                                {"key": "metric", "label": "Metric"},
+                                {"key": "value", "label": "Value"},
+                            ],
+                            "rows": _weatherapi_air_rows(weather_snapshot),
+                            "read_only": True,
+                        },
+                        {
+                            "key": "weatherapi_alerts",
+                            "label": "Alerts",
+                            "type": "table",
+                            "columns": [
+                                {"key": "event", "label": "Event"},
+                                {"key": "severity", "label": "Severity"},
+                                {"key": "areas", "label": "Areas"},
+                                {"key": "effective", "label": "Effective"},
+                                {"key": "expires", "label": "Expires"},
+                            ],
+                            "rows": _weatherapi_alert_rows(weather_snapshot),
+                            "read_only": True,
+                        },
+                    ],
+                },
+            ],
+            "run_action": "environment_poll_integrations",
+            "run_label": "Poll Forecast",
         },
         {
             "id": "settings:sources",
             "group": "settings",
             "title": "Environment Sources",
             "subtitle": "Core settings",
-            "detail": "Enable configured integrations here to let them contribute temperature and humidity readings.",
+            "detail": "Configured integrations contribute readings after their sensors are added to Environment Core.",
             "sections": [
                 {
                     "label": "Status",
@@ -2304,7 +2817,7 @@ def _environment_manager_ui(
         },
         {
             "id": "setup",
-            "group": "overview",
+            "group": "source",
             "title": "Ecowitt Upload Target",
             "subtitle": "Custom Server receiver",
             "detail": "Configure WS View Plus or the Ecowitt web UI to use Ecowitt protocol and this Tater path.",
@@ -2403,22 +2916,6 @@ def _environment_manager_ui(
         ]
     )
 
-    for category in ("temperature", "humidity", "pressure", "wind", "rain", "solar", "air", "lightning", "soil", "leak", "other"):
-        rows = grouped.get(category) or []
-        if not rows:
-            continue
-        item_forms.append(
-            {
-                "id": f"category:{category}",
-                "group": "sensor",
-                "title": CATEGORY_LABELS.get(category, category.title()),
-                "subtitle": f"{len(rows)} reading{'s' if len(rows) != 1 else ''}",
-                "detail": "Normalized from the latest enabled environment sources.",
-                "sensor_title": CATEGORY_LABELS.get(category, category.title()),
-                "sensor_rows": _sensor_rows(rows, include_meta=False),
-            }
-        )
-
     battery_rows = grouped.get("battery") or []
     item_forms.append(
         {
@@ -2478,13 +2975,13 @@ def _environment_manager_ui(
         "empty_message": "No environment telemetry has been received yet.",
         "manager_tabs": [
             {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
-            {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
-            {"key": "sources", "label": "Sources", "source": "items", "item_group": "source", "selector": True},
-            {"key": "add_source", "label": "Add Sensor", "source": "add_form"},
+            {"key": "forecast", "label": "Forecast", "source": "items", "item_group": "forecast"},
             {"key": "trends", "label": "Graphs", "source": "items", "item_group": "trend"},
-            {"key": "readings", "label": "Measurements", "source": "items", "item_group": "sensor", "selector": True},
             {"key": "batteries", "label": "Batteries", "source": "items", "item_group": "battery"},
             {"key": "raw", "label": "Raw", "source": "items", "item_group": "raw", "selector": True},
+            {"key": "add_source", "label": "Add Sensor", "source": "add_form"},
+            {"key": "sources", "label": "Sources", "source": "items", "item_group": "source", "selector": True},
+            {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
         ],
         "default_tab": "overview",
         "add_form": {
@@ -2511,6 +3008,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
     provider_snapshots = _load_provider_snapshots(client)
     snapshot = _combined_snapshot(provider_snapshots)
+    weather_snapshot = provider_snapshots.get("weather_api") or {}
     history = _load_history(limit=96, client=client)
     settings = _load_settings(client)
     received_at = snapshot.get("received_at") if snapshot else 0
@@ -2530,6 +3028,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             {"label": "Outdoor Temp", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
             {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
             {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
+            {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
             {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
             {"label": "Status", "value": "Stale" if stale else "Live" if snapshot else "Waiting"},
         ],
@@ -2568,13 +3067,6 @@ def _action_values(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
     values = _action_values(payload)
-    bool_keys = (
-        "ECOWITT_ENABLED",
-        "ENVIRONMENT_UNIFI_PROTECT_ENABLED",
-        "ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED",
-        "ENVIRONMENT_HUE_ENABLED",
-        "ENVIRONMENT_HOMEASSISTANT_ENABLED",
-    )
     text_keys = (
         "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
         "ENVIRONMENT_ECOWITT_INDOOR_AREA",
@@ -2584,16 +3076,17 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
         "ENVIRONMENT_STALE_AFTER_MINUTES": (DEFAULT_STALE_AFTER_MINUTES, 1, 10080),
         "ENVIRONMENT_HISTORY_LIMIT": (DEFAULT_HISTORY_LIMIT, 1, 10000),
     }
+    bool_keys = ("ENVIRONMENT_ENABLE_WEATHERAPI",)
     mapping: Dict[str, str] = {}
-    for key in bool_keys:
-        if key in values:
-            mapping[key] = "true" if _as_bool(values.get(key), False) else "false"
     for key in text_keys:
         if key in values:
             mapping[key] = _text(values.get(key))
     for key, (default, minimum, maximum) in int_keys.items():
         if key in values:
             mapping[key] = str(_as_int(values.get(key), default, minimum=minimum, maximum=maximum))
+    for key in bool_keys:
+        if key in values:
+            mapping[key] = "true" if _as_bool(values.get(key), False) else "false"
     if not mapping:
         return {"ok": True, "message": "No Environment Core settings changed.", "changed": []}
     (client or redis_client).hset(SETTINGS_KEY, mapping=mapping)
@@ -2603,15 +3096,6 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
         "changed": sorted(mapping.keys()),
         "settings": _load_settings(client),
     }
-
-
-def _provider_enabled_setting_key(provider: str) -> str:
-    return {
-        "unifi_protect": "ENVIRONMENT_UNIFI_PROTECT_ENABLED",
-        "ecobee_homekit": "ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED",
-        "hue": "ENVIRONMENT_HUE_ENABLED",
-        "homeassistant": "ENVIRONMENT_HOMEASSISTANT_ENABLED",
-    }.get(_clean_key(provider), "")
 
 
 def _candidate_by_key(sensor_key: Any, client: Any = None) -> Dict[str, Any]:
@@ -2652,9 +3136,6 @@ def _add_sensor_source(payload: Dict[str, Any], client: Any = None) -> Dict[str,
     )
     selected.append(row)
     _save_selected_sensors(selected, client)
-    setting_key = _provider_enabled_setting_key(row.get("provider"))
-    if setting_key:
-        (client or redis_client).hset(SETTINGS_KEY, mapping={setting_key: "true"})
     return {"ok": True, "message": f"Added {row.get('label')} to Environment Core.", "source": row}
 
 
@@ -2709,9 +3190,6 @@ def handle_core_webhook(
         raise KeyError(f"Unsupported Environment Core webhook: {webhook}")
 
     settings = _load_settings(client)
-    if not bool(settings.get("ecowitt_enabled", True)):
-        raise ValueError("Ecowitt receiver is disabled.")
-
     incoming = _payload_from_webhook(payload, body=body)
     if query:
         for key, value in query.items():
@@ -2760,16 +3238,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         return _remove_sensor_source(payload, client)
     if action_name == "environment_poll_integrations":
         values = _action_values(payload)
-        if any(
-            key in values
-            for key in (
-                "ENVIRONMENT_UNIFI_PROTECT_ENABLED",
-                "ENVIRONMENT_ECOBEE_HOMEKIT_ENABLED",
-                "ENVIRONMENT_HUE_ENABLED",
-                "ENVIRONMENT_HOMEASSISTANT_ENABLED",
-                "ENVIRONMENT_INTEGRATION_POLL_SECONDS",
-            )
-        ):
+        if values:
             _save_environment_settings(payload, client)
         return _poll_enabled_integrations(client)
     raise KeyError(f"Unsupported Environment Core action: {action}")
@@ -2786,12 +3255,11 @@ def run(stop_event: Optional[object] = None) -> None:
         try:
             settings = _load_settings(redis_client)
             poll_seconds = int(settings.get("integration_poll_seconds") or DEFAULT_INTEGRATION_POLL_SECONDS)
-            integrations_enabled = bool(
-                settings.get("unifi_protect_enabled")
-                or settings.get("ecobee_homekit_enabled")
-                or settings.get("hue_enabled")
-                or settings.get("homeassistant_enabled")
-            )
+            integrations_enabled = any(
+                _clean_key(row.get("provider")) in {"unifi_protect", "ecobee_homekit", "hue", "homeassistant"}
+                and _as_bool(row.get("enabled"), True)
+                for row in _load_selected_sensors(redis_client)
+            ) or _as_bool(settings.get("weather_api_enabled"), False)
             now_ts = time.time()
             if integrations_enabled and now_ts - last_integration_poll >= poll_seconds:
                 last_integration_poll = now_ts
