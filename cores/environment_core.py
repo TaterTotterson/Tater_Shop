@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.8"
+__version__ = "1.4.9"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -24,6 +24,8 @@ logger.setLevel(logging.INFO)
 
 CORE_SETTINGS = {
     "category": "Environment Core Settings",
+    # Let Hydra answer from cached Environment Core readings even if the polling loop is stopped.
+    "hydra_tools_require_running": False,
     "required": {
         "ECOWITT_PASSKEY": {
             "label": "Ecowitt PASSKEY",
@@ -3984,6 +3986,228 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             _save_environment_settings(payload, client)
         return _poll_enabled_integrations(client)
     raise KeyError(f"Unsupported Environment Core action: {action}")
+
+
+def _hydra_limit(value: Any, default: int = 16) -> int:
+    return _as_int(value, default, minimum=1, maximum=80)
+
+
+def _hydra_reading_matches(row: Dict[str, Any], args: Dict[str, Any]) -> bool:
+    area = _clean_key(args.get("area") or args.get("room") or args.get("location"))
+    category = _clean_key(args.get("category") or args.get("type") or args.get("measurement"))
+    provider = _clean_key(args.get("provider") or args.get("source") or args.get("integration"))
+    text = _clean_key(args.get("sensor") or args.get("query"))
+    if area and area not in _clean_key(row.get("area")) and area not in _clean_key(row.get("source_name")):
+        return False
+    if category and category not in {_clean_key(row.get("category")), _clean_key(row.get("label")), _clean_key(row.get("key"))}:
+        haystack = f"{_clean_key(row.get('category'))} {_clean_key(row.get('label'))} {_clean_key(row.get('key'))}"
+        if category not in haystack:
+            return False
+    if provider and provider not in {_clean_key(row.get("provider")), _clean_key(row.get("provider_label"))}:
+        return False
+    if text:
+        haystack = " ".join(
+            _clean_key(part)
+            for part in (
+                row.get("label"),
+                row.get("key"),
+                row.get("area"),
+                row.get("source_name"),
+                row.get("provider_label"),
+                row.get("category"),
+            )
+        )
+        if text not in haystack:
+            return False
+    return True
+
+
+def _hydra_reading_row(row: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "label": _text(row.get("label")),
+        "value": _text(row.get("display")) or _value_label(row.get("value"), _text(row.get("unit"))),
+        "area": _text(row.get("area")),
+        "category": CATEGORY_LABELS.get(_clean_key(row.get("category")), _humanize_key(_clean_key(row.get("category")))),
+        "provider": _text(row.get("provider_label")) or _provider_label(row.get("provider")),
+        "source": _text(row.get("source_name")) or _text(row.get("source_id")),
+    }
+
+
+def _hydra_relevant_readings(snapshot: Dict[str, Any], args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = [row for row in snapshot.get("readings") or [] if isinstance(row, dict) and _hydra_reading_matches(row, args)]
+    preferred_order = {
+        "condition": 0,
+        "temperature": 1,
+        "humidity": 2,
+        "wind": 3,
+        "rain": 4,
+        "pressure": 5,
+        "solar": 6,
+        "air": 7,
+        "lightning": 8,
+        "battery": 20,
+    }
+    rows.sort(
+        key=lambda row: (
+            preferred_order.get(_clean_key(row.get("category")), 12),
+            _text(row.get("area")).casefold(),
+            _text(row.get("provider_label")).casefold(),
+            _text(row.get("label")).casefold(),
+        )
+    )
+    return rows[: _hydra_limit(args.get("limit"), 16)]
+
+
+def _hydra_summary_from_readings(readings: List[Dict[str, str]], *, prefix: str) -> str:
+    if not readings:
+        return f"{prefix} I do not have matching Environment Core readings yet."
+    pieces: List[str] = []
+    for row in readings[:10]:
+        label = _text(row.get("label"))
+        value = _text(row.get("value"))
+        area = _text(row.get("area"))
+        if not label or not value:
+            continue
+        area_part = f"{area} " if area and area.lower() not in label.lower() else ""
+        pieces.append(f"{area_part}{label}: {value}")
+    if not pieces:
+        return f"{prefix} I found matching readings, but none had display values yet."
+    return f"{prefix} " + "; ".join(pieces) + "."
+
+
+def _hydra_environment_payload(client: Any = None) -> Dict[str, Any]:
+    store = client or redis_client
+    provider_snapshots = _load_provider_snapshots(store)
+    snapshot = _combined_snapshot(provider_snapshots)
+    settings = _load_settings(store)
+    selected = _load_selected_sensors(store)
+    provider_status = _provider_status_rows(settings, provider_snapshots, store)
+    received_at = snapshot.get("received_at") if snapshot else 0
+    stale_after_s = int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES) * 60
+    stale = bool(received_at and (time.time() - float(received_at)) > stale_after_s)
+    return {
+        "provider_snapshots": provider_snapshots,
+        "snapshot": snapshot,
+        "settings": settings,
+        "selected_sensors": selected,
+        "provider_status": provider_status,
+        "received_at": received_at,
+        "stale": stale,
+    }
+
+
+def _environment_conditions_kernel(args: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
+    payload = _hydra_environment_payload(client)
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    if not snapshot:
+        return {
+            "tool": "environment_conditions",
+            "ok": False,
+            "error": "No Environment Core readings are available.",
+            "summary_for_user": "I do not have Environment Core readings yet.",
+        }
+    readings = [_hydra_reading_row(row) for row in _hydra_relevant_readings(snapshot, args)]
+    last = _age_label(payload.get("received_at"))
+    stale = bool(payload.get("stale"))
+    prefix = f"Environment readings were last updated {last}" + (" and may be stale." if stale else ".")
+    return {
+        "tool": "environment_conditions",
+        "ok": True,
+        "stale": stale,
+        "last_sample": last,
+        "filters": {key: args.get(key) for key in ("area", "room", "location", "category", "provider", "source", "integration", "sensor", "query") if args.get(key)},
+        "readings": readings,
+        "sources": payload.get("provider_status") or [],
+        "summary_for_user": _hydra_summary_from_readings(readings, prefix=prefix),
+    }
+
+
+def _environment_sensors_kernel(args: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
+    payload = _hydra_environment_payload(client)
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    selected = payload.get("selected_sensors") if isinstance(payload.get("selected_sensors"), list) else []
+    readings = [_hydra_reading_row(row) for row in _hydra_relevant_readings(snapshot, args)] if snapshot else []
+    selected_rows = []
+    for row in selected:
+        if not isinstance(row, dict):
+            continue
+        selected_rows.append(
+            {
+                "label": _text(row.get("label")) or _text(row.get("key")),
+                "area": _text(row.get("area")),
+                "category": CATEGORY_LABELS.get(_clean_key(row.get("category")), _humanize_key(_clean_key(row.get("category")))),
+                "provider": _provider_label(row.get("provider")),
+                "enabled": _as_bool(row.get("enabled"), True),
+            }
+        )
+    source_count = len([row for row in payload.get("provider_status") or [] if _text(row.get("last_sample")) != "never"])
+    summary = (
+        f"Environment Core has {len(selected_rows)} selected sensor source{'s' if len(selected_rows) != 1 else ''} "
+        f"and {source_count} source{'s' if source_count != 1 else ''} with recent readings."
+    )
+    if readings:
+        summary += " " + "; ".join(f"{row.get('label')}: {row.get('value')}" for row in readings[:8] if row.get("label") and row.get("value")) + "."
+    return {
+        "tool": "environment_sensors",
+        "ok": True,
+        "selected_sensors": selected_rows,
+        "latest_readings": readings,
+        "sources": payload.get("provider_status") or [],
+        "summary_for_user": summary,
+    }
+
+
+def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
+    del platform
+    return [
+        {
+            "id": "environment_conditions",
+            "description": "Read current local Environment Core conditions from Ecowitt/weather station, WeatherAPI condition data, and selected integration sensors.",
+            "usage": '{"function":"environment_conditions","arguments":{"area":"Outside","category":"temperature"}}',
+        },
+        {
+            "id": "environment_sensors",
+            "description": "List Environment Core sensor sources, providers, areas, and latest sensor readings.",
+            "usage": '{"function":"environment_sensors","arguments":{"area":"Office","category":"humidity"}}',
+        },
+    ]
+
+
+async def run_hydra_kernel_tool(
+    *,
+    tool_id: str,
+    args: Optional[Dict[str, Any]] = None,
+    platform: str = "",
+    scope: str = "",
+    origin: Optional[Dict[str, Any]] = None,
+    llm_client: Any = None,
+    redis_client: Any = None,
+    **_kwargs,
+) -> Optional[Dict[str, Any]]:
+    del platform, scope, origin, llm_client
+    func = _clean_key(tool_id)
+    payload = dict(args) if isinstance(args, dict) else {}
+    client = redis_client if redis_client is not None else globals().get("redis_client")
+    if client is None:
+        return {
+            "tool": func or "environment",
+            "ok": False,
+            "error": "Environment Core store is unavailable.",
+            "summary_for_user": "Environment Core storage is unavailable right now.",
+        }
+    try:
+        if func in {"environment_conditions", "environment_weather", "environment_current_conditions"}:
+            return _environment_conditions_kernel(payload, client)
+        if func in {"environment_sensors", "environment_sensor_status", "environment_sources"}:
+            return _environment_sensors_kernel(payload, client)
+    except Exception as exc:
+        return {
+            "tool": func or "environment",
+            "ok": False,
+            "error": f"{func or 'environment'} failed: {exc}",
+            "summary_for_user": "I could not read Environment Core data right now.",
+        }
+    return None
 
 
 def run(stop_event: Optional[object] = None) -> None:
