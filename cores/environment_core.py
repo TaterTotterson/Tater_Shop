@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.6"
+__version__ = "1.4.7"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -56,16 +56,16 @@ CORE_SETTINGS = {
             "description": "When enabled, Environment Core polls the WeatherAPI.com integration for current conditions and forecast data.",
         },
         "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE": {
-            "label": "Current Card Live Source",
+            "label": "Current Card Readings Source",
             "type": "select",
             "default": "provider:ecowitt",
-            "description": "Integration or selected sensor used for the live readings on the Current Conditions card.",
+            "description": "Integration or selected sensor used for measured values on the Current Conditions card.",
         },
         "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE": {
-            "label": "Current Card Condition Source",
+            "label": "Current Card Artwork Source",
             "type": "select",
             "default": "provider:weather_api",
-            "description": "Integration or selected sensor used for the Current Conditions card condition text and artwork.",
+            "description": "Integration or selected sensor used for sunny/rainy condition text and artwork.",
         },
         "ENVIRONMENT_FORECAST_PROVIDER": {
             "label": "Forecast Provider",
@@ -290,19 +290,19 @@ def _settings_field_rows(
         },
         {
             "key": "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
-            "label": "Current Card Live Source",
+            "label": "Current Card Readings Source",
             "type": "select",
             "value": _text(settings.get("current_live_source")) or "provider:ecowitt",
             "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=False),
-            "description": "Choose the integration or selected sensor used for the big temperature and live readings.",
+            "description": "Choose the measured values for the card: temperature, humidity, wind, and feels-like.",
         },
         {
             "key": "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
-            "label": "Current Card Condition Source",
+            "label": "Current Card Artwork Source",
             "type": "select",
             "value": _text(settings.get("current_condition_source")) or "provider:weather_api",
             "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=True),
-            "description": "Choose the source for condition text and sunny/rainy artwork.",
+            "description": "Choose the source for condition text and the sunny/rainy/cloudy card artwork.",
         },
         {
             "key": "ENVIRONMENT_FORECAST_PROVIDER",

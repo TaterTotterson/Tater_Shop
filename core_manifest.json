@@ -33,7 +33,7 @@
       "id": "environment",
       "name": "Environment Core",
       "module_key": "environment_core",
-      "version": "1.4.6",
+      "version": "1.4.7",
       "min_tater_version": "59",
       "description": "Local environment telemetry receiver for weather stations and configured sensor integrations.",
       "settings_category": "Environment Core Settings",
@@ -46,7 +46,7 @@
         "telemetry"
       ],
       "entry": "cores/environment_core.py",
-      "sha256": "2df5011d27a3239e08e24defe06fec98157d39924b6db315d22ed54b993fe200"
+      "sha256": "453f0f2586d889271b7f562e40267580c4121152de1b6a739685b4bc321b175d"
     },
     {
       "id": "memory",
