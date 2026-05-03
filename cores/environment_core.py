@@ -12,9 +12,9 @@ from html import escape as html_escape
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote
 
-from helpers import redis_client
+from helpers import extract_json, redis_client
 
-__version__ = "1.4.9"
+__version__ = "1.4.10"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -182,6 +182,19 @@ CATEGORY_LABELS = {
     "battery": "Batteries",
     "system": "Station",
     "other": "Other",
+}
+
+HYDRA_WEATHER_CATEGORIES = {
+    "air",
+    "condition",
+    "forecast",
+    "humidity",
+    "lightning",
+    "pressure",
+    "rain",
+    "solar",
+    "temperature",
+    "wind",
 }
 
 
@@ -3999,7 +4012,10 @@ def _hydra_reading_matches(row: Dict[str, Any], args: Dict[str, Any]) -> bool:
     text = _clean_key(args.get("sensor") or args.get("query"))
     if area and area not in _clean_key(row.get("area")) and area not in _clean_key(row.get("source_name")):
         return False
-    if category and category not in {_clean_key(row.get("category")), _clean_key(row.get("label")), _clean_key(row.get("key"))}:
+    if category == "weather":
+        if _clean_key(row.get("category")) not in HYDRA_WEATHER_CATEGORIES:
+            return False
+    elif category and category not in {_clean_key(row.get("category")), _clean_key(row.get("label")), _clean_key(row.get("key"))}:
         haystack = f"{_clean_key(row.get('category'))} {_clean_key(row.get('label'))} {_clean_key(row.get('key'))}"
         if category not in haystack:
             return False
@@ -4075,6 +4091,118 @@ def _hydra_summary_from_readings(readings: List[Dict[str, str]], *, prefix: str)
     return f"{prefix} " + "; ".join(pieces) + "."
 
 
+def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]] = None) -> str:
+    payload = args if isinstance(args, dict) else {}
+    for key in ("request", "question", "user_query", "prompt", "text", "content", "message", "query"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    arg_origin = payload.get("origin")
+    if isinstance(arg_origin, dict):
+        for key in ("request_text", "raw_message", "query", "question", "text", "content", "message", "body"):
+            value = arg_origin.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    if isinstance(origin, dict):
+        for key in ("request_text", "raw_message", "user_text", "query", "question", "text", "content", "message", "body"):
+            value = origin.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _hydra_filter_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    readings = [row for row in snapshot.get("readings") or [] if isinstance(row, dict)]
+    areas = sorted({_text(row.get("area")) for row in readings if _text(row.get("area"))}, key=str.casefold)
+    categories = sorted({_clean_key(row.get("category")) for row in readings if _clean_key(row.get("category"))})
+    providers = sorted(
+        {
+            _clean_key(row.get("provider")) or _clean_key(row.get("provider_label"))
+            for row in readings
+            if _clean_key(row.get("provider")) or _clean_key(row.get("provider_label"))
+        }
+    )
+    sensor_labels = sorted({_text(row.get("label")) for row in readings if _text(row.get("label"))}, key=str.casefold)
+    return {
+        "areas": areas[:40],
+        "categories": categories[:40],
+        "providers": providers[:20],
+        "sensor_labels": sensor_labels[:80],
+    }
+
+
+def _hydra_normalized_filter_args(raw: Dict[str, Any], original: Dict[str, Any]) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    out: Dict[str, Any] = {}
+    for key in ("area", "room", "location", "category", "provider", "source", "integration", "sensor", "query"):
+        value = source.get(key)
+        if value is None:
+            continue
+        text = _text(value)
+        if text:
+            out[key] = text
+    limit = source.get("limit", original.get("limit") if isinstance(original, dict) else None)
+    if limit not in (None, ""):
+        out["limit"] = _hydra_limit(limit)
+    if "limit" not in out and isinstance(original, dict) and original.get("limit") not in (None, ""):
+        out["limit"] = _hydra_limit(original.get("limit"))
+    return out
+
+
+async def _hydra_ai_normalize_environment_args(
+    args: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    llm_client: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    request_text = _hydra_request_text(args, origin)
+    if llm_client is None or not request_text:
+        return dict(args or {})
+
+    context = _hydra_filter_context(payload)
+    user_payload = {
+        "request": request_text,
+        "current_tool_arguments": dict(args or {}),
+        "available_environment_context": context,
+    }
+    system_prompt = (
+        "You normalize a user's natural-language request into Environment Core filters. "
+        "Return only one JSON object. Do not answer the user. "
+        "Allowed keys: area, category, provider, sensor, query, limit. Use an empty string to omit a filter. "
+        "Allowed categories include weather, condition, temperature, humidity, wind, rain, pressure, solar, air, lightning, battery, system, and other. "
+        "Use category weather for broad current weather or conditions requests. "
+        "Use provider only when the user clearly names a specific integration/provider. "
+        "Use query only for a real sensor label/name the user asked for; do not put generic words like weather, current, conditions, outside, or local in query. "
+        "Prefer the available areas, categories, providers, and sensor labels from the payload."
+    )
+    try:
+        response = await llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            temperature=0.0,
+            max_tokens=280,
+            timeout_ms=25_000,
+        )
+    except Exception as exc:
+        logger.warning("[Environment] AI filter normalization failed: %s", exc)
+        return dict(args or {})
+
+    raw = _text((response.get("message") or {}).get("content"))
+    parsed_text = extract_json(raw) or raw
+    try:
+        parsed = json.loads(parsed_text)
+    except Exception as exc:
+        logger.warning("[Environment] AI filter normalization returned invalid JSON: %s", exc)
+        return dict(args or {})
+    return _hydra_normalized_filter_args(parsed if isinstance(parsed, dict) else {}, dict(args or {}))
+
+
 def _hydra_environment_payload(client: Any = None) -> Dict[str, Any]:
     store = client or redis_client
     provider_snapshots = _load_provider_snapshots(store)
@@ -4096,8 +4224,8 @@ def _hydra_environment_payload(client: Any = None) -> Dict[str, Any]:
     }
 
 
-def _environment_conditions_kernel(args: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
-    payload = _hydra_environment_payload(client)
+def _environment_conditions_kernel(args: Dict[str, Any], client: Any = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else _hydra_environment_payload(client)
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
     if not snapshot:
         return {
@@ -4122,8 +4250,8 @@ def _environment_conditions_kernel(args: Dict[str, Any], client: Any = None) -> 
     }
 
 
-def _environment_sensors_kernel(args: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
-    payload = _hydra_environment_payload(client)
+def _environment_sensors_kernel(args: Dict[str, Any], client: Any = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else _hydra_environment_payload(client)
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
     selected = payload.get("selected_sensors") if isinstance(payload.get("selected_sensors"), list) else []
     readings = [_hydra_reading_row(row) for row in _hydra_relevant_readings(snapshot, args)] if snapshot else []
@@ -4162,13 +4290,13 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "environment_conditions",
-            "description": "Read current local Environment Core conditions from Ecowitt/weather station, WeatherAPI condition data, and selected integration sensors.",
-            "usage": '{"function":"environment_conditions","arguments":{"area":"Outside","category":"temperature"}}',
+            "description": "Read live local weather and environment conditions from Environment Core, including Ecowitt/weather station readings, WeatherAPI condition data, and selected integration sensors. Use this for current weather, temperature, humidity, wind, rain, and sensor readings.",
+            "usage": '{"function":"environment_conditions","arguments":{"request":"What is the weather outside right now?"}}',
         },
         {
             "id": "environment_sensors",
-            "description": "List Environment Core sensor sources, providers, areas, and latest sensor readings.",
-            "usage": '{"function":"environment_sensors","arguments":{"area":"Office","category":"humidity"}}',
+            "description": "List Environment Core sensor sources, providers, areas, selected integration sensors, and latest environment readings.",
+            "usage": '{"function":"environment_sensors","arguments":{"request":"Show office humidity sensors"}}',
         },
     ]
 
@@ -4184,7 +4312,7 @@ async def run_hydra_kernel_tool(
     redis_client: Any = None,
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
-    del platform, scope, origin, llm_client
+    del platform, scope
     func = _clean_key(tool_id)
     payload = dict(args) if isinstance(args, dict) else {}
     client = redis_client if redis_client is not None else globals().get("redis_client")
@@ -4197,9 +4325,23 @@ async def run_hydra_kernel_tool(
         }
     try:
         if func in {"environment_conditions", "environment_weather", "environment_current_conditions"}:
-            return _environment_conditions_kernel(payload, client)
+            environment_payload = _hydra_environment_payload(client)
+            normalized_args = await _hydra_ai_normalize_environment_args(
+                payload,
+                environment_payload,
+                llm_client=llm_client,
+                origin=origin,
+            )
+            return _environment_conditions_kernel(normalized_args, client, payload=environment_payload)
         if func in {"environment_sensors", "environment_sensor_status", "environment_sources"}:
-            return _environment_sensors_kernel(payload, client)
+            environment_payload = _hydra_environment_payload(client)
+            normalized_args = await _hydra_ai_normalize_environment_args(
+                payload,
+                environment_payload,
+                llm_client=llm_client,
+                origin=origin,
+            )
+            return _environment_sensors_kernel(normalized_args, client, payload=environment_payload)
     except Exception as exc:
         return {
             "tool": func or "environment",
