@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import redis_client
 
-__version__ = "1.4.0"
+__version__ = "1.4.2"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -2033,6 +2033,19 @@ def _combined_snapshot(provider_snapshots: Dict[str, Dict[str, Any]]) -> Dict[st
 
     if len(ordered) == 1:
         single = dict(ordered[0])
+        provider = _clean_key(single.get("provider") or "ecowitt")
+        source_id = single.get("source_id") or provider
+        enriched_readings: List[Dict[str, Any]] = []
+        for row in single.get("readings") or []:
+            if not isinstance(row, dict):
+                continue
+            next_row = dict(row)
+            next_row.setdefault("provider", provider)
+            next_row.setdefault("provider_label", _provider_label(provider))
+            next_row.setdefault("source_id", source_id)
+            next_row.setdefault("source_name", single.get("model") or single.get("stationtype") or _provider_label(provider))
+            enriched_readings.append(next_row)
+        single["readings"] = enriched_readings
         single["providers"] = [_snapshot_provider_summary(single)]
         return single
 
@@ -2230,6 +2243,158 @@ def _history_summary(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             }
         )
     return rows
+
+
+def _reading_rows_by_keys(snapshot: Dict[str, Any], keys: Iterable[str]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in keys:
+        row = _reading(snapshot, key)
+        row_key = _clean_key(row.get("key")) if isinstance(row, dict) else ""
+        if row and row_key and row_key not in seen:
+            rows.append(row)
+            seen.add(row_key)
+    return rows
+
+
+def _reading_rows_by_categories(
+    snapshot: Dict[str, Any],
+    categories: Iterable[str],
+    *,
+    limit: int = 18,
+    exclude_keys: Iterable[str] = (),
+    exclude_providers: Iterable[str] = (),
+) -> List[Dict[str, Any]]:
+    wanted = [_clean_key(category) for category in categories if _clean_key(category)]
+    exclude_key_set = {_clean_key(key) for key in exclude_keys}
+    exclude_provider_set = {_clean_key(provider) for provider in exclude_providers}
+    rows: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str, str]] = set()
+    for category in wanted:
+        for row in snapshot.get("readings") or []:
+            if not isinstance(row, dict) or _clean_key(row.get("category")) != category:
+                continue
+            key = _clean_key(row.get("key"))
+            provider = _clean_key(row.get("provider"))
+            if key in exclude_key_set or provider in exclude_provider_set:
+                continue
+            identity = (provider, _clean_key(row.get("source_id")), key)
+            if identity in seen:
+                continue
+            rows.append(row)
+            seen.add(identity)
+            if len(rows) >= max(1, int(limit)):
+                return rows
+    return rows
+
+
+def _area_overview_rows(snapshot: Dict[str, Any]) -> List[Dict[str, str]]:
+    areas: Dict[str, Dict[str, Any]] = {}
+    for row in snapshot.get("readings") or []:
+        if not isinstance(row, dict):
+            continue
+        category = _clean_key(row.get("category"))
+        if category not in {"temperature", "humidity", "air", "solar", "condition"}:
+            continue
+        area = _text(row.get("area")) or _text(row.get("source_name")) or _provider_label(row.get("provider"))
+        if not area:
+            continue
+        entry = areas.setdefault(area, {"area": area, "sources": set()})
+        provider_label = _text(row.get("provider_label")) or _provider_label(row.get("provider"))
+        if provider_label:
+            entry["sources"].add(provider_label)
+        display = _text(row.get("display"))
+        if not display:
+            continue
+        key = _clean_key(row.get("key"))
+        label = _text(row.get("label"))
+        if category == "temperature" and "temperature" not in entry:
+            entry["temperature"] = display
+        elif category == "humidity" and "humidity" not in entry:
+            entry["humidity"] = display
+        elif category == "air" and "air" not in entry:
+            entry["air"] = f"{label}: {display}" if label else display
+        elif category == "solar" and key == "uv" and "light" not in entry:
+            entry["light"] = f"UV {display}"
+        elif category == "condition" and "condition" not in entry:
+            entry["condition"] = display
+
+    def area_sort(row: Dict[str, Any]) -> Tuple[int, str]:
+        token = _clean_key(row.get("area"))
+        priority = 2
+        if token in {"outside", "outdoor", "forecast"}:
+            priority = 0
+        elif token in {"inside", "indoor"}:
+            priority = 1
+        return priority, _text(row.get("area")).casefold()
+
+    rows: List[Dict[str, str]] = []
+    for entry in sorted(areas.values(), key=area_sort):
+        rows.append(
+            {
+                "area": _text(entry.get("area")),
+                "temperature": _text(entry.get("temperature")) or "-",
+                "humidity": _text(entry.get("humidity")) or "-",
+                "condition": _text(entry.get("condition")) or _text(entry.get("light")) or _text(entry.get("air")) or "-",
+                "source": ", ".join(sorted(entry.get("sources") or [])) or "-",
+            }
+        )
+    return rows[:24]
+
+
+def _source_health_rows(provider_status_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for row in provider_status_rows or []:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "source": _text(row.get("source")),
+                "state": _text(row.get("state")),
+                "selected": _text(row.get("selected")),
+                "last_sample": _text(row.get("last_sample")),
+                "readings": _text(row.get("readings")),
+            }
+        )
+    return rows
+
+
+def _source_reading_points(provider_status_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for row in provider_status_rows or []:
+        if not isinstance(row, dict):
+            continue
+        value = _as_int(row.get("readings"), 0, minimum=0, maximum=100000)
+        if value <= 0:
+            continue
+        points.append({"label": _text(row.get("source")) or "Source", "value": value})
+    return points
+
+
+def _overview_card(
+    *,
+    card_id: str,
+    title: str,
+    subtitle: str,
+    detail: str,
+    sensor_title: str,
+    sensor_rows: List[Dict[str, Any]],
+    badges: Optional[List[Dict[str, str]]] = None,
+    summary_rows: Optional[List[Dict[str, str]]] = None,
+    sections: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    return {
+        "id": card_id,
+        "group": "overview",
+        "title": title,
+        "subtitle": subtitle,
+        "detail": detail,
+        "hero_badges": badges or [],
+        "summary_rows": summary_rows or [],
+        "sensor_title": sensor_title,
+        "sensor_rows": _sensor_rows(sensor_rows, include_meta=True),
+        "sections": sections or [],
+    }
 
 
 def _weatherapi_units(client: Any = None) -> str:
@@ -2559,52 +2724,237 @@ def _environment_manager_ui(
     weather_enabled = _as_bool(settings.get("weather_api_enabled"), False)
     source_count = len(provider_summaries) if provider_summaries else (1 if snapshot else 0)
     grouped = _readings_by_category(snapshot)
+    battery_rows = grouped.get("battery") or []
+    low_battery_count = sum(1 for row in battery_rows if _text(row.get("tone")) == "danger")
+    battery_summary = (
+        "No readings"
+        if not battery_rows
+        else f"{low_battery_count} low"
+        if low_battery_count
+        else f"{len(battery_rows)} OK"
+    )
     has_snapshot = bool(snapshot)
     received_at = snapshot.get("received_at") if has_snapshot else 0
     stale_after_s = int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES) * 60
     is_stale = bool(received_at and (time.time() - float(received_at)) > stale_after_s)
     webhook_path = "/api/cores/environment_core/webhook/ecowitt"
-    current_condition_rows: List[Dict[str, Any]] = []
-    seen_current_keys: set[str] = set()
-    for key in (
-        "tempf",
-        "humidity",
-        "tempinf",
-        "humidityin",
-        "baromrelin",
-        "windspeedmph",
-        "windgustmph",
-        "rainratein",
-        "dailyrainin",
-        "solarradiation",
-        "uv",
-    ):
-        row = _reading(snapshot, key)
-        if row:
-            current_condition_rows.append(row)
-            seen_current_keys.add(_clean_key(row.get("key")))
-    for row in snapshot.get("readings") or []:
-        if not isinstance(row, dict):
-            continue
+    current_condition_rows = _reading_rows_by_keys(
+        snapshot,
+        (
+            "weather_api_condition",
+            "tempf",
+            "weather_api_feelslike",
+            "humidity",
+            "tempinf",
+            "humidityin",
+            "windspeedmph",
+            "windgustmph",
+            "dailyrainin",
+            "uv",
+            "weather_api_aqi_us_epa",
+        ),
+    )
+    weather_rows = _reading_rows_by_keys(
+        snapshot,
+        (
+            "weather_api_condition",
+            "tempf",
+            "weather_api_feelslike",
+            "humidity",
+            "baromrelin",
+            "weather_api_cloud",
+            "weather_api_visibility",
+        ),
+    )
+    area_rows = _area_overview_rows(snapshot)
+    room_rows = []
+    for row in _reading_rows_by_categories(snapshot, ("temperature", "humidity"), limit=32, exclude_providers=("weather_api",)):
         key = _clean_key(row.get("key"))
-        if key in seen_current_keys:
+        area = _clean_key(row.get("area"))
+        if key in {"tempf", "humidity"} and area in {"outside", "outdoor"}:
             continue
-        current_condition_rows.append(row)
-        seen_current_keys.add(key)
+        room_rows.append(row)
+    movement_rows = _reading_rows_by_categories(snapshot, ("wind", "rain", "lightning"), limit=18)
+    air_light_rows = _reading_rows_by_categories(snapshot, ("solar", "air"), limit=18)
+    source_health_rows = _source_health_rows(provider_status_rows)
+    source_reading_points = _source_reading_points(provider_status_rows)
 
     overview_summary_rows = [
         {"label": "Outdoor", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
+        {"label": "Feels Like", "value": _reading_display(snapshot, "weather_api_feelslike", _reading_display(snapshot, "feelslikef"))},
+        {"label": "Indoor", "value": _reading_display(snapshot, "tempinf")},
         {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
         {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
         {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+        {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
+        {"label": "Batteries", "value": battery_summary},
     ]
-    if weather_snapshot:
-        overview_summary_rows.extend(
-            [
-                {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
-                {"label": "Feels Like", "value": _reading_display(weather_snapshot, "weather_api_feelslike")},
-            ]
+    overview_badges = [
+        {"label": "Live" if has_snapshot and not is_stale else "Stale" if has_snapshot else "Waiting", "tone": "good" if has_snapshot and not is_stale else "warning"},
+        {"label": f"{source_count} source{'s' if source_count != 1 else ''}" if source_count else "No sources", "tone": "muted"},
+    ]
+    if battery_rows:
+        overview_badges.append({"label": "Low Battery" if low_battery_count else "Batteries OK", "tone": "danger" if low_battery_count else "good"})
+
+    overview_cards: List[Dict[str, Any]] = []
+    if area_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:areas",
+                title="Areas",
+                subtitle=f"{len(area_rows)} area{'s' if len(area_rows) != 1 else ''}",
+                detail="Current temperature, humidity, and condition readings grouped by area.",
+                sensor_title="",
+                sensor_rows=[],
+                sections=[
+                    {
+                        "label": "Area Readings",
+                        "inline": True,
+                        "fields": [
+                            {
+                                "key": "environment_area_overview",
+                                "label": "Area Overview",
+                                "type": "table",
+                                "columns": [
+                                    {"key": "area", "label": "Area"},
+                                    {"key": "temperature", "label": "Temp"},
+                                    {"key": "humidity", "label": "Humidity"},
+                                    {"key": "condition", "label": "Condition"},
+                                    {"key": "source", "label": "Source"},
+                                ],
+                                "rows": area_rows,
+                                "read_only": True,
+                            }
+                        ],
+                    }
+                ],
+            )
         )
+    if weather_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:weather",
+                title="Weather Now",
+                subtitle="Outdoor station and forecast",
+                detail="The outside-facing readings Tater can use for weather-aware automations.",
+                sensor_title="Outside",
+                sensor_rows=weather_rows,
+                badges=[{"label": _reading_display(weather_snapshot, "weather_api_condition", "Current"), "tone": "muted"}],
+                summary_rows=[
+                    {"label": "Temp", "value": _reading_display(snapshot, "tempf", _category_display(snapshot, "temperature"))},
+                    {"label": "Humidity", "value": _reading_display(snapshot, "humidity")},
+                    {"label": "Pressure", "value": _reading_display(snapshot, "baromrelin")},
+                ],
+            )
+        )
+    if room_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:rooms",
+                title="Rooms & Sensors",
+                subtitle=f"{len(room_rows)} reading{'s' if len(room_rows) != 1 else ''}",
+                detail="Indoor, room, and selected integration sensors in one scan-friendly card.",
+                sensor_title="Selected Sensors",
+                sensor_rows=room_rows,
+                summary_rows=[
+                    {"label": "Indoor", "value": _reading_display(snapshot, "tempinf", _category_display(snapshot, "temperature"))},
+                    {"label": "Indoor Humidity", "value": _reading_display(snapshot, "humidityin")},
+                ],
+            )
+        )
+    if movement_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:wind_rain",
+                title="Wind, Rain & Lightning",
+                subtitle="Weather movement",
+                detail="Fast-changing outdoor readings that are useful for alerts and context.",
+                sensor_title="Movement",
+                sensor_rows=movement_rows,
+                summary_rows=[
+                    {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
+                    {"label": "Gust", "value": _reading_display(snapshot, "windgustmph")},
+                    {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+                    {"label": "Lightning", "value": _reading_display(snapshot, "lightning_num", _reading_display(snapshot, "lightning"))},
+                ],
+            )
+        )
+    if air_light_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:air_light",
+                title="Air, UV & Light",
+                subtitle="Exposure and air quality",
+                detail="Solar, UV, and air quality readings from the station and enabled services.",
+                sensor_title="Air and Light",
+                sensor_rows=air_light_rows,
+                summary_rows=[
+                    {"label": "UV", "value": _reading_display(snapshot, "uv")},
+                    {"label": "Solar", "value": _reading_display(snapshot, "solarradiation")},
+                    {"label": "AQI", "value": _reading_display(snapshot, "weather_api_aqi_us_epa")},
+                ],
+            )
+        )
+    if battery_rows:
+        overview_cards.append(
+            _overview_card(
+                card_id="overview:batteries",
+                title="Sensor Batteries",
+                subtitle=f"{len(battery_rows)} battery reading{'s' if len(battery_rows) != 1 else ''}",
+                detail="Battery fields are decoded where known; raw values are shown otherwise.",
+                sensor_title="Batteries",
+                sensor_rows=battery_rows,
+                badges=[
+                    {
+                        "label": "Low Battery" if low_battery_count else "OK",
+                        "tone": "danger" if low_battery_count else "good",
+                    }
+                ],
+            )
+        )
+    overview_cards.append(
+        {
+            "id": "overview:sources",
+            "group": "overview",
+            "title": "Source Health",
+            "subtitle": f"{source_count} active source{'s' if source_count != 1 else ''}" if source_count else "Waiting for sources",
+            "detail": "A quick check of which integrations are feeding Environment Core.",
+            "summary_rows": [
+                {"label": "Active", "value": str(source_count)},
+                {"label": "Selected", "value": str(sum(1 for row in selected_sensors if _as_bool(row.get("enabled"), True)))},
+                {"label": "Last Sample", "value": _age_label(received_at) if has_snapshot else "never"},
+            ],
+            "sections": [
+                {
+                    "label": "Readings by Source",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "environment_source_reading_counts",
+                            "label": "Readings by Source",
+                            "type": "bar_chart",
+                            "points": source_reading_points,
+                            "read_only": True,
+                        },
+                        {
+                            "key": "environment_source_health",
+                            "label": "Source Health",
+                            "type": "table",
+                            "columns": [
+                                {"key": "source", "label": "Source"},
+                                {"key": "state", "label": "State"},
+                                {"key": "selected", "label": "Selected"},
+                                {"key": "last_sample", "label": "Last Sample"},
+                                {"key": "readings", "label": "Readings"},
+                            ],
+                            "rows": source_health_rows,
+                            "read_only": True,
+                        },
+                    ],
+                }
+            ],
+        }
+    )
 
     item_forms: List[Dict[str, Any]] = [
         {
@@ -2617,12 +2967,9 @@ def _environment_manager_ui(
                 if has_snapshot
                 else f"Point Ecowitt custom server uploads at {webhook_path}."
             ),
-            "hero_badges": [
-                {"label": "Live" if has_snapshot and not is_stale else "Stale" if has_snapshot else "Waiting", "tone": "good" if has_snapshot and not is_stale else "warning"},
-                {"label": snapshot.get("model") or snapshot.get("stationtype") or "Environment", "tone": "muted"},
-            ],
+            "hero_badges": overview_badges,
             "summary_rows": overview_summary_rows,
-            "sensor_title": "Current Readings",
+            "sensor_title": "At a Glance",
             "sensor_rows": _sensor_rows(current_condition_rows, include_meta=False),
         },
         {
@@ -2837,6 +3184,7 @@ def _environment_manager_ui(
             "run_confirm": "Clear Environment Core weather history?",
         },
     ]
+    item_forms[1:1] = overview_cards
 
     for selection in selected_sensors:
         key = _text(selection.get("key"))
@@ -2916,57 +3264,6 @@ def _environment_manager_ui(
         ]
     )
 
-    battery_rows = grouped.get("battery") or []
-    item_forms.append(
-        {
-            "id": "batteries",
-            "group": "battery",
-            "title": "Sensor Batteries",
-            "subtitle": f"{len(battery_rows)} battery reading{'s' if len(battery_rows) != 1 else ''}",
-            "detail": "Battery fields are decoded where known; raw values are shown otherwise.",
-            "hero_badges": [
-                {
-                    "label": "Low Battery" if any(_text(row.get("tone")) == "danger" for row in battery_rows) else "OK",
-                    "tone": "danger" if any(_text(row.get("tone")) == "danger" for row in battery_rows) else "good",
-                }
-            ],
-            "sensor_title": "Batteries",
-            "sensor_rows": _sensor_rows(battery_rows, include_meta=False),
-        }
-    )
-
-    raw_rows = snapshot.get("raw") if isinstance(snapshot.get("raw"), dict) else {}
-    raw_text = json.dumps(raw_rows, indent=2, sort_keys=True) if raw_rows else "{}"
-    item_forms.append(
-        {
-            "id": "raw:latest",
-            "group": "raw",
-            "title": "Latest Raw Payload",
-            "subtitle": snapshot.get("source_id") or "No source yet",
-            "detail": "Ecowitt PASSKEY is stored as a short hash, not displayed raw.",
-            "sections": [
-                {
-                    "label": "Payload",
-                    "inline": True,
-                    "fields": [
-                        {"key": "raw_payload", "label": "Payload", "type": "textarea", "value": raw_text, "read_only": True},
-                    ],
-                }
-            ],
-        }
-    )
-    item_forms.append(
-        {
-            "id": "raw:history",
-            "group": "raw",
-            "title": "Recent History",
-            "subtitle": f"{min(len(history), 8)} of {len(history)} loaded sample{'s' if len(history) != 1 else ''} shown",
-            "detail": "Most recent samples are kept in Redis for quick trend checks.",
-            "sensor_title": "Recent Samples",
-            "sensor_rows": _history_summary(history),
-        }
-    )
-
     return {
         "kind": "settings_manager",
         "title": "Environment Core",
@@ -2977,8 +3274,6 @@ def _environment_manager_ui(
             {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
             {"key": "forecast", "label": "Forecast", "source": "items", "item_group": "forecast"},
             {"key": "trends", "label": "Graphs", "source": "items", "item_group": "trend"},
-            {"key": "batteries", "label": "Batteries", "source": "items", "item_group": "battery"},
-            {"key": "raw", "label": "Raw", "source": "items", "item_group": "raw", "selector": True},
             {"key": "add_source", "label": "Add Sensor", "source": "add_form"},
             {"key": "sources", "label": "Sources", "source": "items", "item_group": "source", "selector": True},
             {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
