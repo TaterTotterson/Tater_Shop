@@ -28,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.3"
+__version__ = "3.3.5"
 
 load_dotenv()
 
@@ -309,27 +309,57 @@ def _split_provider_ref(value: Any, fallback_provider: Any = "all") -> Tuple[str
 
 def _provider_from_rule_fields(rule: Dict[str, Any]) -> str:
     for item in _normalize_trigger_entities((rule or {}).get("trigger_entities")):
-        provider, raw_value = _split_provider_ref(item, "")
-        if provider != "all" and raw_value:
+        provider = _provider_from_entity_ref(item)
+        if provider:
             return provider
     for key in ("sensor_entity", "trigger_entity", "camera_entity"):
-        provider, raw_value = _split_provider_ref((rule or {}).get(key), "")
-        if provider != "all" and raw_value:
+        provider = _provider_from_entity_ref((rule or {}).get(key))
+        if provider:
             return provider
     return ""
 
 
-def _rule_provider(rule: Dict[str, Any], *, fallback: str = "all") -> str:
+def _provider_from_entity_ref(value: Any) -> str:
+    provider, raw_value = _split_provider_ref(value, "")
+    if provider != "all" and raw_value:
+        return provider
+    return ""
+
+
+def _concrete_rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
+    provider = _normalize_event_provider((rule or {}).get("provider"))
+    if provider != "all":
+        return provider
+    inferred = _provider_from_rule_fields(rule)
+    if inferred:
+        return inferred
+    fallback_provider = _normalize_event_provider(fallback)
+    return fallback_provider if fallback_provider != "all" else ""
+
+
+def _rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
     kind = _text((rule or {}).get("kind")).lower()
     if kind == "brief":
         return "homeassistant"
-    return _normalize_event_provider((rule or {}).get("provider") or _provider_from_rule_fields(rule) or fallback)
+    return _concrete_rule_provider(rule, fallback=fallback)
+
+
+def _snapshot_target_for_camera(camera: Any, rule_provider: Any) -> Tuple[str, str]:
+    provider, target = _split_provider_ref(camera, "")
+    if provider != "all":
+        return provider, target
+    camera_target = _text(target or camera)
+    inferred = _provider_from_entity_ref(camera_target)
+    if inferred:
+        return inferred, camera_target
+    provider = _normalize_event_provider(rule_provider)
+    return "" if provider == "all" else provider, camera_target
 
 
 def _provider_label(provider: str) -> str:
     token = _normalize_event_provider(provider)
     if token == "all":
-        return "All Integrations"
+        return "Integrated Devices"
     if token == "unifi_protect":
         return "UniFi Protect"
     if token == "unifi_network":
@@ -776,7 +806,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "kind": kind,
         "provider": "homeassistant"
         if kind == "brief"
-        else _normalize_event_provider(raw.get("provider") or _provider_from_rule_fields(raw) or "all"),
+        else _concrete_rule_provider(raw),
         "name": _text(raw.get("name")) or f"{kind.title()} rule",
         "enabled": _bool(raw.get("enabled"), True),
         "created_at": _as_float(raw.get("created_at"), now_ts),
@@ -786,6 +816,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "last_summary": _text(raw.get("last_summary")),
         "last_error": _text(raw.get("last_error")),
     }
+    if kind != "brief" and not _text(base.get("provider")):
+        return None
 
     if kind == "camera":
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
@@ -820,9 +852,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
         if not trigger_entities:
             trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
-        provider_token = _normalize_event_provider(
-            raw.get("provider") or base.get("provider") or _provider_from_rule_fields(raw) or "all"
-        )
+        provider_token = _concrete_rule_provider({**raw, "provider": base.get("provider")})
         if provider_token == "unifi_protect" and camera_entity:
             camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
             if camera_id:
@@ -967,9 +997,10 @@ def _rule_migration_score(rule: Dict[str, Any]) -> float:
 def _migrate_loaded_rules(
     redis_obj: Any,
     candidates: List[Tuple[str, Dict[str, Any], bool, float]],
+    invalid_fields: Optional[set[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     chosen_by_fingerprint: Dict[str, Tuple[str, Dict[str, Any], bool, float]] = {}
-    stale_fields: set[str] = set()
+    stale_fields: set[str] = set(invalid_fields or set())
 
     for field_name, normalized, needs_write, source_score in candidates:
         fingerprint = _rule_fingerprint(normalized)
@@ -1036,6 +1067,7 @@ def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
     if not isinstance(raw, dict):
         return {}
     candidates: List[Tuple[str, Dict[str, Any], bool, float]] = []
+    invalid_fields: set[str] = set()
     for field_name_raw, row in raw.items():
         field_name = _redis_field_text(field_name_raw)
         try:
@@ -1049,6 +1081,8 @@ def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
             payload["id"] = field_name
         normalized = _normalize_rule(payload)
         if not normalized:
+            if field_name:
+                invalid_fields.add(field_name)
             continue
         rule_id = _text(normalized.get("id"))
         needs_write = field_name != rule_id
@@ -1058,7 +1092,7 @@ def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
             except Exception:
                 needs_write = True
         candidates.append((field_name, normalized, needs_write, source_score))
-    return _migrate_loaded_rules(redis_obj, candidates)
+    return _migrate_loaded_rules(redis_obj, candidates, invalid_fields=invalid_fields)
 
 
 def _get_rule(client: Any, rule_id: str) -> Optional[Dict[str, Any]]:
@@ -2888,9 +2922,8 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "camera"
     provider = _rule_provider(rule)
-    camera_provider, camera_target = _split_provider_ref(camera, provider)
-    if camera_provider != "all":
-        provider = camera_provider
+    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
+    provider = snapshot_provider
     if not camera:
         raise ValueError("Camera rule is missing camera_entity.")
 
@@ -2914,13 +2947,13 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     ignore_vehicles = _bool(rule.get("ignore_vehicles"), False)
 
     try:
-        if provider == "unifi_protect":
+        if snapshot_provider == "unifi_protect":
             jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
-        elif provider == "homeassistant":
+        elif snapshot_provider == "homeassistant":
             ha = _ha_config()
             jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
         else:
-            raise ValueError(f"{_provider_label(provider)} does not expose camera snapshots to Awareness yet.")
+            raise ValueError(f"{_provider_label(snapshot_provider)} does not expose camera snapshots to Awareness yet.")
         summary = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -3017,9 +3050,8 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     camera = _text(rule.get("camera_entity"))
     area = _text(rule.get("area")) or "front door"
     provider = _rule_provider(rule)
-    camera_provider, camera_target = _split_provider_ref(camera, provider)
-    if camera_provider != "all":
-        provider = camera_provider
+    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
+    provider = snapshot_provider
     if not camera:
         raise ValueError("Doorbell rule is missing camera_entity.")
     vision = get_shared_vision_settings(
@@ -3034,13 +3066,13 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     tts_voice = _text(shared_tts.get("voice"))
     jpeg: bytes = b""
     try:
-        if provider == "unifi_protect":
+        if snapshot_provider == "unifi_protect":
             jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
-        elif provider == "homeassistant":
+        elif snapshot_provider == "homeassistant":
             ha = _ha_config()
             jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
         else:
-            raise ValueError(f"{_provider_label(provider)} does not expose doorbell camera snapshots to Awareness yet.")
+            raise ValueError(f"{_provider_label(snapshot_provider)} does not expose doorbell camera snapshots to Awareness yet.")
         spoken_line = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -3149,8 +3181,7 @@ async def _execute_entry_sensor_rule(
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
     camera = _text(rule.get("camera_entity"))
-    camera_provider, camera_target = _split_provider_ref(camera, provider)
-    snapshot_provider = camera_provider if camera_provider != "all" else provider
+    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
     entity_id = _text(event.get("entity_id")) or _text(rule.get("sensor_entity"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
@@ -5361,7 +5392,7 @@ def _build_rule_from_values(
     now_ts = time.time()
     previous = existing if isinstance(existing, dict) else {}
     explicit_provider = "provider" in values or "provider" in payload
-    provider_value = "homeassistant" if kind == "brief" else _normalize_event_provider(previous.get("provider") or "all")
+    provider_value = "homeassistant" if kind == "brief" else _concrete_rule_provider(previous)
     base: Dict[str, Any] = {
         "id": _text(previous.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -5515,10 +5546,14 @@ def _build_rule_from_values(
     if kind != "brief":
         inferred_provider = _provider_from_rule_fields(base)
         if explicit_provider:
-            provider_value = _normalize_event_provider(_value(values, payload, "provider", provider_value))
+            provider_value = _concrete_rule_provider(
+                {**base, "provider": _value(values, payload, "provider", provider_value)}
+            )
         elif inferred_provider:
             provider_value = inferred_provider
         base["provider"] = provider_value
+        if not _text(base.get("provider")):
+            raise ValueError("Select devices from a connected integration so Awareness can save the provider.")
     if kind == "doorbell":
         base["trigger_to_state"] = "on"
         base["trigger_attribute"] = ""
