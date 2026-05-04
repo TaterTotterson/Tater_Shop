@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
 
-__version__ = "1.4.10"
+__version__ = "1.4.11"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -4137,7 +4137,7 @@ def _hydra_filter_context(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _hydra_normalized_filter_args(raw: Dict[str, Any], original: Dict[str, Any]) -> Dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     out: Dict[str, Any] = {}
-    for key in ("area", "room", "location", "category", "provider", "source", "integration", "sensor", "query"):
+    for key in ("area", "room", "location", "category", "provider", "source", "integration", "sensor", "query", "date", "day"):
         value = source.get(key)
         if value is None:
             continue
@@ -4149,6 +4149,9 @@ def _hydra_normalized_filter_args(raw: Dict[str, Any], original: Dict[str, Any])
         out["limit"] = _hydra_limit(limit)
     if "limit" not in out and isinstance(original, dict) and original.get("limit") not in (None, ""):
         out["limit"] = _hydra_limit(original.get("limit"))
+    hours = source.get("hours", original.get("hours") if isinstance(original, dict) else None)
+    if hours not in (None, ""):
+        out["hours"] = _hydra_limit(hours, default=12)
     return out
 
 
@@ -4172,9 +4175,11 @@ async def _hydra_ai_normalize_environment_args(
     system_prompt = (
         "You normalize a user's natural-language request into Environment Core filters. "
         "Return only one JSON object. Do not answer the user. "
-        "Allowed keys: area, category, provider, sensor, query, limit. Use an empty string to omit a filter. "
+        "Allowed keys: area, category, provider, sensor, query, date, day, hours, limit. Use an empty string to omit a filter. "
         "Allowed categories include weather, condition, temperature, humidity, wind, rain, pressure, solar, air, lightning, battery, system, and other. "
         "Use category weather for broad current weather or conditions requests. "
+        "Use category forecast for forecasts, tomorrow, tonight, this week, rain chance later, or future weather requests. "
+        "For forecast requests, include date when the user gives or implies a specific YYYY-MM-DD date; otherwise leave date empty. "
         "Use provider only when the user clearly names a specific integration/provider. "
         "Use query only for a real sensor label/name the user asked for; do not put generic words like weather, current, conditions, outside, or local in query. "
         "Prefer the available areas, categories, providers, and sensor labels from the payload."
@@ -4224,8 +4229,114 @@ def _hydra_environment_payload(client: Any = None) -> Dict[str, Any]:
     }
 
 
+def _hydra_forecast_requested(args: Dict[str, Any]) -> bool:
+    return _clean_key(args.get("category") or args.get("type") or args.get("measurement")) == "forecast"
+
+
+def _hydra_forecast_summary(
+    *,
+    provider_label: str,
+    last_sample: str,
+    daily_rows: List[Dict[str, str]],
+    hourly_rows: List[Dict[str, str]],
+    date_filter: str = "",
+    stale: bool = False,
+) -> str:
+    if not daily_rows and not hourly_rows:
+        return f"{provider_label} forecast data is not available in Environment Core yet."
+    prefix = f"{provider_label} forecast was last updated {last_sample}" + (" and may be stale." if stale else ".")
+    if date_filter:
+        prefix += f" Matching date: {date_filter}."
+    pieces: List[str] = []
+    for row in daily_rows[:5]:
+        date_text = _text(row.get("date")) or "Forecast"
+        condition = _text(row.get("condition")) or "-"
+        high = _text(row.get("high")) or "-"
+        low = _text(row.get("low")) or "-"
+        rain = _text(row.get("rain")) or "-"
+        wind = _text(row.get("wind")) or "-"
+        pieces.append(f"{date_text}: {condition}, high {high}, low {low}, rain {rain}, wind {wind}")
+    if not pieces:
+        for row in hourly_rows[:8]:
+            time_text = _text(row.get("time")) or "Hour"
+            condition = _text(row.get("condition")) or "-"
+            temp = _text(row.get("temp")) or "-"
+            rain = _text(row.get("rain")) or "-"
+            wind = _text(row.get("wind")) or "-"
+            pieces.append(f"{time_text}: {condition}, {temp}, rain {rain}, wind {wind}")
+    return prefix + " " + "; ".join(pieces) + "."
+
+
+def _hydra_forecast_payload(args: Dict[str, Any], client: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else _load_settings(client)
+    provider = _clean_key(settings.get("forecast_provider")) or "weather_api"
+    provider_label = _provider_label(provider)
+    provider_snapshots = payload.get("provider_snapshots") if isinstance(payload.get("provider_snapshots"), dict) else {}
+    forecast_snapshot = provider_snapshots.get(provider) if isinstance(provider_snapshots.get(provider), dict) else {}
+    if provider != "weather_api":
+        return {
+            "tool": "environment_conditions",
+            "ok": False,
+            "forecast_provider": provider,
+            "forecast": {"provider": provider_label, "daily": [], "hourly": []},
+            "sources": payload.get("provider_status") or [],
+            "summary_for_user": f"{provider_label} does not expose forecast data to Environment Core yet.",
+        }
+    if not forecast_snapshot:
+        enabled = _as_bool(settings.get("weather_api_enabled"), False)
+        detail = "Enabled, waiting for forecast data." if enabled else "Enable WeatherAPI Forecast in Environment Core settings."
+        return {
+            "tool": "environment_conditions",
+            "ok": False,
+            "forecast_provider": provider,
+            "forecast": {"provider": provider_label, "daily": [], "hourly": []},
+            "sources": payload.get("provider_status") or [],
+            "summary_for_user": f"{provider_label} forecast data is not available yet. {detail}",
+        }
+
+    units = _weatherapi_units(client)
+    daily_rows = _weatherapi_daily_rows(forecast_snapshot, units=units)
+    date_filter = _text(args.get("date"))
+    if date_filter:
+        daily_rows = [row for row in daily_rows if _text(row.get("date")) == date_filter]
+    daily_limit = _hydra_limit(args.get("limit"), default=7)
+    hourly_limit = _hydra_limit(args.get("hours"), default=12)
+    daily_rows = daily_rows[:daily_limit]
+    hourly_rows = _weatherapi_hourly_rows(forecast_snapshot, units=units, limit=hourly_limit)
+    last = _age_label(forecast_snapshot.get("received_at"))
+    stale_after_s = int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES) * 60
+    received_at = _as_float(forecast_snapshot.get("received_at"))
+    stale = bool(received_at and (time.time() - float(received_at)) > stale_after_s)
+    return {
+        "tool": "environment_conditions",
+        "ok": True,
+        "stale": stale,
+        "last_sample": last,
+        "forecast_provider": provider,
+        "filters": {key: args.get(key) for key in ("category", "date", "day", "provider", "source", "integration", "query") if args.get(key)},
+        "forecast": {
+            "provider": provider_label,
+            "location": _text(forecast_snapshot.get("model")) or provider_label,
+            "units": units,
+            "daily": daily_rows,
+            "hourly": hourly_rows,
+        },
+        "sources": payload.get("provider_status") or [],
+        "summary_for_user": _hydra_forecast_summary(
+            provider_label=provider_label,
+            last_sample=last,
+            daily_rows=daily_rows,
+            hourly_rows=hourly_rows,
+            date_filter=date_filter,
+            stale=stale,
+        ),
+    }
+
+
 def _environment_conditions_kernel(args: Dict[str, Any], client: Any = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload if isinstance(payload, dict) else _hydra_environment_payload(client)
+    if _hydra_forecast_requested(args):
+        return _hydra_forecast_payload(args, client or redis_client, payload)
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
     if not snapshot:
         return {
@@ -4290,8 +4401,8 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "environment_conditions",
-            "description": "Read live local weather and environment conditions from Environment Core, including Ecowitt/weather station readings, WeatherAPI condition data, and selected integration sensors. Use this for current weather, temperature, humidity, wind, rain, and sensor readings.",
-            "usage": '{"function":"environment_conditions","arguments":{"request":"What is the weather outside right now?"}}',
+            "description": "Read live local weather, environment sensor readings, and WeatherAPI forecast data from Environment Core. Use this for current weather, temperature, humidity, wind, rain, rain chance, tomorrow/tonight/weekly forecasts, and selected sensor readings.",
+            "usage": '{"function":"environment_conditions","arguments":{"request":"What is tomorrow\'s forecast?"}}',
         },
         {
             "id": "environment_sensors",
