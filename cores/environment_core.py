@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
 
-__version__ = "1.4.11"
+__version__ = "1.4.13"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -26,68 +26,7 @@ CORE_SETTINGS = {
     "category": "Environment Core Settings",
     # Let Hydra answer from cached Environment Core readings even if the polling loop is stopped.
     "hydra_tools_require_running": False,
-    "required": {
-        "ECOWITT_PASSKEY": {
-            "label": "Ecowitt PASSKEY",
-            "type": "password",
-            "default": "",
-            "description": "Optional. If set, inbound Ecowitt uploads must include this PASSKEY.",
-        },
-        "ENVIRONMENT_ECOWITT_OUTDOOR_AREA": {
-            "label": "Ecowitt Outdoor Area",
-            "type": "text",
-            "default": "Outside",
-            "description": "Area label applied to outdoor Ecowitt readings.",
-        },
-        "ENVIRONMENT_ECOWITT_INDOOR_AREA": {
-            "label": "Ecowitt Indoor Area",
-            "type": "text",
-            "default": "Inside",
-            "description": "Area label applied to indoor Ecowitt readings.",
-        },
-        "ENVIRONMENT_INTEGRATION_POLL_SECONDS": {
-            "label": "Integration Poll Seconds",
-            "type": "number",
-            "default": "300",
-            "description": "How often the Environment Core polls selected integration sensors.",
-        },
-        "ENVIRONMENT_ENABLE_WEATHERAPI": {
-            "label": "Enable WeatherAPI Forecast",
-            "type": "checkbox",
-            "default": False,
-            "description": "When enabled, Environment Core polls the WeatherAPI.com integration for current conditions and forecast data.",
-        },
-        "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE": {
-            "label": "Current Card Readings Source",
-            "type": "select",
-            "default": "provider:ecowitt",
-            "description": "Integration or selected sensor used for measured values on the Current Conditions card.",
-        },
-        "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE": {
-            "label": "Current Card Artwork Source",
-            "type": "select",
-            "default": "provider:weather_api",
-            "description": "Integration or selected sensor used for sunny/rainy condition text and artwork.",
-        },
-        "ENVIRONMENT_FORECAST_PROVIDER": {
-            "label": "Forecast Provider",
-            "type": "select",
-            "default": "weather_api",
-            "description": "Forecast provider shown in the Forecast tab.",
-        },
-        "ENVIRONMENT_HISTORY_LIMIT": {
-            "label": "History Samples",
-            "type": "number",
-            "default": "288",
-            "description": "Maximum recent snapshots retained in Redis.",
-        },
-        "ENVIRONMENT_STALE_AFTER_MINUTES": {
-            "label": "Stale After Minutes",
-            "type": "number",
-            "default": "30",
-            "description": "UI marks readings stale after this many minutes without a new upload.",
-        },
-    },
+    "required": {},
 }
 
 CORE_WEBUI_TAB = {
@@ -252,7 +191,6 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
             minimum=30,
             maximum=86400,
         ),
-        "weather_api_enabled": _as_bool(raw.get("ENVIRONMENT_ENABLE_WEATHERAPI"), False),
         "current_live_source": _text(raw.get("ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE")) or "provider:ecowitt",
         "current_condition_source": _text(raw.get("ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE")) or "provider:weather_api",
         "forecast_provider": _clean_key(raw.get("ENVIRONMENT_FORECAST_PROVIDER")) or "weather_api",
@@ -272,21 +210,41 @@ def _settings_field_rows(
     provider_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
     selected_sensors: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    provider_snapshots = provider_snapshots if isinstance(provider_snapshots, dict) else {}
-    selected_sensors = selected_sensors if isinstance(selected_sensors, list) else []
+    return _display_settings_field_rows(
+        settings,
+        provider_snapshots=provider_snapshots,
+        selected_sensors=selected_sensors,
+    ) + _retention_settings_field_rows(settings)
+
+
+def _ecowitt_settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
         {
+            "key": "ECOWITT_PASSKEY",
+            "label": "Ecowitt PASSKEY",
+            "type": "password",
+            "value": _text(settings.get("ecowitt_passkey")),
+            "description": "Optional. If set, inbound Ecowitt uploads must include this PASSKEY.",
+        },
+        {
             "key": "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
-            "label": "Ecowitt Outdoor Area",
+            "label": "Outdoor Area",
             "type": "text",
             "value": _text(settings.get("ecowitt_outdoor_area")) or "Outside",
+            "description": "Area label applied to outdoor Ecowitt readings.",
         },
         {
             "key": "ENVIRONMENT_ECOWITT_INDOOR_AREA",
-            "label": "Ecowitt Indoor Area",
+            "label": "Indoor Area",
             "type": "text",
             "value": _text(settings.get("ecowitt_indoor_area")) or "Inside",
+            "description": "Area label applied to indoor Ecowitt readings.",
         },
+    ]
+
+
+def _source_runtime_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
         {
             "key": "ENVIRONMENT_INTEGRATION_POLL_SECONDS",
             "label": "Poll Seconds",
@@ -294,22 +252,27 @@ def _settings_field_rows(
             "value": int(settings.get("integration_poll_seconds") or DEFAULT_INTEGRATION_POLL_SECONDS),
             "min": 30,
             "max": 86400,
-            "description": "How often selected integration sensors are polled by the running core.",
+            "description": "How often Environment Core polls selected integration sensors and configured forecast providers.",
         },
-        {
-            "key": "ENVIRONMENT_ENABLE_WEATHERAPI",
-            "label": "WeatherAPI Forecast",
-            "type": "checkbox",
-            "value": bool(settings.get("weather_api_enabled")),
-            "description": "Poll WeatherAPI.com through Settings > Integrations and show forecast data in Environment Core.",
-        },
+    ]
+
+
+def _display_settings_field_rows(
+    settings: Dict[str, Any],
+    *,
+    provider_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+    selected_sensors: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    provider_snapshots = provider_snapshots if isinstance(provider_snapshots, dict) else {}
+    selected_sensors = selected_sensors if isinstance(selected_sensors, list) else []
+    return [
         {
             "key": "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
             "label": "Current Card Readings Source",
             "type": "select",
             "value": _text(settings.get("current_live_source")) or "provider:ecowitt",
             "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=False),
-            "description": "Choose the measured values for the card: temperature, humidity, wind, and feels-like.",
+            "description": "Choose any provider or selected sensor source for the card's measured values: temperature, humidity, wind, and feels-like.",
         },
         {
             "key": "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
@@ -317,7 +280,7 @@ def _settings_field_rows(
             "type": "select",
             "value": _text(settings.get("current_condition_source")) or "provider:weather_api",
             "options": _environment_display_source_options(provider_snapshots, selected_sensors, include_condition_only=True),
-            "description": "Choose the source for condition text and the sunny/rainy/cloudy card artwork.",
+            "description": "Choose the source for condition text and sunny/rainy/cloudy artwork. WeatherAPI.com is the default condition provider.",
         },
         {
             "key": "ENVIRONMENT_FORECAST_PROVIDER",
@@ -325,8 +288,13 @@ def _settings_field_rows(
             "type": "select",
             "value": _text(settings.get("forecast_provider")) or "weather_api",
             "options": _forecast_provider_options(provider_snapshots),
-            "description": "WeatherAPI.com is the only forecast provider right now; this selector is ready for additional providers.",
+            "description": "Choose the forecast-capable provider. WeatherAPI.com is the only option right now, but this is ready for more providers.",
         },
+    ]
+
+
+def _retention_settings_field_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
         {
             "key": "ENVIRONMENT_STALE_AFTER_MINUTES",
             "label": "Stale After Minutes",
@@ -334,6 +302,7 @@ def _settings_field_rows(
             "value": int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES),
             "min": 1,
             "max": 10080,
+            "description": "How long a source can go without a new sample before Environment Core marks it stale.",
         },
         {
             "key": "ENVIRONMENT_HISTORY_LIMIT",
@@ -342,6 +311,7 @@ def _settings_field_rows(
             "value": int(settings.get("history_limit") or DEFAULT_HISTORY_LIMIT),
             "min": 1,
             "max": 10000,
+            "description": "Maximum recent environment snapshots retained for graphs and history.",
         },
     ]
 
@@ -1934,9 +1904,6 @@ def _normalize_weatherapi_forecast(data: Dict[str, Any], settings: Dict[str, Any
 
 
 def _poll_weather_api(client: Any = None) -> Dict[str, Any]:
-    settings = _load_settings(client)
-    if not _as_bool(settings.get("weather_api_enabled"), False):
-        return {"ok": True, "provider": "weather_api", "reading_count": 0, "message": "WeatherAPI.com forecast is disabled."}
     configured, message = _weather_api_configured(client)
     if not configured:
         return {"ok": False, "provider": "weather_api", "message": message}
@@ -2001,6 +1968,7 @@ def _poll_weather_api(client: Any = None) -> Dict[str, Any]:
 def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     settings = _load_settings(client)
+    forecast_provider = _clean_key(settings.get("forecast_provider")) or "weather_api"
     selected_providers = {
         _clean_key(row.get("provider"))
         for row in _load_selected_sensors(client)
@@ -2015,7 +1983,7 @@ def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
     for provider, poller in pollers.items():
         if provider in selected_providers:
             results.append(poller(client))
-    if _as_bool(settings.get("weather_api_enabled"), False):
+    if forecast_provider == "weather_api":
         results.append(_poll_weather_api(client))
     if not results:
         return {"ok": True, "message": "No integration sensors or forecast providers are enabled.", "results": []}
@@ -2217,7 +2185,8 @@ def _provider_status_rows(
     hue_configured, hue_message = _hue_configured(client)
     ha_configured, ha_message = _homeassistant_configured(client)
     weather_configured, weather_message = _weather_api_configured(client)
-    weather_enabled = _as_bool(_settings.get("weather_api_enabled"), False)
+    forecast_provider = _clean_key(_settings.get("forecast_provider")) or "weather_api"
+    weather_selected = forecast_provider == "weather_api"
     selected = _load_selected_sensors(client)
     selected_counts: Dict[str, int] = {}
     for row in selected:
@@ -2254,8 +2223,8 @@ def _provider_status_rows(
         {
             "provider": "weather_api",
             "configured": weather_configured,
-            "setup": "Enabled" if weather_enabled and weather_configured else "Disabled" if not weather_enabled else weather_message,
-            "selected": "Enabled" if weather_enabled else "Disabled",
+            "setup": "Configured" if weather_configured else weather_message,
+            "selected": "Forecast Provider" if weather_selected else "Not selected",
         },
     ]
     rows: List[Dict[str, str]] = []
@@ -3099,10 +3068,10 @@ def _environment_manager_ui(
     candidate_updated_at = candidate_cache.get("updated_at")
     provider_summaries = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
     weather_snapshot = provider_snapshots.get("weather_api") or {}
-    weather_enabled = _as_bool(settings.get("weather_api_enabled"), False)
     forecast_provider = _clean_key(settings.get("forecast_provider")) or "weather_api"
     forecast_snapshot = provider_snapshots.get(forecast_provider) or {}
-    forecast_enabled = weather_enabled if forecast_provider == "weather_api" else False
+    forecast_configured = _weather_api_configured(client)[0] if forecast_provider == "weather_api" else False
+    forecast_enabled = forecast_provider == "weather_api" and forecast_configured
     weather_units = _weatherapi_units(client)
     source_count = len(provider_summaries) if provider_summaries else (1 if snapshot else 0)
     grouped = _readings_by_category(snapshot)
@@ -3433,15 +3402,15 @@ def _environment_manager_ui(
             "subtitle": (
                 f"Last forecast {_age_label(forecast_snapshot.get('received_at'))}"
                 if forecast_snapshot
-                else "Enabled, waiting for forecast" if forecast_enabled else "Disabled"
+                else "Ready, waiting for forecast" if forecast_enabled else "Needs setup"
             ),
             "detail": (
                 _reading_display(forecast_snapshot, "weather_api_condition")
                 if forecast_snapshot
-                else f"Enable {_provider_label(forecast_provider)} in Environment Core settings and configure it in Settings > Integrations."
+                else f"Configure {_provider_label(forecast_provider)} in Settings > Integrations."
             ),
             "hero_badges": [
-                {"label": "Enabled" if forecast_enabled else "Disabled", "tone": "good" if forecast_enabled else "muted"},
+                {"label": "Ready" if forecast_enabled else "Needs Setup", "tone": "good" if forecast_enabled else "warning"},
                 {
                     "label": _text(forecast_snapshot.get("model")) or _provider_label(forecast_provider),
                     "tone": "muted",
@@ -3542,10 +3511,10 @@ def _environment_manager_ui(
             "run_label": "Poll Forecast",
         },
         {
-            "id": "settings:sources",
-            "group": "settings",
-            "title": "Environment Sources",
-            "subtitle": "Core settings",
+            "id": "source:runtime",
+            "group": "source",
+            "title": "Integration Sources",
+            "subtitle": "Polling and status",
             "detail": "Configured integrations contribute readings after their sensors are added to Environment Core.",
             "sections": [
                 {
@@ -3570,13 +3539,9 @@ def _environment_manager_ui(
                     ],
                 },
                 {
-                    "label": "Settings",
+                    "label": "Polling & Forecast",
                     "inline": True,
-                    "fields": _settings_field_rows(
-                        settings,
-                        provider_snapshots=provider_snapshots,
-                        selected_sensors=selected_sensors,
-                    ),
+                    "fields": _source_runtime_field_rows(settings),
                 },
             ],
             "save_action": "environment_save_settings",
@@ -3585,8 +3550,33 @@ def _environment_manager_ui(
             "run_label": "Poll Now",
         },
         {
-            "id": "settings:discovery",
-            "group": "settings",
+            "id": "source:ecowitt",
+            "group": "source",
+            "title": "Ecowitt Upload Target",
+            "subtitle": "Custom Server receiver",
+            "detail": "Configure WS View Plus or the Ecowitt web UI to use Ecowitt protocol and this Tater path.",
+            "sections": [
+                {
+                    "label": "Receiver",
+                    "inline": True,
+                    "fields": [
+                        {"key": "path", "label": "Path", "type": "text", "value": webhook_path, "read_only": True},
+                        {"key": "method", "label": "Method", "type": "text", "value": "POST", "read_only": True},
+                        {"key": "protocol", "label": "Protocol", "type": "text", "value": "Ecowitt", "read_only": True},
+                    ],
+                },
+                {
+                    "label": "Labels & Security",
+                    "inline": True,
+                    "fields": _ecowitt_settings_field_rows(settings),
+                },
+            ],
+            "save_action": "environment_save_settings",
+            "save_label": "Save Ecowitt",
+        },
+        {
+            "id": "source:discovery",
+            "group": "source",
             "title": "Sensor Discovery",
             "subtitle": f"{len(candidate_items)} candidate{'s' if len(candidate_items) != 1 else ''}",
             "detail": (
@@ -3621,22 +3611,40 @@ def _environment_manager_ui(
             "run_label": "Discover Sensors",
         },
         {
-            "id": "setup",
-            "group": "source",
-            "title": "Ecowitt Upload Target",
-            "subtitle": "Custom Server receiver",
-            "detail": "Configure WS View Plus or the Ecowitt web UI to use Ecowitt protocol and this Tater path.",
+            "id": "settings:display",
+            "group": "settings",
+            "title": "Display & Forecast",
+            "subtitle": "Overview card sources",
+            "detail": "Choose which sources drive the current conditions card and forecast panels.",
             "sections": [
                 {
-                    "label": "Receiver",
+                    "label": "Card Sources",
                     "inline": True,
-                    "fields": [
-                        {"key": "path", "label": "Path", "type": "text", "value": webhook_path, "read_only": True},
-                        {"key": "method", "label": "Method", "type": "text", "value": "POST", "read_only": True},
-                        {"key": "protocol", "label": "Protocol", "type": "text", "value": "Ecowitt", "read_only": True},
-                    ],
+                    "fields": _display_settings_field_rows(
+                        settings,
+                        provider_snapshots=provider_snapshots,
+                        selected_sensors=selected_sensors,
+                    ),
                 }
             ],
+            "save_action": "environment_save_settings",
+            "save_label": "Save Display",
+        },
+        {
+            "id": "settings:retention",
+            "group": "settings",
+            "title": "History & Freshness",
+            "subtitle": "Graphs and stale indicators",
+            "detail": "Control how long readings stay fresh and how much history is kept for graphs.",
+            "sections": [
+                {
+                    "label": "Storage",
+                    "inline": True,
+                    "fields": _retention_settings_field_rows(settings),
+                }
+            ],
+            "save_action": "environment_save_settings",
+            "save_label": "Save History",
             "run_action": "environment_clear_history",
             "run_label": "Clear History",
             "run_confirm": "Clear Environment Core weather history?",
@@ -3822,6 +3830,7 @@ def _action_values(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
     values = _action_values(payload)
     text_keys = (
+        "ECOWITT_PASSKEY",
         "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
         "ENVIRONMENT_ECOWITT_INDOOR_AREA",
         "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
@@ -3833,7 +3842,7 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
         "ENVIRONMENT_STALE_AFTER_MINUTES": (DEFAULT_STALE_AFTER_MINUTES, 1, 10080),
         "ENVIRONMENT_HISTORY_LIMIT": (DEFAULT_HISTORY_LIMIT, 1, 10000),
     }
-    bool_keys = ("ENVIRONMENT_ENABLE_WEATHERAPI",)
+    bool_keys: Tuple[str, ...] = ()
     mapping: Dict[str, str] = {}
     for key in text_keys:
         if key in values:
@@ -4283,8 +4292,8 @@ def _hydra_forecast_payload(args: Dict[str, Any], client: Any, payload: Dict[str
             "summary_for_user": f"{provider_label} does not expose forecast data to Environment Core yet.",
         }
     if not forecast_snapshot:
-        enabled = _as_bool(settings.get("weather_api_enabled"), False)
-        detail = "Enabled, waiting for forecast data." if enabled else "Enable WeatherAPI Forecast in Environment Core settings."
+        configured, message = _weather_api_configured(client)
+        detail = "Ready, waiting for forecast data." if configured else message
         return {
             "tool": "environment_conditions",
             "ok": False,
@@ -4474,11 +4483,13 @@ def run(stop_event: Optional[object] = None) -> None:
         try:
             settings = _load_settings(redis_client)
             poll_seconds = int(settings.get("integration_poll_seconds") or DEFAULT_INTEGRATION_POLL_SECONDS)
+            forecast_provider = _clean_key(settings.get("forecast_provider")) or "weather_api"
+            forecast_ready = forecast_provider == "weather_api" and _weather_api_configured(redis_client)[0]
             integrations_enabled = any(
                 _clean_key(row.get("provider")) in {"unifi_protect", "ecobee_homekit", "hue", "homeassistant"}
                 and _as_bool(row.get("enabled"), True)
                 for row in _load_selected_sensors(redis_client)
-            ) or _as_bool(settings.get("weather_api_enabled"), False)
+            ) or forecast_ready
             now_ts = time.time()
             if integrations_enabled and now_ts - last_integration_poll >= poll_seconds:
                 last_integration_poll = now_ts
