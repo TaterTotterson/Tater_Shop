@@ -26,13 +26,16 @@ from helpers import (
     redis_client,
 )
 from admin_gate import (
+    admin_denial_message,
     is_admin_only_plugin,
+    origin_is_admin,
+    resolve_admin_status,
 )
 from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 
 load_dotenv()
@@ -57,12 +60,6 @@ PORTAL_SETTINGS = {
             "type": "string",
             "default": "",
             "description": "Your Discord bot token",
-        },
-        "admin_user_id": {
-            "label": "Admin User ID",
-            "type": "string",
-            "default": "",
-            "description": "User ID allowed to DM the bot",
         },
         "response_channel_ids_by_guild": {
             "label": "Response Channel IDs By Guild",
@@ -681,14 +678,12 @@ class discord_portal(commands.Bot):
     def __init__(
         self,
         llm_client,
-        admin_user_id,
         response_channel_ids_by_guild=None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.llm = llm_client
-        self.admin_user_id = admin_user_id
         self.response_channel_ids_by_guild: dict[int, set[int]] = {}
         self._response_channel_map_raw_cache = serialize_response_channel_map(response_channel_ids_by_guild or {})
         self._response_channel_last_refresh = 0.0
@@ -773,14 +768,6 @@ class discord_portal(commands.Bot):
             if self.is_response_channel(cid, guild_id=guild_id):
                 return True
         return False
-
-    def _admin_allowed(self, user_id: int | None) -> bool:
-        if not self.admin_user_id:
-            return False
-        try:
-            return int(user_id or 0) == int(self.admin_user_id)
-        except Exception:
-            return False
 
     async def _send_notify_attachment(self, channel, attachment: dict):
         kind = str((attachment or {}).get("type") or "file").strip().lower() or "file"
@@ -939,7 +926,7 @@ class discord_portal(commands.Bot):
             pass
         guild_override_count = len(self.response_channel_ids_by_guild)
         logger.info(
-            f"Bot is ready. Admin: {self.admin_user_id}, "
+            "Bot is ready. People-admin gate enabled, "
             f"Guild-specific response configs: {guild_override_count}"
         )
 
@@ -1086,11 +1073,28 @@ class discord_portal(commands.Bot):
                 user_id=str(message.author.id),
             )
 
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        origin = {
+            "platform": "discord",
+            "channel_id": str(message.channel.id),
+            "guild_id": str(message.guild.id) if message.guild else None,
+            "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
+            "user": message.author.display_name or message.author.name,
+            "user_id": str(message.author.id),
+            "chat_type": "dm" if is_dm else "channel",
+            "dm_user_id": str(message.author.id) if is_dm else None,
+            "request_id": str(message.id),
+        }
+        if input_artifacts:
+            origin["input_artifacts"] = [dict(item) for item in input_artifacts]
+        origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        resolve_admin_status(platform="discord", origin=origin, redis_client=redis_client)
+
         # -------------------------
         # Permission checks
         # -------------------------
-        if isinstance(message.channel, discord.DMChannel):
-            if message.author.id != self.admin_user_id:
+        if is_dm:
+            if not origin_is_admin("discord", origin, redis_client):
                 return
         else:
             self._refresh_response_channel_map_from_redis()
@@ -1106,22 +1110,7 @@ class discord_portal(commands.Bot):
 
         async with safe_typing(message.channel):
             try:
-                is_dm = isinstance(message.channel, discord.DMChannel)
                 scope_value = f"dm:{message.author.id}" if is_dm else f"channel:{message.channel.id}"
-                origin = {
-                    "platform": "discord",
-                    "channel_id": str(message.channel.id),
-                    "guild_id": str(message.guild.id) if message.guild else None,
-                    "channel": f"#{message.channel.name}" if getattr(message.channel, "name", None) else None,
-                    "user": message.author.display_name or message.author.name,
-                    "user_id": str(message.author.id),
-                    "chat_type": "dm" if is_dm else "channel",
-                    "dm_user_id": str(message.author.id) if is_dm else None,
-                    "request_id": str(message.id),
-                }
-                if input_artifacts:
-                    origin["input_artifacts"] = [dict(item) for item in input_artifacts]
-                origin = {k: v for k, v in origin.items() if v not in (None, "")}
 
                 async def _wait_callback(func_name, plugin_obj, wait_text="", wait_payload=None):
                     del plugin_obj
@@ -1142,19 +1131,15 @@ class discord_portal(commands.Bot):
                     if is_admin_only_plugin(func_name):
                         needs_admin = True
 
-                    if needs_admin and not self._admin_allowed(getattr(message.author, "id", None)):
+                    if needs_admin and not origin_is_admin("discord", origin, redis_client):
                         plugin_obj = merged_registry.get(func_name)
                         pretty = verba_display_name(plugin_obj) if plugin_obj else func_name
-                        msg = (
-                            "This tool is restricted to the configured admin user on Discord."
-                            if self.admin_user_id
-                            else "This tool is disabled because no Discord admin user is configured."
-                        )
+                        msg = admin_denial_message("discord", origin, redis_client)
                         return action_failure(
                             code="admin_only",
                             message=f"{pretty}: {msg}",
                             needs=[],
-                            say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                            say_hint="Explain that this tool is restricted to People marked as admin.",
                         )
                     return None
 
@@ -1258,6 +1243,19 @@ class AdminCommands(commands.Cog):
 
     @app_commands.command(name="wipe", description="Clear chat history for this channel.")
     async def wipe(self, interaction: discord.Interaction):
+        origin = {
+            "platform": "discord",
+            "channel_id": str(getattr(getattr(interaction, "channel", None), "id", "") or ""),
+            "guild_id": str(getattr(getattr(interaction, "guild", None), "id", "") or ""),
+            "user": getattr(getattr(interaction, "user", None), "display_name", "")
+            or getattr(getattr(interaction, "user", None), "name", ""),
+            "user_id": str(getattr(getattr(interaction, "user", None), "id", "") or ""),
+            "request_id": str(getattr(interaction, "id", "") or time.time()),
+        }
+        origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        if not origin_is_admin("discord", origin, redis_client):
+            await interaction.response.send_message(admin_denial_message("discord", origin, redis_client), ephemeral=True)
+            return
         try:
             clear_channel_history(interaction.channel.id)
             await interaction.response.send_message("🧠 Wait What!?! What Just Happened!?!😭")
@@ -1272,7 +1270,6 @@ async def setup_commands(client: commands.Bot):
 
 def run(stop_event=None):
     token = redis_client.hget(DISCORD_SETTINGS_KEY, "discord_token")
-    admin_id = redis_client.hget(DISCORD_SETTINGS_KEY, "admin_user_id")
     response_channel_ids_by_guild_raw = redis_client.hget(
         DISCORD_SETTINGS_KEY, RESPONSE_CHANNEL_MAP_FIELD
     )
@@ -1280,21 +1277,14 @@ def run(stop_event=None):
     llm_client = get_llm_client_from_env()
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
 
-    if not (token and admin_id):
+    if not token:
         print("⚠️ Missing Discord settings in Redis. Bot not started.")
-        return
-
-    try:
-        admin_user_id = int(str(admin_id).strip())
-    except Exception:
-        print("⚠️ Invalid Discord admin_user_id in Redis. Bot not started.")
         return
 
     response_channel_ids_by_guild = parse_response_channel_map(response_channel_ids_by_guild_raw)
 
     client = discord_portal(
         llm_client=llm_client,
-        admin_user_id=admin_user_id,
         response_channel_ids_by_guild=response_channel_ids_by_guild,
         command_prefix="!",
         intents=discord.Intents.all(),

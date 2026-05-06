@@ -25,12 +25,15 @@ from helpers import (
     redis_client as shared_redis_client,
 )
 from admin_gate import (
+    admin_denial_message,
     is_admin_only_plugin,
+    origin_is_admin,
+    resolve_admin_status,
 )
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -961,23 +964,6 @@ class TelegramPlatform:
             candidates.add(sender_username)
         return bool(candidates & self.allowed_dm_users)
 
-    def _admin_user_allowed(self, sender: Dict[str, Any]) -> bool:
-        if not self.allowed_dm_users:
-            return False
-
-        sender_id = str((sender or {}).get("id") or "").strip()
-        sender_username = _normalize_user_ref((sender or {}).get("username"))
-        sender_first = _normalize_user_ref((sender or {}).get("first_name"))
-
-        candidates = set()
-        if sender_id:
-            candidates.add(sender_id)
-        if sender_username:
-            candidates.add(sender_username)
-        if sender_first:
-            candidates.add(sender_first)
-        return bool(candidates & self.allowed_dm_users)
-
     async def _send_plugin_result(self, chat_id: str, result: Any):
         async def emit_item(item: Any):
             if item is None:
@@ -1115,6 +1101,7 @@ class TelegramPlatform:
             if isinstance(input_artifacts, list) and input_artifacts:
                 origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
             origin = {k: v for k, v in origin.items() if v not in (None, "")}
+            resolve_admin_status(platform="telegram", origin=origin, redis_client=redis_client)
 
             async def _wait_callback(func_name, plugin_obj, wait_text="", wait_payload=None):
                 del plugin_obj
@@ -1135,17 +1122,13 @@ class TelegramPlatform:
                 if is_admin_only_plugin(func_name):
                     needs_admin = True
 
-                if needs_admin and not self._admin_user_allowed(sender):
-                    msg = (
-                        "This tool is restricted to the configured admin user on Telegram."
-                        if self.allowed_dm_users
-                        else "This tool is disabled because no Telegram admin user is configured."
-                    )
+                if needs_admin and not origin_is_admin("telegram", origin, redis_client):
+                    msg = admin_denial_message("telegram", origin, redis_client)
                     return action_failure(
                         code="admin_only",
                         message=msg,
                         needs=[],
-                        say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                        say_hint="Explain that this tool is restricted to People marked as admin.",
                     )
                 return None
 

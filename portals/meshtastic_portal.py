@@ -16,11 +16,13 @@ import requests
 from dotenv import load_dotenv
 
 import verba_registry as pr
+from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from helpers import get_llm_client_from_env, redis_client
 from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
+from verba_result import action_failure
 
-__version__ = "0.1.4"
+__version__ = "0.1.6"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -454,11 +456,22 @@ def _history_key(session_key: str) -> str:
     return f"tater:meshtastic:{session_key}:history"
 
 
-def _save_history(session_key: str, role: str, content: Any) -> None:
+def _save_history(
+    session_key: str,
+    role: str,
+    content: Any,
+    *,
+    username: str = "",
+    user_id: str = "",
+) -> None:
     max_items = _global_history_store_limit()
     ttl_seconds = max(60, _get_int_setting("session_ttl_seconds", DEFAULT_SESSION_TTL_SECONDS))
     key = _history_key(session_key)
     item = {"role": str(role or "user").strip() or "user", "content": content}
+    if username:
+        item["username"] = username
+    if user_id:
+        item["user_id"] = user_id
     payload = json.dumps(item, ensure_ascii=False)
     pipe = redis_client.pipeline()
     pipe.rpush(key, payload)
@@ -796,6 +809,10 @@ def _mesh_origin_for_message(message: Dict[str, Any]) -> Dict[str, Any]:
         "user": str(sender.get("long_name") or sender.get("short_name") or sender.get("node_id") or "mesh_user").strip(),
         "request_id": request_id,
     }
+    if origin.get("node_id"):
+        origin["user_id"] = origin.get("node_id")
+    if origin.get("user"):
+        origin["username"] = origin.get("user")
     return {k: v for k, v in origin.items() if v not in (None, "")}
 
 
@@ -1042,16 +1059,33 @@ class MeshtasticPortalRuntime:
 
         session_key = _session_key_for_message(message)
         effective_request = _sanitize_request_text(text)
-        _save_history(session_key, "user", effective_request)
+        origin = _mesh_origin_for_message(message)
+        resolve_admin_status(platform="meshtastic", origin=origin, redis_client=redis_client)
+        _save_history(
+            session_key,
+            "user",
+            effective_request,
+            username=str(origin.get("username") or origin.get("user") or "").strip(),
+            user_id=str(origin.get("user_id") or origin.get("node_id") or "").strip(),
+        )
 
         history_limit = _global_history_llm_limit()
         history = _load_history(session_key, history_limit)
         registry = dict(pr.get_verba_registry_snapshot() or {})
-        origin = _mesh_origin_for_message(message)
         scope_value = f"pm:{session_key}" if _is_direct_message(message) else f"chan:{session_key}"
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
 
         try:
+            def _admin_guard(func_name: str):
+                if is_admin_only_plugin(func_name) and not origin_is_admin("meshtastic", origin, redis_client):
+                    return action_failure(
+                        code="admin_only",
+                        message=admin_denial_message("meshtastic", origin, redis_client),
+                        needs=[],
+                        say_hint="Explain that this tool is restricted to People marked as admin.",
+                    )
+                return None
+
             result = await run_hydra_turn(
                 llm_client=self.llm_client,
                 platform="meshtastic",
@@ -1062,6 +1096,7 @@ class MeshtasticPortalRuntime:
                 user_text=effective_request,
                 scope=scope_value,
                 origin=origin,
+                admin_guard=_admin_guard,
                 redis_client=redis_client,
                 max_rounds=agent_max_rounds,
                 max_tool_calls=agent_max_tool_calls,

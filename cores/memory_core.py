@@ -6,6 +6,7 @@ import re
 import time
 import textwrap
 import hashlib
+import importlib.util
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -692,6 +693,7 @@ forget_fact_keys = _memory_store_module["forget_fact_keys"]
 load_doc = _memory_store_module["load_doc"]
 load_memory_doc = _memory_store_module["load_doc"]
 load_memory_core_doc = _memory_store_module["load_doc"]
+identity_doc_key = _memory_store_module["identity_doc_key"]
 merge_doc_facts = _memory_store_module["merge_doc_facts"]
 merge_observation = _memory_store_module["merge_observation"]
 normalize_fact_key = _memory_store_module["normalize_fact_key"]
@@ -744,7 +746,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.20"
+__version__ = "1.0.23"
 
 
 load_dotenv()
@@ -814,8 +816,8 @@ CORE_SETTINGS = {
             "type": "checkbox",
             "default": True,
             "description": (
-                "Enable writes to durable user docs. With auto-link on: mem:user:identity:{identity_id}; "
-                "with auto-link off: mem:user:{platform}:{user_id}."
+                "Enable writes to durable user docs. Linked People use mem:user:identity:{person_id}; "
+                "unlinked portal users use mem:user:{platform}:{user_id}."
             ),
         },
         "write_room_memory": {
@@ -824,11 +826,11 @@ CORE_SETTINGS = {
             "default": True,
             "description": "Enable writes to mem:room:{platform}:{room_id}.",
         },
-        "auto_link_identities": {
-            "label": "Auto-link Identity by Name",
+        "use_people_identities": {
+            "label": "Use People Identity Links",
             "type": "checkbox",
-            "default": False,
-            "description": "Automatically map matching usernames across platforms to one shared identity profile.",
+            "default": True,
+            "description": "Use Settings > People links to merge selected portal users into one master memory profile.",
         },
     },
 }
@@ -846,6 +848,7 @@ _SUPPORTED_PLATFORMS = (
     "telegram",
     "irc",
     "matrix",
+    "meshtastic",
     "homeassistant",
     "homekit",
     "xbmc",
@@ -857,6 +860,7 @@ _AUTO_STATE_KEYS = {
     "telegram": "telegram_portal_running",
     "irc": "irc_portal_running",
     "matrix": "matrix_portal_running",
+    "meshtastic": "meshtastic_portal_running",
     "homekit": "homekit_portal_running",
     "xbmc": "xbmc_portal_running",
 }
@@ -866,6 +870,7 @@ _HISTORY_SCAN_SPECS = {
     "telegram": ("tater:telegram:*:history", "tater:telegram:", ":history"),
     "irc": ("tater:irc:*:history", "tater:irc:", ":history"),
     "matrix": ("tater:matrix:*:history", "tater:matrix:", ":history"),
+    "meshtastic": ("tater:meshtastic:*:history", "tater:meshtastic:", ":history"),
     "homeassistant": ("tater:ha:session:*:history", "tater:ha:session:", ":history"),
     "homekit": ("tater:homekit:session:*:history", "tater:homekit:session:", ":history"),
     "xbmc": ("tater:xbmc:session:*:history", "tater:xbmc:session:", ":history"),
@@ -1221,6 +1226,238 @@ def _as_bool(value: Any, default: bool) -> bool:
     return bool(default)
 
 
+_PEOPLE_API_MODULE: Any = None
+_PEOPLE_API_UNAVAILABLE = False
+
+
+def _people_api_module() -> Any:
+    global _PEOPLE_API_MODULE, _PEOPLE_API_UNAVAILABLE
+    if _PEOPLE_API_MODULE is not None:
+        return _PEOPLE_API_MODULE
+    if _PEOPLE_API_UNAVAILABLE:
+        return None
+
+    try:
+        import people as people_module  # type: ignore
+
+        _PEOPLE_API_MODULE = people_module
+        return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "Tater" / "people.py"
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location("tater_people_api", candidate)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                _PEOPLE_API_MODULE = module
+                return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+
+    _PEOPLE_API_UNAVAILABLE = True
+    return None
+
+
+def _people_person_rows(redis_obj: Any) -> List[Dict[str, Any]]:
+    module = _people_api_module()
+    load_store = getattr(module, "load_store", None) if module is not None else None
+    if not callable(load_store):
+        return []
+    try:
+        store = load_store(redis_obj)
+    except Exception:
+        return []
+    people = list(store.get("people") or []) if isinstance(store, dict) else []
+    rows = [dict(row) for row in people if isinstance(row, dict)]
+    rows.sort(key=lambda row: (_as_text(row.get("display_name")).strip().lower(), _as_text(row.get("id")).strip()))
+    return rows
+
+
+def _people_person_name(person_id: Any, redis_obj: Any) -> str:
+    wanted = _as_text(person_id).strip()
+    if not wanted:
+        return ""
+    for person in _people_person_rows(redis_obj):
+        if _as_text(person.get("id")).strip() == wanted:
+            return _as_text(person.get("display_name")).strip()
+    return ""
+
+
+def _people_person_options(redis_obj: Any) -> List[Dict[str, str]]:
+    options = [{"value": "", "label": "Choose a person"}]
+    for person in _people_person_rows(redis_obj):
+        person_id = _as_text(person.get("id")).strip()
+        display_name = _as_text(person.get("display_name")).strip()
+        if not person_id or not display_name:
+            continue
+        options.append({"value": person_id, "label": display_name})
+    return options
+
+
+def _people_origin_alias_identity(origin: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    if not isinstance(origin, dict):
+        return "", ""
+    resolution = origin.get("people_resolution")
+    if isinstance(resolution, dict) and _as_text(resolution.get("match_type")).strip() != "alias":
+        return "", ""
+    person_id = _as_text(origin.get("master_user_id") or origin.get("person_id")).strip()
+    if not person_id:
+        return "", ""
+    return person_id, _as_text(origin.get("person_name") or origin.get("display_name")).strip()
+
+
+def _people_alias_resolution(
+    *,
+    redis_obj: Any,
+    platform: Any,
+    user_id: Any,
+    display_name: Any = "",
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    platform_name = normalize_segment(platform, default="")
+    user_text = _as_text(user_id).strip()
+    if not platform_name or not user_text:
+        return {}
+
+    module = _people_api_module()
+    resolve_person = getattr(module, "resolve_person", None) if module is not None else None
+    if not callable(resolve_person):
+        return {}
+
+    label = _as_text(display_name).strip() or user_text
+    origin_payload = dict(origin) if isinstance(origin, dict) else {}
+    origin_payload.setdefault("platform", platform_name)
+    origin_payload.setdefault("user_id", user_text)
+    origin_payload.setdefault("username", label)
+    origin_payload.setdefault("display_name", label)
+    if platform_name == "voice_core":
+        origin_payload.setdefault("speaker_id", user_text)
+        origin_payload.setdefault("speaker_name", label)
+
+    try:
+        resolved = resolve_person(platform=platform_name, origin=origin_payload, redis_client=redis_obj)
+    except Exception:
+        return {}
+    if not isinstance(resolved, dict):
+        return {}
+    if not bool(resolved.get("matched")) or _as_text(resolved.get("match_type")).strip() != "alias":
+        return {}
+
+    person_id = _as_text(resolved.get("master_user_id") or resolved.get("person_id")).strip()
+    if not person_id:
+        return {}
+    return {
+        "person_id": person_id,
+        "person_name": _as_text(resolved.get("display_name")).strip() or person_id,
+        "resolved": resolved,
+    }
+
+
+def _memory_user_doc_target(
+    *,
+    redis_obj: Any,
+    platform: Any,
+    user_id: Any,
+    display_name: Any = "",
+    origin: Optional[Dict[str, Any]] = None,
+    use_people_identities: bool = True,
+) -> Dict[str, str]:
+    platform_name = normalize_segment(platform, default="webui")
+    user_text = _as_text(user_id).strip()
+    legacy_key = user_doc_key(platform_name, user_text)
+    if not user_text:
+        return {"doc_key": "", "legacy_key": "", "person_id": "", "person_name": ""}
+
+    if bool(use_people_identities):
+        person_id, person_name = _people_origin_alias_identity(origin)
+        if not person_id:
+            resolved = _people_alias_resolution(
+                redis_obj=redis_obj,
+                platform=platform_name,
+                user_id=user_text,
+                display_name=display_name,
+                origin=origin,
+            )
+            person_id = _as_text(resolved.get("person_id")).strip()
+            person_name = _as_text(resolved.get("person_name")).strip()
+        if person_id:
+            return {
+                "doc_key": identity_doc_key(person_id),
+                "legacy_key": legacy_key,
+                "person_id": person_id,
+                "person_name": person_name or person_id,
+            }
+
+    return {"doc_key": legacy_key, "legacy_key": legacy_key, "person_id": "", "person_name": ""}
+
+
+def _memory_core_link_person(
+    *,
+    platform: Any,
+    user_id: Any,
+    person_id: Any,
+    label: Any = "",
+    merge_existing_doc: bool = True,
+    delete_source_doc: bool = False,
+) -> Dict[str, Any]:
+    platform_name = normalize_segment(platform, default="")
+    user_text = _as_text(user_id).strip()
+    person_text = _as_text(person_id).strip()
+    if not platform_name or not user_text:
+        return {"ok": False, "error": "Invalid memory user target."}
+    if not person_text:
+        return {"ok": False, "error": "Choose a master person to link."}
+
+    module = _people_api_module()
+    attach_alias = getattr(module, "attach_alias", None) if module is not None else None
+    if not callable(attach_alias):
+        return {"ok": False, "error": "People API is not available."}
+
+    alias_label = _as_text(label).strip() or _memory_core_user_name(platform_name, user_text) or user_text
+    try:
+        attach_alias(
+            person_id=person_text,
+            platform=platform_name,
+            external_id=user_text,
+            label=alias_label,
+            kind="memory_user",
+            redis_client=redis_client,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"People link failed: {exc}"}
+
+    _save_user_label(platform_name, user_text, alias_label)
+    person_name = _people_person_name(person_text, redis_client) or person_text
+    _save_user_label("identity", person_text, person_name)
+
+    merged = 0
+    deleted = 0
+    source_key = user_doc_key(platform_name, user_text)
+    target_key = identity_doc_key(person_text)
+    if bool(merge_existing_doc) and source_key != target_key:
+        try:
+            source_doc = load_doc(redis_client, source_key, now=time.time())
+            target_doc = load_doc(redis_client, target_key, now=time.time())
+            merged = int(merge_doc_facts(target_doc, source_doc, min_confidence=0.0, now=time.time()) or 0)
+            if merged > 0:
+                save_doc(redis_client, target_key, target_doc, now=time.time())
+            if bool(delete_source_doc):
+                deleted = int(redis_client.delete(source_key) or 0)
+        except Exception as exc:
+            return {"ok": False, "error": f"Linked People alias, but memory merge failed: {exc}"}
+
+    return {
+        "ok": True,
+        "person_id": person_text,
+        "person_name": person_name,
+        "merged": merged,
+        "deleted": deleted,
+    }
+
+
 def _load_settings() -> Dict[str, Any]:
     settings = redis_client.hgetall("memory_core_settings") or {}
     if "enabled_platforms" in settings:
@@ -1243,6 +1480,11 @@ def _load_settings() -> Dict[str, Any]:
             redis_client.hdel("memory_core_settings", "allow_new_keys")
         except Exception:
             pass
+    if "auto_link_identities" in settings:
+        try:
+            redis_client.hdel("memory_core_settings", "auto_link_identities")
+        except Exception:
+            pass
     return {
         "interval_seconds": _as_int(settings.get("interval_seconds"), 180, min_value=30, max_value=3600),
         "lookback_limit": _as_int(settings.get("lookback_limit"), 80, min_value=10, max_value=500),
@@ -1250,7 +1492,7 @@ def _load_settings() -> Dict[str, Any]:
         "extraction_max_tokens": _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000),
         "write_user_memory": _as_bool(settings.get("write_user_memory"), True),
         "write_room_memory": _as_bool(settings.get("write_room_memory"), True),
-        "auto_link_identities": _as_bool(settings.get("auto_link_identities"), False),
+        "use_people_identities": _as_bool(settings.get("use_people_identities"), True),
     }
 
 
@@ -1324,10 +1566,10 @@ def _voice_context_user(context: Dict[str, Any]) -> Tuple[str, str]:
         return "", ""
     speaker_id = _as_text(context.get("speaker_id")).strip()
     speaker_name = _as_text(context.get("speaker_name")).strip()
+    if speaker_id:
+        return speaker_id, speaker_name or speaker_id
     if speaker_name:
         return speaker_name, speaker_name
-    if speaker_id:
-        return speaker_id, speaker_id
     return "", ""
 
 
@@ -1566,7 +1808,7 @@ def _existing_user_profile_snapshot(
     *,
     now_ts: float,
     user_display_names: Optional[Dict[str, str]] = None,
-    auto_link_identities: bool = False,
+    use_people_identities: bool = True,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for raw_user_id in user_ids:
@@ -1578,17 +1820,14 @@ def _existing_user_profile_snapshot(
             if isinstance(user_display_names, dict)
             else ""
         )
-        if bool(auto_link_identities):
-            doc_key = resolve_user_doc_key(
-                redis_client,
-                platform,
-                user_id,
-                create=False,
-                display_name=display_name or user_id,
-                auto_link_name=True,
-            ) or user_doc_key(platform, user_id)
-        else:
-            doc_key = user_doc_key(platform, user_id)
+        target = _memory_user_doc_target(
+            redis_obj=redis_client,
+            platform=platform,
+            user_id=user_id,
+            display_name=display_name or user_id,
+            use_people_identities=use_people_identities,
+        )
+        doc_key = _as_text(target.get("doc_key")).strip() or user_doc_key(platform, user_id)
         try:
             doc = load_doc(redis_client, doc_key, now=now_ts)
         except Exception:
@@ -1881,7 +2120,7 @@ def _process_scope(
     extraction_max_tokens = _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000)
     write_user_memory = _as_bool(settings.get("write_user_memory"), True)
     write_room_memory = _as_bool(settings.get("write_room_memory"), True)
-    auto_link_identities = _as_bool(settings.get("auto_link_identities"), False)
+    use_people_identities = _as_bool(settings.get("use_people_identities"), True)
 
     history_scope_id = _as_text(scope_id).strip()
     memory_scope_id = _memory_scope_id_for_history(platform, history_scope_id) or history_scope_id
@@ -1933,7 +2172,7 @@ def _process_scope(
         known_user_ids,
         now_ts=ts_now,
         user_display_names=user_display_names,
-        auto_link_identities=auto_link_identities,
+        use_people_identities=use_people_identities,
     )
     current_room_profile = _existing_room_profile_snapshot(
         platform,
@@ -1989,22 +2228,19 @@ def _process_scope(
 
         for user_id, rows in by_user.items():
             display_name = _as_text(user_display_names.get(user_id)).strip() or user_id
-            legacy_key = user_doc_key(platform, user_id)
-            if bool(auto_link_identities):
-                u_key = resolve_user_doc_key(
-                    redis_client,
-                    platform,
-                    user_id,
-                    create=True,
-                    display_name=display_name,
-                    auto_link_name=True,
-                ) or legacy_key
-            else:
-                u_key = legacy_key
-            if u_key.startswith("mem:user:identity:"):
-                identity_id = _as_text(u_key.split("mem:user:identity:", 1)[-1]).strip()
-                if identity_id and display_name:
-                    _save_user_label("identity", identity_id, display_name)
+            target = _memory_user_doc_target(
+                redis_obj=redis_client,
+                platform=platform,
+                user_id=user_id,
+                display_name=display_name,
+                use_people_identities=use_people_identities,
+            )
+            legacy_key = _as_text(target.get("legacy_key")).strip() or user_doc_key(platform, user_id)
+            u_key = _as_text(target.get("doc_key")).strip() or legacy_key
+            identity_id = _as_text(target.get("person_id")).strip()
+            identity_name = _as_text(target.get("person_name")).strip() or display_name
+            if identity_id and identity_name:
+                _save_user_label("identity", identity_id, identity_name)
             user_doc = load_doc(redis_client, u_key, now=ts_now)
             user_changed = False
             if u_key != legacy_key:
@@ -2029,11 +2265,6 @@ def _process_scope(
             if user_changed:
                 save_doc(redis_client, u_key, user_doc, now=ts_now)
                 updated_docs += 1
-            if u_key != legacy_key:
-                try:
-                    redis_client.delete(legacy_key)
-                except Exception:
-                    pass
 
     redis_client.set(cursor_redis_key, str(end_idx_exclusive))
     return {
@@ -2306,6 +2537,10 @@ def _memory_core_user_name(platform: Any, user_id: Any) -> str:
             return label
 
     if platform_name == "identity":
+        people_name = _people_person_name(scope_id, redis_client)
+        if people_name:
+            _MEMORY_USER_NAME_CACHE[cache_key] = people_name
+            return people_name
         try:
             for raw_key in redis_client.scan_iter(match="mem:identity_name:*", count=300):
                 lookup_key = str(raw_key or "").strip()
@@ -2328,6 +2563,7 @@ def _memory_core_user_name(platform: Any, user_id: Any) -> str:
         "homeassistant": "tater:ha:session:*:history",
         "homekit": "tater:homekit:session:*:history",
         "xbmc": "tater:xbmc:session:*:history",
+        "meshtastic": "tater:meshtastic:*:history",
         "voice_core": "tater:voice:conv:*:history",
         "webui": "webui:chat_history",
     }
@@ -2484,6 +2720,7 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
                     "fact_keys": fact_keys_preview,
                     "last_updated": _format_unix_ts(doc.get("last_updated")),
                     "preview": preview,
+                    "doc_key": key,
                     "doc": doc,
                 }
             )
@@ -4549,6 +4786,89 @@ def _memory_core_ui_manager_payload(
         }
     )
 
+    people_options = _people_person_options(redis_client)
+    people_available = len(people_options) > 1
+    if people_available:
+        for row in user_rows[:120]:
+            platform = _memory_core_ui_clean_text(row.get("platform")) or "unknown"
+            scope_id = _memory_core_ui_clean_text(row.get("user_id"))
+            if not scope_id or platform == "identity":
+                continue
+            name = _memory_core_ui_clean_text(row.get("user_name") or scope_id or "unknown")
+            fact_count = int(row.get("fact_count") or 0)
+            last_updated = _memory_core_ui_clean_text(row.get("last_updated")) or "n/a"
+            linked = _people_alias_resolution(
+                redis_obj=redis_client,
+                platform=platform,
+                user_id=scope_id,
+                display_name=name,
+            )
+            linked_person_id = _as_text(linked.get("person_id")).strip()
+            linked_person_name = _as_text(linked.get("person_name")).strip()
+            status = f"Linked to {linked_person_name}" if linked_person_id else "Not linked"
+            forms.append(
+                {
+                    "id": _memory_core_ui_scope_token("user", platform, scope_id),
+                    "title": f"Link: {name}",
+                    "group": "people_link",
+                    "subtitle": f"{platform} · facts: {fact_count} · updated: {last_updated}",
+                    "save_action": "memory_link_person",
+                    "save_label": "Link To Person",
+                    "summary_rows": [
+                        {"label": "Status", "value": status},
+                        {"label": "User ID", "value": scope_id},
+                    ],
+                    "sections": [
+                        {
+                            "label": "People Link",
+                            "inline": True,
+                            "fields": [
+                                {
+                                    "key": "person_id",
+                                    "label": "Master Person",
+                                    "type": "select",
+                                    "value": linked_person_id,
+                                    "options": people_options,
+                                    "description": "Links this portal user to a master People profile. Memory Core only uses explicit People links.",
+                                },
+                                {
+                                    "key": "alias_label",
+                                    "label": "Alias Label",
+                                    "type": "text",
+                                    "value": name,
+                                },
+                                {
+                                    "key": "merge_existing_doc",
+                                    "label": "Copy Existing Facts To Person",
+                                    "type": "checkbox",
+                                    "value": True,
+                                    "description": "Copies this user memory doc into the master person doc. The source doc is kept unless the delete option is enabled.",
+                                },
+                                {
+                                    "key": "delete_source_doc",
+                                    "label": "Delete Source Doc After Copy",
+                                    "type": "checkbox",
+                                    "value": False,
+                                    "description": "Optional cleanup after a successful copy.",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+    else:
+        forms.append(
+            {
+                "id": "__people_links_empty__",
+                "title": "People Links",
+                "group": "people_link",
+                "subtitle": "Create a person in Settings > People before linking memory users.",
+                "summary_rows": [
+                    {"label": "Status", "value": "No master people found"},
+                ],
+            }
+        )
+
     ranked: List[Dict[str, Any]] = []
     for row in user_rows:
         row_copy = dict(row or {})
@@ -4734,6 +5054,15 @@ def _memory_core_ui_manager_payload(
                         "empty_message": "No room memory documents found.",
                     },
                 ],
+            },
+            {
+                "key": "people",
+                "label": "People",
+                "source": "items",
+                "item_group": "people_link",
+                "selector": True,
+                "selector_label": "Select Memory User",
+                "empty_message": "No user memory documents are ready to link.",
             },
             {
                 "key": "tools",
@@ -4973,6 +5302,29 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not delete memory document.")
         return {"ok": True, "message": f"Deleted {scope} memory document."}
 
+    if action_name == "memory_link_person":
+        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
+        if scope != "user":
+            raise ValueError("Only user memory documents can be linked to People.")
+        if _memory_core_ui_clean_text(platform).lower() == "identity":
+            raise ValueError("This memory document is already a master People profile.")
+        result = _memory_core_link_person(
+            platform=platform,
+            user_id=scope_id,
+            person_id=_value("person_id"),
+            label=_value("alias_label"),
+            merge_existing_doc=_as_bool(_value("merge_existing_doc"), True),
+            delete_source_doc=_as_bool(_value("delete_source_doc"), False),
+        )
+        if not bool(result.get("ok")):
+            raise ValueError(_memory_core_ui_clean_text(result.get("error")) or "Could not link memory user.")
+        merged = int(result.get("merged") or 0)
+        person_name = _memory_core_ui_clean_text(result.get("person_name")) or _memory_core_ui_clean_text(result.get("person_id"))
+        message = f"Linked memory user to {person_name}."
+        if merged > 0:
+            message = f"{message} Copied {merged} fact(s)."
+        return {"ok": True, "message": message}
+
     if action_name == "memory_wipe_all":
         confirm_text = _memory_core_ui_clean_text(_value("confirm_text"))
         if confirm_text.upper() != "WIPE":
@@ -5022,13 +5374,13 @@ def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) 
     return ""
 
 
-def _hydra_auto_link_identities_enabled(*, args: Dict[str, Any], redis_obj: Any) -> bool:
+def _hydra_people_identities_enabled(*, args: Dict[str, Any], redis_obj: Any) -> bool:
     settings = _hydra_memory_context_settings(redis_obj)
-    configured = _as_bool(settings.get("auto_link_identities"), False)
+    configured = _as_bool(settings.get("use_people_identities"), True)
     if not isinstance(args, dict):
         return configured
-    if "auto_link_identities" in args:
-        return _as_bool(args.get("auto_link_identities"), configured)
+    if "use_people_identities" in args:
+        return _as_bool(args.get("use_people_identities"), configured)
     return configured
 
 
@@ -5050,24 +5402,27 @@ def _hydra_user_doc_candidates(
     normalized_platform: str,
     user_id: str,
     display_name: str,
-    auto_link_identities: bool,
+    origin: Optional[Dict[str, Any]],
+    use_people_identities: bool,
     create: bool,
 ) -> List[str]:
+    del create
     legacy_key = user_doc_key(normalized_platform, user_id)
-    identity_key = resolve_user_doc_key(
-        redis_obj,
-        normalized_platform,
-        user_id,
-        create=(create if auto_link_identities else False),
+    target = _memory_user_doc_target(
+        redis_obj=redis_obj,
+        platform=normalized_platform,
+        user_id=user_id,
         display_name=display_name,
-        auto_link_name=True,
+        origin=origin,
+        use_people_identities=use_people_identities,
     )
+    identity_key = _as_text(target.get("doc_key")).strip()
 
     ordered: List[str] = []
-    if auto_link_identities:
+    if use_people_identities:
         ordered.extend([identity_key, legacy_key])
     else:
-        ordered.extend([legacy_key, identity_key])
+        ordered.append(legacy_key)
 
     out: List[str] = []
     seen: set[str] = set()
@@ -5093,8 +5448,8 @@ def _hydra_user_target(
         user_id = _hydra_origin_text(
             origin,
             "user_id",
-            "speaker_name",
             "speaker_id",
+            "speaker_name",
             "user",
             "username",
             "sender",
@@ -5121,13 +5476,22 @@ def _hydra_user_target(
     if isinstance(args, dict):
         requested_platform = _as_text(args.get("platform")).strip()
     normalized_platform = _hydra_platform(requested_platform or platform)
-    auto_link_identities = _hydra_auto_link_identities_enabled(args=args, redis_obj=redis_obj)
+    use_people_identities = _hydra_people_identities_enabled(args=args, redis_obj=redis_obj)
+    people_target = _memory_user_doc_target(
+        redis_obj=redis_obj,
+        platform=normalized_platform,
+        user_id=user_id,
+        display_name=display_name,
+        origin=origin,
+        use_people_identities=use_people_identities,
+    )
     doc_candidates = _hydra_user_doc_candidates(
         redis_obj=redis_obj,
         normalized_platform=normalized_platform,
         user_id=user_id,
         display_name=display_name,
-        auto_link_identities=auto_link_identities,
+        origin=origin,
+        use_people_identities=use_people_identities,
         create=create,
     )
     doc_key = ""
@@ -5150,7 +5514,11 @@ def _hydra_user_target(
         "platform": normalized_platform,
         "user_id": user_id,
         "display_name": display_name,
-        "auto_link_identities": auto_link_identities,
+        "use_people_identities": use_people_identities,
+        "person_id": _as_text(people_target.get("person_id")).strip(),
+        "person_name": _as_text(people_target.get("person_name")).strip(),
+        "source_platform": normalized_platform,
+        "source_user_id": user_id,
         "doc_key": doc_key,
         "doc_candidates": doc_candidates,
     }
@@ -5949,7 +6317,7 @@ def get_hydra_memory_context_payload(
 
     normalized_platform = _hydra_platform(platform)
     settings = _hydra_memory_context_settings(redis_obj)
-    auto_link_identities = _as_bool(settings.get("auto_link_identities"), False)
+    use_people_identities = _as_bool(settings.get("use_people_identities"), True)
     min_conf = _hydra_memory_context_min_confidence(redis_obj)
     max_items = _hydra_memory_context_max_items(redis_obj)
     value_max_chars = _hydra_memory_context_value_max_chars(redis_obj)
@@ -5961,8 +6329,8 @@ def get_hydra_memory_context_payload(
         origin,
         "user_id",
         "dm_user_id",
-        "speaker_name",
         "speaker_id",
+        "speaker_name",
         "user",
         "username",
         "sender",
@@ -5982,7 +6350,7 @@ def get_hydra_memory_context_payload(
             args={
                 "user_id": user_id,
                 "display_name": display_name or user_id,
-                "auto_link_identities": auto_link_identities,
+                "use_people_identities": use_people_identities,
             },
             platform=normalized_platform,
             origin=origin,
@@ -6005,8 +6373,16 @@ def get_hydra_memory_context_payload(
         )
         user_summary = _hydra_memory_context_summary(user_items, value_max_chars=value_max_chars)
         if user_summary:
+            person_id = _as_text(target.get("person_id")).strip() if isinstance(target, dict) else ""
+            person_name = _as_text(target.get("person_name")).strip() if isinstance(target, dict) else ""
             out["user"] = {
                 "user_id": user_id,
+                "display_name": person_name or display_name or user_id,
+                "person_id": person_id,
+                "person_name": person_name,
+                "source_platform": normalized_platform,
+                "source_user_id": user_id,
+                "doc_key": user_key,
                 "summary": user_summary,
                 "items": user_items,
             }
@@ -6069,7 +6445,15 @@ def get_hydra_system_prompt_fragments(
     user_summary = _as_text(user_ctx.get("summary")).strip()
     room_summary = _as_text(room_ctx.get("summary")).strip()
     if user_summary:
-        lines.append(f"User memory: {user_summary[:summary_limit]}")
+        user_label = (
+            _as_text(user_ctx.get("person_name")).strip()
+            or _as_text(user_ctx.get("display_name")).strip()
+            or _as_text(user_ctx.get("user_id")).strip()
+        )
+        if user_label:
+            lines.append(f"User memory for {user_label}: {user_summary[:summary_limit]}")
+        else:
+            lines.append(f"User memory: {user_summary[:summary_limit]}")
     if room_summary:
         lines.append(f"Room memory: {room_summary[:summary_limit]}")
 

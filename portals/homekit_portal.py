@@ -10,13 +10,15 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Header
 from dotenv import load_dotenv
 import verba_registry as pr
+from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from helpers import (
     get_llm_client_from_env,
     build_llm_host_from_env,
     redis_client,
 )
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.1.0"
+from verba_result import action_failure
+__version__ = "1.1.2"
 
 
 load_dotenv()
@@ -244,10 +246,24 @@ async def _load_history(session_id: Optional[str], limit: int) -> List[Dict[str,
             continue
     return _enforce_user_assistant_alternation(loop_messages)
 
-async def _save_message(session_id: Optional[str], role: str, content: Any, max_store: int, ttl: int):
+async def _save_message(
+    session_id: Optional[str],
+    role: str,
+    content: Any,
+    max_store: int,
+    ttl: int,
+    *,
+    username: str = "",
+    user_id: str = "",
+):
     key = _sess_key(session_id)
+    payload: Dict[str, Any] = {"role": role, "content": content}
+    if username:
+        payload["username"] = username
+    if user_id:
+        payload["user_id"] = user_id
     pipe = redis_client.pipeline()
-    pipe.rpush(key, json.dumps({"role": role, "content": content}))
+    pipe.rpush(key, json.dumps(payload))
     if max_store > 0:
         pipe.ltrim(key, -max_store, -1)
     pipe.expire(key, ttl)
@@ -303,12 +319,29 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
     history_store_limit = _global_history_store_limit()
     history_llm_limit = _global_history_llm_limit()
     session_ttl = _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    user_id = str(payload.get("user_id") or payload.get("device_id") or session_id or "homekit_user").strip()
+    username = str(
+        payload.get("username")
+        or payload.get("user")
+        or payload.get("name")
+        or payload.get("device_name")
+        or user_id
+        or "homekit_user"
+    ).strip()
 
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(session_id, history_llm_limit)
     messages_list = loop_messages + [{"role": "user", "content": text_in}]
 
-    await _save_message(session_id, "user", text_in, history_store_limit, session_ttl)
+    await _save_message(
+        session_id,
+        "user",
+        text_in,
+        history_store_limit,
+        session_ttl,
+        username=username,
+        user_id=user_id,
+    )
 
     merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = _get_plugin_enabled
@@ -318,10 +351,23 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
             "platform": "homekit",
             "session_id": session_id,
             "device_id": payload.get("device_id"),
-            "user_id": payload.get("user_id"),
+            "user_id": user_id,
+            "user": username,
             "request_id": session_id,
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        resolve_admin_status(platform="homekit", origin=origin, redis_client=redis_client)
+
+        def _admin_guard(func_name: str):
+            if is_admin_only_plugin(func_name) and not origin_is_admin("homekit", origin, redis_client):
+                return action_failure(
+                    code="admin_only",
+                    message=admin_denial_message("homekit", origin, redis_client),
+                    needs=[],
+                    say_hint="Explain that this tool is restricted to People marked as admin.",
+                )
+            return None
+
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
         result = await run_hydra_turn(
             llm_client=_llm,
@@ -333,6 +379,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
             user_text=text_in,
             scope=f"session:{session_id}" if str(session_id or "").strip() else "",
             origin=origin,
+            admin_guard=_admin_guard,
             redis_client=redis_client,
             max_rounds=agent_max_rounds,
             max_tool_calls=agent_max_tool_calls,

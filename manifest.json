@@ -268,7 +268,7 @@
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "portals": [
@@ -288,7 +288,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "verba/find_my_phone.py",
-      "sha256": "e41ff4bb32c06826b25bb8aa64efdbf195c8e6d9cadf3ce4a41bfa3909586b29"
+      "sha256": "31159d4dc8d4a9f40a8d8600311b10fc50630dad9e8724bbd007b79fb54d3078"
     },
     {
       "id": "ftp_browser",

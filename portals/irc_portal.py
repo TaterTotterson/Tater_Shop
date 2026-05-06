@@ -15,13 +15,15 @@ from helpers import (
     redis_client,
 )
 from admin_gate import (
+    admin_denial_message,
     is_admin_only_plugin,
-    normalize_admin_list,
+    origin_is_admin,
+    resolve_admin_status,
 )
 from verba_result import action_failure
 from verba_kernel import verba_supports_platform
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 load_dotenv()
@@ -65,12 +67,6 @@ PORTAL_SETTINGS = {
             "type": "string",
             "default": "",
             "description": "Login password (ZNC password)"
-        },
-        "admin_nick": {
-            "label": "Admin Nick",
-            "type": "string",
-            "default": "",
-            "description": "Only this nick can run admin-only tools (comma-separated supported)."
         }
     }
 }
@@ -102,7 +98,6 @@ def _load_irc_settings():
     username = settings.get("irc_username", "")
     password = settings.get("irc_password", "")
     ssl_flag = str(settings.get("irc_ssl", "false")).lower() in ("1", "true", "yes", "on")
-    admin_nick = settings.get("admin_nick", "")
 
     return {
         "server": server,
@@ -112,15 +107,7 @@ def _load_irc_settings():
         "username": username,
         "password": password,
         "ssl": ssl_flag,
-        "admin_nick": admin_nick,
     }
-
-def _irc_admin_allowed(nick: str) -> bool:
-    raw = (_load_irc_settings().get("admin_nick") or "").strip()
-    allowed = normalize_admin_list(raw)
-    if not allowed:
-        return False
-    return str(nick or "").strip().lower() in allowed
 
 def format_irc_text(raw: str, width: int = 80) -> str:
     if not isinstance(raw, str):
@@ -462,9 +449,12 @@ async def on_message(self, mask, event, target, data):
             "target": target,
             "chat_type": "channel" if str(target or "").startswith(("#", "&")) else "pm",
             "user": mask.nick,
+            "nick": mask.nick,
+            "username": mask.nick,
             "request_id": f"{target}:{time.time():.3f}",
         }
         origin = {k: v for k, v in origin.items() if v not in (None, "")}
+        resolve_admin_status(platform="irc", origin=origin, redis_client=redis_client)
 
         async def _wait_callback(func_name, plugin_obj):
             if not plugin_obj:
@@ -495,17 +485,13 @@ async def on_message(self, mask, event, target, data):
             if is_admin_only_plugin(func_name):
                 needs_admin = True
 
-            if needs_admin and not _irc_admin_allowed(mask.nick):
-                msg = (
-                    "This tool is restricted to the configured admin user on IRC."
-                    if (_load_irc_settings().get("admin_nick") or "").strip()
-                    else "This tool is disabled because no IRC admin user is configured."
-                )
+            if needs_admin and not origin_is_admin("irc", origin, redis_client):
+                msg = admin_denial_message("irc", origin, redis_client)
                 return action_failure(
                     code="admin_only",
                     message=msg,
                     needs=[],
-                    say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                    say_hint="Explain that this tool is restricted to People marked as admin.",
                 )
             return None
 

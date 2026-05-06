@@ -15,6 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 import verba_registry as pr
+from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from hydra import resolve_agent_limits, run_hydra_turn
 from conversation_artifacts import load_conversation_artifacts, save_conversation_artifacts
 from helpers import (
@@ -28,9 +29,9 @@ from notify.core import dispatch_notification_sync
 from notify.media import load_queue_attachments
 from notify.queue import is_expired as notify_item_is_expired, queue_key as notify_queue_key
 from verba_kernel import verba_supports_platform
-from verba_result import narrate_result, result_artifacts
+from verba_result import action_failure, narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 
 load_dotenv()
@@ -1111,6 +1112,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
         input_artifacts=input_artifacts,
         request_kind="chat",
     )
+    resolve_admin_status(platform="macos", origin=origin, redis_client=redis_client)
     runtime_context = _build_runtime_context(
         context_payload=context_payload,
         origin=origin,
@@ -1134,6 +1136,16 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
         except Exception:
             return
 
+    def _admin_guard(func_name: str):
+        if is_admin_only_plugin(func_name) and not origin_is_admin("macos", origin, redis_client):
+            return action_failure(
+                code="admin_only",
+                message=admin_denial_message("macos", origin, redis_client),
+                needs=[],
+                say_hint="Explain that this tool is restricted to People marked as admin.",
+            )
+        return None
+
     try:
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
         result = await run_hydra_turn(
@@ -1147,6 +1159,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             scope=scope,
             origin=origin,
             wait_callback=_wait_callback,
+            admin_guard=_admin_guard,
             redis_client=redis_client,
             max_rounds=agent_max_rounds,
             max_tool_calls=agent_max_tool_calls,
@@ -1250,6 +1263,7 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
         input_artifacts=input_artifacts,
         request_kind="plugin",
     )
+    resolve_admin_status(platform="macos", origin=origin, redis_client=redis_client)
     runtime_context = _build_runtime_context(
         context_payload=context_payload,
         origin=origin,
@@ -1262,6 +1276,25 @@ async def plugin_call(payload: MacOSPluginRequest, x_tater_token: Optional[str] 
     mention_target = str(context_payload.get("device_name") or "there").strip() or "there"
     args = dict(payload.plugin_args or {})
     args.setdefault("origin", origin)
+
+    if is_admin_only_plugin(plugin_name) and not origin_is_admin("macos", origin, redis_client):
+        normalized_result = action_failure(
+            code="admin_only",
+            message=admin_denial_message("macos", origin, redis_client),
+            needs=[],
+            say_hint="Explain that this tool is restricted to People marked as admin.",
+        )
+        assistant_text = await narrate_result(normalized_result, llm_client=_llm, platform="macos")
+        await _save_message(
+            scope,
+            "assistant",
+            {"marker": "plugin_response", "phase": "final", "plugin": plugin_name, "content": assistant_text},
+            max_store=history_store_limit,
+            ttl_seconds=ttl_seconds,
+            username="assistant",
+            user_id="assistant",
+        )
+        return _response_payload(scope=scope, assistant_text=assistant_text, actions=[], attachments=[], ok=False)
 
     await _save_message(
         scope,

@@ -1,9 +1,12 @@
 # verba/find_my_phone.py
 import asyncio
+import importlib.util
+import json
 import logging
 import re
 import time
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -32,7 +35,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -45,9 +48,16 @@ class FindMyPhonePlugin(ToolVerba):
     settings_category = "Find My Phone"
     required_settings = {
         "MOBILE_NOTIFY_SERVICE": {
-            "label": "Notify service (ex: notify.mobile_app_taters_iphone)",
+            "label": "Legacy notify service (optional fallback)",
             "type": "string",
             "default": "",
+            "description": "Only used when legacy fallback is enabled. People-specific services are preferred.",
+        },
+        "ALLOW_LEGACY_FALLBACK": {
+            "label": "Allow legacy fallback when no Person matches",
+            "type": "checkbox",
+            "default": False,
+            "description": "Leave off to require Settings > People identity links before ringing a phone.",
         },
         "DEFAULT_TITLE": {
             "label": "Default notification title",
@@ -83,9 +93,11 @@ class FindMyPhonePlugin(ToolVerba):
     common_needs = []
     missing_info_prompts = []
 
+    _PEOPLE_API_MODULE: Any = None
+    _PEOPLE_API_UNAVAILABLE = False
 
     @staticmethod
-    def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
+    def _decode_map(raw: Optional[Dict[Any, Any]]) -> Dict[str, str]:
         out: Dict[str, str] = {}
         for key, value in (raw or {}).items():
             k = key.decode("utf-8", "ignore") if isinstance(key, (bytes, bytearray)) else str(key)
@@ -94,6 +106,30 @@ class FindMyPhonePlugin(ToolVerba):
             else:
                 out[k] = str(value or "")
         return out
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8", "replace").strip()
+            except Exception:
+                return str(value).strip()
+        return str(value).strip()
+
+    @classmethod
+    def _as_bool(cls, value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        token = cls._text(value).lower()
+        if token in {"1", "true", "yes", "on", "enabled", "y"}:
+            return True
+        if token in {"0", "false", "no", "off", "disabled", "n"}:
+            return False
+        return bool(default)
 
     @classmethod
     def _coerce_int(cls, value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -118,6 +154,125 @@ class FindMyPhonePlugin(ToolVerba):
         if parsed > maximum:
             return float(maximum)
         return float(parsed)
+
+    @classmethod
+    def _people_api_module(cls) -> Any:
+        if cls._PEOPLE_API_MODULE is not None:
+            return cls._PEOPLE_API_MODULE
+        if cls._PEOPLE_API_UNAVAILABLE:
+            return None
+
+        try:
+            import people as people_module  # type: ignore
+
+            cls._PEOPLE_API_MODULE = people_module
+            return cls._PEOPLE_API_MODULE
+        except Exception:
+            pass
+
+        try:
+            candidate = Path(__file__).resolve().parents[2] / "Tater" / "people.py"
+            if candidate.exists():
+                spec = importlib.util.spec_from_file_location("tater_people_api", candidate)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    cls._PEOPLE_API_MODULE = module
+                    return cls._PEOPLE_API_MODULE
+        except Exception:
+            pass
+
+        cls._PEOPLE_API_UNAVAILABLE = True
+        return None
+
+    @classmethod
+    def _people_rows(cls, redis_obj: Any = None) -> List[Dict[str, Any]]:
+        module = cls._people_api_module()
+        load_store = getattr(module, "load_store", None) if module is not None else None
+        if not callable(load_store):
+            return []
+        try:
+            store = load_store(redis_obj if redis_obj is not None else redis_client)
+        except Exception:
+            return []
+        rows = [dict(row) for row in list((store or {}).get("people") or []) if isinstance(row, dict)]
+        rows.sort(key=lambda row: (cls._text(row.get("display_name")).lower(), cls._text(row.get("id"))))
+        return rows
+
+    @classmethod
+    def _person_setting_key(cls, person_id: Any) -> str:
+        token = re.sub(r"[^A-Za-z0-9_]+", "_", cls._text(person_id)).strip("_")
+        return f"PERSON_NOTIFY_SERVICE__{token}" if token else ""
+
+    @classmethod
+    def _person_label(cls, person_id: Any) -> str:
+        wanted = cls._text(person_id)
+        if not wanted:
+            return ""
+        for person in cls._people_rows():
+            if cls._text(person.get("id")) == wanted:
+                return cls._text(person.get("display_name"))
+        return ""
+
+    @classmethod
+    def webui_settings_fields(
+        cls,
+        fields: List[Dict[str, Any]],
+        current_settings: Optional[Dict[str, Any]] = None,
+        redis_client: Any = None,
+        **_kwargs,
+    ) -> List[Dict[str, Any]]:
+        current = current_settings if isinstance(current_settings, dict) else {}
+        out = [dict(field) for field in fields if isinstance(field, dict)]
+        people = cls._people_rows(redis_client)
+        if people:
+            for person in people:
+                person_id = cls._text(person.get("id"))
+                display_name = cls._text(person.get("display_name")) or person_id
+                key = cls._person_setting_key(person_id)
+                if not key:
+                    continue
+                out.append(
+                    {
+                        "key": key,
+                        "label": f"{display_name} phone notify service",
+                        "type": "string",
+                        "value": cls._text(current.get(key)),
+                        "default": "",
+                        "description": "Example: notify.mobile_app_taters_iphone or mobile_app_taters_iphone.",
+                    }
+                )
+        else:
+            out.append(
+                {
+                    "key": "PEOPLE_SETUP_NOTE",
+                    "label": "People setup",
+                    "type": "textarea",
+                    "value": "Create a master person in Settings > People before configuring per-person phones.",
+                    "default": "",
+                    "description": "This note is informational; it can be left as-is.",
+                }
+            )
+        return out
+
+    @classmethod
+    def webui_prepare_settings_values(
+        cls,
+        values: Dict[str, Any],
+        redis_client: Any = None,
+        **_kwargs,
+    ) -> Dict[str, Any]:
+        out = dict(values or {})
+        out.pop("PEOPLE_SETUP_NOTE", None)
+        for person in cls._people_rows(redis_client):
+            key = cls._person_setting_key(person.get("id"))
+            if key in out:
+                out[key] = cls._text(out.get(key))
+        if "MOBILE_NOTIFY_SERVICE" in out:
+            out["MOBILE_NOTIFY_SERVICE"] = cls._text(out.get("MOBILE_NOTIFY_SERVICE"))
+        if "ALLOW_LEGACY_FALLBACK" in out:
+            out["ALLOW_LEGACY_FALLBACK"] = "1" if cls._as_bool(out.get("ALLOW_LEGACY_FALLBACK"), False) else "0"
+        return out
 
     def _load_settings(self) -> Dict[str, str]:
         raw = redis_client.hgetall(f"verba_settings:{self.settings_category}") or redis_client.hgetall(
@@ -145,19 +300,123 @@ class FindMyPhonePlugin(ToolVerba):
             return ""
         return raw
 
-    def _extract_overrides(self, args: Dict[str, Any] | None) -> Dict[str, Any]:
+    def _extract_overrides(self, args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         args = args or {}
         return {
-            "notify_service": (
-                args.get("notify_service")
-                or args.get("mobile_notify_service")
-                or args.get("device_service")
-                or ""
-            ),
             "title": args.get("title") or "",
             "message": args.get("message") or args.get("content") or "",
             "count": args.get("count") if args.get("count") is not None else args.get("alert_count"),
         }
+
+    def _origin_from_context(self, platform: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        ctx = context if isinstance(context, dict) else {}
+        origin = dict(ctx.get("origin")) if isinstance(ctx.get("origin"), dict) else {}
+        args_origin = ctx.get("args_origin") if isinstance(ctx.get("args_origin"), dict) else {}
+        if args_origin:
+            origin.update(args_origin)
+        origin.setdefault("platform", platform)
+        for key in (
+            "person_id",
+            "master_user_id",
+            "person_name",
+            "people_resolution",
+            "speaker_id",
+            "speaker_name",
+            "user_id",
+            "user",
+            "username",
+            "display_name",
+        ):
+            if key in ctx and ctx.get(key) is not None:
+                origin.setdefault(key, ctx.get(key))
+        return origin
+
+    def _origin_from_discord(self, message: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        origin = self._origin_from_context("discord", context)
+        author = getattr(message, "author", None)
+        author_id = self._text(getattr(author, "id", ""))
+        name = self._text(getattr(author, "display_name", "") or getattr(author, "global_name", "") or getattr(author, "name", ""))
+        if author_id:
+            origin.setdefault("user_id", author_id)
+            origin.setdefault("author_id", author_id)
+        if name:
+            origin.setdefault("display_name", name)
+            origin.setdefault("username", name)
+            origin.setdefault("user", name)
+        return origin
+
+    def _origin_from_telegram(self, update: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        origin = self._origin_from_context("telegram", context)
+        sender = (update or {}).get("from") if isinstance(update, dict) else {}
+        sender = sender if isinstance(sender, dict) else {}
+        user_id = self._text(sender.get("id") or sender.get("user_id"))
+        username = self._text(sender.get("username") or sender.get("first_name") or sender.get("last_name"))
+        if user_id:
+            origin.setdefault("user_id", user_id)
+            origin.setdefault("from_id", user_id)
+        if username:
+            origin.setdefault("username", username)
+            origin.setdefault("display_name", username)
+            origin.setdefault("user", username)
+        return origin
+
+    def _origin_from_matrix(self, sender: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        origin = self._origin_from_context("matrix", context)
+        user_id = self._text(sender)
+        if user_id:
+            origin.setdefault("user_id", user_id)
+            origin.setdefault("sender", user_id)
+            origin.setdefault("user", user_id)
+            origin.setdefault("display_name", user_id)
+        return origin
+
+    def _origin_from_irc(self, user: Any, context: Optional[Dict[str, Any]] = None, *, platform: str = "irc") -> Dict[str, Any]:
+        origin = self._origin_from_context(platform, context)
+        user_name = self._text(user)
+        if user_name:
+            origin.setdefault("user", user_name)
+            origin.setdefault("username", user_name)
+            origin.setdefault("display_name", user_name)
+        return origin
+
+    def _resolve_person_for_request(self, platform: str, origin: Dict[str, Any]) -> Dict[str, str]:
+        source = origin if isinstance(origin, dict) else {}
+        module = self._people_api_module()
+        resolver = getattr(module, "resolve_person", None) if module is not None else None
+        if callable(resolver):
+            try:
+                resolved = resolver(platform=platform, origin=source, redis_client=redis_client)
+            except Exception:
+                resolved = {}
+            if bool((resolved or {}).get("matched")):
+                person_id = self._text((resolved or {}).get("person_id") or (resolved or {}).get("master_user_id"))
+                return {
+                    "person_id": person_id,
+                    "person_name": self._text((resolved or {}).get("display_name")) or self._person_label(person_id),
+                    "match_type": self._text((resolved or {}).get("match_type")),
+                }
+
+        return {"person_id": "", "person_name": "", "match_type": ""}
+
+    def _notify_service_for_person(self, settings: Dict[str, str], person_id: str) -> str:
+        key = self._person_setting_key(person_id)
+        if key:
+            configured = self._text(settings.get(key))
+            if configured:
+                return configured
+
+        raw_json = self._text(settings.get("PEOPLE_NOTIFY_SERVICES_JSON") or settings.get("PERSON_NOTIFY_SERVICES_JSON"))
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                for candidate in (person_id, self._person_label(person_id)):
+                    value = self._text(parsed.get(candidate))
+                    if value:
+                        return value
+        return ""
 
     def _ha_post_service(
         self,
@@ -177,7 +436,13 @@ class FindMyPhonePlugin(ToolVerba):
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
         return resp.status_code, resp.text
 
-    def _trigger_phone_alert(self, overrides: Dict[str, Any] | None = None) -> dict:
+    def _trigger_phone_alert(
+        self,
+        overrides: Optional[Dict[str, Any]] = None,
+        *,
+        platform: str = "webui",
+        origin: Optional[Dict[str, Any]] = None,
+    ) -> dict:
         """
         Returns a dict:
           - ok: bool
@@ -186,14 +451,37 @@ class FindMyPhonePlugin(ToolVerba):
         """
         overrides = overrides or {}
         settings = self._load_settings()
+        person = self._resolve_person_for_request(platform, origin or {})
+        person_id = self._text(person.get("person_id"))
+        person_name = self._text(person.get("person_name"))
+        legacy_fallback = self._as_bool(settings.get("ALLOW_LEGACY_FALLBACK"), False)
+
+        if person_id:
+            notify_service_raw = self._notify_service_for_person(settings, person_id)
+        elif legacy_fallback:
+            notify_service_raw = (settings.get("MOBILE_NOTIFY_SERVICE") or "").strip() or self._load_default_notify_service()
+        else:
+            return {
+                "ok": False,
+                "count": 0,
+                "code": "person_phone_missing",
+                "error": "I do not have a phone set up for you yet. Link this user to a Person in Settings > People, then set that person's phone notify service in Find My Phone settings.",
+            }
+
+        if person_id and not notify_service_raw:
+            owner = person_name or "this person"
+            return {
+                "ok": False,
+                "count": 0,
+                "code": "person_phone_missing",
+                "person_id": person_id,
+                "person_name": person_name,
+                "error": f"No phone is set up for {owner}. Add a notify service for {owner} in Find My Phone settings.",
+            }
+
         ha_settings = self._load_homeassistant_settings()
         ha_base = (ha_settings.get("HA_BASE_URL") or "http://homeassistant.local:8123").strip().rstrip("/")
         ha_token = (ha_settings.get("HA_TOKEN") or "").strip()
-        notify_service_raw = (
-            (overrides.get("notify_service") or "").strip()
-            or (settings.get("MOBILE_NOTIFY_SERVICE") or "").strip()
-            or self._load_default_notify_service()
-        )
 
         title = ((overrides.get("title") or "").strip() or (settings.get("DEFAULT_TITLE", "") or "Find My Phone")).strip()
         message = ((overrides.get("message") or "").strip() or (settings.get("DEFAULT_MESSAGE", "") or "Phone alert requested.")).strip()
@@ -202,6 +490,7 @@ class FindMyPhonePlugin(ToolVerba):
             return {
                 "ok": False,
                 "count": 0,
+                "code": "ha_token_missing",
                 "error": (
                     "Home Assistant token is not set. Open WebUI → Settings → Home Assistant Settings "
                     "and add a Long-Lived Access Token."
@@ -212,7 +501,8 @@ class FindMyPhonePlugin(ToolVerba):
             return {
                 "ok": False,
                 "count": 0,
-                "error": "Find My Phone is not configured. Please set MOBILE_NOTIFY_SERVICE in plugin settings.",
+                "code": "notify_service_missing",
+                "error": "Find My Phone is not configured. Please set a notify service in plugin settings.",
             }
 
         service = self._normalize_notify_service(notify_service_raw)
@@ -220,8 +510,9 @@ class FindMyPhonePlugin(ToolVerba):
             return {
                 "ok": False,
                 "count": 0,
+                "code": "notify_service_invalid",
                 "error": (
-                    "MOBILE_NOTIFY_SERVICE is invalid. Use notify.mobile_app_<device> or mobile_app_<device> "
+                    "The notify service is invalid. Use notify.mobile_app_<device> or mobile_app_<device> "
                     "(letters/numbers/underscore)."
                 ),
             }
@@ -274,6 +565,7 @@ class FindMyPhonePlugin(ToolVerba):
                 return {
                     "ok": False,
                     "count": i + 1,
+                    "code": "phone_alert_failed",
                     "error": f"Home Assistant notify failed (HTTP {last_status}). Check HA URL/token/service name.",
                 }
 
@@ -281,9 +573,9 @@ class FindMyPhonePlugin(ToolVerba):
             if i < count - 1:
                 time.sleep(delay_seconds)
 
-        return {"ok": True, "count": count, "error": ""}
+        return {"ok": True, "count": count, "error": "", "person_id": person_id, "person_name": person_name}
 
-    def _siri_flatten(self, text: str | None) -> str:
+    def _siri_flatten(self, text: Optional[str]) -> str:
         if not text:
             return "No answer available."
         out = str(text)
@@ -291,80 +583,77 @@ class FindMyPhonePlugin(ToolVerba):
         out = re.sub(r"\s+", " ", out).strip()
         return out[:280]
 
-    async def _run(self, args: Dict[str, Any] | None, llm_client, mention: str = "you") -> Dict[str, Any]:
+    async def _run(
+        self,
+        args: Optional[Dict[str, Any]],
+        llm_client,
+        mention: str = "you",
+        *,
+        platform: str = "webui",
+        origin: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         overrides = self._extract_overrides(args)
-        result = await asyncio.to_thread(self._trigger_phone_alert, overrides)
+        result = await asyncio.to_thread(self._trigger_phone_alert, overrides, platform=platform, origin=origin or {})
 
         if not result.get("ok"):
             err_msg = (result.get("error") or "Something went wrong triggering the phone alert.").strip()
-            code = "phone_alert_failed"
-            if "token is not set" in err_msg.lower():
-                code = "ha_token_missing"
-            elif "not configured" in err_msg.lower():
-                code = "notify_service_missing"
-            elif "invalid" in err_msg.lower():
-                code = "notify_service_invalid"
+            code = (result.get("code") or "phone_alert_failed").strip()
             return action_failure(
                 code=code,
                 message=err_msg,
-                say_hint="Explain why the phone alert failed and what setting to fix.",
+                say_hint="Tell the user they do not have a phone set up yet, or explain the setting that needs attention.",
             )
 
         count = int(result.get("count", 1) or 1)
+        person_name = self._text(result.get("person_name"))
         return action_success(
-            facts={"alert_count": count, "mention": mention},
+            facts={"alert_count": count, "mention": mention, "person_name": person_name},
             summary_for_user=f"Sent the phone alert {count} time(s).",
             say_hint="Confirm that the alert was sent and suggest listening for the phone.",
         )
 
     # ---- platform handlers ----
-    async def handle_webui(self, args, llm_client):
-        return await self._run(args or {}, llm_client, mention="you")
+    async def handle_webui(self, args, llm_client, context=None):
+        return await self._run(args or {}, llm_client, mention="you", platform="webui", origin=self._origin_from_context("webui", context))
 
 
     async def handle_macos(self, args, llm_client, context=None):
-        try:
-            return await self.handle_webui(args, llm_client, context=context)
-        except TypeError:
-            return await self.handle_webui(args, llm_client)
-    async def handle_homeassistant(self, args, llm_client):
-        return await self._run(args or {}, llm_client, mention="you")
+        return await self._run(args or {}, llm_client, mention="you", platform="macos", origin=self._origin_from_context("macos", context))
+
+    async def handle_homeassistant(self, args, llm_client, context=None):
+        return await self._run(args or {}, llm_client, mention="you", platform="homeassistant", origin=self._origin_from_context("homeassistant", context))
+
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        try:
-            return await self.handle_homeassistant(args=args, llm_client=llm_client, context=context)
-        except TypeError:
-            try:
-                return await self.handle_homeassistant(args=args, llm_client=llm_client)
-            except TypeError:
-                return await self.handle_homeassistant(args, llm_client)
+        return await self._run(args or {}, llm_client, mention="you", platform="voice_core", origin=self._origin_from_context("voice_core", context))
 
 
-    async def handle_homekit(self, args, llm_client):
-        return await self._run(args or {}, llm_client, mention="you")
+    async def handle_homekit(self, args, llm_client, context=None):
+        return await self._run(args or {}, llm_client, mention="you", platform="homekit", origin=self._origin_from_context("homekit", context))
 
-    async def handle_xbmc(self, args, llm_client):
-        return await self._run(args or {}, llm_client, mention="you")
+    async def handle_xbmc(self, args, llm_client, context=None):
+        return await self._run(args or {}, llm_client, mention="you", platform="xbmc", origin=self._origin_from_context("xbmc", context))
 
-    async def handle_discord(self, message, args, llm_client):
+    async def handle_discord(self, message, args, llm_client, context=None):
         mention = getattr(getattr(message, "author", None), "mention", None) or "you"
-        return await self._run(args or {}, llm_client, mention=mention)
+        return await self._run(args or {}, llm_client, mention=mention, platform="discord", origin=self._origin_from_discord(message, context))
 
-    async def handle_telegram(self, update, args, llm_client):
+    async def handle_telegram(self, update, args, llm_client, context=None):
         sender = (update or {}).get("from") or {}
         username = (sender.get("username") or sender.get("first_name") or "you").strip()
         mention = f"@{username}" if username and username != "you" and not username.startswith("@") else (username or "you")
-        return await self._run(args or {}, llm_client, mention=mention)
+        return await self._run(args or {}, llm_client, mention=mention, platform="telegram", origin=self._origin_from_telegram(update, context))
 
-    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, context=None, **kwargs):
         if llm_client is None:
             llm_client = kwargs.get("llm") or kwargs.get("ll_client") or kwargs.get("llm_client")
         mention = str(sender or "you").strip() or "you"
-        return await self._run(args or {}, llm_client, mention=mention)
+        return await self._run(args or {}, llm_client, mention=mention, platform="matrix", origin=self._origin_from_matrix(sender, context))
 
 
     async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
         args = args or {}
         ctx = context if isinstance(context, dict) else {}
+        ctx["platform"] = "meshtastic"
         origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
         sender = ""
         source_from = origin.get("from")
@@ -401,9 +690,11 @@ class FindMyPhonePlugin(ToolVerba):
                 call_kwargs["context"] = ctx
         return await self.handle_irc(**call_kwargs)
 
-    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client, context=None):
         mention = str(user or "you").strip() or "you"
-        return await self._run(args or {}, llm_client, mention=mention)
+        ctx = context if isinstance(context, dict) else {}
+        platform = "meshtastic" if str(ctx.get("platform") or "").strip().lower() == "meshtastic" else "irc"
+        return await self._run(args or {}, llm_client, mention=mention, platform=platform, origin=self._origin_from_irc(user, ctx, platform=platform))
 
 
 verba = FindMyPhonePlugin()

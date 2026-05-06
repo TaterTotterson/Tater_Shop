@@ -28,8 +28,10 @@ from helpers import (
     redis_client as shared_redis_client,
 )
 from admin_gate import (
+    admin_denial_message,
     is_admin_only_plugin,
-    normalize_admin_list,
+    origin_is_admin,
+    resolve_admin_status,
 )
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
@@ -69,7 +71,7 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 
 # Tables plugin: handle both modern and legacy module names, else no-op
@@ -169,12 +171,6 @@ PORTAL_SETTINGS = {
             "type": "string",
             "default": "",
             "description": "Comma-separated triggers (e.g. 'tater, taterbot') to count as mentions"
-        },
-        "admin_user_id": {
-            "label": "Admin User ID",
-            "type": "string",
-            "default": "",
-            "description": "Only this Matrix user can run admin-only tools (use full MXID like @user:server).",
         },
         "max_response_length": {
             "label": "Max Response Chunk Length",
@@ -425,27 +421,6 @@ def _resolve_store_path(requested: str) -> tuple[str, List[str]]:
         + (" | ".join(failures) if failures else "no candidates")
     )
 
-def _matrix_user_tokens(value: str) -> set[str]:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return set()
-    tokens = {raw}
-    if raw.startswith("@"):
-        tokens.add(raw[1:])
-        raw = raw[1:]
-    if ":" in raw:
-        tokens.add(raw.split(":", 1)[0])
-    return tokens
-
-def _admin_user_allowed(sender: str) -> bool:
-    raw = _get_setting("admin_user_id", "")
-    allowed: set[str] = set()
-    for item in normalize_admin_list(raw):
-        allowed |= _matrix_user_tokens(item)
-    if not allowed:
-        return False
-    return bool(_matrix_user_tokens(sender) & allowed)
-
 def get_plugin_enabled(name: str) -> bool:
     enabled = redis_client.hget("verba_enabled", name)
     return bool(enabled and enabled.lower() == "true")
@@ -453,10 +428,14 @@ def get_plugin_enabled(name: str) -> bool:
 def _room_history_key(room_id: str) -> str:
     return f"tater:matrix:{room_id}:history"
 
-def save_matrix_message(room_id: str, role: str, username: str, content: Any):
+def save_matrix_message(room_id: str, role: str, username: str, content: Any, *, user_id: str = ""):
     key = _room_history_key(room_id)
     max_store = int(redis_client.get("tater:max_store") or 20)
-    redis_client.rpush(key, json.dumps({"role": role, "username": username, "content": content}))
+    payload: Dict[str, Any] = {"role": role, "username": username, "content": content}
+    user_id_text = str(user_id or "").strip()
+    if user_id_text:
+        payload["user_id"] = user_id_text
+    redis_client.rpush(key, json.dumps(payload))
     if max_store > 0:
         redis_client.ltrim(key, -max_store, -1)
 
@@ -1362,6 +1341,7 @@ class MatrixPlatform:
                 "blob_key": blob_key,
                 "size": len(media_bytes),
             },
+            user_id=sender,
         )
         if media_type == "image":
             return ref
@@ -1426,7 +1406,7 @@ class MatrixPlatform:
         if not _should_respond(self.response_policy, body, self.user_id, self.display_name_cache):
             return
 
-        save_matrix_message(room.room_id, "user", sender, body)
+        save_matrix_message(room.room_id, "user", sender, body, user_id=sender)
 
         effective_body = body
         stripped = _strip_matrix_mentions(body, self.user_id, self.display_name_cache)
@@ -1451,9 +1431,12 @@ class MatrixPlatform:
                     "platform": "matrix",
                     "room_id": room.room_id,
                     "user": sender,
+                    "user_id": sender,
+                    "sender": sender,
                     "request_id": str(time.time()),
                 }
                 origin = {k: v for k, v in origin.items() if v not in (None, "")}
+                resolve_admin_status(platform="matrix", origin=origin, redis_client=redis_client)
 
                 async def _wait_callback(func_name, plugin_obj, wait_text="", wait_payload=None):
                     del plugin_obj
@@ -1472,17 +1455,13 @@ class MatrixPlatform:
                     if is_admin_only_plugin(func_name):
                         needs_admin = True
 
-                    if needs_admin and not _admin_user_allowed(sender):
-                        msg = (
-                            "This tool is restricted to the configured admin user on Matrix."
-                            if _get_setting("admin_user_id", "")
-                            else "This tool is disabled because no Matrix admin user is configured."
-                        )
+                    if needs_admin and not origin_is_admin("matrix", origin, redis_client):
+                        msg = admin_denial_message("matrix", origin, redis_client)
                         return action_failure(
                             code="admin_only",
                             message=msg,
                             needs=[],
-                            say_hint="Explain that this tool is restricted to the admin user on this platform.",
+                            say_hint="Explain that this tool is restricted to People marked as admin.",
                         )
                     return None
 
