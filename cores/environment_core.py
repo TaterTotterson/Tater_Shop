@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
 
-__version__ = "1.4.14"
+__version__ = "1.4.15"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -1002,6 +1002,119 @@ def _normalize_ecobee_homekit_thermostats(rows: List[Dict[str, Any]]) -> List[Di
     return readings
 
 
+def _normalize_ecobee_homekit_sensors(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    readings: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows or []):
+        if not isinstance(row, dict):
+            continue
+        sensor_id = _text(row.get("id") or row.get("accessory_id") or f"sensor_{index + 1}")
+        source_name = _text(row.get("name")) or sensor_id
+        source_id = f"ecobee_homekit:{_clean_key(sensor_id)}"
+        key_base = f"ecobee_homekit_{_clean_key(sensor_id)}"
+        sensor_type = _clean_key(row.get("type"))
+
+        if sensor_type == "temperature":
+            unit = _text(row.get("temperature_unit")).upper() or "F"
+            if unit not in {"C", "F"}:
+                unit = "F"
+            temp_value = row.get("current_temperature_f") if unit == "F" else row.get("current_temperature_c")
+            if _as_float(temp_value) is None:
+                temp_value = row.get("current_temperature_c") if unit == "F" else row.get("current_temperature_f")
+                unit = "C" if unit == "F" else "F"
+            if _as_float(temp_value) is not None:
+                readings.append(
+                    _reading_row(
+                        key=f"{key_base}_temperature",
+                        label=f"{source_name} Temperature",
+                        category="temperature",
+                        unit=unit,
+                        value=temp_value,
+                        provider="ecobee_homekit",
+                        source_id=source_id,
+                        source_name=source_name,
+                    )
+                )
+            continue
+
+        if sensor_type == "humidity":
+            humidity = row.get("current_humidity")
+            if _as_float(humidity) is not None:
+                readings.append(
+                    _reading_row(
+                        key=f"{key_base}_humidity",
+                        label=f"{source_name} Humidity",
+                        category="humidity",
+                        unit="%",
+                        value=humidity,
+                        provider="ecobee_homekit",
+                        source_id=source_id,
+                        source_name=source_name,
+                    )
+                )
+            continue
+
+        if sensor_type in {"occupancy", "motion", "contact"}:
+            display = _text(row.get("display"))
+            if not display:
+                if sensor_type == "occupancy":
+                    display = "Occupied" if row.get("occupancy_detected") is True else "Clear" if row.get("occupancy_detected") is False else ""
+                elif sensor_type == "motion":
+                    display = "Motion" if row.get("motion_detected") is True else "Clear" if row.get("motion_detected") is False else ""
+                else:
+                    state = _as_float(row.get("contact_state"))
+                    display = "Closed" if state == 0 else "Open" if state == 1 else _text(row.get("contact_state"))
+            if display:
+                readings.append(
+                    _reading_row(
+                        key=f"{key_base}_{sensor_type}",
+                        label=f"{source_name} {CATEGORY_LABELS.get('condition')}",
+                        category="condition",
+                        unit="",
+                        value=display,
+                        display=display,
+                        provider="ecobee_homekit",
+                        source_id=source_id,
+                        source_name=source_name,
+                    )
+                )
+            continue
+
+        if sensor_type == "battery":
+            level = row.get("battery_level")
+            low = row.get("status_low_battery")
+            if _as_float(level) is not None:
+                readings.append(
+                    _reading_row(
+                        key=f"{key_base}_battery",
+                        label=f"{source_name} Battery",
+                        category="battery",
+                        unit="%",
+                        value=level,
+                        provider="ecobee_homekit",
+                        source_id=source_id,
+                        source_name=source_name,
+                        tone="danger" if low is True or (_as_float(level) or 0) <= 20 else "good",
+                    )
+                )
+            elif low is not None:
+                display = "Low" if low is True else "OK"
+                readings.append(
+                    _reading_row(
+                        key=f"{key_base}_battery",
+                        label=f"{source_name} Battery",
+                        category="battery",
+                        unit="",
+                        value=display,
+                        display=display,
+                        provider="ecobee_homekit",
+                        source_id=source_id,
+                        source_name=source_name,
+                        tone="danger" if low is True else "good",
+                    )
+                )
+    return readings
+
+
 def _store_snapshot(snapshot: Dict[str, Any], client: Any = None, provider_key: Optional[str] = None) -> None:
     store = client or redis_client
     settings = _load_settings(store)
@@ -1381,7 +1494,15 @@ def _discover_ecobee_candidates(client: Any = None) -> List[Dict[str, Any]]:
         from integrations.homekit import list_homekit_thermostats
     except Exception:
         return []
+    try:
+        from integrations.homekit import list_homekit_environment_sensors
+    except Exception:
+        list_homekit_environment_sensors = None
     thermostats = list_homekit_thermostats()
+    try:
+        sensor_services = list_homekit_environment_sensors() if callable(list_homekit_environment_sensors) else []
+    except Exception:
+        sensor_services = []
     rows: List[Dict[str, Any]] = []
     for row in thermostats if isinstance(thermostats, list) else []:
         if not isinstance(row, dict):
@@ -1405,6 +1526,22 @@ def _discover_ecobee_candidates(client: Any = None) -> List[Dict[str, Any]]:
                 measurement="thermostat",
                 current_display=", ".join(current_parts),
                 capabilities=["Temperature", "Humidity"],
+            )
+        )
+    for reading in _normalize_ecobee_homekit_sensors(sensor_services if isinstance(sensor_services, list) else []):
+        source_id = _text(reading.get("source_id"))
+        source_suffix = source_id.split(":", 1)[1] if ":" in source_id else source_id
+        category = _clean_key(reading.get("category")) or "other"
+        rows.append(
+            _candidate_row(
+                provider="ecobee_homekit",
+                sensor_id=source_suffix,
+                label=_text(reading.get("source_name")) or _text(reading.get("label")) or source_suffix,
+                category=category,
+                unit=_text(reading.get("unit")),
+                measurement=category,
+                current_display=_text(reading.get("display")),
+                capabilities=[CATEGORY_LABELS.get(category, _humanize_key(category) or "Sensor")],
             )
         )
     return rows
@@ -1514,46 +1651,63 @@ def _poll_ecobee_homekit(client: Any = None) -> Dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "provider": "ecobee_homekit", "message": f"Ecobee HomeKit integration unavailable: {exc}"}
     try:
+        from integrations.homekit import list_homekit_environment_sensors
+    except Exception:
+        list_homekit_environment_sensors = None
+    try:
         rows = list_homekit_thermostats()
+        sensor_rows = list_homekit_environment_sensors() if callable(list_homekit_environment_sensors) else []
     except Exception as exc:
         logger.warning("[Environment] Ecobee HomeKit poll failed: %s", exc)
         return {"ok": False, "provider": "ecobee_homekit", "message": str(exc)}
     thermostats = rows if isinstance(rows, list) else []
+    sensors = sensor_rows if isinstance(sensor_rows, list) else []
     selected = _selected_by_provider("ecobee_homekit", client)
     if not selected:
-        return {"ok": True, "provider": "ecobee_homekit", "reading_count": 0, "source_count": len(thermostats), "message": "No Ecobee HomeKit thermostats are selected."}
+        return {
+            "ok": True,
+            "provider": "ecobee_homekit",
+            "reading_count": 0,
+            "source_count": len(thermostats) + len(sensors),
+            "message": "No Ecobee HomeKit thermostats or sensors are selected.",
+        }
     readings = [
         _apply_selection_to_reading(row, selection)
-        for row in _normalize_ecobee_homekit_thermostats(thermostats)
+        for row in _normalize_ecobee_homekit_thermostats(thermostats) + _normalize_ecobee_homekit_sensors(sensors)
         for selection in [_selection_for_source("ecobee_homekit", row.get("source_id"), selected)]
         if selection
     ]
     raw = {
         "thermostat_count": len(thermostats),
         "thermostat_names": [_text(row.get("name")) or _text(row.get("id")) for row in thermostats if isinstance(row, dict)][:50],
+        "sensor_count": len(sensors),
+        "sensor_names": [_text(row.get("name")) or _text(row.get("id")) for row in sensors if isinstance(row, dict)][:50],
     }
     if not readings:
         return {
             "ok": True,
             "provider": "ecobee_homekit",
             "reading_count": 0,
-            "source_count": len(thermostats),
-            "message": f"Ecobee HomeKit returned {len(thermostats)} thermostat{'s' if len(thermostats) != 1 else ''}, but no environment readings were found.",
+            "source_count": len(thermostats) + len(sensors),
+            "message": (
+                f"Ecobee HomeKit returned {len(thermostats)} thermostat{'s' if len(thermostats) != 1 else ''} "
+                f"and {len(sensors)} sensor service{'s' if len(sensors) != 1 else ''}, but no selected environment readings were found."
+            ),
         }
     snapshot = _snapshot_from_readings(
         provider="ecobee_homekit",
-        source_id="ecobee_homekit:thermostats",
+        source_id="ecobee_homekit:homekit",
         readings=readings,
         raw=raw,
-        model="Ecobee HomeKit Thermostats",
+        model="Ecobee HomeKit",
     )
     _store_snapshot(snapshot, client, provider_key="ecobee_homekit")
-    logger.info("[Environment] Ecobee HomeKit poll stored %d readings from %d thermostats.", len(readings), len(thermostats))
+    logger.info("[Environment] Ecobee HomeKit poll stored %d readings from %d thermostats and %d sensor services.", len(readings), len(thermostats), len(sensors))
     return {
         "ok": True,
         "provider": "ecobee_homekit",
         "reading_count": len(readings),
-        "source_count": len(thermostats),
+        "source_count": len(thermostats) + len(sensors),
         "message": f"Stored {len(readings)} Ecobee HomeKit environment reading{'s' if len(readings) != 1 else ''}.",
     }
 
