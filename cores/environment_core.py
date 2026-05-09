@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
 
-__version__ = "1.4.13"
+__version__ = "1.4.14"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -95,6 +95,15 @@ ECOWITT_FIELD_META: Dict[str, Tuple[str, str, str]] = {
     "monthlyrainin": ("Monthly Rain", "rain", "in"),
     "yearlyrainin": ("Yearly Rain", "rain", "in"),
     "totalrainin": ("Total Rain", "rain", "in"),
+    "rrain_piezo": ("Piezo Rain Rate", "rain", "mm/hr"),
+    "erain_piezo": ("Piezo Event Rain", "rain", "mm"),
+    "hrain_piezo": ("Piezo Hourly Rain", "rain", "mm"),
+    "drain_piezo": ("Piezo Daily Rain", "rain", "mm"),
+    "wrain_piezo": ("Piezo Weekly Rain", "rain", "mm"),
+    "mrain_piezo": ("Piezo Monthly Rain", "rain", "mm"),
+    "yrain_piezo": ("Piezo Yearly Rain", "rain", "mm"),
+    "last24hrain_piezo": ("Piezo Last 24h Rain", "rain", "mm"),
+    "srain_piezo": ("Rain State", "rain", ""),
     "solarradiation": ("Solar Radiation", "solar", "W/m2"),
     "uv": ("UV Index", "solar", ""),
     "lightning": ("Lightning Distance", "lightning", "mi"),
@@ -2160,6 +2169,18 @@ def _reading_display(snapshot: Dict[str, Any], key: str, default: str = "-") -> 
     return _text(row.get("display")) or default
 
 
+def _reading_display_any(snapshot: Dict[str, Any], keys: Iterable[str], default: str = "-") -> str:
+    for key in keys:
+        value = _reading_display(snapshot, key, "")
+        if value:
+            return value
+    return default
+
+
+def _rain_today_display(snapshot: Dict[str, Any], default: str = "-") -> str:
+    return _reading_display_any(snapshot, ("dailyrainin", "drain_piezo"), default)
+
+
 def _category_display(snapshot: Dict[str, Any], category: str, default: str = "-") -> str:
     wanted = _clean_key(category)
     for row in snapshot.get("readings") or []:
@@ -3100,6 +3121,7 @@ def _environment_manager_ui(
             "humidityin",
             "windspeedmph",
             "windgustmph",
+            "drain_piezo",
             "dailyrainin",
             "uv",
             "weather_api_aqi_us_epa",
@@ -3173,7 +3195,7 @@ def _environment_manager_ui(
         {"label": "Indoor", "value": _reading_display(snapshot, "tempinf")},
         {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
         {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
-        {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+        {"label": "Rain Today", "value": _rain_today_display(snapshot)},
         {"label": "Forecast", "value": _reading_display(forecast_snapshot, "weather_api_condition")},
         {"label": "Batteries", "value": battery_summary},
     ]
@@ -3296,7 +3318,7 @@ def _environment_manager_ui(
                 summary_rows=[
                     {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
                     {"label": "Gust", "value": _reading_display(snapshot, "windgustmph")},
-                    {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+                    {"label": "Rain Today", "value": _rain_today_display(snapshot)},
                     {"label": "Lightning", "value": _reading_display(snapshot, "lightning_num", _reading_display(snapshot, "lightning"))},
                 ],
             )
@@ -3716,7 +3738,9 @@ def _environment_manager_ui(
                 detail="Rain rate and daily accumulation over recent uploads.",
                 fields=[
                     _trend_image_field(history, "rainratein", "Rain Rate", "Recent rain rate trend.", color_token="rain"),
+                    _trend_image_field(history, "rrain_piezo", "Piezo Rain Rate", "Recent piezo rain rate trend.", color_token="rain"),
                     _trend_image_field(history, "dailyrainin", "Rain Today", "Daily rain accumulation trend.", color_token="rain"),
+                    _trend_image_field(history, "drain_piezo", "Piezo Rain Today", "Daily piezo rain accumulation trend.", color_token="rain"),
                 ],
             ),
             _trend_card(
@@ -3791,7 +3815,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             {"label": "Humidity", "value": _reading_display(snapshot, "humidity", _category_display(snapshot, "humidity"))},
             {"label": "Wind", "value": _reading_display(snapshot, "windspeedmph")},
             {"label": "Forecast", "value": _reading_display(weather_snapshot, "weather_api_condition")},
-            {"label": "Rain Today", "value": _reading_display(snapshot, "dailyrainin")},
+            {"label": "Rain Today", "value": _rain_today_display(snapshot)},
             {"label": "Status", "value": "Stale" if stale else "Live" if snapshot else "Waiting"},
         ],
         "items": [],
