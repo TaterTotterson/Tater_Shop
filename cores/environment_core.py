@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
 
-__version__ = "1.4.15"
+__version__ = "1.4.16"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -52,6 +52,7 @@ CANDIDATE_SENSORS_KEY = "environment:candidate_sensors"
 DEFAULT_HISTORY_LIMIT = 288
 DEFAULT_STALE_AFTER_MINUTES = 30
 DEFAULT_INTEGRATION_POLL_SECONDS = 300
+DEFAULT_TEMPERATURE_UNIT = "F"
 
 LATEST_PROVIDER_KEYS = {
     "ecowitt": LATEST_ECOWITT_KEY,
@@ -184,6 +185,18 @@ def _clean_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", _text(value).lower()).strip("_")
 
 
+def _temperature_unit(value: Any, default: str = DEFAULT_TEMPERATURE_UNIT) -> str:
+    token = _text(value).strip().lower().replace("°", "")
+    if token in {"c", "celcius", "celsius", "centigrade", "metric"}:
+        return "C"
+    if token in {"f", "fahrenheit", "imperial", "us"}:
+        return "F"
+    default_token = _text(default).strip().upper()
+    if default_token in {"C", "F"}:
+        return default_token
+    return ""
+
+
 def _load_settings(client: Any = None) -> Dict[str, Any]:
     store = client or redis_client
     try:
@@ -194,6 +207,7 @@ def _load_settings(client: Any = None) -> Dict[str, Any]:
         "ecowitt_passkey": _text(raw.get("ECOWITT_PASSKEY")),
         "ecowitt_outdoor_area": _text(raw.get("ENVIRONMENT_ECOWITT_OUTDOOR_AREA")) or "Outside",
         "ecowitt_indoor_area": _text(raw.get("ENVIRONMENT_ECOWITT_INDOOR_AREA")) or "Inside",
+        "temperature_unit": _temperature_unit(raw.get("ENVIRONMENT_TEMPERATURE_UNIT"), DEFAULT_TEMPERATURE_UNIT),
         "integration_poll_seconds": _as_int(
             raw.get("ENVIRONMENT_INTEGRATION_POLL_SECONDS"),
             DEFAULT_INTEGRATION_POLL_SECONDS,
@@ -275,6 +289,17 @@ def _display_settings_field_rows(
     provider_snapshots = provider_snapshots if isinstance(provider_snapshots, dict) else {}
     selected_sensors = selected_sensors if isinstance(selected_sensors, list) else []
     return [
+        {
+            "key": "ENVIRONMENT_TEMPERATURE_UNIT",
+            "label": "Temperature Unit",
+            "type": "select",
+            "value": _temperature_unit(settings.get("temperature_unit"), DEFAULT_TEMPERATURE_UNIT),
+            "options": [
+                {"value": "F", "label": "Fahrenheit (F)"},
+                {"value": "C", "label": "Celsius (C)"},
+            ],
+            "description": "Normalize all Environment Core temperature readings to this unit, including selected integration sensors.",
+        },
         {
             "key": "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
             "label": "Current Card Readings Source",
@@ -387,6 +412,90 @@ def _value_label(value: Any, unit: str = "") -> str:
     else:
         text = _text(value)
     return f"{text} {unit}".strip()
+
+
+def _temperature_value(value: Any, from_unit: Any, to_unit: Any) -> Optional[float]:
+    number = _as_float(value)
+    if number is None:
+        return None
+    source = _temperature_unit(from_unit, "")
+    target = _temperature_unit(to_unit, DEFAULT_TEMPERATURE_UNIT)
+    if source == target:
+        return number
+    if source == "C" and target == "F":
+        return (number * 9.0 / 5.0) + 32.0
+    if source == "F" and target == "C":
+        return (number - 32.0) * 5.0 / 9.0
+    return number
+
+
+def _temperature_row_unit(row: Dict[str, Any]) -> str:
+    for value in (row.get("native_unit"), row.get("source_unit"), row.get("unit")):
+        unit = _temperature_unit(value, "")
+        if unit in {"C", "F"}:
+            return unit
+    return ""
+
+
+def _is_temperature_reading(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    unit = _temperature_row_unit(row)
+    if unit not in {"C", "F"}:
+        return False
+    category = _clean_key(row.get("category"))
+    haystack = f"{row.get('key') or ''} {row.get('label') or ''}".lower()
+    return category == "temperature" or "temp" in haystack or "temperature" in haystack
+
+
+def _normalize_temperature_row(row: Dict[str, Any], preferred_unit: str) -> Dict[str, Any]:
+    next_row = dict(row)
+    if not _is_temperature_reading(next_row):
+        return next_row
+
+    native_unit = _temperature_row_unit(next_row)
+    native_value = next_row.get("native_value", next_row.get("source_value", next_row.get("value")))
+    native_number = _as_float(native_value)
+    if native_number is None or native_unit not in {"C", "F"}:
+        return next_row
+
+    if "native_unit" not in next_row:
+        next_row["native_unit"] = native_unit
+    if "native_value" not in next_row:
+        next_row["native_value"] = native_number
+    if "native_display" not in next_row and _text(next_row.get("display")):
+        next_row["native_display"] = _text(next_row.get("display"))
+
+    target_unit = _temperature_unit(preferred_unit, DEFAULT_TEMPERATURE_UNIT)
+    converted = _temperature_value(native_number, native_unit, target_unit)
+    if converted is None:
+        return next_row
+
+    next_row["unit"] = target_unit
+    next_row["value"] = round(converted, 2)
+    next_row["display"] = _value_label(converted, target_unit)
+    next_row["normalized_unit"] = target_unit
+    return next_row
+
+
+def _normalize_temperature_snapshot(
+    snapshot: Dict[str, Any],
+    *,
+    settings: Optional[Dict[str, Any]] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    settings = settings if isinstance(settings, dict) else _load_settings(client)
+    preferred_unit = _temperature_unit(settings.get("temperature_unit"), DEFAULT_TEMPERATURE_UNIT)
+    next_snapshot = dict(snapshot)
+    readings = []
+    for row in snapshot.get("readings") or []:
+        if isinstance(row, dict):
+            readings.append(_normalize_temperature_row(row, preferred_unit))
+    next_snapshot["readings"] = readings
+    next_snapshot["temperature_unit"] = preferred_unit
+    return next_snapshot
 
 
 def _humanize_key(key: str) -> str:
@@ -1118,6 +1227,7 @@ def _normalize_ecobee_homekit_sensors(rows: List[Dict[str, Any]]) -> List[Dict[s
 def _store_snapshot(snapshot: Dict[str, Any], client: Any = None, provider_key: Optional[str] = None) -> None:
     store = client or redis_client
     settings = _load_settings(store)
+    snapshot = _normalize_temperature_snapshot(snapshot, settings=settings)
     blob = json.dumps(snapshot, sort_keys=True)
     provider = _clean_key(provider_key or snapshot.get("provider") or "environment")
     store.set(LATEST_KEY, blob)
@@ -2178,6 +2288,7 @@ def _load_json_key(key: str, client: Any = None) -> Dict[str, Any]:
 
 def _load_history(limit: int = 10, client: Any = None) -> List[Dict[str, Any]]:
     store = client or redis_client
+    settings = _load_settings(store)
     try:
         rows = store.lrange(HISTORY_KEY, 0, max(0, int(limit) - 1)) or []
     except Exception:
@@ -2189,7 +2300,7 @@ def _load_history(limit: int = 10, client: Any = None) -> List[Dict[str, Any]]:
         except Exception:
             parsed = None
         if isinstance(parsed, dict):
-            out.append(parsed)
+            out.append(_normalize_temperature_snapshot(parsed, settings=settings))
     return out
 
 
@@ -2206,15 +2317,51 @@ def _snapshot_provider_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 def _load_provider_snapshots(client: Any = None) -> Dict[str, Dict[str, Any]]:
     snapshots: Dict[str, Dict[str, Any]] = {}
+    settings = _load_settings(client)
     for provider, key in LATEST_PROVIDER_KEYS.items():
         snapshot = _load_json_key(key, client)
         if snapshot:
-            snapshots[provider] = snapshot
+            snapshots[provider] = _normalize_temperature_snapshot(snapshot, settings=settings)
     latest = _load_json_key(LATEST_KEY, client)
     if latest:
         provider = _clean_key(latest.get("provider") or "ecowitt")
-        snapshots.setdefault(provider, latest)
+        snapshots.setdefault(provider, _normalize_temperature_snapshot(latest, settings=settings))
     return snapshots
+
+
+def _renormalize_temperature_cache(client: Any = None) -> None:
+    store = client or redis_client
+    settings = _load_settings(store)
+
+    def normalize_blob(raw: Any) -> str:
+        try:
+            parsed = json.loads(_text(raw))
+        except Exception:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        normalized = _normalize_temperature_snapshot(parsed, settings=settings)
+        return json.dumps(normalized, sort_keys=True)
+
+    for key in [LATEST_KEY, *LATEST_PROVIDER_KEYS.values()]:
+        try:
+            raw = store.get(key)
+        except Exception:
+            raw = None
+        if raw in (None, ""):
+            continue
+        blob = normalize_blob(raw)
+        if blob:
+            store.set(key, blob)
+
+    try:
+        source_rows = store.hgetall(SOURCES_KEY) or {}
+    except Exception:
+        source_rows = {}
+    for field, raw in source_rows.items():
+        blob = normalize_blob(raw)
+        if blob:
+            store.hset(SOURCES_KEY, field, blob)
 
 
 def _combined_snapshot(provider_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -4011,6 +4158,7 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
         "ECOWITT_PASSKEY",
         "ENVIRONMENT_ECOWITT_OUTDOOR_AREA",
         "ENVIRONMENT_ECOWITT_INDOOR_AREA",
+        "ENVIRONMENT_TEMPERATURE_UNIT",
         "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
         "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
         "ENVIRONMENT_FORECAST_PROVIDER",
@@ -4024,7 +4172,7 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
     mapping: Dict[str, str] = {}
     for key in text_keys:
         if key in values:
-            mapping[key] = _text(values.get(key))
+            mapping[key] = _temperature_unit(values.get(key), DEFAULT_TEMPERATURE_UNIT) if key == "ENVIRONMENT_TEMPERATURE_UNIT" else _text(values.get(key))
     for key, (default, minimum, maximum) in int_keys.items():
         if key in values:
             mapping[key] = str(_as_int(values.get(key), default, minimum=minimum, maximum=maximum))
@@ -4034,6 +4182,8 @@ def _save_environment_settings(payload: Dict[str, Any], client: Any = None) -> D
     if not mapping:
         return {"ok": True, "message": "No Environment Core settings changed.", "changed": []}
     (client or redis_client).hset(SETTINGS_KEY, mapping=mapping)
+    if "ENVIRONMENT_TEMPERATURE_UNIT" in mapping:
+        _renormalize_temperature_cache(client)
     return {
         "ok": True,
         "message": "Environment source settings saved.",
