@@ -28,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.6"
+__version__ = "3.3.8"
 
 load_dotenv()
 
@@ -65,12 +65,6 @@ CORE_SETTINGS = {
             "default": 30,
             "description": "How long to cache provider entity discovery for UI dropdowns.",
         },
-        "brief_scheduler_tick_sec": {
-            "label": "Brief Scheduler Tick (sec)",
-            "type": "number",
-            "default": 5,
-            "description": "How often the brief scheduler checks for due jobs.",
-        },
     },
 }
 
@@ -85,6 +79,9 @@ _EXEC_QUEUE_KEY = "awareness:exec_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
 _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
+_DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
+_FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
+_S3BOX_FIRMWARE_PROFILE_KEY = "template:s3box_display"
 _AWARENESS_WORKER_COUNT = 10
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
@@ -341,9 +338,6 @@ def _concrete_rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
 
 
 def _rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
-    kind = _text((rule or {}).get("kind")).lower()
-    if kind == "brief":
-        return "homeassistant"
     return _concrete_rule_provider(rule, fallback=fallback)
 
 
@@ -755,50 +749,12 @@ def _normalize_trigger_entities(value: Any) -> List[str]:
     return out
 
 
-def _normalize_quote_history(value: Any, *, limit: int = 5) -> List[str]:
-    raw_value = value
-    if isinstance(value, str):
-        token = value.strip()
-        if token.startswith("[") and token.endswith("]"):
-            try:
-                raw_value = json.loads(token)
-            except Exception:
-                raw_value = value
-    items = _normalize_players(raw_value)
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in items:
-        text = _compact(_text(item), limit=220)
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-        if len(out) >= max(1, int(limit)):
-            break
-    return out
-
-
-def _quote_history_with_new(history: Any, quote: str, *, limit: int = 5) -> List[str]:
-    clean_quote = _compact(_text(quote), limit=220)
-    merged: List[str] = []
-    if clean_quote:
-        merged.append(clean_quote)
-    for item in _normalize_quote_history(history, limit=max(1, int(limit)) * 2):
-        if clean_quote and item.lower() == clean_quote.lower():
-            continue
-        merged.append(item)
-    return _normalize_quote_history(merged, limit=limit)
-
-
 def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
 
     kind = _text(raw.get("kind")).lower()
-    if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:
+    if kind not in {"camera", "doorbell", "entry_sensor"}:
         return None
 
     rule_id = _text(raw.get("id")) or str(uuid.uuid4())
@@ -807,9 +763,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     base: Dict[str, Any] = {
         "id": rule_id,
         "kind": kind,
-        "provider": "homeassistant"
-        if kind == "brief"
-        else _concrete_rule_provider(raw),
+        "provider": _concrete_rule_provider(raw),
         "name": _text(raw.get("name")) or f"{kind.title()} rule",
         "enabled": _bool(raw.get("enabled"), True),
         "created_at": _as_float(raw.get("created_at"), now_ts),
@@ -819,7 +773,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "last_summary": _text(raw.get("last_summary")),
         "last_error": _text(raw.get("last_error")),
     }
-    if kind != "brief" and not _text(base.get("provider")):
+    if not _text(base.get("provider")):
         return None
 
     if kind == "camera":
@@ -846,6 +800,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
                 else "normal",
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "display_notifications": _bool(raw.get("display_notifications"), False),
+                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
         )
         return base
@@ -890,6 +846,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), True),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "display_notifications": _bool(raw.get("display_notifications"), False),
+                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
         )
         return base
@@ -921,36 +879,11 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), False),
                 "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "display_notifications": _bool(raw.get("display_notifications"), False),
+                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
         )
         return base
-
-    interval = _as_int(raw.get("interval_minutes"), 60, minimum=1, maximum=10080)
-    next_run_ts = _as_float(raw.get("next_run_ts"), 0.0)
-    if next_run_ts <= 0:
-        next_run_ts = now_ts + (interval * 60)
-
-    base.update(
-        {
-            "brief_kind": _text(raw.get("brief_kind") or "events_query_brief").lower(),
-            "interval_minutes": interval,
-            "next_run_ts": next_run_ts,
-            "input_text_entity": _text(raw.get("input_text_entity")),
-            "timeframe": _text(raw.get("timeframe") or "today").lower(),
-            "area": _text(raw.get("area")),
-            "hours": _as_int(raw.get("hours"), 12, minimum=1, maximum=72),
-            "weather_temp_entity": _text(raw.get("weather_temp_entity")),
-            "weather_wind_entity": _text(raw.get("weather_wind_entity")),
-            "weather_rain_entity": _text(raw.get("weather_rain_entity")),
-            "query": _text(raw.get("query")),
-            "include_date": _bool(raw.get("include_date"), False),
-            "tone": _text(raw.get("tone") or "zen"),
-            "prompt_hint": _text(raw.get("prompt_hint")),
-            "max_chars": _as_int(raw.get("max_chars"), 100, minimum=40, maximum=240),
-            "quote_history": _normalize_quote_history(raw.get("quote_history") or raw.get("last_quotes"), limit=5),
-        }
-    )
-    return base
 
 
 _RULE_FINGERPRINT_IGNORE_KEYS = {
@@ -961,8 +894,6 @@ _RULE_FINGERPRINT_IGNORE_KEYS = {
     "last_status",
     "last_summary",
     "last_error",
-    "next_run_ts",
-    "quote_history",
 }
 
 
@@ -1728,6 +1659,85 @@ def _normalize_device_services(raw: Any) -> List[str]:
     return out
 
 
+def _normalize_display_target(raw: Any) -> str:
+    token = _text(raw)
+    if not token:
+        return ""
+    clean = re.sub(r"[^A-Za-z0-9:._,@-]+", "_", token).strip("._,")
+    return clean[:120] or ""
+
+
+def _normalize_display_targets(raw: Any) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in _normalize_players(raw):
+        token = _normalize_display_target(item)
+        if not token or token in seen:
+            continue
+        if token.lower() == "all":
+            return ["all"]
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _display_target_pairs(current_values: Any = None) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = [("all", "All Tater displays")]
+    seen: set[str] = {"all"}
+
+    def add_target(value: Any, label: Any = "") -> None:
+        token = _normalize_display_target(value)
+        if not token or token.lower() in seen:
+            return
+        seen.add(token.lower())
+        pairs.append((token, _text(label) or token))
+
+    try:
+        profile_rows = redis_client.hgetall(_DISPLAY_PROFILE_HASH_KEY) or {}
+    except Exception:
+        profile_rows = {}
+    if isinstance(profile_rows, dict):
+        for raw_key, raw_value in profile_rows.items():
+            key = _text(raw_key)
+            label = key
+            try:
+                profile = json.loads(_text(raw_value))
+                if isinstance(profile, dict):
+                    label = _text(profile.get("name") or profile.get("friendly_name") or profile.get("display_name") or key)
+                    add_target(profile.get("display_target") or key, label)
+                    continue
+            except Exception:
+                pass
+            add_target(key, label)
+
+    try:
+        raw_profile = redis_client.hget(_FIRMWARE_PROFILE_HASH_KEY, _S3BOX_FIRMWARE_PROFILE_KEY)
+        firmware_profile = json.loads(_text(raw_profile)) if raw_profile not in (None, "") else {}
+    except Exception:
+        firmware_profile = {}
+    if isinstance(firmware_profile, dict):
+        add_target(
+            firmware_profile.get("display_target"),
+            firmware_profile.get("friendly_name") or firmware_profile.get("display_name") or firmware_profile.get("display_target"),
+        )
+
+    for current in _normalize_display_targets(current_values):
+        add_target(current, f"{current} (current)")
+    return pairs
+
+
+def _display_target_options(current_values: Any = None) -> List[Dict[str, str]]:
+    return _multiselect_choices_from_pairs(_display_target_pairs(current_values), current_values=current_values)
+
+
+def _display_snapshot_url(snapshot_store: Any) -> str:
+    row = snapshot_store if isinstance(snapshot_store, dict) else {}
+    snapshot_id = _text(row.get("snapshot_id"))
+    if not snapshot_id:
+        return ""
+    return f"/tater-ha/v1/display/snapshots/{snapshot_id}"
+
+
 def _camera_snapshot_sync(ha_base: str, token: str, camera_entity: str) -> bytes:
     url = f"{ha_base}/api/camera_proxy/{quote(camera_entity, safe='')}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
@@ -1920,6 +1930,59 @@ async def _notify_homeassistant(
     return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "homeassistant notifier failed"}
 
 
+async def _notify_display(
+    *,
+    kind: str,
+    title: str,
+    message: str,
+    priority: str,
+    display_targets: Any,
+    snapshot_store: Any,
+    origin: Dict[str, Any],
+    ttl_seconds: int = 90,
+) -> Dict[str, Any]:
+    targets = _normalize_display_targets(display_targets)
+    if not targets:
+        targets = ["all"]
+    snapshot_url = _display_snapshot_url(snapshot_store)
+    normalized_kind = _text(kind) or "notification"
+    meta = {
+        "display_kind": normalized_kind,
+        "priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal",
+        "description": message,
+        "summary": message,
+        "snapshot_url": snapshot_url,
+        "image_format": "jpeg" if snapshot_url else "",
+        "ttl_seconds": _as_int(ttl_seconds, 90, minimum=6, maximum=3600),
+    }
+    try:
+        result = await dispatch_notification(
+            platform="display",
+            title=title,
+            content=message,
+            targets={"target": targets[0] if len(targets) == 1 else "all", "targets": targets},
+            origin=origin,
+            meta=meta,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "sent_count": 0,
+            "error": str(exc),
+            "snapshot_url": snapshot_url,
+            "targets": targets,
+        }
+    result_text = _text(result)
+    ok = result_text.lower().startswith("queued notification")
+    return {
+        "ok": ok,
+        "sent_count": 1 if ok else 0,
+        "result": result_text,
+        "snapshot_url": snapshot_url,
+        "targets": targets,
+    }
+
+
 def _event_window(timeframe: str) -> Tuple[datetime, datetime, str]:
     now = datetime.now()
     token = _text(timeframe).lower()
@@ -2053,6 +2116,34 @@ def _events_query_parse_local_iso(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is not None:
         parsed = parsed.replace(tzinfo=None)
     return parsed
+
+
+def _json_object_from_text(text: Any) -> Dict[str, Any]:
+    raw = _text(text)
+    if not raw:
+        return {}
+    candidate = raw
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        payload = json.loads(candidate)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        pass
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            payload = json.loads(candidate[start : end + 1])
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 async def _events_query_llm_json_object(
@@ -2876,165 +2967,6 @@ def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
         "last_event": last_event,
     }
 
-def _ha_set_input_text_sync(ha_base: str, token: str, entity_id: str, value: str) -> None:
-    entity = _text(entity_id)
-    if not entity:
-        return
-    text_value = str(value or "")
-    max_len = _ha_get_input_text_max_len_sync(ha_base, token, entity)
-    if max_len is not None and len(text_value) > max_len:
-        text_value = text_value[:max_len]
-        logger.info(
-            "[awareness] truncated input_text payload for %s to %s chars",
-            entity,
-            max_len,
-        )
-    url = f"{ha_base}/api/services/input_text/set_value"
-    payload = {"entity_id": entity, "value": text_value}
-    resp = requests.post(url, headers=_ha_headers(token), json=payload, timeout=10)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"input_text.set_value HTTP {resp.status_code}: {resp.text[:200]}")
-
-
-async def _ha_set_input_text(ha_base: str, token: str, entity_id: str, value: str) -> None:
-    await asyncio.to_thread(_ha_set_input_text_sync, ha_base, token, entity_id, value)
-
-
-def _ha_get_input_text_max_len_sync(ha_base: str, token: str, entity_id: str) -> Optional[int]:
-    entity = _text(entity_id)
-    if not entity:
-        return None
-    try:
-        resp = requests.get(
-            f"{ha_base}/api/states/{quote(entity, safe='')}",
-            headers=_ha_headers(token, json_content=False),
-            timeout=10,
-        )
-        if resp.status_code >= 400:
-            return None
-        payload = resp.json() or {}
-        attrs = payload.get("attributes") if isinstance(payload, dict) else {}
-        if not isinstance(attrs, dict):
-            return None
-        for key in ("max", "max_length", "maxlen"):
-            raw = attrs.get(key)
-            try:
-                value = int(raw)
-            except Exception:
-                continue
-            if 1 <= value <= 10000:
-                return value
-    except Exception:
-        return None
-    return None
-
-
-def _ha_fetch_history_sync(
-    ha_base: str,
-    token: str,
-    entities: List[str],
-    start: datetime,
-    end: datetime,
-) -> Dict[str, List[Dict[str, Any]]]:
-    clean_entities = [entity for entity in entities if _text(entity)]
-    if not clean_entities:
-        return {}
-    start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
-    end_iso = end.strftime("%Y-%m-%dT%H:%M:%S")
-    url = f"{ha_base}/api/history/period/{start_iso}"
-    params = {"filter_entity_id": ",".join(clean_entities), "end_time": end_iso}
-    resp = requests.get(url, headers=_ha_headers(token, json_content=False), params=params, timeout=15)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"history HTTP {resp.status_code}: {resp.text[:200]}")
-    payload = resp.json() or []
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    for series in payload:
-        if not isinstance(series, list) or not series:
-            continue
-        entity_id = _text((series[0] or {}).get("entity_id"))
-        if entity_id:
-            out[entity_id] = series
-    return out
-
-
-async def _ha_fetch_history(
-    ha_base: str,
-    token: str,
-    entities: List[str],
-    start: datetime,
-    end: datetime,
-) -> Dict[str, List[Dict[str, Any]]]:
-    return await asyncio.to_thread(_ha_fetch_history_sync, ha_base, token, entities, start, end)
-
-
-def _numeric_value(value: Any) -> Optional[float]:
-    if value in (None, ""):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    match = re.search(r"-?\d+(?:\.\d+)?", _text(value))
-    if not match:
-        return None
-    try:
-        return float(match.group(0))
-    except Exception:
-        return None
-
-
-def _extract_numeric(series: List[Dict[str, Any]]) -> List[float]:
-    values: List[float] = []
-    for item in series or []:
-        state = _text((item or {}).get("state"))
-        if not state or state in {"unknown", "unavailable"}:
-            continue
-        value = _numeric_value(state)
-        if value is not None:
-            values.append(value)
-    return values
-
-
-def _summary_stats(values: List[float]) -> Optional[Dict[str, float]]:
-    if not values:
-        return None
-    return {"min": min(values), "max": max(values), "avg": sum(values) / len(values)}
-
-
-def _runtime_sensor_numeric(entity_ref: str, role: str) -> Optional[float]:
-    provider, state_id = _split_provider_ref(entity_ref, "homeassistant")
-    if provider in {"all", "homeassistant"} or not state_id:
-        return None
-    record = _integration_runtime_state(redis_client, provider, state_id)
-    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
-    candidates: List[Any] = []
-    role_token = _text(role).lower()
-    if role_token == "temperature":
-        candidates.extend(
-            [
-                payload.get("current_temperature_f"),
-                payload.get("current_temperature_c"),
-                details.get("current_temperature_f"),
-                details.get("current_temperature_c"),
-            ]
-        )
-        temperature = details.get("temperature") if isinstance(details.get("temperature"), dict) else {}
-        candidates.append(temperature.get("temperature"))
-    elif role_token == "wind":
-        candidates.extend(
-            [payload.get("wind"), payload.get("wind_speed"), payload.get("wind_speed_mph"), details.get("wind_speed")]
-        )
-    elif role_token == "rain":
-        candidates.extend(
-            [payload.get("rain"), payload.get("rain_total"), payload.get("rain_today"), details.get("rain")]
-        )
-    candidates.append(payload.get("state"))
-    for candidate in candidates:
-        value = _numeric_value(candidate)
-        if value is not None:
-            return value
-    return None
-
-
 def _shared_announcement_tts_settings() -> Dict[str, Any]:
     shared = get_shared_speech_settings()
     return {
@@ -3146,30 +3078,53 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     _append_event(redis_client, source=area, payload=event_payload)
 
     notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+    display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
     device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+    display_enabled = _bool(rule.get("display_notifications"), False)
+    display_targets = _normalize_display_targets(rule.get("display_targets") or rule.get("display_target"))
     notification_cooldown_seconds = _as_int(rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400)
-    if device_services:
+    if device_services or display_enabled:
         notify_key = _camera_notify_cooldown_key(camera)
         if notification_cooldown_seconds > 0 and not _acquire_cooldown(notify_key, notification_cooldown_seconds):
             notify_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
+            display_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
         else:
-            notify_result = await _notify_homeassistant(
-                title=_text(rule.get("title") or "Camera Event"),
-                message=summary,
-                priority=_text(rule.get("priority") or "high"),
-                device_services=device_services,
-                origin={
-                    "platform": "awareness_core",
-                    "scope": "camera_rule",
-                    "rule_id": rule.get("id"),
-                    "camera": camera,
-                    "area": area,
-                    "provider": provider,
-                    "trigger_entity": trigger_entity,
-                },
-            )
-            if not notify_result.get("ok") and notification_cooldown_seconds > 0:
-                _clear_cooldown(notify_key)
+            origin = {
+                "platform": "awareness_core",
+                "scope": "camera_rule",
+                "rule_id": rule.get("id"),
+                "camera": camera,
+                "area": area,
+                "provider": provider,
+                "trigger_entity": trigger_entity,
+            }
+            if device_services:
+                notify_result = await _notify_homeassistant(
+                    title=_text(rule.get("title") or "Camera Event"),
+                    message=summary,
+                    priority=_text(rule.get("priority") or "high"),
+                    device_services=device_services,
+                    origin=origin,
+                )
+            if display_enabled:
+                display_result = await _notify_display(
+                    kind="camera",
+                    title=_text(rule.get("title") or "Camera Event"),
+                    message=summary,
+                    priority=_text(rule.get("priority") or "high"),
+                    display_targets=display_targets,
+                    snapshot_store=snapshot_store,
+                    origin=origin,
+                    ttl_seconds=90,
+                )
+            if notification_cooldown_seconds > 0:
+                attempted_results = []
+                if device_services:
+                    attempted_results.append(notify_result)
+                if display_enabled:
+                    attempted_results.append(display_result)
+                if attempted_results and not any(row.get("ok") for row in attempted_results):
+                    _clear_cooldown(notify_key)
 
     return {
         "ok": True,
@@ -3178,6 +3133,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
         "area": area,
         "provider": provider,
         "notification": notify_result,
+        "display_notification": display_result,
     }
 
 
@@ -3276,6 +3232,14 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
         event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
+    origin = {
+        "platform": "awareness_core",
+        "scope": "doorbell_rule",
+        "rule_id": rule.get("id"),
+        "camera": camera,
+        "area": area,
+        "provider": provider,
+    }
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
         device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
@@ -3284,14 +3248,19 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             message=spoken_line,
             priority=_text(rule.get("priority") or "normal"),
             device_services=device_services,
-            origin={
-                "platform": "awareness_core",
-                "scope": "doorbell_rule",
-                "rule_id": rule.get("id"),
-                "camera": camera,
-                "area": area,
-                "provider": provider,
-            },
+            origin=origin,
+        )
+    display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
+    if _bool(rule.get("display_notifications"), False):
+        display_result = await _notify_display(
+            kind="doorbell",
+            title=_text(rule.get("title") or "Doorbell"),
+            message=spoken_line,
+            priority=_text(rule.get("priority") or "normal"),
+            display_targets=rule.get("display_targets") or rule.get("display_target"),
+            snapshot_store=snapshot_store,
+            origin=origin,
+            ttl_seconds=90,
         )
     return {
         "ok": True,
@@ -3302,6 +3271,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
         "players": players,
         "tts": tts_result,
         "notification": notify_result,
+        "display_notification": display_result,
     }
 
 
@@ -3411,28 +3381,45 @@ async def _execute_entry_sensor_rule(
         except Exception as exc:
             logger.warning("[awareness] entry sensor TTS failed for %s: %s", entity_id, exc)
             tts_result = {"ok": False, "sent_count": 0, "error": str(exc), "backend": tts_backend}
+    origin = {
+        "platform": "awareness_core",
+        "scope": "entry_sensor_rule",
+        "rule_id": rule.get("id"),
+        "entity_id": entity_id,
+        "sensor_type": sensor_type,
+        "area": area,
+        "provider": provider,
+    }
     notify_result: Dict[str, Any]
+    display_result: Dict[str, Any]
     if action_token != "open":
         notify_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
-    elif not _bool(rule.get("notifications"), False):
-        notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+        display_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
     else:
-        device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-        notify_result = await _notify_homeassistant(
-            title=_text(rule.get("title") or "Entry Sensor"),
-            message=summary,
-            priority=_text(rule.get("priority") or "normal"),
-            device_services=device_services,
-            origin={
-                "platform": "awareness_core",
-                "scope": "entry_sensor_rule",
-                "rule_id": rule.get("id"),
-                "entity_id": entity_id,
-                "sensor_type": sensor_type,
-                "area": area,
-                "provider": provider,
-            },
-        )
+        if not _bool(rule.get("notifications"), False):
+            notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
+        else:
+            device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+            notify_result = await _notify_homeassistant(
+                title=_text(rule.get("title") or "Entry Sensor"),
+                message=summary,
+                priority=_text(rule.get("priority") or "normal"),
+                device_services=device_services,
+                origin=origin,
+            )
+        if _bool(rule.get("display_notifications"), False):
+            display_result = await _notify_display(
+                kind="camera" if snapshot_store.get("stored") else "notification",
+                title=_text(rule.get("title") or "Entry Sensor"),
+                message=summary,
+                priority=_text(rule.get("priority") or "normal"),
+                display_targets=rule.get("display_targets") or rule.get("display_target"),
+                snapshot_store=snapshot_store,
+                origin=origin,
+                ttl_seconds=90,
+            )
+        else:
+            display_result = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
     return {
         "ok": True,
         "summary": summary,
@@ -3443,350 +3430,8 @@ async def _execute_entry_sensor_rule(
         "players": players,
         "tts": tts_result,
         "notification": notify_result,
+        "display_notification": display_result,
     }
-
-
-async def _run_events_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
-    del llm_client
-    ha = _ha_config()
-    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
-    start, end, label = _event_window(rule.get("timeframe"))
-    area = _slug(rule.get("area")) if _text(rule.get("area")) else ""
-    if area:
-        sources = [area]
-    else:
-        sources = _discover_event_sources(redis_client)
-    events = _load_events_for_sources(redis_client, sources, start, end, limit_per_source=250)
-    if not events:
-        summary = f"No activity detected {label}."
-    else:
-        top: List[str] = []
-        for event in events[:3]:
-            msg = _text(event.get("message") or event.get("title"))
-            if msg:
-                top.append(msg)
-        summary = "; ".join(top) if top else f"Activity detected {label}."
-    summary = _compact(summary, limit=max_chars)
-    input_text_entity = _text(rule.get("input_text_entity"))
-    if input_text_entity:
-        try:
-            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, summary)
-        except Exception as exc:
-            logger.warning("[awareness] events brief failed to write %s: %s", input_text_entity, exc)
-    return {"ok": True, "summary": summary, "timeframe": label, "event_count": len(events)}
-
-
-async def _run_weather_brief(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
-    del llm_client
-    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
-    core_settings = _settings(redis_client)
-    # Legacy fallback keeps prior installs working after removing automation verbas.
-    legacy_settings = (
-        redis_client.hgetall("verba_settings:Weather Brief")
-        or redis_client.hgetall("verba_settings: Weather Brief")
-        or {}
-    )
-    temp_entity = (
-        _text(rule.get("weather_temp_entity"))
-        or _text(core_settings.get("weather_temp_entity"))
-        or _text(legacy_settings.get("TEMP_ENTITY"))
-    )
-    wind_entity = (
-        _text(rule.get("weather_wind_entity"))
-        or _text(core_settings.get("weather_wind_entity"))
-        or _text(legacy_settings.get("WIND_ENTITY"))
-    )
-    rain_entity = (
-        _text(rule.get("weather_rain_entity"))
-        or _text(core_settings.get("weather_rain_entity"))
-        or _text(legacy_settings.get("RAIN_ENTITY"))
-    )
-    hours = _as_int(rule.get("hours"), 12, minimum=1, maximum=72)
-    now = datetime.now()
-    start = now - timedelta(hours=hours)
-    sensor_refs = [entity for entity in [temp_entity, wind_entity, rain_entity] if entity]
-    if not sensor_refs:
-        raise ValueError("Weather Brief sensors are not configured.")
-    ha_entities = []
-    for entity in sensor_refs:
-        provider, raw_entity = _split_provider_ref(entity, "homeassistant")
-        if provider in {"all", "homeassistant"} and raw_entity:
-            ha_entities.append(raw_entity)
-    ha = _ha_config() if ha_entities else {"base": "", "token": ""}
-    history = await _ha_fetch_history(ha["base"], ha["token"], ha_entities, start, now) if ha_entities else {}
-    metrics: Dict[str, Any] = {"temperature": None, "wind": None, "rain": None}
-    if temp_entity:
-        provider, raw_entity = _split_provider_ref(temp_entity, "homeassistant")
-        values = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
-        runtime_value = _runtime_sensor_numeric(temp_entity, "temperature")
-        if runtime_value is not None:
-            values.append(runtime_value)
-        summary = _summary_stats(values)
-        if summary:
-            metrics["temperature"] = summary
-    if wind_entity:
-        provider, raw_entity = _split_provider_ref(wind_entity, "homeassistant")
-        values = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
-        runtime_value = _runtime_sensor_numeric(wind_entity, "wind")
-        if runtime_value is not None:
-            values.append(runtime_value)
-        summary = _summary_stats(values)
-        if summary:
-            metrics["wind"] = summary
-    if rain_entity:
-        provider, raw_entity = _split_provider_ref(rain_entity, "homeassistant")
-        vals = _extract_numeric(history.get(raw_entity) or []) if provider in {"all", "homeassistant"} else []
-        runtime_value = _runtime_sensor_numeric(rain_entity, "rain")
-        if runtime_value is not None:
-            vals.append(runtime_value)
-        if vals:
-            total = sum(v for v in vals if v >= 0)
-            metrics["rain"] = {"total": total, "max": max(vals), "rained": total > 0}
-    if not any(metrics.values()):
-        summary_text = f"No recent weather data available for the last {hours} hours."
-    else:
-        parts = [f"In the last {hours} hours"]
-        if metrics["temperature"]:
-            parts.append(
-                f"temps ranged {round(metrics['temperature']['min'])}-{round(metrics['temperature']['max'])}"
-            )
-        if metrics["wind"]:
-            parts.append(f"winds up to {round(metrics['wind']['max'])}")
-        if metrics["rain"]:
-            parts.append(f"rain ~{round(metrics['rain']['total'], 1)}" if metrics["rain"]["rained"] else "no rain")
-        summary_text = ". ".join(parts) + "."
-    summary_text = _compact(summary_text, limit=max_chars)
-    input_text_entity = _text(rule.get("input_text_entity")) or _text(legacy_settings.get("INPUT_TEXT_ENTITY"))
-    if input_text_entity:
-        if not ha.get("base") or not ha.get("token"):
-            ha = _ha_config()
-        try:
-            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, summary_text)
-        except Exception as exc:
-            logger.warning("[awareness] weather brief failed to write %s: %s", input_text_entity, exc)
-    return {"ok": True, "summary": summary_text, "hours": hours}
-
-
-def _time_greeting(dt: datetime) -> str:
-    hour = dt.hour
-    if 5 <= hour < 12:
-        return "Good morning"
-    if 12 <= hour < 17:
-        return "Good afternoon"
-    if 17 <= hour < 22:
-        return "Good evening"
-    return "Hello"
-
-
-def _json_object_from_text(text: Any) -> Dict[str, Any]:
-    raw = _text(text)
-    if not raw:
-        return {}
-    candidate = raw
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        candidate = "\n".join(lines).strip()
-    try:
-        payload = json.loads(candidate)
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        pass
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            payload = json.loads(candidate[start : end + 1])
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _format_datetime_for_brief(now: datetime) -> Tuple[str, str]:
-    date_text = f"{now.strftime('%a, %b')} {now.day}"
-    time_text = now.strftime("%I:%M %p").lstrip("0")
-    return date_text, time_text
-
-
-def _message_has_date_hint(message: str, now: datetime) -> bool:
-    text = _text(message).lower()
-    if not text:
-        return False
-    month_tokens = {now.strftime("%B").lower(), now.strftime("%b").lower()}
-    weekday_tokens = {now.strftime("%A").lower(), now.strftime("%a").lower()}
-    if any(token and token in text for token in month_tokens):
-        return True
-    if str(now.year) in text:
-        return True
-    if any(token and token in text for token in weekday_tokens):
-        return True
-    if re.search(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b", text):
-        return True
-    return False
-
-
-def _message_has_time_hint(message: str) -> bool:
-    text = _text(message).lower()
-    if not text:
-        return False
-    if re.search(r"\b\d{1,2}:\d{2}\s*(am|pm)?\b", text):
-        return True
-    return False
-
-
-async def _run_zen_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
-    if llm_client is None:
-        raise ValueError("LLM client is unavailable for zen greeting generation.")
-    ha = _ha_config()
-    now = datetime.now()
-    greeting = _time_greeting(now)
-    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
-    include_date = _bool(rule.get("include_date"), False)
-    tone = _text(rule.get("tone") or "zen")
-    prompt_hint = _text(rule.get("prompt_hint"))
-    system = (
-        "You write short, calming dashboard messages. "
-        "One sentence, plain text, no markdown, no emojis, no quotes. "
-        f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER."
-    )
-    date_str = f"{now.strftime('%a, %b')} {now.day}" if include_date else ""
-    user_payload = {
-        "time": now.strftime("%H:%M"),
-        "date": date_str,
-        "opening_greeting": greeting,
-        "tone": tone,
-        "extra_hint": prompt_hint,
-        "instruction": "Create a one-line zen message that starts with the greeting.",
-    }
-    output = ""
-    try:
-        resp = await llm_client.chat(
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            temperature=0.8,
-            max_tokens=90,
-            timeout_ms=30_000,
-        )
-        output = _text((resp.get("message") or {}).get("content"))
-    except Exception as exc:
-        logger.info("[awareness] zen greeting generation failed, using fallback: %s", exc)
-    if not output:
-        if include_date and date_str:
-            output = f"{greeting} - {date_str}. Breathe and begin gently."
-        else:
-            output = f"{greeting}. Breathe and begin gently."
-    output = _compact(output, limit=max_chars)
-    input_text_entity = _text(rule.get("input_text_entity"))
-    if input_text_entity:
-        try:
-            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, output)
-        except Exception as exc:
-            logger.warning("[awareness] zen greeting failed to write %s: %s", input_text_entity, exc)
-    return {"ok": True, "summary": output}
-
-
-async def _run_alan_watts_greeting(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
-    ha = _ha_config()
-    now = datetime.now()
-    greeting = _time_greeting(now)
-    date_text, time_text = _format_datetime_for_brief(now)
-    max_chars = min(100, _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240))
-    prompt_hint = _text(rule.get("prompt_hint"))
-    recent_quotes = _normalize_quote_history(rule.get("quote_history"), limit=5)
-    message = ""
-    quote = ""
-    quote_source = "Alan Watts"
-    if llm_client is not None:
-        system = (
-            "You write warm greeting cards in a reflective, conversational voice. "
-            "Return JSON only with keys message, quote, quote_source. "
-            "message rules: plain text, natural flow, starts with the provided greeting, includes concise date and time once. "
-            "Do not repeat date or time. "
-            "quote rules: provide one Alan Watts quote and avoid repeating any recent quotes provided. "
-            f"TOTAL OUTPUT MUST BE {max_chars} CHARACTERS OR FEWER (message + quote line). "
-            "No markdown, no emojis."
-        )
-        user_payload = {
-            "greeting": greeting,
-            "date": date_text,
-            "time": time_text,
-            "recent_quotes_do_not_repeat": recent_quotes,
-            "max_total_chars": max_chars,
-            "extra_hint": prompt_hint,
-            "instruction": (
-                "Write a smooth greeting for the user and include a single quote line."
-            ),
-        }
-        try:
-            resp = await llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                ],
-                temperature=0.8,
-                max_tokens=180,
-                timeout_ms=30_000,
-            )
-            parsed = _json_object_from_text((resp.get("message") or {}).get("content"))
-            message = _text(parsed.get("message"))
-            quote = _text(parsed.get("quote"))
-            quote_source = _text(parsed.get("quote_source") or "Alan Watts")
-        except Exception as exc:
-            logger.info("[awareness] alan watts greeting generation failed, using fallback: %s", exc)
-    if not message:
-        message = f"{greeting}. {date_text}, {time_text}. Begin gently."
-    elif not message.lower().startswith(greeting.lower()):
-        message = f"{greeting}. {message}"
-    has_date = _message_has_date_hint(message, now)
-    has_time = _message_has_time_hint(message)
-    if not has_date and not has_time:
-        message = f"{message} {date_text}, {time_text}."
-    elif not has_date:
-        message = f"{message} {date_text}."
-    elif not has_time:
-        message = f"{message} {time_text}."
-    quote_line = ""
-    if quote:
-        quote_line = f"\"{quote}\" - {quote_source}"
-    output = f"{message}\n\n{quote_line}".strip() if quote_line else message
-    if len(output) > max_chars and quote_line:
-        allowed_message = max_chars - len(quote_line) - 2
-        if allowed_message >= 40:
-            message = _compact(message, limit=allowed_message)
-            output = f"{message}\n\n{quote_line}".strip()
-    if len(output) > max_chars:
-        output = _compact(output, limit=max_chars)
-    input_text_entity = _text(rule.get("input_text_entity"))
-    if input_text_entity:
-        try:
-            await _ha_set_input_text(ha["base"], ha["token"], input_text_entity, output)
-        except Exception as exc:
-            logger.warning("[awareness] alan watts greeting failed to write %s: %s", input_text_entity, exc)
-    history = _quote_history_with_new(recent_quotes, quote, limit=5) if quote else recent_quotes
-    return {
-        "ok": True,
-        "summary": output,
-        "quote": quote,
-        "quote_source": quote_source,
-        "rule_updates": {"quote_history": history},
-    }
-
-
-async def _execute_brief_rule(rule: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
-    kind = _text(rule.get("brief_kind")).lower()
-    if kind == "weather_brief":
-        return await _run_weather_brief(rule, llm_client)
-    if kind == "zen_greeting":
-        return await _run_zen_greeting(rule, llm_client)
-    if kind == "alan_watts_greeting":
-        return await _run_alan_watts_greeting(rule, llm_client)
-    return await _run_events_brief(rule, llm_client)
 
 
 async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -3797,8 +3442,6 @@ async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, even
         return await _execute_doorbell_rule(rule, llm_client, reason, event)
     if kind == "entry_sensor":
         return await _execute_entry_sensor_rule(rule, llm_client, reason, event)
-    if kind == "brief":
-        return await _execute_brief_rule(rule, llm_client)
     raise ValueError(f"Unsupported rule kind: {kind}")
 
 
@@ -4032,7 +3675,7 @@ def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[s
     if cached is not None:
         return cached
     catalog = _empty_entity_catalog()
-    # Keep weather/tts/notify/input_text sourced from Home Assistant so briefs and notifications still work.
+    # Keep Home Assistant support entities available so notifications still work.
     ha_support = _ha_entity_catalog(force_refresh=force_refresh)
     if not any(ha_support.get(key) for key in ("tts", "notify_services", "input_text")):
         stale_ha_support = _stale_cached_catalog("homeassistant")
@@ -4354,8 +3997,6 @@ def _rule_subtitle(rule: Dict[str, Any]) -> str:
     kind = _text(rule.get("kind"))
     enabled = "Enabled" if _bool(rule.get("enabled"), True) else "Disabled"
     last_run = _fmt_ts(rule.get("last_run_ts"))
-    if kind == "brief":
-        return f"{enabled} - {kind} - next: {_fmt_ts(rule.get('next_run_ts'))} - last: {last_run}"
     provider = _provider_label(_rule_provider(rule))
     return f"{enabled} - {kind} - {provider} - last: {last_run}"
 
@@ -4564,6 +4205,7 @@ def _camera_form(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
     )
+    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
         "id": rule["id"],
         "group": "camera",
@@ -4650,6 +4292,20 @@ def _camera_form(
                         "options": notify_service_options,
                         "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
+                    {
+                        "key": "display_notifications",
+                        "label": "Show On ESPHome Displays",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("display_notifications"), False),
+                    },
+                    {
+                        "key": "display_targets",
+                        "label": "Display Targets",
+                        "type": "multiselect",
+                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
+                        "options": display_target_options,
+                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
+                    },
                 ],
             },
         ],
@@ -4680,6 +4336,7 @@ def _doorbell_form(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
     )
+    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
         "id": rule["id"],
         "group": "doorbell",
@@ -4755,6 +4412,20 @@ def _doorbell_form(
                         "options": notify_service_options,
                         "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
+                    {
+                        "key": "display_notifications",
+                        "label": "Show On ESPHome Displays",
+                        "type": "checkbox",
+                        "value": _bool(rule.get("display_notifications"), False),
+                    },
+                    {
+                        "key": "display_targets",
+                        "label": "Display Targets",
+                        "type": "multiselect",
+                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
+                        "options": display_target_options,
+                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
+                    },
                 ],
             },
         ],
@@ -4788,6 +4459,7 @@ def _entry_sensor_form(
         catalog.get("notify_services") or [],
         current_values=rule.get("device_services") or rule.get("device_service"),
     )
+    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
         "id": rule["id"],
         "group": "entry_sensor",
@@ -4873,208 +4545,26 @@ def _entry_sensor_form(
                         "options": notify_service_options,
                         "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
                     },
-                ],
-            },
-        ],
-    }
-
-
-
-def _brief_form(rule: Dict[str, Any], catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, Any]:
-    input_text_options = _choices_from_pairs(
-        catalog.get("input_text") or [],
-        placeholder="(None)",
-        current_value=_text(rule.get("input_text_entity")),
-    )
-    weather_temp_options = _choices_from_pairs(
-        catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
-        placeholder="(Select temperature sensor)",
-        current_value=_text(rule.get("weather_temp_entity")),
-    )
-    weather_wind_options = _choices_from_pairs(
-        catalog.get("weather_wind") or catalog.get("weather_sensors") or [],
-        placeholder="(Select wind sensor)",
-        current_value=_text(rule.get("weather_wind_entity")),
-    )
-    weather_rain_options = _choices_from_pairs(
-        catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
-        placeholder="(Select rain sensor)",
-        current_value=_text(rule.get("weather_rain_entity")),
-    )
-    show_events = {"source_key": "brief_kind", "equals": "events_query_brief"}
-    show_weather = {"source_key": "brief_kind", "equals": "weather_brief"}
-    show_zen = {"source_key": "brief_kind", "equals": "zen_greeting"}
-    show_alan = {"source_key": "brief_kind", "equals": "alan_watts_greeting"}
-    quote_history_preview = "\n".join(_normalize_quote_history(rule.get("quote_history"), limit=5))
-    return {
-        "id": rule["id"],
-        "group": "brief",
-        "title": _text(rule.get("name")) or "Brief job",
-        "subtitle": _rule_subtitle(rule),
-        "save_action": "awareness_save_rule",
-        "remove_action": "awareness_remove_rule",
-        "run_action": "awareness_run_now",
-        "run_label": "Run Now",
-        "remove_confirm": "Remove this brief job?",
-        "fields": [
-            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
-            {"key": "name", "label": "Job Name", "type": "text", "value": _text(rule.get("name"))},
-            {
-                "key": "brief_kind",
-                "label": "Brief Type",
-                "type": "select",
-                "options": [
-                    {"value": "events_query_brief", "label": "Events Brief"},
-                    {"value": "weather_brief", "label": "Weather Brief"},
-                    {"value": "zen_greeting", "label": "Zen Greeting"},
-                    {"value": "alan_watts_greeting", "label": "Alan Watts Greeting"},
-                ],
-                "value": _text(rule.get("brief_kind") or "events_query_brief"),
-            },
-            {
-                "key": "interval_minutes",
-                "label": "Interval (minutes)",
-                "type": "number",
-                "value": _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080),
-            },
-            {
-                "key": "input_text_entity",
-                "label": "Output input_text (optional)",
-                "type": "select",
-                "options": input_text_options,
-                "value": _text(rule.get("input_text_entity")),
-            },
-        ],
-        "sections": [
-            {
-                "label": "Events Brief",
-                "fields": [
                     {
-                        "key": "timeframe",
-                        "label": "Timeframe",
-                        "type": "select",
-                        "options": [
-                            {"value": "today", "label": "Today"},
-                            {"value": "yesterday", "label": "Yesterday"},
-                            {"value": "last_24h", "label": "Last 24 Hours"},
-                        ],
-                        "value": _text(rule.get("timeframe") or "today"),
-                        "show_when": show_events,
-                    },
-                    {
-                        "key": "area",
-                        "label": "Area Source (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("area")),
-                        "show_when": show_events,
-                    },
-                    {
-                        "key": "query",
-                        "label": "Query Hint (optional)",
-                        "type": "text",
-                        "value": _text(rule.get("query")),
-                        "show_when": show_events,
-                    },
-                ],
-            },
-            {
-                "label": "Weather Brief",
-                "fields": [
-                    {
-                        "key": "hours",
-                        "label": "Hours",
-                        "type": "number",
-                        "value": _as_int(rule.get("hours"), 12, minimum=1, maximum=72),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_temp_entity",
-                        "label": "Temperature Sensor",
-                        "type": "select",
-                        "options": weather_temp_options,
-                        "value": _text(rule.get("weather_temp_entity")),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_wind_entity",
-                        "label": "Wind Sensor",
-                        "type": "select",
-                        "options": weather_wind_options,
-                        "value": _text(rule.get("weather_wind_entity")),
-                        "show_when": show_weather,
-                    },
-                    {
-                        "key": "weather_rain_entity",
-                        "label": "Rain Sensor",
-                        "type": "select",
-                        "options": weather_rain_options,
-                        "value": _text(rule.get("weather_rain_entity")),
-                        "show_when": show_weather,
-                    }
-                ],
-            },
-            {
-                "label": "Zen Greeting",
-                "fields": [
-                    {
-                        "key": "include_date",
-                        "label": "Include Date",
+                        "key": "display_notifications",
+                        "label": "Show On ESPHome Displays",
                         "type": "checkbox",
-                        "value": _bool(rule.get("include_date"), False),
-                        "show_when": show_zen,
+                        "value": _bool(rule.get("display_notifications"), False),
                     },
                     {
-                        "key": "tone",
-                        "label": "Tone",
-                        "type": "text",
-                        "value": _text(rule.get("tone") or "zen"),
-                        "show_when": show_zen,
-                    },
-                    {
-                        "key": "prompt_hint",
-                        "label": "Prompt Hint",
-                        "type": "text",
-                        "value": _text(rule.get("prompt_hint")),
-                        "show_when": show_zen,
-                    },
-                    {
-                        "key": "max_chars",
-                        "label": "Max Characters",
-                        "type": "number",
-                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
-                        "show_when": show_zen,
-                    },
-                ],
-            },
-            {
-                "label": "Alan Watts Greeting",
-                "fields": [
-                    {
-                        "key": "prompt_hint",
-                        "label": "Prompt Hint",
-                        "type": "text",
-                        "value": _text(rule.get("prompt_hint")),
-                        "show_when": show_alan,
-                    },
-                    {
-                        "key": "max_chars",
-                        "label": "Max Characters",
-                        "type": "number",
-                        "value": _as_int(rule.get("max_chars"), 100, minimum=40, maximum=240),
-                        "show_when": show_alan,
-                    },
-                    {
-                        "key": "quote_history_preview",
-                        "label": "Recent Quotes (last 5, auto)",
-                        "type": "textarea",
-                        "read_only": True,
-                        "value": quote_history_preview,
-                        "show_when": show_alan,
+                        "key": "display_targets",
+                        "label": "Display Targets",
+                        "type": "multiselect",
+                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
+                        "options": display_target_options,
+                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
                     },
                 ],
             },
         ],
     }
+
+
 
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     all_rules = _load_rules(client)
@@ -5094,8 +4584,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
             forms.append(_doorbell_form(rule, catalog, rules))
         elif kind == "entry_sensor":
             forms.append(_entry_sensor_form(rule, catalog, rules))
-        elif kind == "brief":
-            forms.append(_brief_form(rule, catalog))
     all_forms = event_forms + forms
     camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
     area_options = _area_options(rules)
@@ -5111,19 +4599,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         current_triggers=[],
         doorbell=True,
     )
-    input_text_options = _choices_from_pairs(catalog.get("input_text") or [], placeholder="(None)")
-    weather_temp_options = _choices_from_pairs(
-        catalog.get("weather_temp") or catalog.get("weather_sensors") or [],
-        placeholder="(Select temperature sensor)",
-    )
-    weather_wind_options = _choices_from_pairs(
-        catalog.get("weather_wind") or catalog.get("weather_sensors") or [],
-        placeholder="(Select wind sensor)",
-    )
-    weather_rain_options = _choices_from_pairs(
-        catalog.get("weather_rain") or catalog.get("weather_sensors") or [],
-        placeholder="(Select rain sensor)",
-    )
     entry_sensor_options, entry_sensor_dependency = _entry_sensor_dependency_options(
         catalog=catalog,
         current_type="door",
@@ -5132,31 +4607,15 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     notify_service_options = _multiselect_choices_from_pairs(
         catalog.get("notify_services") or [],
     )
+    display_target_options = _display_target_options()
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
     show_camera = {"source_key": "kind", "equals": "camera"}
     show_doorbell = {"source_key": "kind", "equals": "doorbell"}
     show_entry = {"source_key": "kind", "equals": "entry_sensor"}
     show_doorbell_or_entry = {"source_key": "kind", "any_of": ["doorbell", "entry_sensor"]}
-    show_brief = {"source_key": "kind", "equals": "brief"}
     show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
     show_camera_or_doorbell_or_entry = {"source_key": "kind", "any_of": ["camera", "doorbell", "entry_sensor"]}
-    show_brief_events = [
-        {"source_key": "kind", "equals": "brief"},
-        {"source_key": "brief_kind", "equals": "events_query_brief"},
-    ]
-    show_brief_weather = [
-        {"source_key": "kind", "equals": "brief"},
-        {"source_key": "brief_kind", "equals": "weather_brief"},
-    ]
-    show_brief_zen = [
-        {"source_key": "kind", "equals": "brief"},
-        {"source_key": "brief_kind", "equals": "zen_greeting"},
-    ]
-    show_brief_zen_or_alan = [
-        {"source_key": "kind", "equals": "brief"},
-        {"source_key": "brief_kind", "any_of": ["zen_greeting", "alan_watts_greeting"]},
-    ]
     add_tts_fields = _announcement_tts_add_fields(
         catalog,
         show_when=show_doorbell_or_entry,
@@ -5245,14 +4704,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "selector": False,
                 "empty_message": "No entry sensor rules configured.",
             },
-            {
-                "key": "briefs",
-                "label": "Briefs",
-                "source": "items",
-                "item_group": "brief",
-                "selector": False,
-                "empty_message": "No brief jobs configured.",
-            },
             {"key": "create", "label": "Create Rule", "source": "add_form"},
         ],
         "add_form": {
@@ -5267,7 +4718,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         {"value": "camera", "label": "Camera"},
                         {"value": "doorbell", "label": "Doorbell"},
                         {"value": "entry_sensor", "label": "Door/Window/Garage Sensor"},
-                        {"value": "brief", "label": "Brief"},
                     ],
                     "value": "camera",
                 },
@@ -5382,106 +4832,23 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "value": [],
                     "show_when": show_camera_or_doorbell_or_entry,
                 },
-                *add_tts_fields,
                 {
-                    "key": "brief_kind",
-                    "label": "Brief Type",
-                    "type": "select",
-                    "options": [
-                        {"value": "events_query_brief", "label": "Events Brief"},
-                        {"value": "weather_brief", "label": "Weather Brief"},
-                        {"value": "zen_greeting", "label": "Zen Greeting"},
-                        {"value": "alan_watts_greeting", "label": "Alan Watts Greeting"},
-                    ],
-                    "value": "events_query_brief",
-                    "show_when": show_brief,
-                },
-                {
-                    "key": "interval_minutes",
-                    "label": "Interval Minutes",
-                    "type": "number",
-                    "value": 60,
-                    "show_when": show_brief,
-                },
-                {
-                    "key": "input_text_entity",
-                    "label": "Output Text Block (input_text)",
-                    "type": "select",
-                    "options": input_text_options,
-                    "value": "",
-                    "show_when": show_brief,
-                },
-                {
-                    "key": "timeframe",
-                    "label": "Timeframe (events brief)",
-                    "type": "select",
-                    "options": [
-                        {"value": "today", "label": "Today"},
-                        {"value": "yesterday", "label": "Yesterday"},
-                        {"value": "last_24h", "label": "Last 24 Hours"},
-                    ],
-                    "value": "today",
-                    "show_when_all": show_brief_events,
-                },
-                {
-                    "key": "hours",
-                    "label": "Hours (weather brief)",
-                    "type": "number",
-                    "value": 12,
-                    "show_when_all": show_brief_weather,
-                },
-                {
-                    "key": "weather_temp_entity",
-                    "label": "Temperature Sensor (weather brief)",
-                    "type": "select",
-                    "options": weather_temp_options,
-                    "value": "",
-                    "show_when_all": show_brief_weather,
-                },
-                {
-                    "key": "weather_wind_entity",
-                    "label": "Wind Sensor (weather brief)",
-                    "type": "select",
-                    "options": weather_wind_options,
-                    "value": "",
-                    "show_when_all": show_brief_weather,
-                },
-                {
-                    "key": "weather_rain_entity",
-                    "label": "Rain Sensor (weather brief)",
-                    "type": "select",
-                    "options": weather_rain_options,
-                    "value": "",
-                    "show_when_all": show_brief_weather,
-                },
-                {
-                    "key": "include_date",
-                    "label": "Include Date (zen)",
+                    "key": "display_notifications",
+                    "label": "Show On ESPHome Displays",
                     "type": "checkbox",
                     "value": False,
-                    "show_when_all": show_brief_zen,
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
-                    "key": "tone",
-                    "label": "Tone (zen)",
-                    "type": "text",
-                    "value": "zen",
-                    "show_when_all": show_brief_zen,
+                    "key": "display_targets",
+                    "label": "Display Targets",
+                    "type": "multiselect",
+                    "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
+                    "options": display_target_options,
+                    "value": [],
+                    "show_when": show_camera_or_doorbell_or_entry,
                 },
-                {
-                    "key": "prompt_hint",
-                    "label": "Prompt Hint",
-                    "type": "text",
-                    "value": "",
-                    "show_when_all": show_brief_zen_or_alan,
-                },
-                {
-                    "key": "max_chars",
-                    "label": "Max Characters",
-                    "type": "number",
-                    "value": 100,
-                    "show_when_all": show_brief_zen_or_alan,
-                },
+                *add_tts_fields,
             ],
         },
         "item_forms": all_forms,
@@ -5537,7 +4904,7 @@ def _build_rule_from_values(
     now_ts = time.time()
     previous = existing if isinstance(existing, dict) else {}
     explicit_provider = "provider" in values or "provider" in payload
-    provider_value = "homeassistant" if kind == "brief" else _concrete_rule_provider(previous)
+    provider_value = _concrete_rule_provider(previous)
     base: Dict[str, Any] = {
         "id": _text(previous.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -5585,6 +4952,12 @@ def _build_rule_from_values(
         "device_services",
         previous.get("device_services", previous.get("device_service", "")),
     )
+    display_targets_value = _value(
+        values,
+        payload,
+        "display_targets",
+        previous.get("display_targets", previous.get("display_target", "")),
+    )
     base.update(
         {
             "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
@@ -5630,6 +5003,11 @@ def _build_rule_from_values(
             "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
             "priority": "high" if priority_value in {"critical", "high"} else "normal",
             "device_services": _normalize_device_services(device_services_value),
+            "display_notifications": _bool(
+                _value(values, payload, "display_notifications", previous.get("display_notifications", False)),
+                False,
+            ),
+            "display_targets": _normalize_display_targets(display_targets_value),
             "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
             "notifications": _bool(
                 _value(values, payload, "notifications", previous.get("notifications", notifications_default)),
@@ -5644,61 +5022,18 @@ def _build_rule_from_values(
                     previous.get("sensor_entity", trigger_entities[0] if trigger_entities else ""),
                 )
             ),
-            "brief_kind": _text(
-                _value(values, payload, "brief_kind", previous.get("brief_kind", "events_query_brief"))
-            ).lower(),
-            "interval_minutes": _as_int(
-                _value(values, payload, "interval_minutes", previous.get("interval_minutes", 60)),
-                60,
-                minimum=1,
-                maximum=10080,
-            ),
-            "next_run_ts": _as_float(previous.get("next_run_ts"), 0.0),
-            "input_text_entity": _text(
-                _value(values, payload, "input_text_entity", previous.get("input_text_entity", ""))
-            ),
-            "timeframe": _text(_value(values, payload, "timeframe", previous.get("timeframe", "today"))).lower(),
-            "hours": _as_int(
-                _value(values, payload, "hours", previous.get("hours", 12)),
-                12,
-                minimum=1,
-                maximum=72,
-            ),
-            "weather_temp_entity": _text(
-                _value(values, payload, "weather_temp_entity", previous.get("weather_temp_entity", ""))
-            ),
-            "weather_wind_entity": _text(
-                _value(values, payload, "weather_wind_entity", previous.get("weather_wind_entity", ""))
-            ),
-            "weather_rain_entity": _text(
-                _value(values, payload, "weather_rain_entity", previous.get("weather_rain_entity", ""))
-            ),
-            "include_date": _bool(
-                _value(values, payload, "include_date", previous.get("include_date", False)),
-                False,
-            ),
-            "tone": _text(_value(values, payload, "tone", previous.get("tone", "zen"))),
-            "prompt_hint": _text(_value(values, payload, "prompt_hint", previous.get("prompt_hint", ""))),
-            "max_chars": _as_int(
-                _value(values, payload, "max_chars", previous.get("max_chars", 100)),
-                100,
-                minimum=40,
-                maximum=240,
-            ),
-            "quote_history": _normalize_quote_history(previous.get("quote_history") or previous.get("last_quotes"), limit=5),
         }
     )
-    if kind != "brief":
-        inferred_provider = _provider_from_rule_fields(base)
-        if explicit_provider:
-            provider_value = _concrete_rule_provider(
-                {**base, "provider": _value(values, payload, "provider", provider_value)}
-            )
-        elif inferred_provider:
-            provider_value = inferred_provider
-        base["provider"] = provider_value
-        if not _text(base.get("provider")):
-            raise ValueError("Select devices from a connected integration so Awareness can save the provider.")
+    inferred_provider = _provider_from_rule_fields(base)
+    if explicit_provider:
+        provider_value = _concrete_rule_provider(
+            {**base, "provider": _value(values, payload, "provider", provider_value)}
+        )
+    elif inferred_provider:
+        provider_value = inferred_provider
+    base["provider"] = provider_value
+    if not _text(base.get("provider")):
+        raise ValueError("Select devices from a connected integration so Awareness can save the provider.")
     if kind == "doorbell":
         base["trigger_to_state"] = "on"
         base["trigger_attribute"] = ""
@@ -5729,14 +5064,6 @@ def _build_rule_from_values(
 
         if not base["area"]:
             base["area"] = base["sensor_type"]
-    elif kind == "brief":
-        brief_kind = base["brief_kind"]
-        if brief_kind not in {"events_query_brief", "weather_brief", "zen_greeting", "alan_watts_greeting"}:
-            raise ValueError(
-                "Brief type must be events_query_brief, weather_brief, zen_greeting, or alan_watts_greeting."
-            )
-        if base["next_run_ts"] <= 0:
-            base["next_run_ts"] = now_ts + (base["interval_minutes"] * 60)
     return _normalize_rule(base) or base
 
 
@@ -5794,8 +5121,8 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         }
     if action_name == "awareness_add_rule":
         kind = _text(_value(values, body, "kind")).lower()
-        if kind not in {"camera", "doorbell", "entry_sensor", "brief"}:
-            raise ValueError("Rule type must be camera, doorbell, entry_sensor, or brief.")
+        if kind not in {"camera", "doorbell", "entry_sensor"}:
+            raise ValueError("Rule type must be camera, doorbell, or entry_sensor.")
         rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=None)
         _save_rule(client, rule)
         return {"ok": True, "id": rule["id"], "message": "Awareness rule added."}
@@ -5857,9 +5184,6 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             rule["last_status"] = "ok"
             rule["last_summary"] = _text(result.get("summary"))
             rule["last_error"] = ""
-            if _text(rule.get("kind")) == "brief":
-                interval = _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080)
-                rule["next_run_ts"] = now_ts + (interval * 60)
             rule["updated_at"] = now_ts
             _save_rule(redis_client, rule)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error="")
@@ -5878,31 +5202,6 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             rule["updated_at"] = now_ts
             _save_rule(redis_client, rule)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error=str(exc))
-
-
-async def _awareness_brief_scheduler_loop(stop_event: Optional[object]) -> None:
-    while not (stop_event and stop_event.is_set()):
-        tick = _setting_int(redis_client, "brief_scheduler_tick_sec", 5, minimum=1, maximum=60)
-        now_ts = time.time()
-        rules = _load_rules(redis_client)
-        for rule in rules.values():
-            if _text(rule.get("kind")) != "brief":
-                continue
-            if not _bool(rule.get("enabled"), True):
-                continue
-            interval = _as_int(rule.get("interval_minutes"), 60, minimum=1, maximum=10080)
-            next_run = _as_float(rule.get("next_run_ts"), 0.0)
-            if next_run <= 0:
-                rule["next_run_ts"] = now_ts + (interval * 60)
-                rule["updated_at"] = now_ts
-                _save_rule(redis_client, rule)
-                continue
-            if now_ts >= next_run:
-                _enqueue_execution(redis_client, rule_id=_text(rule.get("id")), reason="schedule", event={})
-                rule["next_run_ts"] = now_ts + (interval * 60)
-                rule["updated_at"] = now_ts
-                _save_rule(redis_client, rule)
-        await asyncio.sleep(float(tick))
 
 
 async def _handle_trigger_state_change(
@@ -6656,7 +5955,6 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
     ]
     tasks.extend(
         [
-            asyncio.create_task(_awareness_brief_scheduler_loop(stop_event)),
             asyncio.create_task(_awareness_integration_runtime_loop(stop_event)),
             asyncio.create_task(_awareness_retention_loop(stop_event)),
         ]
