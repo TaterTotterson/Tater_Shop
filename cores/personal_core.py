@@ -24,7 +24,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.40"
+__version__ = "1.0.41"
 
 load_dotenv()
 
@@ -7943,7 +7943,7 @@ def _personal_add_account_form(people_options: List[Dict[str, str]]) -> Dict[str
     return {
         "id": "__personal_add_account__",
         "title": "Add Email / Calendar Account",
-        "group": "accounts",
+        "group": "account_create",
         "subtitle": "Create an account row and optionally link it to a master People profile.",
         "save_action": "personal_add_account",
         "save_label": "Add Account",
@@ -7960,7 +7960,7 @@ def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[st
     form = {
         "id": f"personal_account:{source}:{_as_int(account.get('account_index'), -1, minimum=-1)}:{account_id}",
         "title": f"Account: {email_label}",
-        "group": "accounts",
+        "group": "account_current",
         "subtitle": f"{_provider_key(account.get('provider'), default='imap')} - {account_id}",
         "save_action": "personal_save_account",
         "save_label": "Save Account",
@@ -8343,7 +8343,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "id": "__personal_people_empty__",
                 "title": "No Accounts Yet",
-                "group": "accounts",
+                "group": "account_current",
                 "subtitle": "Add an inbox or calendar account, then link it to a master People profile.",
                 "summary_rows": [
                     {"label": "Status", "value": "Waiting for account setup"},
@@ -8520,10 +8520,23 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "key": "accounts",
                 "label": "Accounts",
-                "source": "items",
-                "item_group": "accounts",
-                "empty_message": "No accounts available.",
-                "selector": False,
+                "source": "grouped_items",
+                "groups": [
+                    {
+                        "key": "create",
+                        "label": "Create",
+                        "item_group": "account_create",
+                        "selector": False,
+                        "empty_message": "No account creation form available.",
+                    },
+                    {
+                        "key": "current",
+                        "label": "Current Accounts",
+                        "item_group": "account_current",
+                        "selector": False,
+                        "empty_message": "No accounts configured.",
+                    },
+                ],
             },
             {
                 "key": "notifications",
