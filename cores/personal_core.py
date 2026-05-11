@@ -24,7 +24,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.38"
+__version__ = "1.0.40"
 
 load_dotenv()
 
@@ -325,17 +325,6 @@ def _people_person_options(redis_obj: Any = None) -> List[Dict[str, str]]:
         if person_id and display_name:
             options.append({"value": person_id, "label": display_name})
     return options
-
-
-def _create_people_person(display_name: Any) -> Dict[str, Any]:
-    name = _text(display_name)
-    if not name:
-        raise ValueError("Person name is required.")
-    module = _people_api_module()
-    create_person = getattr(module, "create_person", None) if module is not None else None
-    if not callable(create_person):
-        raise ValueError("People API is not available.")
-    return dict(create_person(name, redis_client))
 
 
 def _account_person_id(account_id: Any) -> str:
@@ -1458,10 +1447,6 @@ def _account_id_conflicts(settings: Dict[str, Any], new_account_id: Any, origina
 
 
 def _person_id_from_account_values(values: Dict[str, Any]) -> Tuple[str, str]:
-    new_name = _text(values.get("new_person_name"))
-    if new_name:
-        person = _create_people_person(new_name)
-        return _text(person.get("id")), _text(person.get("display_name")) or new_name
     person_id = _text(values.get("person_id"))
     if not person_id:
         return "", ""
@@ -1562,7 +1547,7 @@ def _save_personal_account(values: Dict[str, Any]) -> Dict[str, Any]:
             redis_client.hdel(_PERSONAL_ACCOUNT_PEOPLE_HASH, original_account_id)
         except Exception:
             pass
-    if "person_id" in values or _text(values.get("new_person_name")):
+    if "person_id" in values:
         _set_account_person_id(new_account_id, person_id)
 
     return {
@@ -5392,9 +5377,9 @@ def _run_account_cycle(llm_client: Any, account: Dict[str, Any], settings: Dict[
     if not person_id:
         people_rows = _people_person_rows()
         if people_rows:
-            error_text = "Personal account is not linked to a Person. Open Personal > People and choose the owner for this inbox/calendar."
+            error_text = "Personal account is not linked to a Person. Open Personal > Accounts and choose the owner for this inbox/calendar."
         else:
-            error_text = "Create a Person in Settings > People, then link this email/calendar account in Personal > People."
+            error_text = "Create a Person in Tater Settings > People, then link this email/calendar account in Personal > Accounts."
         return {
             "account_id": account_id,
             "person_id": "",
@@ -7794,14 +7779,7 @@ def _account_form_sections(
                 "type": "select",
                 "value": person_id,
                 "options": people_options,
-                "description": "Choose the People profile that owns this inbox/calendar.",
-            },
-            {
-                "key": "new_person_name",
-                "label": "Create New Master User",
-                "type": "text",
-                "value": "",
-                "description": "Optional. Creates a People profile and links this account to it.",
+                "description": "Choose the People profile that owns this inbox/calendar. Create People in Tater Settings > People.",
             },
         ]
     )
@@ -7965,7 +7943,7 @@ def _personal_add_account_form(people_options: List[Dict[str, str]]) -> Dict[str
     return {
         "id": "__personal_add_account__",
         "title": "Add Email / Calendar Account",
-        "group": "people",
+        "group": "accounts",
         "subtitle": "Create an account row and optionally link it to a master People profile.",
         "save_action": "personal_add_account",
         "save_label": "Add Account",
@@ -7982,7 +7960,7 @@ def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[st
     form = {
         "id": f"personal_account:{source}:{_as_int(account.get('account_index'), -1, minimum=-1)}:{account_id}",
         "title": f"Account: {email_label}",
-        "group": "people",
+        "group": "accounts",
         "subtitle": f"{_provider_key(account.get('provider'), default='imap')} - {account_id}",
         "save_action": "personal_save_account",
         "save_label": "Save Account",
@@ -8356,27 +8334,6 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         }
     ]
     forms.append(_personal_scan_settings_form(settings, linked_accounts))
-    forms.append(
-        {
-            "id": "__personal_create_person__",
-            "title": "Create Person",
-            "group": "people",
-            "subtitle": "Create a master People profile, then link inboxes to that person.",
-            "save_action": "personal_create_person",
-            "save_label": "Create Person",
-            "fields": [
-                {
-                    "key": "display_name",
-                    "label": "Person Name",
-                    "type": "text",
-                    "value": "",
-                }
-            ],
-            "summary_rows": [
-                {"label": "People", "value": str(len(people_rows))},
-            ],
-        }
-    )
     forms.append(_personal_add_account_form(people_options))
     for account in linked_accounts:
         if _text(account.get("account_id")):
@@ -8386,7 +8343,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "id": "__personal_people_empty__",
                 "title": "No Accounts Yet",
-                "group": "people",
+                "group": "accounts",
                 "subtitle": "Add an inbox or calendar account, then link it to a master People profile.",
                 "summary_rows": [
                     {"label": "Status", "value": "Waiting for account setup"},
@@ -8561,12 +8518,12 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "empty_message": "No prompt controls available.",
             },
             {
-                "key": "people",
-                "label": "People",
+                "key": "accounts",
+                "label": "Accounts",
                 "source": "items",
-                "item_group": "people",
-                "empty_message": "No People links available.",
-                "selector": True,
+                "item_group": "accounts",
+                "empty_message": "No accounts available.",
+                "selector": False,
             },
             {
                 "key": "notifications",
@@ -9114,14 +9071,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 f"telegram={'on' if _as_bool(result.get('prompt_include_telegram'), False) else 'off'}, "
                 f"matrix={'on' if _as_bool(result.get('prompt_include_matrix'), False) else 'off'}."
             ),
-        }
-
-    if action_name == "personal_create_person":
-        person = _create_people_person(_value("display_name"))
-        return {
-            "ok": True,
-            "message": f"Created person {_text(person.get('display_name'))}.",
-            "data": person,
         }
 
     if action_name == "personal_add_account":
