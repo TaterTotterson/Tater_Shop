@@ -24,13 +24,38 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.37"
+__version__ = "1.0.38"
 
 load_dotenv()
 
 logger = logging.getLogger("personal_core")
 logger.setLevel(logging.INFO)
 
+
+_PERSONAL_INTERVAL_OPTIONS = [
+    {"value": "60", "label": "1 minute"},
+    {"value": "120", "label": "2 minutes"},
+    {"value": "300", "label": "5 minutes"},
+    {"value": "600", "label": "10 minutes"},
+    {"value": "900", "label": "15 minutes"},
+    {"value": "1800", "label": "30 minutes"},
+    {"value": "3600", "label": "1 hour"},
+]
+
+_PERSONAL_PROVIDER_OPTIONS = [
+    {"value": "gmail", "label": "Gmail"},
+    {"value": "apple", "label": "Apple / iCloud"},
+    {"value": "yahoo", "label": "Yahoo"},
+    {"value": "outlook", "label": "Outlook / Office365"},
+    {"value": "aol", "label": "AOL"},
+    {"value": "custom", "label": "Custom IMAP"},
+]
+
+_PERSONAL_CALENDAR_SOURCE_OPTIONS = [
+    {"value": "auto", "label": "Auto / Same Account"},
+    {"value": "caldav", "label": "CalDAV"},
+    {"value": "ics", "label": "Private iCal URL"},
+]
 
 CORE_SETTINGS = {
     "category": "Personal Core Settings",
@@ -41,225 +66,8 @@ CORE_SETTINGS = {
             "label": "Scan Interval (sec)",
             "type": "select",
             "default": "300",
-            "options": [
-                {"value": "60", "label": "1 minute"},
-                {"value": "120", "label": "2 minutes"},
-                {"value": "300", "label": "5 minutes"},
-                {"value": "600", "label": "10 minutes"},
-                {"value": "900", "label": "15 minutes"},
-                {"value": "1800", "label": "30 minutes"},
-                {"value": "3600", "label": "1 hour"},
-            ],
-            "description": "How often Personal Core checks connected inboxes.",
-        },
-        "provider": {
-            "label": "Email Provider",
-            "type": "select",
-            "default": "gmail",
-            "options": [
-                {"value": "gmail", "label": "Gmail"},
-                {"value": "apple", "label": "Apple / iCloud"},
-                {"value": "yahoo", "label": "Yahoo"},
-                {"value": "outlook", "label": "Outlook / Office365"},
-                {"value": "aol", "label": "AOL"},
-                {"value": "custom", "label": "Custom IMAP"},
-            ],
-            "description": "Primary provider to scan. Use app passwords where required.",
-        },
-        "email_address": {
-            "label": "Email Address",
-            "type": "string",
-            "default": "",
-            "description": "Primary account login email.",
-        },
-        "email_password": {
-            "label": "Email App Password",
-            "type": "string",
-            "default": "",
-            "description": "IMAP/app password for the primary account.",
-        },
-        "imap_host": {
-            "label": "Custom IMAP Host (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Leave blank to use provider defaults.",
-        },
-        "imap_port": {
-            "label": "IMAP Port",
-            "type": "number",
-            "default": 993,
-            "description": "IMAP SSL port (usually 993).",
-        },
-        "mailbox": {
-            "label": "Mailbox",
-            "type": "string",
-            "default": "INBOX",
-            "description": "Mailbox/folder to scan.",
-        },
-        "calendar_enabled": {
-            "label": "Enable Calendar Scan",
-            "type": "checkbox",
-            "default": False,
-            "description": "Also pull upcoming calendar events for linked People profiles.",
-        },
-        "calendar_source": {
-            "label": "Calendar Source",
-            "type": "select",
-            "default": "auto",
-            "options": [
-                {"value": "auto", "label": "Auto / Same Account"},
-                {"value": "caldav", "label": "CalDAV"},
-                {"value": "ics", "label": "Private iCal URL"},
-            ],
-            "description": "Auto uses the inbox provider where possible. Extra accounts can override this in JSON.",
-        },
-        "calendar_url": {
-            "label": "Calendar URL",
-            "type": "string",
-            "default": "",
-            "description": "Optional CalDAV endpoint or private iCal URL. Leave blank to use provider defaults where available.",
-        },
-        "calendar_username": {
-            "label": "Calendar Username",
-            "type": "string",
-            "default": "",
-            "description": "Optional calendar login. Blank uses the email address.",
-        },
-        "calendar_password": {
-            "label": "Calendar App Password",
-            "type": "string",
-            "default": "",
-            "description": "Optional calendar password/token. Blank uses the email app password.",
-        },
-        "calendar_name_filter": {
-            "label": "Calendar Name Filter",
-            "type": "string",
-            "default": "",
-            "description": "Optional comma-separated calendar names to include when a CalDAV account exposes multiple calendars.",
-        },
-        "calendar_lookahead_days": {
-            "label": "Calendar Lookahead Days",
-            "type": "number",
-            "default": 60,
-            "description": "How far ahead to pull calendar events.",
-        },
-        "calendar_lookback_days": {
-            "label": "Calendar Lookback Days",
-            "type": "number",
-            "default": 1,
-            "description": "Pull a small amount of recent calendar history to catch events happening today.",
-        },
-        "calendar_max_events": {
-            "label": "Calendar Events Per Account",
-            "type": "number",
-            "default": 120,
-            "description": "Maximum calendar events stored per account scan.",
-        },
-        "calendar_auto_add_email_events": {
-            "label": "Auto Add Email Events To Calendar",
-            "type": "checkbox",
-            "default": False,
-            "description": "When enabled, write newly discovered email events into the linked writable CalDAV calendar after duplicate checks.",
-        },
-        "calendar_write_url": {
-            "label": "Calendar Write URL",
-            "type": "string",
-            "default": "",
-            "description": "Optional CalDAV calendar collection for auto-added email events. Required when Calendar URL is a private iCal feed.",
-        },
-        "calendar_auto_add_max_per_scan": {
-            "label": "Auto Add Max Per Scan",
-            "type": "number",
-            "default": 5,
-            "description": "Maximum email-discovered events Personal Core may add to the calendar in one scan.",
-        },
-        "extra_accounts_json": {
-            "label": "Extra Accounts JSON (optional)",
-            "type": "textarea",
-            "default": "",
-            "description": (
-                "Optional JSON list of extra accounts. Example: "
-                "[{\"provider\":\"yahoo\",\"email_address\":\"name@yahoo.com\",\"email_password\":\"app-pass\","
-                "\"calendar_enabled\":true}]"
-            ),
-        },
-        "lookback_limit": {
-            "label": "Emails Per Scan",
-            "type": "number",
-            "default": 40,
-            "description": "Maximum new emails fetched per account each scan.",
-        },
-        "scan_days": {
-            "label": "Initial Scan Days",
-            "type": "number",
-            "default": 21,
-            "description": "When first connecting, pull this many days of email history.",
-        },
-        "max_stored_emails": {
-            "label": "Stored Emails Per Account",
-            "type": "number",
-            "default": 1500,
-            "description": "How many normalized emails remain searchable per account.",
-        },
-        "min_confidence": {
-            "label": "Min Confidence",
-            "type": "number",
-            "default": 0.62,
-            "description": "Minimum confidence needed before storing extracted profile updates.",
-        },
-        "max_spending_entries": {
-            "label": "Max Spending Rows",
-            "type": "number",
-            "default": 600,
-            "description": "Maximum stored spending observations per account profile.",
-        },
-        "max_note_entries": {
-            "label": "Max Important Notes",
-            "type": "number",
-            "default": 300,
-            "description": "Maximum stored important-note items per account profile.",
-        },
-        "max_event_entries": {
-            "label": "Max Events",
-            "type": "number",
-            "default": 260,
-            "description": "Maximum stored events per account profile.",
-        },
-        "prompt_upcoming_days": {
-            "label": "Prompt Upcoming Days",
-            "type": "number",
-            "default": 45,
-            "description": "How far ahead to include upcoming plans in Hydra prompt context.",
-        },
-        "prompt_upcoming_limit": {
-            "label": "Prompt Event Limit",
-            "type": "number",
-            "default": 8,
-            "description": "Maximum events injected into Hydra prompt context.",
-        },
-        "prompt_include_discord": {
-            "label": "Inject Into Discord",
-            "type": "checkbox",
-            "default": False,
-            "description": "Allow Personal Core prompt context on Discord conversations.",
-        },
-        "prompt_include_irc": {
-            "label": "Inject Into IRC",
-            "type": "checkbox",
-            "default": False,
-            "description": "Allow Personal Core prompt context on IRC conversations.",
-        },
-        "prompt_include_telegram": {
-            "label": "Inject Into Telegram",
-            "type": "checkbox",
-            "default": False,
-            "description": "Allow Personal Core prompt context on Telegram conversations.",
-        },
-        "prompt_include_matrix": {
-            "label": "Inject Into Matrix",
-            "type": "checkbox",
-            "default": False,
-            "description": "Allow Personal Core prompt context on Matrix conversations.",
+            "options": _PERSONAL_INTERVAL_OPTIONS,
+            "description": "How often Personal Core checks connected inboxes. Full account setup lives in the Personal core tab.",
         },
     },
 }
@@ -267,7 +75,7 @@ CORE_SETTINGS = {
 CORE_WEBUI_TAB = {
     "label": "Personal",
     "order": 25,
-    "requires_running": True,
+    "requires_running": False,
 }
 
 
@@ -870,6 +678,16 @@ def _account_storage_id(account: Dict[str, Any]) -> str:
     return f"{provider}_{local[:24]}_{digest}"
 
 
+def _account_has_identity(account: Dict[str, Any]) -> bool:
+    if not isinstance(account, dict):
+        return False
+    return bool(
+        _text(account.get("email_address") or account.get("username"))
+        or _text(account.get("calendar_username") or account.get("calendar_user"))
+        or _text(account.get("calendar_url") or account.get("calendar_ics_url") or account.get("ics_url"))
+    )
+
+
 def _history_key(account_id: str) -> str:
     return f"{_PERSONAL_HISTORY_PREFIX}:{_slug(account_id)}"
 
@@ -909,6 +727,7 @@ def _load_settings() -> Dict[str, Any]:
         "calendar_write_url": _text(raw.get("calendar_write_url")),
         "calendar_auto_add_max_per_scan": _as_int(raw.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50),
         "extra_accounts_json": _text(raw.get("extra_accounts_json")),
+        "person_id": _text(raw.get("person_id")),
         "lookback_limit": _as_int(raw.get("lookback_limit"), 40, minimum=1, maximum=300),
         "scan_days": _as_int(raw.get("scan_days"), 21, minimum=1, maximum=365),
         "max_stored_emails": _as_int(raw.get("max_stored_emails"), 1500, minimum=100, maximum=50000),
@@ -1361,10 +1180,8 @@ def _notification_routes_from_settings(
 
     return routes
 
-def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-
-    primary = {
+def _primary_account_from_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    return {
         "provider": _provider_key(settings.get("provider"), default="gmail"),
         "email_address": _text(settings.get("email_address")),
         "email_password": _text(settings.get("email_password")),
@@ -1385,47 +1202,95 @@ def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
         "calendar_auto_add_max_per_scan": _as_int(settings.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50),
         "person_id": _text(settings.get("person_id")),
         "enabled": True,
+        "account_source": "primary",
+        "account_index": -1,
     }
-    out.append(primary)
 
+
+def _extra_account_rows(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     extra_json = _text(settings.get("extra_accounts_json"))
-    if extra_json:
-        try:
-            parsed = json.loads(extra_json)
-        except Exception:
-            parsed = []
-        if isinstance(parsed, dict):
-            parsed = [parsed]
-        if isinstance(parsed, list):
-            for row in parsed:
-                if not isinstance(row, dict):
-                    continue
-                enabled = _as_bool(row.get("enabled"), True)
-                if not enabled:
-                    continue
-                merged = {
-                    "provider": _provider_key(row.get("provider") or primary.get("provider"), default="gmail"),
-                    "email_address": _text(row.get("email_address") or row.get("username")),
-                    "email_password": _text(row.get("email_password") or row.get("password")),
-                    "imap_host": _text(row.get("imap_host")),
-                    "imap_port": _as_int(row.get("imap_port"), 993, minimum=1, maximum=65535),
-                    "mailbox": _text(row.get("mailbox")) or "INBOX",
-                    "calendar_enabled": _as_bool(row.get("calendar_enabled"), _as_bool(primary.get("calendar_enabled"), False)),
-                    "calendar_source": _calendar_source_key(row.get("calendar_source") or primary.get("calendar_source"), default="auto"),
-                    "calendar_url": _text(row.get("calendar_url") or row.get("calendar_ics_url") or row.get("ics_url")),
-                    "calendar_username": _text(row.get("calendar_username") or row.get("calendar_user")),
-                    "calendar_password": _text(row.get("calendar_password") or row.get("calendar_token")),
-                    "calendar_name_filter": _text(row.get("calendar_name_filter") or primary.get("calendar_name_filter")),
-                    "calendar_lookahead_days": _as_int(row.get("calendar_lookahead_days"), _as_int(primary.get("calendar_lookahead_days"), 60, minimum=1, maximum=730), minimum=1, maximum=730),
-                    "calendar_lookback_days": _as_int(row.get("calendar_lookback_days"), _as_int(primary.get("calendar_lookback_days"), 1, minimum=0, maximum=90), minimum=0, maximum=90),
-                    "calendar_max_events": _as_int(row.get("calendar_max_events"), _as_int(primary.get("calendar_max_events"), 120, minimum=1, maximum=1000), minimum=1, maximum=1000),
-                    "calendar_auto_add_email_events": _as_bool(row.get("calendar_auto_add_email_events"), _as_bool(primary.get("calendar_auto_add_email_events"), False)),
-                    "calendar_write_url": _text(row.get("calendar_write_url") or row.get("caldav_write_url") or primary.get("calendar_write_url")),
-                    "calendar_auto_add_max_per_scan": _as_int(row.get("calendar_auto_add_max_per_scan"), _as_int(primary.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50), minimum=1, maximum=50),
-                    "person_id": _text(row.get("person_id")),
-                    "enabled": True,
-                }
-                out.append(merged)
+    if not extra_json:
+        return []
+    try:
+        parsed = json.loads(extra_json)
+    except Exception:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    return [dict(row) for row in parsed if isinstance(row, dict)]
+
+
+def _normal_account_from_extra(
+    row: Dict[str, Any],
+    *,
+    primary: Dict[str, Any],
+    index: int,
+) -> Dict[str, Any]:
+    return {
+        "provider": _provider_key(row.get("provider") or primary.get("provider"), default="gmail"),
+        "email_address": _text(row.get("email_address") or row.get("username")),
+        "email_password": _text(row.get("email_password") or row.get("password")),
+        "imap_host": _text(row.get("imap_host")),
+        "imap_port": _as_int(row.get("imap_port"), 993, minimum=1, maximum=65535),
+        "mailbox": _text(row.get("mailbox")) or "INBOX",
+        "calendar_enabled": _as_bool(row.get("calendar_enabled"), _as_bool(primary.get("calendar_enabled"), False)),
+        "calendar_source": _calendar_source_key(row.get("calendar_source") or primary.get("calendar_source"), default="auto"),
+        "calendar_url": _text(row.get("calendar_url") or row.get("calendar_ics_url") or row.get("ics_url")),
+        "calendar_username": _text(row.get("calendar_username") or row.get("calendar_user")),
+        "calendar_password": _text(row.get("calendar_password") or row.get("calendar_token")),
+        "calendar_name_filter": _text(row.get("calendar_name_filter") or primary.get("calendar_name_filter")),
+        "calendar_lookahead_days": _as_int(
+            row.get("calendar_lookahead_days"),
+            _as_int(primary.get("calendar_lookahead_days"), 60, minimum=1, maximum=730),
+            minimum=1,
+            maximum=730,
+        ),
+        "calendar_lookback_days": _as_int(
+            row.get("calendar_lookback_days"),
+            _as_int(primary.get("calendar_lookback_days"), 1, minimum=0, maximum=90),
+            minimum=0,
+            maximum=90,
+        ),
+        "calendar_max_events": _as_int(
+            row.get("calendar_max_events"),
+            _as_int(primary.get("calendar_max_events"), 120, minimum=1, maximum=1000),
+            minimum=1,
+            maximum=1000,
+        ),
+        "calendar_auto_add_email_events": _as_bool(
+            row.get("calendar_auto_add_email_events"),
+            _as_bool(primary.get("calendar_auto_add_email_events"), False),
+        ),
+        "calendar_write_url": _text(row.get("calendar_write_url") or row.get("caldav_write_url") or primary.get("calendar_write_url")),
+        "calendar_auto_add_max_per_scan": _as_int(
+            row.get("calendar_auto_add_max_per_scan"),
+            _as_int(primary.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50),
+            minimum=1,
+            maximum=50,
+        ),
+        "person_id": _text(row.get("person_id")),
+        "enabled": True,
+        "account_source": "extra",
+        "account_index": int(index),
+    }
+
+
+def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+
+    primary = _primary_account_from_settings(settings)
+    if _account_has_identity(primary):
+        out.append(primary)
+
+    for index, row in enumerate(_extra_account_rows(settings)):
+        enabled = _as_bool(row.get("enabled"), True)
+        if not enabled:
+            continue
+        merged = _normal_account_from_extra(row, primary=primary, index=index)
+        if _account_has_identity(merged):
+            out.append(merged)
 
     deduped: List[Dict[str, Any]] = []
     seen = set()
@@ -1439,6 +1304,299 @@ def _resolve_accounts(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
         account_copy.update(_account_person_fields(account_copy))
         deduped.append(account_copy)
     return deduped
+
+
+def _account_config_from_values(
+    values: Dict[str, Any],
+    current: Optional[Dict[str, Any]] = None,
+    *,
+    preserve_blank_passwords: bool = False,
+) -> Dict[str, Any]:
+    current_row = dict(current or {})
+
+    def has_value(key: str) -> bool:
+        return key in values
+
+    def raw(key: str, default: Any = "") -> Any:
+        if has_value(key):
+            return values.get(key)
+        return current_row.get(key, default)
+
+    def secret(key: str) -> str:
+        value = _text(raw(key, ""))
+        if preserve_blank_passwords and not value:
+            return _text(current_row.get(key))
+        return value
+
+    return {
+        "provider": _provider_key(raw("provider", current_row.get("provider") or "gmail"), default="gmail"),
+        "email_address": _text(raw("email_address")),
+        "email_password": secret("email_password"),
+        "imap_host": _text(raw("imap_host")),
+        "imap_port": _as_int(raw("imap_port", current_row.get("imap_port") or 993), 993, minimum=1, maximum=65535),
+        "mailbox": _text(raw("mailbox", current_row.get("mailbox") or "INBOX")) or "INBOX",
+        "calendar_enabled": _as_bool(raw("calendar_enabled", current_row.get("calendar_enabled")), _as_bool(current_row.get("calendar_enabled"), False)),
+        "calendar_source": _calendar_source_key(raw("calendar_source", current_row.get("calendar_source") or "auto"), default="auto"),
+        "calendar_url": _text(raw("calendar_url")),
+        "calendar_username": _text(raw("calendar_username")),
+        "calendar_password": secret("calendar_password"),
+        "calendar_name_filter": _text(raw("calendar_name_filter")),
+        "calendar_lookahead_days": _as_int(raw("calendar_lookahead_days", current_row.get("calendar_lookahead_days") or 60), 60, minimum=1, maximum=730),
+        "calendar_lookback_days": _as_int(raw("calendar_lookback_days", current_row.get("calendar_lookback_days") or 1), 1, minimum=0, maximum=90),
+        "calendar_max_events": _as_int(raw("calendar_max_events", current_row.get("calendar_max_events") or 120), 120, minimum=1, maximum=1000),
+        "calendar_auto_add_email_events": _as_bool(
+            raw("calendar_auto_add_email_events", current_row.get("calendar_auto_add_email_events")),
+            _as_bool(current_row.get("calendar_auto_add_email_events"), False),
+        ),
+        "calendar_write_url": _text(raw("calendar_write_url")),
+        "calendar_auto_add_max_per_scan": _as_int(
+            raw("calendar_auto_add_max_per_scan", current_row.get("calendar_auto_add_max_per_scan") or 5),
+            5,
+            minimum=1,
+            maximum=50,
+        ),
+        "person_id": _text(raw("person_id", current_row.get("person_id"))),
+        "enabled": True,
+        "account_source": _text(current_row.get("account_source")),
+        "account_index": _as_int(current_row.get("account_index"), -1, minimum=-1),
+    }
+
+
+def _extra_account_storage_row(account: Dict[str, Any]) -> Dict[str, Any]:
+    row = {
+        "provider": _provider_key(account.get("provider"), default="gmail"),
+        "email_address": _text(account.get("email_address") or account.get("username")),
+        "email_password": _text(account.get("email_password") or account.get("password")),
+        "imap_host": _text(account.get("imap_host")),
+        "imap_port": _as_int(account.get("imap_port"), 993, minimum=1, maximum=65535),
+        "mailbox": _text(account.get("mailbox")) or "INBOX",
+        "calendar_enabled": _as_bool(account.get("calendar_enabled"), False),
+        "calendar_source": _calendar_source_key(account.get("calendar_source"), default="auto"),
+        "calendar_url": _text(account.get("calendar_url") or account.get("calendar_ics_url") or account.get("ics_url")),
+        "calendar_username": _text(account.get("calendar_username") or account.get("calendar_user")),
+        "calendar_password": _text(account.get("calendar_password") or account.get("calendar_token")),
+        "calendar_name_filter": _text(account.get("calendar_name_filter")),
+        "calendar_lookahead_days": _as_int(account.get("calendar_lookahead_days"), 60, minimum=1, maximum=730),
+        "calendar_lookback_days": _as_int(account.get("calendar_lookback_days"), 1, minimum=0, maximum=90),
+        "calendar_max_events": _as_int(account.get("calendar_max_events"), 120, minimum=1, maximum=1000),
+        "calendar_auto_add_email_events": _as_bool(account.get("calendar_auto_add_email_events"), False),
+        "calendar_write_url": _text(account.get("calendar_write_url") or account.get("caldav_write_url")),
+        "calendar_auto_add_max_per_scan": _as_int(account.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50),
+        "person_id": _text(account.get("person_id")),
+        "enabled": _as_bool(account.get("enabled"), True),
+    }
+    return row
+
+
+def _save_extra_account_rows(rows: List[Dict[str, Any]]) -> None:
+    clean_rows = [
+        _extra_account_storage_row(row)
+        for row in rows
+        if isinstance(row, dict) and _as_bool(row.get("enabled"), True) and _account_has_identity(row)
+    ]
+    redis_client.hset(_PERSONAL_SETTINGS_KEY, "extra_accounts_json", json.dumps(clean_rows, ensure_ascii=False))
+
+
+def _primary_account_settings_mapping(account: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "provider": _provider_key(account.get("provider"), default="gmail"),
+        "email_address": _text(account.get("email_address")),
+        "email_password": _text(account.get("email_password")),
+        "imap_host": _text(account.get("imap_host")),
+        "imap_port": str(_as_int(account.get("imap_port"), 993, minimum=1, maximum=65535)),
+        "mailbox": _text(account.get("mailbox")) or "INBOX",
+        "calendar_enabled": "1" if _as_bool(account.get("calendar_enabled"), False) else "0",
+        "calendar_source": _calendar_source_key(account.get("calendar_source"), default="auto"),
+        "calendar_url": _text(account.get("calendar_url")),
+        "calendar_username": _text(account.get("calendar_username")),
+        "calendar_password": _text(account.get("calendar_password")),
+        "calendar_name_filter": _text(account.get("calendar_name_filter")),
+        "calendar_lookahead_days": str(_as_int(account.get("calendar_lookahead_days"), 60, minimum=1, maximum=730)),
+        "calendar_lookback_days": str(_as_int(account.get("calendar_lookback_days"), 1, minimum=0, maximum=90)),
+        "calendar_max_events": str(_as_int(account.get("calendar_max_events"), 120, minimum=1, maximum=1000)),
+        "calendar_auto_add_email_events": "1" if _as_bool(account.get("calendar_auto_add_email_events"), False) else "0",
+        "calendar_write_url": _text(account.get("calendar_write_url")),
+        "calendar_auto_add_max_per_scan": str(_as_int(account.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50)),
+        "person_id": _text(account.get("person_id")),
+    }
+
+
+def _account_lookup_by_id(settings: Dict[str, Any], account_id: Any) -> Dict[str, Any]:
+    wanted = _text(account_id)
+    if not wanted:
+        return {}
+    for account in _resolve_accounts(settings):
+        if _text(account.get("account_id")) == wanted:
+            return dict(account)
+    return {}
+
+
+def _extra_row_index_by_account_id(settings: Dict[str, Any], account_id: Any) -> int:
+    wanted = _text(account_id)
+    if not wanted:
+        return -1
+    primary = _primary_account_from_settings(settings)
+    for index, row in enumerate(_extra_account_rows(settings)):
+        if not _as_bool(row.get("enabled"), True):
+            continue
+        account = _normal_account_from_extra(row, primary=primary, index=index)
+        if _account_has_identity(account) and _account_storage_id(account) == wanted:
+            return index
+    return -1
+
+
+def _account_id_conflicts(settings: Dict[str, Any], new_account_id: Any, original_account_id: Any = "") -> bool:
+    new_id = _text(new_account_id)
+    original_id = _text(original_account_id)
+    if not new_id:
+        return False
+    for account in _resolve_accounts(settings):
+        account_id = _text(account.get("account_id"))
+        if account_id == new_id and account_id != original_id:
+            return True
+    return False
+
+
+def _person_id_from_account_values(values: Dict[str, Any]) -> Tuple[str, str]:
+    new_name = _text(values.get("new_person_name"))
+    if new_name:
+        person = _create_people_person(new_name)
+        return _text(person.get("id")), _text(person.get("display_name")) or new_name
+    person_id = _text(values.get("person_id"))
+    if not person_id:
+        return "", ""
+    person_name = _people_person_name(person_id)
+    if not person_name:
+        raise ValueError("Choose an existing person.")
+    return person_id, person_name
+
+
+def _save_personal_scan_settings(values: Dict[str, Any]) -> Dict[str, Any]:
+    current = _load_settings()
+    mapping = {
+        "interval_seconds": str(_as_int(values.get("interval_seconds"), _as_int(current.get("interval_seconds"), 300, minimum=30, maximum=3600), minimum=30, maximum=3600)),
+        "lookback_limit": str(_as_int(values.get("lookback_limit"), _as_int(current.get("lookback_limit"), 40, minimum=1, maximum=300), minimum=1, maximum=300)),
+        "scan_days": str(_as_int(values.get("scan_days"), _as_int(current.get("scan_days"), 21, minimum=1, maximum=365), minimum=1, maximum=365)),
+        "max_stored_emails": str(_as_int(values.get("max_stored_emails"), _as_int(current.get("max_stored_emails"), 1500, minimum=100, maximum=50000), minimum=100, maximum=50000)),
+        "min_confidence": str(_as_float(values.get("min_confidence"), _as_float(current.get("min_confidence"), 0.62, minimum=0.0, maximum=1.0), minimum=0.0, maximum=1.0)),
+        "max_spending_entries": str(_as_int(values.get("max_spending_entries"), _as_int(current.get("max_spending_entries"), 600, minimum=20, maximum=5000), minimum=20, maximum=5000)),
+        "max_note_entries": str(_as_int(values.get("max_note_entries"), _as_int(current.get("max_note_entries"), 300, minimum=20, maximum=3000), minimum=20, maximum=3000)),
+        "max_event_entries": str(_as_int(values.get("max_event_entries"), _as_int(current.get("max_event_entries"), 260, minimum=20, maximum=2000), minimum=20, maximum=2000)),
+        "prompt_upcoming_days": str(_as_int(values.get("prompt_upcoming_days"), _as_int(current.get("prompt_upcoming_days"), 45, minimum=1, maximum=365), minimum=1, maximum=365)),
+        "prompt_upcoming_limit": str(_as_int(values.get("prompt_upcoming_limit"), _as_int(current.get("prompt_upcoming_limit"), 8, minimum=1, maximum=50), minimum=1, maximum=50)),
+    }
+    redis_client.hset(_PERSONAL_SETTINGS_KEY, mapping=mapping)
+    return {"ok": True, "settings": _load_settings(), "changed": sorted(mapping.keys())}
+
+
+def _add_personal_account(values: Dict[str, Any]) -> Dict[str, Any]:
+    settings = _load_settings()
+    account = _account_config_from_values(values)
+    if not _account_has_identity(account):
+        raise ValueError("Add an email address, calendar username, or calendar URL.")
+    account_id = _account_storage_id(account)
+    if _account_lookup_by_id(settings, account_id):
+        raise ValueError("That account is already configured.")
+
+    person_id, person_name = _person_id_from_account_values(values)
+    account["person_id"] = person_id
+    rows = _extra_account_rows(settings)
+    rows.append(_extra_account_storage_row(account))
+    _save_extra_account_rows(rows)
+    if person_id:
+        _set_account_person_id(account_id, person_id)
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "person_id": person_id,
+        "person_name": person_name,
+    }
+
+
+def _save_personal_account(values: Dict[str, Any]) -> Dict[str, Any]:
+    settings = _load_settings()
+    source = _slug(values.get("account_source"), default="")
+    original_account_id = _text(values.get("original_account_id") or values.get("account_id"))
+    current = _account_lookup_by_id(settings, original_account_id)
+    if not source:
+        source = _slug(current.get("account_source"), default="")
+
+    if source == "primary":
+        if not current:
+            current = _primary_account_from_settings(settings)
+        account = _account_config_from_values(values, current, preserve_blank_passwords=True)
+        if not _account_has_identity(account):
+            raise ValueError("Primary account needs an email address, calendar username, or calendar URL.")
+        person_id, person_name = _person_id_from_account_values(values)
+        account["person_id"] = person_id
+        new_account_id = _account_storage_id(account)
+        if _account_id_conflicts(settings, new_account_id, original_account_id):
+            raise ValueError("Another account already uses that identity.")
+        redis_client.hset(_PERSONAL_SETTINGS_KEY, mapping=_primary_account_settings_mapping(account))
+    elif source == "extra":
+        rows = _extra_account_rows(settings)
+        index = _as_int(values.get("account_index"), -1, minimum=-1)
+        if index < 0 or index >= len(rows):
+            index = _extra_row_index_by_account_id(settings, original_account_id)
+        if index < 0 or index >= len(rows):
+            raise ValueError("Extra account was not found.")
+        primary = _primary_account_from_settings(settings)
+        current = _normal_account_from_extra(rows[index], primary=primary, index=index)
+        current["account_id"] = _account_storage_id(current)
+        current.update(_account_person_fields(current))
+        account = _account_config_from_values(values, current, preserve_blank_passwords=True)
+        if not _account_has_identity(account):
+            raise ValueError("Account needs an email address, calendar username, or calendar URL.")
+        person_id, person_name = _person_id_from_account_values(values)
+        account["person_id"] = person_id
+        new_account_id = _account_storage_id(account)
+        if _account_id_conflicts(settings, new_account_id, original_account_id):
+            raise ValueError("Another account already uses that identity.")
+        rows[index] = _extra_account_storage_row(account)
+        _save_extra_account_rows(rows)
+    else:
+        raise ValueError("Account source is missing.")
+
+    if original_account_id and original_account_id != new_account_id:
+        try:
+            redis_client.hdel(_PERSONAL_ACCOUNT_PEOPLE_HASH, original_account_id)
+        except Exception:
+            pass
+    if "person_id" in values or _text(values.get("new_person_name")):
+        _set_account_person_id(new_account_id, person_id)
+
+    return {
+        "ok": True,
+        "account_id": new_account_id,
+        "person_id": person_id,
+        "person_name": person_name,
+        "account_source": source,
+    }
+
+
+def _remove_personal_account(values: Dict[str, Any]) -> Dict[str, Any]:
+    settings = _load_settings()
+    source = _slug(values.get("account_source"), default="")
+    original_account_id = _text(values.get("original_account_id") or values.get("account_id"))
+    if source != "extra":
+        raise ValueError("Only extra accounts can be removed from this tab.")
+    rows = _extra_account_rows(settings)
+    index = _as_int(values.get("account_index"), -1, minimum=-1)
+    if index < 0 or index >= len(rows):
+        index = _extra_row_index_by_account_id(settings, original_account_id)
+    if index < 0 or index >= len(rows):
+        raise ValueError("Extra account was not found.")
+    removed = rows.pop(index)
+    _save_extra_account_rows(rows)
+    primary = _primary_account_from_settings(settings)
+    removed_account = _normal_account_from_extra(removed, primary=primary, index=index)
+    removed_account_id = original_account_id or _account_storage_id(removed_account)
+    if removed_account_id:
+        try:
+            redis_client.hdel(_PERSONAL_ACCOUNT_PEOPLE_HASH, removed_account_id)
+        except Exception:
+            pass
+    return {"ok": True, "account_id": removed_account_id}
 
 
 def _imap_host_port(account: Dict[str, Any]) -> Tuple[str, int]:
@@ -7486,6 +7644,367 @@ def _entry_manager_forms(profiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return forms
 
 
+def _personal_scan_settings_form(settings: Dict[str, Any], linked_accounts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    unlinked_count = sum(1 for account in linked_accounts if not _text(account.get("person_id")))
+    return {
+        "id": "__personal_scan_settings__",
+        "group": "settings",
+        "title": "Scan & Profile Settings",
+        "subtitle": "Polling, storage limits, and prompt context depth.",
+        "save_action": "personal_save_scan_settings",
+        "save_label": "Save Settings",
+        "summary_rows": [
+            {"label": "Configured Accounts", "value": str(len(linked_accounts))},
+            {"label": "Unlinked Accounts", "value": str(unlinked_count)},
+            {"label": "Prompt Event Limit", "value": str(_as_int(settings.get("prompt_upcoming_limit"), 8, minimum=1, maximum=50))},
+        ],
+        "sections": [
+            {
+                "label": "Scan",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "interval_seconds",
+                        "label": "Scan Interval",
+                        "type": "select",
+                        "options": _PERSONAL_INTERVAL_OPTIONS,
+                        "value": str(_as_int(settings.get("interval_seconds"), 300, minimum=30, maximum=3600)),
+                    },
+                    {
+                        "key": "lookback_limit",
+                        "label": "Emails Per Scan",
+                        "type": "number",
+                        "value": _as_int(settings.get("lookback_limit"), 40, minimum=1, maximum=300),
+                    },
+                    {
+                        "key": "scan_days",
+                        "label": "Initial Scan Days",
+                        "type": "number",
+                        "value": _as_int(settings.get("scan_days"), 21, minimum=1, maximum=365),
+                    },
+                    {
+                        "key": "min_confidence",
+                        "label": "Min Confidence",
+                        "type": "number",
+                        "value": _as_float(settings.get("min_confidence"), 0.62, minimum=0.0, maximum=1.0),
+                    },
+                ],
+            },
+            {
+                "label": "Storage",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "max_stored_emails",
+                        "label": "Stored Emails Per Account",
+                        "type": "number",
+                        "value": _as_int(settings.get("max_stored_emails"), 1500, minimum=100, maximum=50000),
+                    },
+                    {
+                        "key": "max_spending_entries",
+                        "label": "Max Spending Rows",
+                        "type": "number",
+                        "value": _as_int(settings.get("max_spending_entries"), 600, minimum=20, maximum=5000),
+                    },
+                    {
+                        "key": "max_note_entries",
+                        "label": "Max Important Notes",
+                        "type": "number",
+                        "value": _as_int(settings.get("max_note_entries"), 300, minimum=20, maximum=3000),
+                    },
+                    {
+                        "key": "max_event_entries",
+                        "label": "Max Events",
+                        "type": "number",
+                        "value": _as_int(settings.get("max_event_entries"), 260, minimum=20, maximum=2000),
+                    },
+                ],
+            },
+            {
+                "label": "Prompt Context",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "prompt_upcoming_days",
+                        "label": "Upcoming Days",
+                        "type": "number",
+                        "value": _as_int(settings.get("prompt_upcoming_days"), 45, minimum=1, maximum=365),
+                    },
+                    {
+                        "key": "prompt_upcoming_limit",
+                        "label": "Event Limit",
+                        "type": "number",
+                        "value": _as_int(settings.get("prompt_upcoming_limit"), 8, minimum=1, maximum=50),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _account_form_sections(
+    account: Dict[str, Any],
+    *,
+    people_options: List[Dict[str, str]],
+    mode: str,
+) -> List[Dict[str, Any]]:
+    is_existing = mode == "edit"
+    account_id = _text(account.get("account_id"))
+    account_source = _text(account.get("account_source"))
+    account_index = _as_int(account.get("account_index"), -1, minimum=-1)
+    person_id = _text(account.get("person_id"))
+    email_password_saved = bool(_text(account.get("email_password")))
+    calendar_password_saved = bool(_text(account.get("calendar_password")))
+    password_help = "Leave blank to keep the saved password." if is_existing else "Use an app password where your provider requires one."
+    calendar_password_help = "Leave blank to keep the saved token/password." if is_existing else "Blank uses the email app password when possible."
+
+    identity_fields: List[Dict[str, Any]] = []
+    if is_existing:
+        identity_fields.extend(
+            [
+                {
+                    "key": "original_account_id",
+                    "label": "Account ID",
+                    "type": "text",
+                    "value": account_id,
+                    "read_only": True,
+                },
+                {
+                    "key": "account_source",
+                    "label": "Source",
+                    "type": "text",
+                    "value": account_source,
+                    "read_only": True,
+                },
+                {
+                    "key": "account_index",
+                    "label": "Account Index",
+                    "type": "number",
+                    "value": account_index,
+                    "read_only": True,
+                },
+            ]
+        )
+
+    identity_fields.extend(
+        [
+            {
+                "key": "person_id",
+                "label": "Master User",
+                "type": "select",
+                "value": person_id,
+                "options": people_options,
+                "description": "Choose the People profile that owns this inbox/calendar.",
+            },
+            {
+                "key": "new_person_name",
+                "label": "Create New Master User",
+                "type": "text",
+                "value": "",
+                "description": "Optional. Creates a People profile and links this account to it.",
+            },
+        ]
+    )
+
+    return [
+        {
+            "label": "Owner",
+            "inline": True,
+            "fields": identity_fields,
+        },
+        {
+            "label": "Email",
+            "inline": True,
+            "fields": [
+                {
+                    "key": "provider",
+                    "label": "Provider",
+                    "type": "select",
+                    "value": _provider_key(account.get("provider"), default="gmail"),
+                    "options": _PERSONAL_PROVIDER_OPTIONS,
+                },
+                {
+                    "key": "email_address",
+                    "label": "Email Address",
+                    "type": "text",
+                    "value": _text(account.get("email_address")),
+                },
+                {
+                    "key": "email_password",
+                    "label": "Email App Password",
+                    "type": "text",
+                    "value": "",
+                    "placeholder": "Saved" if email_password_saved else "",
+                    "description": password_help,
+                },
+                {
+                    "key": "mailbox",
+                    "label": "Mailbox",
+                    "type": "text",
+                    "value": _text(account.get("mailbox")) or "INBOX",
+                },
+                {
+                    "key": "imap_host",
+                    "label": "Custom IMAP Host",
+                    "type": "text",
+                    "value": _text(account.get("imap_host")),
+                    "description": "Leave blank to use provider defaults.",
+                },
+                {
+                    "key": "imap_port",
+                    "label": "IMAP Port",
+                    "type": "number",
+                    "value": _as_int(account.get("imap_port"), 993, minimum=1, maximum=65535),
+                },
+            ],
+        },
+        {
+            "label": "Calendar",
+            "inline": True,
+            "fields": [
+                {
+                    "key": "calendar_enabled",
+                    "label": "Enable Calendar Scan",
+                    "type": "checkbox",
+                    "value": _as_bool(account.get("calendar_enabled"), False),
+                },
+                {
+                    "key": "calendar_source",
+                    "label": "Calendar Source",
+                    "type": "select",
+                    "value": _calendar_source_key(account.get("calendar_source"), default="auto"),
+                    "options": _PERSONAL_CALENDAR_SOURCE_OPTIONS,
+                },
+                {
+                    "key": "calendar_url",
+                    "label": "Calendar URL",
+                    "type": "text",
+                    "value": _text(account.get("calendar_url")),
+                    "description": "Optional CalDAV endpoint or private iCal URL.",
+                },
+                {
+                    "key": "calendar_username",
+                    "label": "Calendar Username",
+                    "type": "text",
+                    "value": _text(account.get("calendar_username")),
+                    "description": "Blank uses the email address.",
+                },
+                {
+                    "key": "calendar_password",
+                    "label": "Calendar App Password",
+                    "type": "text",
+                    "value": "",
+                    "placeholder": "Saved" if calendar_password_saved else "",
+                    "description": calendar_password_help,
+                },
+                {
+                    "key": "calendar_name_filter",
+                    "label": "Calendar Name Filter",
+                    "type": "text",
+                    "value": _text(account.get("calendar_name_filter")),
+                },
+                {
+                    "key": "calendar_auto_add_email_events",
+                    "label": "Auto Add Email Events",
+                    "type": "checkbox",
+                    "value": _as_bool(account.get("calendar_auto_add_email_events"), False),
+                },
+                {
+                    "key": "calendar_write_url",
+                    "label": "Calendar Write URL",
+                    "type": "text",
+                    "value": _text(account.get("calendar_write_url")),
+                    "description": "Required for auto-add when Calendar URL is a private iCal feed.",
+                },
+            ],
+        },
+        {
+            "label": "Calendar Limits",
+            "inline": True,
+            "fields": [
+                {
+                    "key": "calendar_lookahead_days",
+                    "label": "Lookahead Days",
+                    "type": "number",
+                    "value": _as_int(account.get("calendar_lookahead_days"), 60, minimum=1, maximum=730),
+                },
+                {
+                    "key": "calendar_lookback_days",
+                    "label": "Lookback Days",
+                    "type": "number",
+                    "value": _as_int(account.get("calendar_lookback_days"), 1, minimum=0, maximum=90),
+                },
+                {
+                    "key": "calendar_max_events",
+                    "label": "Events Per Account",
+                    "type": "number",
+                    "value": _as_int(account.get("calendar_max_events"), 120, minimum=1, maximum=1000),
+                },
+                {
+                    "key": "calendar_auto_add_max_per_scan",
+                    "label": "Auto Add Max Per Scan",
+                    "type": "number",
+                    "value": _as_int(account.get("calendar_auto_add_max_per_scan"), 5, minimum=1, maximum=50),
+                },
+            ],
+        },
+    ]
+
+
+def _personal_add_account_form(people_options: List[Dict[str, str]]) -> Dict[str, Any]:
+    default_account = {
+        "provider": "gmail",
+        "imap_port": 993,
+        "mailbox": "INBOX",
+        "calendar_source": "auto",
+        "calendar_lookahead_days": 60,
+        "calendar_lookback_days": 1,
+        "calendar_max_events": 120,
+        "calendar_auto_add_max_per_scan": 5,
+    }
+    return {
+        "id": "__personal_add_account__",
+        "title": "Add Email / Calendar Account",
+        "group": "people",
+        "subtitle": "Create an account row and optionally link it to a master People profile.",
+        "save_action": "personal_add_account",
+        "save_label": "Add Account",
+        "sections": _account_form_sections(default_account, people_options=people_options, mode="add"),
+    }
+
+
+def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[str, str]]) -> Dict[str, Any]:
+    account_id = _text(account.get("account_id"))
+    person_id = _text(account.get("person_id"))
+    person_name = _text(account.get("person_name"))
+    email_label = _mask_email(account.get("email_address")) or _text(account.get("calendar_username")) or account_id
+    source = _text(account.get("account_source")) or "account"
+    form = {
+        "id": f"personal_account:{source}:{_as_int(account.get('account_index'), -1, minimum=-1)}:{account_id}",
+        "title": f"Account: {email_label}",
+        "group": "people",
+        "subtitle": f"{_provider_key(account.get('provider'), default='imap')} - {account_id}",
+        "save_action": "personal_save_account",
+        "save_label": "Save Account",
+        "summary_rows": [
+            {"label": "Status", "value": f"Linked to {person_name}" if person_id else "Not linked"},
+            {"label": "Source", "value": source},
+            {"label": "Calendar", "value": "Enabled" if _as_bool(account.get("calendar_enabled"), False) else "Off"},
+            {"label": "Auto Add Email Events", "value": "On" if _calendar_auto_add_enabled(account, _load_settings()) else "Off"},
+        ],
+        "sections": _account_form_sections(account, people_options=people_options, mode="edit"),
+    }
+    if source == "extra":
+        form.update(
+            {
+                "remove_action": "personal_remove_account",
+                "remove_label": "Remove Account",
+                "remove_confirm": f"Remove {email_label} from Personal Core?",
+            }
+        )
+    return form
+
+
 def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[str, Any]:
     profiles = list(aggregate.get("profiles") or [])
     account_rows = list(aggregate.get("account_rows") or [])
@@ -7836,6 +8355,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             ],
         }
     ]
+    forms.append(_personal_scan_settings_form(settings, linked_accounts))
     forms.append(
         {
             "id": "__personal_create_person__",
@@ -7857,56 +8377,19 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             ],
         }
     )
-    if people_rows:
-        for account in linked_accounts:
-            account_id = _text(account.get("account_id"))
-            if not account_id:
-                continue
-            person_id = _text(account.get("person_id"))
-            person_name = _text(account.get("person_name"))
-            email_label = _mask_email(account.get("email_address")) or account_id
-            forms.append(
-                {
-                    "id": f"personal_link_account:{account_id}",
-                    "title": f"Link Account: {email_label}",
-                    "group": "people",
-                    "subtitle": f"{_provider_key(account.get('provider'), default='imap')} · {account_id}",
-                    "save_action": "personal_link_account_person",
-                    "save_label": "Save Link",
-                    "summary_rows": [
-                        {"label": "Status", "value": f"Linked to {person_name}" if person_id else "Not linked"},
-                        {"label": "Account ID", "value": account_id},
-                        {"label": "Calendar", "value": "Enabled" if _as_bool(account.get("calendar_enabled"), False) else "Off"},
-                        {"label": "Auto Add Email Events", "value": "On" if _calendar_auto_add_enabled(account, settings) else "Off"},
-                    ],
-                    "fields": [
-                        {
-                            "key": "account_id",
-                            "label": "Account ID",
-                            "type": "text",
-                            "value": account_id,
-                            "readonly": True,
-                        },
-                        {
-                            "key": "person_id",
-                            "label": "Owner",
-                            "type": "select",
-                            "value": person_id,
-                            "options": people_options,
-                            "description": "Personal Core stores extracted profile data under this People profile.",
-                        },
-                    ],
-                }
-            )
-    else:
+    forms.append(_personal_add_account_form(people_options))
+    for account in linked_accounts:
+        if _text(account.get("account_id")):
+            forms.append(_personal_account_form(account, people_options))
+    if not linked_accounts:
         forms.append(
             {
                 "id": "__personal_people_empty__",
-                "title": "Link Accounts",
+                "title": "No Accounts Yet",
                 "group": "people",
-                "subtitle": "Create at least one person before Personal Core scans email or calendar accounts.",
+                "subtitle": "Add an inbox or calendar account, then link it to a master People profile.",
                 "summary_rows": [
-                    {"label": "Status", "value": "No master people found"},
+                    {"label": "Status", "value": "Waiting for account setup"},
                 ],
             }
         )
@@ -8064,6 +8547,13 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "empty_message": "No overview data available.",
             },
             {
+                "key": "settings",
+                "label": "Settings",
+                "source": "items",
+                "item_group": "settings",
+                "empty_message": "No Personal Core settings available.",
+            },
+            {
                 "key": "prompt",
                 "label": "Prompt",
                 "source": "items",
@@ -8076,6 +8566,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "source": "items",
                 "item_group": "people",
                 "empty_message": "No People links available.",
+                "selector": True,
             },
             {
                 "key": "notifications",
@@ -8560,13 +9051,30 @@ def _notification_test_settings_from_values(
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
     del redis_client
     body = payload if isinstance(payload, dict) else {}
-    values = body.get("values") if isinstance(body.get("values"), dict) else {}
+    values: Dict[str, Any] = {}
+    if isinstance(body.get("fields"), dict):
+        values.update(body.get("fields") or {})
+    if isinstance(body.get("values"), dict):
+        values.update(body.get("values") or {})
     action_name = _slug(action, default="")
 
     def _value(key: str, default: Any = "") -> Any:
         if key in values:
             return values.get(key)
         return body.get(key, default)
+
+    def _account_values() -> Dict[str, Any]:
+        out = dict(values)
+        item_id = _text(_value("id"))
+        if item_id and "id" not in out:
+            out["id"] = item_id
+        if item_id.startswith("personal_account:"):
+            parts = item_id.split(":", 3)
+            if len(parts) == 4:
+                out.setdefault("account_source", parts[1])
+                out.setdefault("account_index", parts[2])
+                out.setdefault("original_account_id", parts[3])
+        return out
 
     if action_name == "personal_run_tool":
         message = _run_ui_tool_action(
@@ -8576,6 +9084,19 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             confirm_text=_value("confirm_text"),
         )
         return {"ok": True, "message": message}
+
+    if action_name == "personal_save_scan_settings":
+        result = _save_personal_scan_settings(values)
+        settings = result.get("settings") if isinstance(result.get("settings"), dict) else _load_settings()
+        return {
+            "ok": True,
+            "message": (
+                "Saved Personal Core settings: "
+                f"interval={_as_int(settings.get('interval_seconds'), 300, minimum=30, maximum=3600)}s, "
+                f"emails_per_scan={_as_int(settings.get('lookback_limit'), 40, minimum=1, maximum=300)}."
+            ),
+            "data": result,
+        }
 
     if action_name == "personal_save_prompt_controls":
         result = _save_prompt_controls(
@@ -8601,6 +9122,31 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "ok": True,
             "message": f"Created person {_text(person.get('display_name'))}.",
             "data": person,
+        }
+
+    if action_name == "personal_add_account":
+        result = _add_personal_account(values)
+        owner = _text(result.get("person_name"))
+        message = f"Added account {_text(result.get('account_id'))}."
+        if owner:
+            message += f" Linked to {owner}."
+        return {"ok": True, "message": message, "data": result}
+
+    if action_name == "personal_save_account":
+        result = _save_personal_account(_account_values())
+        owner = _text(result.get("person_name"))
+        if _text(result.get("person_id")):
+            message = f"Saved account {_text(result.get('account_id'))} and linked it to {owner or _text(result.get('person_id'))}."
+        else:
+            message = f"Saved account {_text(result.get('account_id'))} with no People link."
+        return {"ok": True, "message": message, "data": result}
+
+    if action_name == "personal_remove_account":
+        result = _remove_personal_account(_account_values())
+        return {
+            "ok": True,
+            "message": f"Removed account {_text(result.get('account_id'))}.",
+            "data": result,
         }
 
     if action_name == "personal_link_account_person":
