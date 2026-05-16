@@ -1,10 +1,8 @@
-<p align="center">
-  <img 
-    src="https://github.com/user-attachments/assets/ec6b41ef-4ba1-4f41-b6f6-a0a9be0a6786" 
-    alt="screenshot"
-    width="300"
-  />
-</p>
+<div align="center">
+  <a href="https://taterassistant.com">
+    <img src="images/tater-repo-logo.png" alt="Tater Shop" width="460"/>
+  </a>
+</div>
 <h3 align="center">
   <a href="https://taterassistant.com">taterassistant.com</a>
 </h3>
