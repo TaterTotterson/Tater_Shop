@@ -32,7 +32,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolVerba):
     name = "comfyui_image_video"
     verba_name = "ComfyUI Animate Image"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -62,8 +62,9 @@ class ComfyUIImageVideoPlugin(ToolVerba):
         "COMFYUI_VIDEO_WORKFLOW": {
             "label": "Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template."
+            "description": "Upload your ComfyUI animation workflow .json file."
         }
     }
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."

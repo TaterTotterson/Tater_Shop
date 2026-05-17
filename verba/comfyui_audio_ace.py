@@ -35,7 +35,7 @@ logger.setLevel(logging.INFO)
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.14"
+    version = "1.0.16"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -50,6 +50,16 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             "type": "string",
             "default": "http://localhost:8188",
             "description": "Base URL for the ComfyUI Ace Audio server."
+        },
+        "COMFYUI_AUDIO_ACE_WORKFLOW": {
+            "label": "Workflow Template (JSON)",
+            "type": "file",
+            "accept": ".json,application/json",
+            "default": "",
+            "description": (
+                "Upload your ComfyUI Audio Ace workflow .json file. "
+                "If empty, Tater uses the bundled Ace Step workflow."
+            ),
         },
         "HA_DEFAULT_MEDIA_PLAYER": {
             "label": "Default media_player entity",
@@ -115,6 +125,25 @@ class ComfyUIAudioAcePlugin(ToolVerba):
     # ---------------------------
     @staticmethod
     def get_workflow_template():
+        settings = ComfyUIAudioAcePlugin._settings()
+        workflow_raw = settings.get("COMFYUI_AUDIO_ACE_WORKFLOW", b"")
+        if isinstance(workflow_raw, dict):
+            return workflow_raw
+
+        workflow_str = ComfyUIAudioAcePlugin._as_text(workflow_raw, "").strip()
+        if workflow_str:
+            try:
+                workflow = json.loads(workflow_str)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in COMFYUI_AUDIO_ACE_WORKFLOW: {exc}") from exc
+            if not isinstance(workflow, dict):
+                raise ValueError("COMFYUI_AUDIO_ACE_WORKFLOW must contain a JSON object.")
+            return workflow
+
+        return ComfyUIAudioAcePlugin._default_workflow_template()
+
+    @staticmethod
+    def _default_workflow_template():
         return {
           "14": {
             "inputs": {
@@ -290,32 +319,103 @@ class ComfyUIAudioAcePlugin(ToolVerba):
     # Main generation pipeline
     # ---------------------------
     @staticmethod
-    def build_workflow(tags: str, lyrics: str) -> dict:
-        workflow = copy.deepcopy(ComfyUIAudioAcePlugin.get_workflow_template())
-        workflow["14"]["inputs"]["tags"] = tags
-        workflow["14"]["inputs"]["lyrics"] = lyrics
+    def _node_title(node: dict) -> str:
+        meta = node.get("_meta") if isinstance(node, dict) else {}
+        return ((meta or {}).get("title", "") or "").strip().lower()
 
-        # Estimate duration from WORD count (more stable than line counting)
-        # Normalize common JSON-escaped newline style first
-        if "\\n" in lyrics and "\n" not in lyrics:
-            lyrics = lyrics.replace("\\n", "\n")
-        lyrics = lyrics.replace("\r\n", "\n")
+    @staticmethod
+    def _is_audio_text_encode_node(node: dict) -> bool:
+        if not isinstance(node, dict):
+            return False
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            return False
+        class_type = str(node.get("class_type") or "")
+        if class_type.startswith("TextEncodeAceStepAudio"):
+            return True
+        return "tags" in inputs and "lyrics" in inputs
 
-        # Count words (ignore section headers as best we can)
-        # Remove bracketed headers like [verse], [chorus]
-        lyrics_for_count = re.sub(r"\[[^\]]+\]", " ", lyrics)
-        # Remove plain headers like "Verse", "Chorus", "Bridge", "Outro" on their own lines
-        lyrics_for_count = re.sub(r"(?im)^\s*(verse|chorus|bridge|outro|inst)\s*$", " ", lyrics_for_count)
+    @staticmethod
+    def _set_tags_and_lyrics(workflow: dict, tags: str, lyrics: str) -> int:
+        patched = 0
+        for node in workflow.values():
+            if not ComfyUIAudioAcePlugin._is_audio_text_encode_node(node):
+                continue
+            inputs = node.setdefault("inputs", {})
+            inputs["tags"] = tags
+            inputs["lyrics"] = lyrics
+            patched += 1
+        if patched <= 0:
+            raise ValueError(
+                "Workflow has no Audio Ace text encode node with `tags` and `lyrics` inputs."
+            )
+        return patched
 
-        words = re.findall(r"\b[\w']+\b", lyrics_for_count)
+    @staticmethod
+    def _set_duration(workflow: dict, duration: int) -> dict:
+        stats = {"seconds": 0, "duration": 0}
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+
+            class_type = str(node.get("class_type") or "").lower()
+            title = ComfyUIAudioAcePlugin._node_title(node)
+            is_ace_audio_latent = (
+                ("acestep" in class_type or "ace step" in title)
+                and "latent" in class_type + title
+                and "audio" in class_type + title
+            )
+
+            if "seconds" in inputs and is_ace_audio_latent:
+                inputs["seconds"] = int(duration)
+                stats["seconds"] += 1
+
+            if "duration" in inputs and ComfyUIAudioAcePlugin._is_audio_text_encode_node(node):
+                inputs["duration"] = int(duration)
+                stats["duration"] += 1
+
+        return stats
+
+    @staticmethod
+    def _estimate_duration_seconds(lyrics: str) -> int:
+        text = str(lyrics or "")
+        if "\\n" in text and "\n" not in text:
+            text = text.replace("\\n", "\n")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text_for_count = re.sub(r"\[[^\]]+\]", " ", text)
+        text_for_count = re.sub(
+            r"(?im)^\s*(verse|chorus|bridge|outro|inst|pre-chorus|final chorus)\s*$",
+            " ",
+            text_for_count,
+        )
+        words = re.findall(r"\b[\w']+\b", text_for_count)
         word_count = len(words)
-
-        # Rough pacing: ~2.2 words/sec + padding for intro/outro
         estimated_duration = int(word_count / 2.2) + 15
         duration = max(30, min(300, estimated_duration))
-        workflow["17"]["inputs"]["seconds"] = duration
+        logger.info(
+            "Audio duration calc: words=%s estimated=%ss final=%ss",
+            word_count,
+            estimated_duration,
+            duration,
+        )
+        return duration
 
-        logger.info("Audio duration calc: words=%s estimated=%ss final=%ss", word_count, estimated_duration, duration)
+    @staticmethod
+    def build_workflow(tags: str, lyrics: str) -> dict:
+        workflow = copy.deepcopy(ComfyUIAudioAcePlugin.get_workflow_template())
+        patched_text_nodes = ComfyUIAudioAcePlugin._set_tags_and_lyrics(workflow, tags, lyrics)
+
+        duration = ComfyUIAudioAcePlugin._estimate_duration_seconds(lyrics)
+        duration_stats = ComfyUIAudioAcePlugin._set_duration(workflow, duration)
+        logger.info(
+            "Audio workflow patched: text_nodes=%s seconds_nodes=%s duration_nodes=%s",
+            patched_text_nodes,
+            duration_stats["seconds"],
+            duration_stats["duration"],
+        )
 
         # Randomize seeds for uniqueness
         for node in workflow.values():

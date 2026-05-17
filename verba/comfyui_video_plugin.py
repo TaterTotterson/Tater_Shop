@@ -355,7 +355,7 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolVerba):
     name = "comfyui_video_plugin"
     verba_name = "ComfyUI Video"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"comfyui_video_plugin","arguments":{"prompt":"<Describe the video you want>"}}'
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
@@ -373,8 +373,9 @@ class ComfyUIVideoPlugin(ToolVerba):
         "COMFYUI_WORKFLOW": {
             "label": "Image Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for image generation."
+            "description": "Upload your ComfyUI image workflow .json file."
         },
         "IMAGE_RESOLUTION": {
             "label": "Image Resolution",
@@ -392,8 +393,9 @@ class ComfyUIVideoPlugin(ToolVerba):
         "COMFYUI_VIDEO_WORKFLOW": {
             "label": "Video Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for animation."
+            "description": "Upload your ComfyUI animation workflow .json file."
         },
         "LENGTH": {
             "label": "Animation Length (seconds)",

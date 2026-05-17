@@ -344,7 +344,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolVerba):
     name = "lowfi_video"
     verba_name = "Lofi Video"
-    version = "1.1.2"
+    version = "1.1.3"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates lofi audio via AceStep and loops a cozy animation to full length (MP4)."
@@ -364,8 +364,9 @@ class LowfiVideoPlugin(ToolVerba):
         "COMFYUI_WORKFLOW": {
             "label": "Image Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for image generation."
+            "description": "Upload your ComfyUI image workflow .json file."
         },
         "IMAGE_RESOLUTION": {
             "label": "Image Resolution",
@@ -383,8 +384,9 @@ class LowfiVideoPlugin(ToolVerba):
         "COMFYUI_VIDEO_WORKFLOW": {
             "label": "Video Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for image animation."
+            "description": "Upload your ComfyUI animation workflow .json file."
         },
         "LENGTH": {
             "label": "Animation Length (seconds)",
@@ -397,6 +399,16 @@ class LowfiVideoPlugin(ToolVerba):
             "type": "string",
             "default": "http://localhost:8188",
             "description": "ComfyUI endpoint for generating audio via AceStep workflow."
+        },
+        "COMFYUI_AUDIO_WORKFLOW": {
+            "label": "Audio Workflow Template (JSON)",
+            "type": "file",
+            "accept": ".json,application/json",
+            "default": "",
+            "description": (
+                "Upload your ComfyUI Audio Ace workflow .json file. "
+                "If empty, Tater uses the bundled Ace Step workflow."
+            ),
         },
         "LOFI_RESOLUTION": {
             "label": "Visual Resolution",
@@ -431,6 +443,14 @@ class LowfiVideoPlugin(ToolVerba):
             else:
                 out[k] = str(value)
         return out
+
+    @staticmethod
+    def _as_text(value, default=""):
+        if value is None:
+            return str(default)
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", "ignore")
+        return str(value)
 
     @staticmethod
     def _coerce_int(value, default: int, minimum: int, maximum: int) -> int:
@@ -520,9 +540,75 @@ class LowfiVideoPlugin(ToolVerba):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _node_title(node: dict) -> str:
+        meta = node.get("_meta") if isinstance(node, dict) else {}
+        return ((meta or {}).get("title", "") or "").strip().lower()
+
+    @staticmethod
+    def _is_audio_text_encode_node(node: dict) -> bool:
+        if not isinstance(node, dict):
+            return False
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            return False
+        class_type = str(node.get("class_type") or "")
+        if class_type.startswith("TextEncodeAceStepAudio"):
+            return True
+        return "tags" in inputs and "lyrics" in inputs
+
+    @staticmethod
+    def _patch_ace_audio_workflow(workflow: dict, seconds: int) -> None:
+        tags = "lowfi"
+        lyrics = "[instrumental]\n[break down]\n[drum fill]\n[chopped samples]\n"
+        patched_text_nodes = 0
+        for node in workflow.values():
+            if not LowfiVideoPlugin._is_audio_text_encode_node(node):
+                continue
+            inputs = node.setdefault("inputs", {})
+            inputs["tags"] = tags
+            inputs["lyrics"] = lyrics
+            patched_text_nodes += 1
+
+        if patched_text_nodes <= 0:
+            raise ValueError("Workflow has no Audio Ace text encode node with `tags` and `lyrics` inputs.")
+
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+
+            class_type = str(node.get("class_type") or "").lower()
+            title = LowfiVideoPlugin._node_title(node)
+            is_ace_audio_latent = (
+                ("acestep" in class_type or "ace step" in title)
+                and "latent" in class_type + title
+                and "audio" in class_type + title
+            )
+
+            if "seconds" in inputs and is_ace_audio_latent:
+                inputs["seconds"] = int(seconds)
+            if "duration" in inputs and LowfiVideoPlugin._is_audio_text_encode_node(node):
+                inputs["duration"] = int(seconds)
+
     def _build_ace_audio_workflow(self, seconds: int):
+        settings = redis_client.hgetall(f"verba_settings:{self.settings_category}") or {}
+        workflow_raw = settings.get("COMFYUI_AUDIO_WORKFLOW", b"")
+        workflow_str = self._as_text(workflow_raw, "").strip()
+        if workflow_str:
+            try:
+                workflow = json.loads(workflow_str)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in COMFYUI_AUDIO_WORKFLOW: {exc}") from exc
+            if not isinstance(workflow, dict):
+                raise ValueError("COMFYUI_AUDIO_WORKFLOW must contain a JSON object.")
+            self._patch_ace_audio_workflow(workflow, seconds=seconds)
+            return workflow
+
         ckpt = "ace_step_v1_3.5b.safetensors"
-        return {
+        workflow = {
             "14": {
                 "inputs": {
                     "tags": "lowfi",
@@ -595,6 +681,8 @@ class LowfiVideoPlugin(ToolVerba):
                 "_meta": {"title": "Save Audio (MP3)"}
             }
         }
+        self._patch_ace_audio_workflow(workflow, seconds=seconds)
+        return workflow
 
     async def _refine_prompt_for_lofi(self, raw: str, llm_client) -> str:
         source = (raw or "").strip()

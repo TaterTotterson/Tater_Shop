@@ -28,7 +28,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolVerba):
     name = "comfyui_image_plugin"
     verba_name = "ComfyUI Image"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>"}}'
     description = "Draws a picture from a text prompt using your ComfyUI workflow."
@@ -52,8 +52,9 @@ class ComfyUIImagePlugin(ToolVerba):
         "COMFYUI_WORKFLOW": {
             "label": "Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your JSON workflow template file. This field is required.",
+            "description": "Upload your ComfyUI workflow .json file. This field is required.",
         },
     }
     waiting_prompt_template = (

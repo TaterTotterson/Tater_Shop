@@ -359,6 +359,14 @@ class _ComfyUIAudioAceHelper:
         return redis_client.hgetall(f"verba_settings:{_ComfyUIAudioAceHelper.settings_category}") or {}
 
     @staticmethod
+    def _as_text(value, default=""):
+        if value is None:
+            return str(default)
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", "ignore")
+        return str(value)
+
+    @staticmethod
     def get_base_http():
         settings = _ComfyUIAudioAceHelper._settings()
         raw = settings.get("COMFYUI_AUDIO_ACE_URL", b"")
@@ -375,6 +383,25 @@ class _ComfyUIAudioAceHelper:
 
     @staticmethod
     def get_workflow_template():
+        settings = _ComfyUIAudioAceHelper._settings()
+        workflow_raw = settings.get("COMFYUI_AUDIO_ACE_WORKFLOW", b"")
+        if isinstance(workflow_raw, dict):
+            return workflow_raw
+
+        workflow_str = _ComfyUIAudioAceHelper._as_text(workflow_raw, "").strip()
+        if workflow_str:
+            try:
+                workflow = json.loads(workflow_str)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in COMFYUI_AUDIO_ACE_WORKFLOW: {exc}") from exc
+            if not isinstance(workflow, dict):
+                raise ValueError("COMFYUI_AUDIO_ACE_WORKFLOW must contain a JSON object.")
+            return workflow
+
+        return _ComfyUIAudioAceHelper._default_workflow_template()
+
+    @staticmethod
+    def _default_workflow_template():
         return {
             "14": {
                 "inputs": {
@@ -505,16 +532,81 @@ class _ComfyUIAudioAceHelper:
         return r.content
 
     @staticmethod
+    def _node_title(node: dict) -> str:
+        meta = node.get("_meta") if isinstance(node, dict) else {}
+        return ((meta or {}).get("title", "") or "").strip().lower()
+
+    @staticmethod
+    def _is_audio_text_encode_node(node: dict) -> bool:
+        if not isinstance(node, dict):
+            return False
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            return False
+        class_type = str(node.get("class_type") or "")
+        if class_type.startswith("TextEncodeAceStepAudio"):
+            return True
+        return "tags" in inputs and "lyrics" in inputs
+
+    @staticmethod
+    def _set_tags_and_lyrics(workflow: dict, tags: str, lyrics: str) -> int:
+        patched = 0
+        for node in workflow.values():
+            if not _ComfyUIAudioAceHelper._is_audio_text_encode_node(node):
+                continue
+            inputs = node.setdefault("inputs", {})
+            inputs["tags"] = tags
+            inputs["lyrics"] = lyrics
+            patched += 1
+        if patched <= 0:
+            raise ValueError("Workflow has no Audio Ace text encode node with `tags` and `lyrics` inputs.")
+        return patched
+
+    @staticmethod
+    def _set_duration(workflow: dict, duration: int) -> None:
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+
+            class_type = str(node.get("class_type") or "").lower()
+            title = _ComfyUIAudioAceHelper._node_title(node)
+            is_ace_audio_latent = (
+                ("acestep" in class_type or "ace step" in title)
+                and "latent" in class_type + title
+                and "audio" in class_type + title
+            )
+
+            if "seconds" in inputs and is_ace_audio_latent:
+                inputs["seconds"] = int(duration)
+            if "duration" in inputs and _ComfyUIAudioAceHelper._is_audio_text_encode_node(node):
+                inputs["duration"] = int(duration)
+
+    @staticmethod
+    def _estimate_duration_seconds(lyrics: str) -> int:
+        text = str(lyrics or "")
+        if "\\n" in text and "\n" not in text:
+            text = text.replace("\\n", "\n")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text_for_count = re.sub(r"\[[^\]]+\]", " ", text)
+        text_for_count = re.sub(
+            r"(?im)^\s*(verse|chorus|bridge|outro|inst|pre-chorus|final chorus)\s*$",
+            " ",
+            text_for_count,
+        )
+        words = re.findall(r"\b[\w']+\b", text_for_count)
+        return max(30, min(300, int(len(words) / 2.2) + 15))
+
+    @staticmethod
     def build_workflow(tags: str, lyrics: str) -> dict:
         workflow = copy.deepcopy(_ComfyUIAudioAceHelper.get_workflow_template())
-        workflow["14"]["inputs"]["tags"] = tags
-        workflow["14"]["inputs"]["lyrics"] = lyrics
-
-        lines = lyrics.strip().splitlines()
-        line_count = sum(1 for l in lines if l.strip() and not l.strip().startswith("["))
-        estimated_duration = int(line_count * 5.0) + 20
-        duration = max(30, min(300, estimated_duration))
-        workflow["17"]["inputs"]["seconds"] = duration
+        _ComfyUIAudioAceHelper._set_tags_and_lyrics(workflow, tags, lyrics)
+        _ComfyUIAudioAceHelper._set_duration(
+            workflow,
+            _ComfyUIAudioAceHelper._estimate_duration_seconds(lyrics),
+        )
 
         for node in workflow.values():
             if isinstance(node, dict):
@@ -624,7 +716,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolVerba):
     name = "comfyui_music_video"
     verba_name = "ComfyUI Music Video"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI verba."
@@ -643,8 +735,9 @@ class ComfyUIMusicVideoPlugin(ToolVerba):
         "COMFYUI_WORKFLOW": {
             "label": "Image Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for image generation."
+            "description": "Upload your ComfyUI image workflow .json file."
         },
         "IMAGE_RESOLUTION": {
             "label": "Image Resolution",
@@ -662,8 +755,9 @@ class ComfyUIMusicVideoPlugin(ToolVerba):
         "COMFYUI_VIDEO_WORKFLOW": {
             "label": "Video Workflow Template (JSON)",
             "type": "file",
+            "accept": ".json,application/json",
             "default": "",
-            "description": "Upload your ComfyUI JSON workflow template for animation."
+            "description": "Upload your ComfyUI animation workflow .json file."
         },
         "LENGTH": {
             "label": "Animation Length (seconds)",
@@ -676,6 +770,16 @@ class ComfyUIMusicVideoPlugin(ToolVerba):
             "type": "string",
             "default": "http://localhost:8188",
             "description": "ComfyUI endpoint for AceStep audio generation."
+        },
+        "COMFYUI_AUDIO_ACE_WORKFLOW": {
+            "label": "Audio Workflow Template (JSON)",
+            "type": "file",
+            "accept": ".json,application/json",
+            "default": "",
+            "description": (
+                "Upload your ComfyUI Audio Ace workflow .json file. "
+                "If empty, Tater uses the bundled Ace Step workflow."
+            ),
         },
         "api_base": {
             "label": "Vision API Base URL",
