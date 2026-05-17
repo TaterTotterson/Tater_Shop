@@ -71,7 +71,7 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 
 # Tables plugin: handle both modern and legacy module names, else no-op
@@ -1406,8 +1406,6 @@ class MatrixPlatform:
         if not _should_respond(self.response_policy, body, self.user_id, self.display_name_cache):
             return
 
-        save_matrix_message(room.room_id, "user", sender, body, user_id=sender)
-
         effective_body = body
         stripped = _strip_matrix_mentions(body, self.user_id, self.display_name_cache)
         if stripped:
@@ -1421,6 +1419,7 @@ class MatrixPlatform:
 
         system_prompt = build_system_prompt()
         history = load_matrix_history(room.room_id)
+        save_matrix_message(room.room_id, "user", sender, body, user_id=sender)
         messages = history
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = get_plugin_enabled

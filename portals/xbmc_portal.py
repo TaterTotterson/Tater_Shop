@@ -24,7 +24,7 @@ import verba_registry as pr
 from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 
 logging.basicConfig(level=logging.INFO)
@@ -396,7 +396,11 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
     user_id = str(payload.user_id or payload.device_id or payload.session_id or "xbmc_user").strip()
     username = str(payload.user_id or payload.device_id or "xbmc_user").strip()
 
-    # Save user turn
+    system_prompt = build_system_prompt()
+    loop_messages = await _load_history(payload.session_id, history_llm_limit)
+    messages_list = loop_messages
+
+    # Save user turn after loading prompt history so the current request is not duplicated.
     await _save_message(
         payload.session_id,
         "user",
@@ -406,9 +410,6 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
         user_id=user_id,
     )
 
-    system_prompt = build_system_prompt()
-    loop_messages = await _load_history(payload.session_id, history_llm_limit)
-    messages_list = loop_messages
     merged_registry = dict(pr.get_verba_registry_snapshot() or {})
     merged_enabled = get_plugin_enabled
 

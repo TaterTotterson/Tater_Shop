@@ -35,7 +35,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 load_dotenv()
@@ -1014,6 +1014,17 @@ class discord_portal(commands.Bot):
 
         _save_discord_room_context(message.channel)
         input_artifacts: list[Dict[str, Any]] = []
+        pending_user_history: list[Dict[str, Any]] = []
+
+        async def _save_pending_user_history() -> None:
+            for pending in pending_user_history:
+                await self.save_message(
+                    message.channel.id,
+                    "user",
+                    str(pending.get("username") or message.author.display_name),
+                    pending.get("content"),
+                    user_id=str(pending.get("user_id") or message.author.id),
+                )
 
         # -------------------------
         # Save user message + attachments (NO base64 in history)
@@ -1045,12 +1056,12 @@ class discord_portal(commands.Bot):
                         "size": len(file_bytes),
                     }
 
-                    await self.save_message(
-                        message.channel.id,
-                        "user",
-                        message.author.name,
-                        file_obj,
-                        user_id=str(message.author.id),
+                    pending_user_history.append(
+                        {
+                            "username": message.author.name,
+                            "content": file_obj,
+                            "user_id": str(message.author.id),
+                        }
                     )
                     input_artifacts.append(
                         {
@@ -1065,12 +1076,12 @@ class discord_portal(commands.Bot):
                 except Exception as e:
                     logger.warning(f"Failed to store attachment ({attachment.filename}): {e}")
         else:
-            await self.save_message(
-                message.channel.id,
-                "user",
-                message.author.display_name,
-                message.content,
-                user_id=str(message.author.id),
+            pending_user_history.append(
+                {
+                    "username": message.author.display_name,
+                    "content": message.content,
+                    "user_id": str(message.author.id),
+                }
             )
 
         is_dm = isinstance(message.channel, discord.DMChannel)
@@ -1100,9 +1111,11 @@ class discord_portal(commands.Bot):
             self._refresh_response_channel_map_from_redis()
             guild_id = getattr(getattr(message, "guild", None), "id", None)
             if not self._message_matches_response_channel(message, guild_id=guild_id) and not self.user.mentioned_in(message):
+                await _save_pending_user_history()
                 return
 
         history = await self.load_history(message.channel.id)
+        await _save_pending_user_history()
         messages_list = history
         platform_preamble = self.build_system_prompt()
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})

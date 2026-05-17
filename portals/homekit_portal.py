@@ -18,7 +18,7 @@ from helpers import (
 )
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 
 load_dotenv()
@@ -331,7 +331,7 @@ async def handle_message(payload: Dict[str, Any], x_tater_token: Optional[str] =
 
     system_prompt = build_system_prompt()
     loop_messages = await _load_history(session_id, history_llm_limit)
-    messages_list = loop_messages + [{"role": "user", "content": text_in}]
+    messages_list = loop_messages
 
     await _save_message(
         session_id,

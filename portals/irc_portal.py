@@ -23,7 +23,7 @@ from admin_gate import (
 from verba_result import action_failure
 from verba_kernel import verba_supports_platform
 from hydra import run_hydra_turn, resolve_agent_limits
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 
 load_dotenv()
@@ -418,10 +418,9 @@ def build_system_prompt():
 
 @irc3.event(irc3.rfc.PRIVMSG)
 async def on_message(self, mask, event, target, data):
-    save_irc_message(channel=target, role="user", username=mask.nick, content=data)
-
     first, _ = get_tater_name()
     if first.lower() not in data.lower():
+        save_irc_message(channel=target, role="user", username=mask.nick, content=data)
         return
 
     effective_request = data
@@ -436,6 +435,7 @@ async def on_message(self, mask, event, target, data):
 
     logger.info(f"<{mask.nick}> {data}")
     history = load_irc_history(channel=target)
+    save_irc_message(channel=target, role="user", username=mask.nick, content=data)
     messages = history
     platform_preamble = build_system_prompt()
     merged_registry = dict(pr.get_verba_registry_snapshot() or {})

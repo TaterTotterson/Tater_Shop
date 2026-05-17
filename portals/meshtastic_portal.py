@@ -22,7 +22,7 @@ from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 from verba_result import action_failure
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -1061,6 +1061,8 @@ class MeshtasticPortalRuntime:
         effective_request = _sanitize_request_text(text)
         origin = _mesh_origin_for_message(message)
         resolve_admin_status(platform="meshtastic", origin=origin, redis_client=redis_client)
+        history_limit = _global_history_llm_limit()
+        history = _load_history(session_key, history_limit)
         _save_history(
             session_key,
             "user",
@@ -1069,8 +1071,6 @@ class MeshtasticPortalRuntime:
             user_id=str(origin.get("user_id") or origin.get("node_id") or "").strip(),
         )
 
-        history_limit = _global_history_llm_limit()
-        history = _load_history(session_key, history_limit)
         registry = dict(pr.get_verba_registry_snapshot() or {})
         scope_value = f"pm:{session_key}" if _is_direct_message(message) else f"chan:{session_key}"
         agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)

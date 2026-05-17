@@ -33,7 +33,7 @@ from admin_gate import (
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 
 load_dotenv()
@@ -1073,6 +1073,8 @@ class TelegramPlatform:
 
         captured_media = await asyncio.to_thread(self._capture_incoming_artifacts_sync, message, chat_id)
         input_artifacts = captured_media.get("input_artifacts") if isinstance(captured_media, dict) else None
+        system_prompt = self.build_system_prompt()
+        history = self._load_history(chat_id)
         self._save_message(
             chat_id,
             "user",
@@ -1082,8 +1084,6 @@ class TelegramPlatform:
             user_handle=sender_user_handle,
         )
 
-        system_prompt = self.build_system_prompt()
-        history = self._load_history(chat_id)
         messages = history
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = _get_plugin_enabled

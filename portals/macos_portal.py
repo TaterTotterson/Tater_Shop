@@ -31,7 +31,7 @@ from notify.queue import is_expired as notify_item_is_expired, queue_key as noti
 from verba_kernel import verba_supports_platform
 from verba_result import action_failure, narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 
 load_dotenv()
@@ -1081,6 +1081,7 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
     user_id = str(payload.device_id or scope).strip() or scope
     username = str(context_payload.get("device_name") or "macos_user").strip() or "macos_user"
 
+    history = await _load_history(scope, history_llm_limit)
     await _save_message(
         scope,
         "user",
@@ -1101,7 +1102,6 @@ async def chat(payload: MacOSChatRequest, x_tater_token: Optional[str] = Header(
             user_id=user_id,
         )
 
-    history = await _load_history(scope, history_llm_limit)
     origin = _build_origin(
         scope=scope,
         device_id=str(payload.device_id or "").strip(),
