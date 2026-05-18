@@ -28,7 +28,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.8"
+__version__ = "3.3.9"
 
 load_dotenv()
 
@@ -2122,28 +2122,54 @@ def _json_object_from_text(text: Any) -> Dict[str, Any]:
     raw = _text(text)
     if not raw:
         return {}
-    candidate = raw
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
+    candidates: List[str] = []
+
+    def _add(candidate: Any) -> None:
+        token = _text(candidate).strip()
+        if token and token not in candidates:
+            candidates.append(token)
+
+    _add(raw)
+    if "<|message|>" in raw:
+        _add(raw.rsplit("<|message|>", 1)[-1])
+    if raw.startswith("```"):
+        lines = raw.splitlines()
         if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
-        candidate = "\n".join(lines).strip()
-    try:
-        payload = json.loads(candidate)
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        pass
-    start = candidate.find("{")
-    end = candidate.rfind("}")
+        _add("\n".join(lines))
+    _add(extract_json(raw))
+
+    start = raw.find("{")
+    end = raw.rfind("}")
     if start >= 0 and end > start:
-        try:
-            payload = json.loads(candidate[start : end + 1])
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
+        _add(raw[start : end + 1])
+
+    for candidate in candidates:
+        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+        for token in (candidate, repaired):
+            try:
+                payload = json.loads(token)
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
+            try:
+                payload = ast.literal_eval(token)
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
     return {}
+
+
+def _events_query_event_ids(candidate_events: List[Dict[str, Any]]) -> List[str]:
+    return [
+        str(item.get("event_id") or "").strip()
+        for item in candidate_events
+        if isinstance(item, dict) and str(item.get("event_id") or "").strip()
+    ]
 
 
 async def _events_query_llm_json_object(
@@ -2170,13 +2196,10 @@ async def _events_query_llm_json_object(
         return None, f"LLM request failed: {exc}"
 
     raw = _text((response.get("message") or {}).get("content"))
-    parsed_text = extract_json(raw) or raw
-    try:
-        obj = json.loads(parsed_text)
-    except Exception as exc:
-        obj = _json_object_from_text(raw)
-        if not obj:
-            return None, f"Could not parse LLM JSON: {exc}"
+    obj = _json_object_from_text(raw)
+    if not obj:
+        logger.warning("[awareness] events_query LLM returned invalid JSON: %r", raw[:500])
+        return None, "Could not parse LLM JSON."
     if not isinstance(obj, dict):
         return None, "LLM did not return a JSON object."
     return obj, ""
@@ -2290,6 +2313,11 @@ async def _events_query_select_relevant_event_ids(
     interpretation: Dict[str, Any],
     candidate_events: List[Dict[str, Any]],
 ) -> Tuple[Optional[List[str]], str]:
+    if not candidate_events:
+        return [], ""
+    if bool(interpretation.get("broad_summary")):
+        return _events_query_event_ids(candidate_events), ""
+
     system_prompt = (
         "You are selecting relevant home events for a user question.\n"
         "Return exactly one strict JSON object:\n"
@@ -2301,7 +2329,7 @@ async def _events_query_select_relevant_event_ids(
         "- Select only event_ids that are directly relevant to the user's request.\n"
         "- Use only event_ids from the provided candidate list.\n"
         "- If none are relevant, return an empty list.\n"
-        "- If interpreted_request.broad_summary is true and candidate_events is non-empty, do not return an empty list.\n"
+        f"- Return at most {_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER} event_ids. If more match, choose the most relevant and most recent.\n"
         "- Do not invent events.\n"
     )
     payload = {
@@ -2319,7 +2347,7 @@ async def _events_query_select_relevant_event_ids(
         llm_client=llm_client,
         system_prompt=system_prompt,
         user_payload=payload,
-        max_tokens=900,
+        max_tokens=1600,
         temperature=0.0,
     )
     if obj is None:
