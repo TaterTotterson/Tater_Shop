@@ -24,7 +24,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.45"
+__version__ = "1.0.46"
 
 load_dotenv()
 
@@ -7121,6 +7121,14 @@ def _personal_calendar_query(args: Dict[str, Any], *, aggregate: Optional[Dict[s
     }
 
 
+def get_personal_calendar_payload(
+    args: Optional[Dict[str, Any]] = None,
+    *,
+    aggregate: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _personal_calendar_query(dict(args or {}), aggregate=aggregate)
+
+
 def _calendar_table_rows(items: List[Dict[str, Any]], *, limit: int = 120) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for item in list(items or [])[: max(1, int(limit))]:
@@ -9061,14 +9069,6 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
     calendar_today_rows = _calendar_table_rows(list(calendar_today.get("items") or []), limit=100)
     calendar_week_rows = _calendar_table_rows(list(calendar_week.get("items") or []), limit=160)
     calendar_week_counts = calendar_week.get("counts_by_type") if isinstance(calendar_week.get("counts_by_type"), dict) else {}
-    calendar_api_examples = "\n".join(
-        [
-            "GET /api/cores/personal/webhook/calendar?range=day&date=2026-05-20",
-            "GET /api/cores/personal/webhook/calendar?range=week&date=2026-05-20",
-            "GET /api/cores/personal/webhook/calendar?date_from=2026-05-20&date_to=2026-05-27",
-            "POST /api/cores/personal/tab-action {\"action\":\"personal_calendar_query\",\"payload\":{\"range\":\"week\",\"date\":\"2026-05-20\"}}",
-        ]
-    )
 
     forms = [
         {
@@ -9113,18 +9113,6 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                                 ["When", "Type", "Title", "Source", "Person", "Location", "Status"],
                             ),
                             "rows": calendar_week_rows,
-                        }
-                    ],
-                },
-                {
-                    "label": "API",
-                    "fields": [
-                        {
-                            "key": "calendar_api_examples",
-                            "label": "Endpoints",
-                            "type": "textarea",
-                            "value": calendar_api_examples,
-                            "read_only": True,
                         }
                     ],
                 },
@@ -9913,28 +9901,6 @@ def _notification_test_settings_from_values(
     return settings
 
 
-def handle_core_webhook(
-    *,
-    webhook: str,
-    payload: Dict[str, Any],
-    query: Dict[str, Any],
-    body: str = "",
-    method: str = "GET",
-    redis_client=None,
-    **_kwargs,
-) -> Dict[str, Any]:
-    del body, method, redis_client
-    hook = _slug(webhook, default="")
-    if hook in {"calendar", "calendar_query", "schedule"}:
-        args: Dict[str, Any] = {}
-        if isinstance(query, dict):
-            args.update(query)
-        if isinstance(payload, dict):
-            args.update(payload)
-        return _personal_calendar_query(args)
-    raise KeyError(f"Unknown Personal Core webhook: {webhook}")
-
-
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
     del redis_client
     body = payload if isinstance(payload, dict) else {}
@@ -9977,7 +9943,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         for key in ("range", "period", "span", "date", "day", "date_from", "date_to", "source", "types", "account_id", "person_id", "query", "limit"):
             if key not in query_values and key in body:
                 query_values[key] = body.get(key)
-        result = _personal_calendar_query(query_values)
+        result = get_personal_calendar_payload(query_values)
         return {
             "ok": True,
             "message": _text(result.get("summary_for_user")) or "Calendar query complete.",
