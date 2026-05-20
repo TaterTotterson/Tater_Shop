@@ -14,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -24,7 +24,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 
-__version__ = "1.0.42"
+__version__ = "1.0.45"
 
 load_dotenv()
 
@@ -55,6 +55,12 @@ _PERSONAL_CALENDAR_SOURCE_OPTIONS = [
     {"value": "auto", "label": "Auto / Same Account"},
     {"value": "caldav", "label": "CalDAV"},
     {"value": "ics", "label": "Private iCal URL"},
+]
+
+_PERSONAL_ACCOUNT_TEST_OPTIONS = [
+    {"value": "email", "label": "Test Email"},
+    {"value": "calendar", "label": "Test Calendar"},
+    {"value": "both", "label": "Test Email + Calendar"},
 ]
 
 CORE_SETTINGS = {
@@ -100,7 +106,32 @@ _PERSONAL_CURSOR_PREFIX = "personal:cursor_uid"
 _PERSONAL_PROCESSED_PREFIX = "personal:processed_msg"
 _PERSONAL_NOTIFY_SENT_PREFIX = "personal:notify_sent"
 
-_AMOUNT_RE = re.compile(r"(?:USD|US\$|\$)\s*([0-9]+(?:\.[0-9]{1,2})?)", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"(?:USD|US\$|\$)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.IGNORECASE)
+_PROMO_SPENDING_RE = re.compile(
+    r"\b(?:"
+    r"bonus miles?|bonus points?|cash back|statement credit|eligible purchases?|"
+    r"account opening|apply now|pre[- ]?approved|limited[- ]time offer|special offer|"
+    r"offer expires|after spending|"
+    r"earn\s+[0-9,]+\s+(?:bonus\s+)?(?:miles|points)|"
+    r"(?:\$[0-9][0-9,]*(?:\.[0-9]{1,2})?|[0-9][0-9,]*\s+dollars?)\s+value|"
+    r"spend\s+\$[0-9][0-9,]*(?:\.[0-9]{1,2})?\s+(?:on|in|within|to earn)"
+    r")\b",
+    re.IGNORECASE,
+)
+_AD_DISCLAIMER_RE = re.compile(
+    r"\b(?:unsubscribe|view in browser|advertisement|marketing email|email preferences|privacy policy)\b",
+    re.IGNORECASE,
+)
+_REAL_SPENDING_RE = re.compile(
+    r"\b(?:"
+    r"receipt|order confirmation|purchase confirmation|payment confirmation|transaction posted|"
+    r"your card was charged|was charged|charged\s+(?:USD|US\$|\$)|"
+    r"payment received|amount paid|amount charged|order total|invoice total|"
+    r"total paid|total charged|thank you for your purchase|booking confirmed|"
+    r"reservation confirmed|ticket confirmation"
+    r")\b",
+    re.IGNORECASE,
+)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MONTH_WORDS_RE = re.compile(
     r"\b("
@@ -245,6 +276,20 @@ def _mask_email(value: Any) -> str:
     else:
         local_mask = local[:2] + "***"
     return f"{local_mask}@{domain}"
+
+
+def _safe_url_label(value: Any) -> str:
+    url = _normalize_calendar_url(value)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        parsed = None
+    if parsed is not None and parsed.scheme and parsed.netloc:
+        suffix = "/..." if _text(parsed.path).strip("/") else "/"
+        return f"{parsed.scheme}://{parsed.netloc}{suffix}"
+    return _clean_text_blob(url, max_chars=90)
 
 
 _PEOPLE_API_MODULE: Any = None
@@ -2689,6 +2734,22 @@ def _caldav_response_rows(xml_text: Any, *, base_url: str) -> List[Dict[str, str
     return rows
 
 
+def _caldav_href_urls(xml_text: Any, *, base_url: str, paths: List[str]) -> List[str]:
+    try:
+        root = ET.fromstring(_text(xml_text).encode("utf-8"))
+    except Exception:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        for href_el in root.findall(path, _CALDAV_NS):
+            url = _caldav_full_url(base_url, href_el.text)
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+    return out
+
+
 def _caldav_propfind(url: str, *, auth: Tuple[str, str], props: str, depth: str = "0") -> List[Dict[str, str]]:
     body = f"""<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -2710,15 +2771,39 @@ def _caldav_discover_calendar_urls(root_url: str, *, auth: Tuple[str, str], filt
 </d:propfind>"""
     try:
         response = _caldav_request("PROPFIND", root, auth=auth, body=body, depth="0")
-        element = ET.fromstring(_text(getattr(response, "text", "")).encode("utf-8"))
-        for href_el in element.findall(".//d:current-user-principal/d:href", _CALDAV_NS):
-            url = _caldav_full_url(root, href_el.text)
+        response_text = _text(getattr(response, "text", ""))
+        principal_urls = _caldav_href_urls(
+            response_text,
+            base_url=root,
+            paths=[".//d:current-user-principal/d:href"],
+        )
+        for url in principal_urls:
             if url:
                 probe_urls.append(url)
-        for href_el in element.findall(".//c:calendar-home-set/d:href", _CALDAV_NS):
-            url = _caldav_full_url(root, href_el.text)
+        for url in _caldav_href_urls(
+            response_text,
+            base_url=root,
+            paths=[".//c:calendar-home-set/d:href"],
+        ):
             if url:
                 probe_urls.append(url)
+
+        principal_body = """<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><c:calendar-home-set/></d:prop>
+</d:propfind>"""
+        for principal_url in principal_urls:
+            try:
+                principal_response = _caldav_request("PROPFIND", principal_url, auth=auth, body=principal_body, depth="0")
+                for url in _caldav_href_urls(
+                    getattr(principal_response, "text", ""),
+                    base_url=principal_url,
+                    paths=[".//c:calendar-home-set/d:href"],
+                ):
+                    if url:
+                        probe_urls.append(url)
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -3150,6 +3235,482 @@ def _fetch_calendar_events_for_account(account: Dict[str, Any], settings: Dict[s
         return {"ok": False, "account_id": account_id, "events": [], "error": f"Calendar CalDAV fetch failed: {exc}"}
 
 
+def _test_email_account(account: Dict[str, Any]) -> Dict[str, Any]:
+    account_id = _text(account.get("account_id")) or (_account_storage_id(account) if _account_has_identity(account) else "unsaved_account")
+    provider = _provider_key(account.get("provider"), default="custom")
+    email_address = _text(account.get("email_address"))
+    masked_email = _mask_email(email_address)
+    email_password = _text(account.get("email_password"))
+    mailbox = _text(account.get("mailbox")) or "INBOX"
+    host, port = _imap_host_port(account)
+
+    if not email_address:
+        return {"ok": False, "account_id": account_id, "test": "email", "error": "Email address is missing."}
+    if not email_password:
+        return {"ok": False, "account_id": account_id, "test": "email", "error": "Email app password is missing."}
+    if not host:
+        return {"ok": False, "account_id": account_id, "test": "email", "error": "IMAP host is missing."}
+
+    imap = None
+    selected = False
+    started = time.time()
+    try:
+        imap = imaplib.IMAP4_SSL(host=host, port=port, timeout=30)
+        imap.login(email_address, email_password)
+        select_status, select_data = imap.select(mailbox, readonly=True)
+        if _text(select_status).upper() != "OK":
+            raise RuntimeError(f"Unable to open mailbox '{mailbox}' (status={_text(select_status) or 'UNKNOWN'}).")
+        selected = True
+        message_count = 0
+        if isinstance(select_data, list) and select_data:
+            message_count = _as_int(select_data[0], 0, minimum=0)
+
+        uid_status, uid_data = imap.uid("search", None, "ALL")
+        uid_status_text = _text(uid_status).upper()
+        if uid_status_text != "OK":
+            raise RuntimeError(f"Mailbox opened, but UID search failed (status={uid_status_text or 'UNKNOWN'}).")
+        uid_numbers = _parse_uid_numbers(uid_data)
+        latest_uid = uid_numbers[-1] if uid_numbers else 0
+
+        try:
+            imap.close()
+        except Exception:
+            pass
+        selected = False
+        try:
+            imap.logout()
+        except Exception:
+            pass
+        elapsed_ms = int((time.time() - started) * 1000)
+        summary = (
+            f"Connected to {host}:{port}, logged in as {masked_email}, "
+            f"opened {mailbox}, messages={message_count}, latest_uid={latest_uid}."
+        )
+        return {
+            "ok": True,
+            "account_id": account_id,
+            "test": "email",
+            "provider": provider,
+            "host": host,
+            "port": port,
+            "mailbox": mailbox,
+            "message_count": message_count,
+            "uid_count": len(uid_numbers),
+            "latest_uid": latest_uid,
+            "elapsed_ms": elapsed_ms,
+            "summary": summary,
+        }
+    except imaplib.IMAP4.error as exc:
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "test": "email",
+            "provider": provider,
+            "error": f"IMAP auth/connect error for {masked_email or 'account'}: {exc}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "test": "email",
+            "provider": provider,
+            "error": f"IMAP test failed for {masked_email or 'account'}: {exc}",
+        }
+    finally:
+        if imap is not None:
+            if selected:
+                try:
+                    imap.close()
+                except Exception:
+                    pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+
+def _calendar_auth_hint(account: Dict[str, Any]) -> str:
+    provider = _provider_key(account.get("provider"), default="custom")
+    if provider in {"apple", "icloud"}:
+        return " Apple/iCloud CalDAV requires an Apple app-specific password; blank calendar credentials reuse the email login."
+    return ""
+
+
+def _caldav_response_status(response: Any) -> int:
+    return _as_int(getattr(response, "status_code", 0), 0, minimum=0)
+
+
+def _caldav_status_label(response: Any) -> str:
+    status = _caldav_response_status(response)
+    reason = _text(getattr(response, "reason", ""))
+    if status <= 0:
+        return "no HTTP status"
+    return f"HTTP {status}{(' ' + reason) if reason else ''}"
+
+
+def _caldav_is_auth_failure(response: Any) -> bool:
+    return _caldav_response_status(response) in {401, 403}
+
+
+def _caldav_test_calendar_query(url: str, *, auth: Tuple[str, str], start_ts: float, end_ts: float) -> Any:
+    start_text = datetime.fromtimestamp(start_ts, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    end_text = datetime.fromtimestamp(end_ts, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    body = f"""<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <d:getetag/>
+    <c:calendar-data/>
+  </d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="{start_text}" end="{end_text}"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>"""
+    return _caldav_request("REPORT", url, auth=auth, body=body, depth="1")
+
+
+def _caldav_test_propfind(url: str, *, auth: Tuple[str, str], props: str, depth: str = "0") -> Any:
+    body = f"""<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>{props}</d:prop>
+</d:propfind>"""
+    return _caldav_request("PROPFIND", url, auth=auth, body=body, depth=depth)
+
+
+def _caldav_principal_probe_urls(response: Any, *, root_url: str) -> List[str]:
+    if not _response_ok(response, allowed={207}):
+        return []
+    return _caldav_href_urls(
+        getattr(response, "text", ""),
+        base_url=root_url,
+        paths=[".//d:current-user-principal/d:href", ".//c:calendar-home-set/d:href"],
+    )
+
+
+def _test_calendar_account(account: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    account_probe = dict(account)
+    account_probe["calendar_enabled"] = True
+    account_id = _text(account_probe.get("account_id")) or (
+        _account_storage_id(account_probe) if _account_has_identity(account_probe) else "unsaved_account"
+    )
+    source = _calendar_source_key(account_probe.get("calendar_source"), default=_calendar_source_key(settings.get("calendar_source"), default="auto"))
+    configured_url = _text(account_probe.get("calendar_url"))
+    raw_url = _normalize_calendar_url(configured_url or _calendar_default_url(account_probe))
+    username, password = _calendar_auth(account_probe)
+    filters = _calendar_name_filters(account_probe.get("calendar_name_filter") or settings.get("calendar_name_filter"))
+    provider = _provider_key(account_probe.get("provider"), default="custom")
+    range_start, range_end = _calendar_range(settings, account_probe)
+    max_events = min(
+        25,
+        _as_int(
+            account_probe.get("calendar_max_events"),
+            _as_int(settings.get("calendar_max_events"), 120, minimum=1, maximum=1000),
+            minimum=1,
+            maximum=1000,
+        ),
+    )
+
+    if source == "ics" or _calendar_url_looks_like_ics(configured_url or raw_url):
+        if not raw_url:
+            return {"ok": False, "account_id": account_id, "test": "calendar", "source": "ics", "error": "Calendar iCal URL is not configured."}
+        try:
+            auth = (username, password) if username and password else None
+            response = requests.get(raw_url, auth=auth, timeout=20)
+            if not _response_ok(response):
+                return {
+                    "ok": False,
+                    "account_id": account_id,
+                    "test": "calendar",
+                    "source": "ics",
+                    "url": _safe_url_label(raw_url),
+                    "status": _caldav_response_status(response),
+                    "error": f"Calendar iCal fetch failed ({_caldav_status_label(response)}).",
+                }
+            rows = _calendar_event_rows_from_ics(
+                getattr(response, "text", ""),
+                account_id=account_id,
+                calendar_name=_safe_url_label(raw_url),
+                range_start=range_start,
+                range_end=range_end,
+                max_events=max_events,
+            )
+            first = rows[0] if rows else {}
+            return {
+                "ok": True,
+                "account_id": account_id,
+                "test": "calendar",
+                "source": "ics",
+                "url": _safe_url_label(raw_url),
+                "event_count": len(rows),
+                "first_event": _text(first.get("title")) if isinstance(first, dict) else "",
+                "summary": f"Fetched iCal feed from {_safe_url_label(raw_url)}; events_in_window={len(rows)}.",
+            }
+        except Exception as exc:
+            return {"ok": False, "account_id": account_id, "test": "calendar", "source": "ics", "error": f"Calendar iCal test failed: {exc}"}
+
+    if not raw_url:
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "test": "calendar",
+            "source": "caldav",
+            "error": f"No default CalDAV URL is known for provider '{provider}'. Add Calendar URL or use a private iCal URL.",
+        }
+    if not username or not password:
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "test": "calendar",
+            "source": "caldav",
+            "error": "Calendar username/password are missing. They default to the email login when left blank." + _calendar_auth_hint(account_probe),
+        }
+
+    auth = (username, password)
+    root = raw_url.rstrip("/") + "/"
+    statuses: List[str] = []
+    calendar_urls: List[Dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def record(method: str, url: str, response: Any) -> None:
+        statuses.append(f"{method} {_safe_url_label(url)} -> {_caldav_status_label(response)}")
+
+    def add_calendar(url: Any, display_name: Any = "") -> None:
+        clean_url = _text(url)
+        if not clean_url or clean_url in seen_urls:
+            return
+        if not _calendar_name_allowed(display_name, clean_url, filters):
+            return
+        seen_urls.add(clean_url)
+        calendar_urls.append({"url": clean_url, "display_name": _text(display_name) or clean_url})
+
+    try:
+        direct_response = _caldav_test_propfind(root, auth=auth, props="<d:displayname/><d:resourcetype/>", depth="0")
+        record("PROPFIND", root, direct_response)
+        if _caldav_is_auth_failure(direct_response):
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "test": "calendar",
+                "source": "caldav",
+                "error": f"CalDAV authentication failed at {_safe_url_label(root)} ({_caldav_status_label(direct_response)})." + _calendar_auth_hint(account_probe),
+                "statuses": statuses,
+            }
+        if _response_ok(direct_response, allowed={207}):
+            for row in _caldav_response_rows(getattr(direct_response, "text", ""), base_url=root):
+                if bool(row.get("is_calendar")):
+                    add_calendar(root, row.get("display_name") or root)
+
+        principal_body = """<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:current-user-principal/><c:calendar-home-set/></d:prop>
+</d:propfind>"""
+        principal_response = _caldav_request("PROPFIND", root, auth=auth, body=principal_body, depth="0")
+        record("PROPFIND principal", root, principal_response)
+        if _caldav_is_auth_failure(principal_response):
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "test": "calendar",
+                "source": "caldav",
+                "error": f"CalDAV principal lookup failed authentication ({_caldav_status_label(principal_response)})." + _calendar_auth_hint(account_probe),
+                "statuses": statuses,
+            }
+
+        probe_urls = _caldav_principal_probe_urls(principal_response, root_url=root)
+        expanded_probe_urls: List[str] = []
+        expanded_seen: set[str] = set()
+        principal_home_body = """<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><c:calendar-home-set/></d:prop>
+</d:propfind>"""
+        for probe in probe_urls:
+            if probe and probe not in expanded_seen:
+                expanded_seen.add(probe)
+                expanded_probe_urls.append(probe)
+            principal_home_response = _caldav_request("PROPFIND", probe, auth=auth, body=principal_home_body, depth="0")
+            record("PROPFIND calendar-home-set", probe, principal_home_response)
+            if _caldav_is_auth_failure(principal_home_response):
+                return {
+                    "ok": False,
+                    "account_id": account_id,
+                    "test": "calendar",
+                    "source": "caldav",
+                    "error": f"CalDAV calendar-home-set lookup failed authentication ({_caldav_status_label(principal_home_response)})." + _calendar_auth_hint(account_probe),
+                    "statuses": statuses,
+                }
+            for home_url in _caldav_principal_probe_urls(principal_home_response, root_url=probe):
+                if home_url and home_url not in expanded_seen:
+                    expanded_seen.add(home_url)
+                    expanded_probe_urls.append(home_url)
+        probe_urls = expanded_probe_urls
+        if not probe_urls:
+            probe_urls.append(root)
+
+        for probe in probe_urls:
+            home_response = _caldav_test_propfind(probe, auth=auth, props="<d:displayname/><d:resourcetype/>", depth="1")
+            record("PROPFIND calendars", probe, home_response)
+            if _caldav_is_auth_failure(home_response):
+                return {
+                    "ok": False,
+                    "account_id": account_id,
+                    "test": "calendar",
+                    "source": "caldav",
+                    "error": f"CalDAV calendar discovery failed authentication ({_caldav_status_label(home_response)})." + _calendar_auth_hint(account_probe),
+                    "statuses": statuses,
+                }
+            if not _response_ok(home_response, allowed={207}):
+                continue
+            for row in _caldav_response_rows(getattr(home_response, "text", ""), base_url=probe):
+                if bool(row.get("is_calendar")):
+                    add_calendar(row.get("url"), row.get("display_name"))
+            if calendar_urls:
+                break
+
+        if not calendar_urls:
+            status_text = "; ".join(statuses[:6])
+            filter_text = " Check Calendar Name Filter." if filters else ""
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "test": "calendar",
+                "source": "caldav",
+                "error": "No CalDAV calendar collections were discovered." + filter_text + (f" Statuses: {status_text}" if status_text else ""),
+                "statuses": statuses,
+            }
+
+        rows: List[Dict[str, Any]] = []
+        report_statuses: List[str] = []
+        successful_reports = 0
+        for calendar in calendar_urls:
+            url = _text(calendar.get("url"))
+            display_name = _text(calendar.get("display_name")) or url
+            if not url:
+                continue
+            response = _caldav_test_calendar_query(url, auth=auth, start_ts=range_start, end_ts=range_end)
+            record("REPORT", url, response)
+            report_statuses.append(_caldav_status_label(response))
+            if _caldav_is_auth_failure(response):
+                return {
+                    "ok": False,
+                    "account_id": account_id,
+                    "test": "calendar",
+                    "source": "caldav",
+                    "error": f"CalDAV event query failed authentication on {display_name} ({_caldav_status_label(response)})." + _calendar_auth_hint(account_probe),
+                    "statuses": statuses,
+                }
+            if not _response_ok(response, allowed={207}):
+                continue
+            successful_reports += 1
+            blobs = [
+                _text(row.get("calendar_data"))
+                for row in _caldav_response_rows(getattr(response, "text", ""), base_url=url)
+                if _text(row.get("calendar_data"))
+            ]
+            for blob in blobs:
+                rows.extend(
+                    _calendar_event_rows_from_ics(
+                        blob,
+                        account_id=account_id,
+                        calendar_name=display_name,
+                        range_start=range_start,
+                        range_end=range_end,
+                        max_events=max_events,
+                    )
+                )
+                if len(rows) >= max_events:
+                    break
+            if len(rows) >= max_events:
+                break
+
+        rows.sort(key=lambda row: _as_float(row.get("starts_ts"), 0.0, minimum=0.0))
+        rows = rows[:max_events]
+        if successful_reports <= 0:
+            status_text = "; ".join(statuses[:8])
+            return {
+                "ok": False,
+                "account_id": account_id,
+                "test": "calendar",
+                "source": "caldav",
+                "calendar_count": len(calendar_urls),
+                "error": f"Discovered {len(calendar_urls)} calendar(s), but event REPORT failed. Statuses: {status_text}",
+                "statuses": statuses,
+                "report_statuses": report_statuses,
+            }
+
+        first = rows[0] if rows else {}
+        return {
+            "ok": True,
+            "account_id": account_id,
+            "test": "calendar",
+            "source": "caldav",
+            "calendar_count": len(calendar_urls),
+            "event_count": len(rows),
+            "first_event": _text(first.get("title")) if isinstance(first, dict) else "",
+            "statuses": statuses,
+            "summary": f"Discovered {len(calendar_urls)} CalDAV calendar(s); events_in_window={len(rows)}.",
+        }
+    except Exception as exc:
+        status_text = "; ".join(statuses[:6])
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "test": "calendar",
+            "source": "caldav",
+            "error": f"Calendar CalDAV test failed: {exc}" + (f" Statuses: {status_text}" if status_text else ""),
+            "statuses": statuses,
+        }
+
+
+def _account_for_test(values: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    settings = _load_settings()
+    original_account_id = _text(values.get("original_account_id") or values.get("account_id"))
+    current = _account_lookup_by_id(settings, original_account_id)
+    account = _account_config_from_values(values, current, preserve_blank_passwords=bool(current))
+    if current:
+        account["account_source"] = _text(current.get("account_source"))
+        account["account_index"] = _as_int(current.get("account_index"), -1, minimum=-1)
+    if not _account_has_identity(account):
+        raise ValueError("Add an email address, calendar username, or calendar URL before testing.")
+    account_id = _account_storage_id(account)
+    account["account_id"] = account_id
+    account.update(_account_person_fields(account))
+    return account, settings
+
+
+def _run_account_test(values: Dict[str, Any]) -> Dict[str, Any]:
+    account, settings = _account_for_test(values)
+    target = _slug(values.get("account_test_target"), default="email")
+    if target in {"email_calendar", "email_and_calendar", "email_plus_calendar", "all"}:
+        target = "both"
+    if target not in {"email", "calendar", "both"}:
+        target = "email"
+
+    tests: List[Dict[str, Any]] = []
+    if target in {"email", "both"}:
+        tests.append(_test_email_account(account))
+    if target in {"calendar", "both"}:
+        tests.append(_test_calendar_account(account, settings))
+
+    ok = all(bool(row.get("ok")) for row in tests) if tests else False
+    parts: List[str] = []
+    for row in tests:
+        label = "Email" if _text(row.get("test")) == "email" else "Calendar"
+        if bool(row.get("ok")):
+            parts.append(f"{label} OK: {_text(row.get('summary')) or 'test passed'}")
+        else:
+            parts.append(f"{label} failed: {_text(row.get('error')) or 'test failed'}")
+    return {
+        "ok": ok,
+        "account_id": _text(account.get("account_id")),
+        "target": target,
+        "tests": tests,
+        "message": "; ".join(parts) if parts else "No account test was selected.",
+    }
+
+
 def _merge_calendar_events_into_profile(
     profile: Dict[str, Any],
     account: Dict[str, Any],
@@ -3468,7 +4029,61 @@ def _extract_first_amount(text: str) -> Optional[float]:
     match = _AMOUNT_RE.search(_text(text))
     if not match:
         return None
-    return _as_float(match.group(1), 0.0, minimum=0.0)
+    return _as_float(match.group(1).replace(",", ""), 0.0, minimum=0.0)
+
+
+def _email_text_blob(row: Dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return " ".join(
+        [
+            _text(row.get("subject")),
+            _text(row.get("snippet")),
+            _text(row.get("body")),
+        ]
+    )
+
+
+def _email_has_real_spending_signal(row: Dict[str, Any]) -> bool:
+    blob = _email_text_blob(row)
+    if not blob:
+        return False
+    return bool(_REAL_SPENDING_RE.search(blob))
+
+
+def _email_has_promotional_spending_signal(row: Dict[str, Any]) -> bool:
+    blob = _email_text_blob(row)
+    if not blob:
+        return False
+    if _PROMO_SPENDING_RE.search(blob):
+        return True
+    lower = blob.lower()
+    if _AD_DISCLAIMER_RE.search(blob) and any(token in lower for token in ("offer", "earn", "bonus", "reward", "coupon", "save")):
+        return True
+    return False
+
+
+def _email_allows_spending_extraction(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _email_has_promotional_spending_signal(row) and not _email_has_real_spending_signal(row):
+        return False
+    return _email_has_real_spending_signal(row)
+
+
+def _spending_row_blocked_by_source_email(row: Dict[str, Any], email_by_id: Dict[str, Dict[str, Any]]) -> bool:
+    if not isinstance(row, dict):
+        return True
+    category = _slug(row.get("category"), default="")
+    if category in {"ad", "ads", "advertisement", "marketing", "offer", "promo", "promotion", "reward", "bonus", "coupon", "discount", "credit_card_offer"}:
+        return True
+    email_id = _text(row.get("email_id"))
+    if not email_id:
+        return bool(email_by_id)
+    source_email = email_by_id.get(email_id)
+    if not isinstance(source_email, dict):
+        return bool(email_by_id)
+    return not _email_allows_spending_extraction(source_email)
 
 
 def _coerce_event_ts(candidate_text: str, fallback_ts: float) -> float:
@@ -3526,13 +4141,19 @@ def _heuristic_extract_updates(rows: List[Dict[str, Any]]) -> Dict[str, List[Dic
 
     purchase_keywords = {
         "receipt",
-        "order",
+        "order confirmation",
         "charged",
-        "payment",
-        "invoice",
-        "purchase",
-        "ticket",
-        "reservation",
+        "payment confirmation",
+        "payment received",
+        "amount paid",
+        "amount charged",
+        "order total",
+        "invoice total",
+        "purchase confirmation",
+        "thank you for your purchase",
+        "ticket confirmation",
+        "reservation confirmed",
+        "booking confirmed",
     }
     event_keywords = {
         "trip",
@@ -3605,7 +4226,7 @@ def _heuristic_extract_updates(rows: List[Dict[str, Any]]) -> Dict[str, List[Dic
 
         corpus = " ".join([subject.lower(), snippet.lower(), body.lower()])
 
-        if any(token in corpus for token in purchase_keywords):
+        if any(token in corpus for token in purchase_keywords) and _email_allows_spending_extraction(row):
             amount = _extract_first_amount(" ".join([subject, snippet, body]))
             if amount is not None and amount > 0:
                 merchant = _merchant_from_sender(sender) or subject.split("-", 1)[0].strip()
@@ -3860,8 +4481,13 @@ def _llm_extract_updates(
         "- For amounts, output numeric values only (not strings).\n"
         "- Use confidence in [0,1].\n"
         "- Include email_id that matches one of provided ids for every extracted row.\n"
+        "- spending_habits must represent actual user spend, charges, receipts, paid invoices, or confirmed purchases only.\n"
+        "- Never put advertised values, rewards, bonus miles/points, cash-back offers, coupons, discounts, credit-card offers, savings claims, or spend thresholds in spending_habits.\n"
+        "- Example: 'Earn 20,000 bonus miles (a $200 value) after spending $1,500...' is an offer/ad; spending_habits must be empty for that email.\n"
         "- upcoming_events should only include events with explicit/plausible future schedule details.\n"
+        "- Promotional emails may produce upcoming_events only when they include a concrete future date/time relevant to the user.\n"
         "- subscriptions should capture recurring or renewal billing when present.\n"
+        "- subscriptions should not capture sign-up offers, trial ads, reward offers, or general marketing promotions.\n"
         "- deliveries should capture shipping/tracking status when present.\n"
         "- Put purchase identifiers in order_number (not tracking_id).\n"
         "- Use tracking_id only for carrier tracking references.\n"
@@ -4177,7 +4803,12 @@ def _normalize_action_item_row(row: Dict[str, Any], *, min_conf: float) -> Optio
     }
 
 
-def _normalize_extracted_payload(payload: Dict[str, Any], *, min_confidence: float) -> Dict[str, List[Dict[str, Any]]]:
+def _normalize_extracted_payload(
+    payload: Dict[str, Any],
+    *,
+    min_confidence: float,
+    source_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
     out = {
         "spending_habits": [],
         "favorite_places": [],
@@ -4190,7 +4821,15 @@ def _normalize_extracted_payload(payload: Dict[str, Any], *, min_confidence: flo
     if not isinstance(payload, dict):
         return out
 
+    email_by_id = {
+        _text(row.get("id")): row
+        for row in (source_rows or [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+
     for row in payload.get("spending_habits") or []:
+        if _spending_row_blocked_by_source_email(row, email_by_id):
+            continue
         normalized = _normalize_spending_row(row, min_conf=min_confidence)
         if normalized:
             out["spending_habits"].append(normalized)
@@ -4543,11 +5182,19 @@ def _extract_updates_for_rows(
         settings=settings,
     )
     if llm_payload is not None:
-        normalized = _normalize_extracted_payload(llm_payload, min_confidence=min_confidence)
+        normalized = _normalize_extracted_payload(
+            llm_payload,
+            min_confidence=min_confidence,
+            source_rows=inserted_rows,
+        )
         return normalized, "llm"
 
     heuristic_payload = _heuristic_extract_updates(inserted_rows)
-    normalized = _normalize_extracted_payload(heuristic_payload, min_confidence=max(0.5, min_confidence - 0.15))
+    normalized = _normalize_extracted_payload(
+        heuristic_payload,
+        min_confidence=max(0.5, min_confidence - 0.15),
+        source_rows=inserted_rows,
+    )
     return normalized, "heuristic"
 
 
@@ -6149,6 +6796,353 @@ def _aggregate_profiles(*, profile_ids: Optional[List[str]] = None) -> Dict[str,
     }
 
 
+def _split_filter_tokens(value: Any) -> List[str]:
+    raw_values = value if isinstance(value, list) else _text(value).split(",")
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        token = _slug(item, default="")
+        if token and token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def _calendar_query_bounds(args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    mode = _slug(payload.get("range") or payload.get("period") or payload.get("span"), default="")
+    if mode in {"next7", "next_7", "next_7_days", "7_days"}:
+        mode = "week"
+    if mode in {"this_day"}:
+        mode = "day"
+    if mode in {"this_week"}:
+        mode = "week"
+    if mode in {"this_month"}:
+        mode = "month"
+
+    date_value = _text(payload.get("date") or payload.get("day"))
+    if mode in {"today"}:
+        mode = "day"
+        date_value = today
+    elif mode in {"tomorrow"}:
+        mode = "day"
+        date_value = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    date_from = _text(payload.get("date_from") or payload.get("from"))
+    date_to = _text(payload.get("date_to") or payload.get("to"))
+    if (date_from or date_to) and mode not in {"day", "week", "month", "upcoming"}:
+        mode = "range"
+    if not mode:
+        mode = "week"
+
+    if mode == "upcoming":
+        start_ts = time.time()
+        days = _as_int(payload.get("days"), 7, minimum=1, maximum=3650)
+        end_ts = start_ts + (days * 86400) - 1
+    elif mode == "range":
+        start_ts, _ = _history_query_day_bounds(date_from or date_value or today)
+        _, end_ts = _history_query_day_bounds(date_to or date_from or date_value or today)
+        if start_ts <= 0:
+            start_ts, _ = _history_query_day_bounds(today)
+        if end_ts <= 0:
+            end_ts = start_ts + (7 * 86400) - 1
+    else:
+        start_ts, _ = _history_query_day_bounds(date_value or today)
+        if start_ts <= 0:
+            start_ts, _ = _history_query_day_bounds(today)
+        if mode == "day":
+            end_ts = start_ts + 86399.0
+        elif mode == "month":
+            start_dt = datetime.fromtimestamp(start_ts, timezone.utc)
+            end_ts = _add_months(start_dt, 1).timestamp() - 1
+        else:
+            mode = "week"
+            end_ts = start_ts + (7 * 86400) - 1
+
+    if end_ts < start_ts:
+        start_ts, end_ts = end_ts, start_ts
+
+    return {
+        "range": mode,
+        "start_ts": float(start_ts),
+        "end_ts": float(end_ts),
+        "date_from": datetime.fromtimestamp(start_ts, timezone.utc).strftime("%Y-%m-%d"),
+        "date_to": datetime.fromtimestamp(end_ts, timezone.utc).strftime("%Y-%m-%d"),
+    }
+
+
+def _calendar_source_allowed(source: str, wanted: str) -> bool:
+    token = _slug(source, default="email")
+    wanted_token = _slug(wanted, default="all")
+    if wanted_token in {"", "all", "any"}:
+        return True
+    if wanted_token in {"cal", "calendar", "caldav", "ics"}:
+        return token == "calendar"
+    if wanted_token in {"mail", "email", "inbox"}:
+        return token != "calendar"
+    return token == wanted_token
+
+
+def _calendar_type_allowed(item_type: str, wanted_types: List[str]) -> bool:
+    if not wanted_types:
+        return True
+    token = _slug(item_type, default="")
+    aliases = {
+        "event": {"event", "events", "calendar_event", "email_event", "plan", "plans"},
+        "calendar_event": {"event", "events", "calendar", "calendar_event"},
+        "email_event": {"event", "events", "email", "email_event", "plan", "plans"},
+        "action": {"action", "actions", "task", "tasks", "todo", "todos"},
+        "subscription": {"subscription", "subscriptions", "charge", "charges", "payment", "payments"},
+        "delivery": {"delivery", "deliveries", "package", "packages"},
+    }
+    accepted = aliases.get(token, {token})
+    return any(wanted in accepted or wanted == token for wanted in wanted_types)
+
+
+def _calendar_item_overlaps(item: Dict[str, Any], start_ts: float, end_ts: float) -> bool:
+    item_ts = _as_float(item.get("ts"), 0.0, minimum=0.0)
+    if item_ts <= 0:
+        return False
+    item_end = _as_float(item.get("end_ts"), 0.0, minimum=0.0)
+    if item_end > 0:
+        return item_ts <= end_ts and item_end >= start_ts
+    return start_ts <= item_ts <= end_ts
+
+
+def _calendar_item_common(
+    *,
+    raw: Dict[str, Any],
+    account_id: str,
+    person_id: str,
+    person_name: str,
+    item_type: str,
+    source: str,
+    ts: float,
+    end_ts: float = 0.0,
+    title: str = "",
+    kind: str = "",
+    status: str = "",
+    location: str = "",
+    summary: str = "",
+) -> Dict[str, Any]:
+    return {
+        "id": _text(raw.get("id")) or hashlib.sha1(
+            f"{item_type}|{account_id}|{title}|{ts}".encode("utf-8", errors="ignore")
+        ).hexdigest()[:24],
+        "item_type": item_type,
+        "source": source,
+        "account_id": account_id,
+        "person_id": person_id,
+        "person_name": person_name,
+        "title": title or "Calendar item",
+        "kind": kind or item_type,
+        "status": status,
+        "when": _text(raw.get("starts_at") or raw.get("due_at") or raw.get("next_charge_at") or raw.get("eta_at")) or _iso_from_ts(ts),
+        "ts": ts,
+        "ends_at": _text(raw.get("ends_at")) or _iso_from_ts(end_ts),
+        "end_ts": end_ts,
+        "location": location,
+        "summary": _clean_text_blob(summary, max_chars=420),
+        "calendar_name": _text(raw.get("calendar_name")),
+        "calendar_uid": _text(raw.get("calendar_uid")),
+        "email_id": _text(raw.get("email_id")),
+    }
+
+
+def _personal_calendar_query(args: Dict[str, Any], *, aggregate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = args if isinstance(args, dict) else {}
+    bounds = _calendar_query_bounds(payload)
+    start_ts = _as_float(bounds.get("start_ts"), time.time(), minimum=0.0)
+    end_ts = _as_float(bounds.get("end_ts"), start_ts + (7 * 86400), minimum=0.0)
+    limit = _as_int(payload.get("limit") or payload.get("page_size"), 100, minimum=1, maximum=1000)
+    source_filter = _slug(payload.get("source"), default="all")
+    wanted_types = _split_filter_tokens(payload.get("types") or payload.get("item_types") or payload.get("type"))
+    account_filter = _text(payload.get("account_id"))
+    person_filter = _text(payload.get("person_id"))
+    query_text = _text(payload.get("query") or payload.get("q")).lower()
+    data = aggregate if isinstance(aggregate, dict) else _aggregate_profiles()
+
+    def passes_common(item: Dict[str, Any]) -> bool:
+        if account_filter and _text(item.get("account_id")) != account_filter:
+            return False
+        if person_filter and _text(item.get("person_id")) != person_filter:
+            return False
+        if not _calendar_source_allowed(_text(item.get("source")), source_filter):
+            return False
+        if not _calendar_type_allowed(_text(item.get("item_type")), wanted_types):
+            return False
+        if not _calendar_item_overlaps(item, start_ts, end_ts):
+            return False
+        if query_text:
+            haystack = " ".join(
+                [
+                    _text(item.get("title")),
+                    _text(item.get("kind")),
+                    _text(item.get("status")),
+                    _text(item.get("location")),
+                    _text(item.get("summary")),
+                    _text(item.get("calendar_name")),
+                    _text(item.get("person_name")),
+                ]
+            ).lower()
+            if query_text not in haystack:
+                return False
+        return True
+
+    items: List[Dict[str, Any]] = []
+
+    for row in list(data.get("upcoming_events") or []):
+        if not isinstance(row, dict):
+            continue
+        event_source = _text(row.get("source")) or "email"
+        item_type = "calendar_event" if event_source == "calendar" else "email_event"
+        starts_ts = _as_float(row.get("starts_ts"), _parse_iso_to_ts(row.get("starts_at")), minimum=0.0)
+        ends_ts = _as_float(row.get("ends_ts"), _parse_iso_to_ts(row.get("ends_at")), minimum=0.0)
+        item = _calendar_item_common(
+            raw=row,
+            account_id=_text(row.get("account_id")),
+            person_id=_text(row.get("person_id")),
+            person_name=_text(row.get("person_name")),
+            item_type=item_type,
+            source=event_source,
+            ts=starts_ts,
+            end_ts=ends_ts,
+            title=_text(row.get("title")) or "Upcoming event",
+            kind=_text(row.get("kind")) or "event",
+            status=_text(row.get("status")),
+            location=_text(row.get("location")),
+            summary=_text(row.get("summary")),
+        )
+        if passes_common(item):
+            items.append(item)
+
+    for row in list(data.get("action_items") or []):
+        if not isinstance(row, dict):
+            continue
+        due_ts = _as_float(row.get("due_ts"), _parse_iso_to_ts(row.get("due_at")), minimum=0.0)
+        item = _calendar_item_common(
+            raw=row,
+            account_id=_text(row.get("account_id")),
+            person_id=_text(row.get("person_id")),
+            person_name=_text(row.get("person_name")),
+            item_type="action",
+            source="email",
+            ts=due_ts,
+            title=_text(row.get("title")) or "Action item",
+            kind=_text(row.get("kind")) or "task",
+            status=_text(row.get("status")) or "open",
+            summary=_text(row.get("summary")),
+        )
+        if passes_common(item):
+            items.append(item)
+
+    for row in list(data.get("subscriptions") or []):
+        if not isinstance(row, dict):
+            continue
+        charge_ts = _as_float(row.get("next_charge_ts"), _parse_iso_to_ts(row.get("next_charge_at")), minimum=0.0)
+        merchant = _text(row.get("merchant")) or "Subscription"
+        amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
+        title = f"{merchant} renewal"
+        summary = _text(row.get("plan"))
+        if amount > 0:
+            summary = (summary + " " if summary else "") + f"${amount:.2f}"
+        item = _calendar_item_common(
+            raw=row,
+            account_id=_text(row.get("account_id")),
+            person_id=_text(row.get("person_id")),
+            person_name=_text(row.get("person_name")),
+            item_type="subscription",
+            source="email",
+            ts=charge_ts,
+            title=title,
+            kind=_text(row.get("cadence")) or "subscription",
+            status="upcoming",
+            summary=summary,
+        )
+        item["amount"] = round(amount, 2)
+        item["merchant"] = merchant
+        if passes_common(item):
+            items.append(item)
+
+    for row in list(data.get("deliveries") or []):
+        if not isinstance(row, dict):
+            continue
+        eta_ts = _as_float(row.get("eta_ts"), _parse_iso_to_ts(row.get("eta_at")), minimum=0.0)
+        carrier = _text(row.get("carrier")) or "Delivery"
+        item_name = _text(row.get("item_description"))
+        title = f"{carrier}: {item_name}" if item_name else carrier
+        item = _calendar_item_common(
+            raw=row,
+            account_id=_text(row.get("account_id")),
+            person_id=_text(row.get("person_id")),
+            person_name=_text(row.get("person_name")),
+            item_type="delivery",
+            source="email",
+            ts=eta_ts,
+            title=title,
+            kind="delivery",
+            status=_text(row.get("status")) or "update",
+            summary=_text(row.get("tracking_id") or row.get("order_number")),
+        )
+        if passes_common(item):
+            items.append(item)
+
+    items.sort(key=lambda row: (_as_float(row.get("ts"), 99999999999.0, minimum=0.0), _text(row.get("title")).lower()))
+    items = items[:limit]
+    counts_by_type: Dict[str, int] = {}
+    counts_by_source: Dict[str, int] = {}
+    for item in items:
+        item_type = _text(item.get("item_type")) or "item"
+        source = _text(item.get("source")) or "unknown"
+        counts_by_type[item_type] = counts_by_type.get(item_type, 0) + 1
+        counts_by_source[source] = counts_by_source.get(source, 0) + 1
+
+    return {
+        "ok": True,
+        "range": bounds.get("range"),
+        "date_from": bounds.get("date_from"),
+        "date_to": bounds.get("date_to"),
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "limit": limit,
+        "source": source_filter,
+        "types": wanted_types,
+        "account_id": account_filter,
+        "person_id": person_filter,
+        "query": query_text,
+        "items": items,
+        "item_count": len(items),
+        "counts_by_type": counts_by_type,
+        "counts_by_source": counts_by_source,
+        "summary_for_user": (
+            f"Found {len(items)} calendar item(s) from {bounds.get('date_from')} to {bounds.get('date_to')}."
+        ),
+    }
+
+
+def _calendar_table_rows(items: List[Dict[str, Any]], *, limit: int = 120) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in list(items or [])[: max(1, int(limit))]:
+        item_type = _text(item.get("item_type"))
+        if item_type == "calendar_event":
+            item_type = "calendar"
+        elif item_type == "email_event":
+            item_type = "email event"
+        rows.append(
+            {
+                "when": _text(item.get("when")),
+                "type": item_type or "item",
+                "title": _text(item.get("title")),
+                "source": _text(item.get("source")),
+                "person": _text(item.get("person_name")),
+                "location": _text(item.get("location")),
+                "status": _text(item.get("status")),
+            }
+        )
+    return rows
+
+
 def _history_query_day_bounds(date_value: Any) -> Tuple[float, float]:
     raw = _text(date_value).strip()
     if not raw:
@@ -6921,6 +7915,47 @@ def _tool_personal_spending(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _tool_personal_plans(args: Dict[str, Any]) -> Dict[str, Any]:
     payload = args if isinstance(args, dict) else {}
+    if any(_text(payload.get(key)) for key in ("date", "day", "date_from", "date_to", "range", "period", "span")):
+        query_payload = dict(payload)
+        query_payload["types"] = "event"
+        result = _personal_calendar_query(query_payload)
+        events = []
+        for item in list(result.get("items") or []):
+            if _text(item.get("item_type")) not in {"calendar_event", "email_event"}:
+                continue
+            events.append(
+                {
+                    "account_id": _text(item.get("account_id")),
+                    "title": _text(item.get("title")) or "Upcoming event",
+                    "kind": _text(item.get("kind")) or "event",
+                    "starts_at": _text(item.get("when")),
+                    "starts_ts": _as_float(item.get("ts"), 0.0, minimum=0.0),
+                    "ends_at": _text(item.get("ends_at")),
+                    "ends_ts": _as_float(item.get("end_ts"), 0.0, minimum=0.0),
+                    "location": _text(item.get("location")),
+                    "summary": _text(item.get("summary")),
+                    "source": _text(item.get("source")) or "email",
+                    "calendar_name": _text(item.get("calendar_name")),
+                }
+            )
+        summary_for_user = "No planned events found."
+        if events:
+            preview = "; ".join([f"{_text(row.get('starts_at'))} - {_text(row.get('title'))}" for row in events[:5]])
+            summary_for_user = f"Found {len(events)} planned event(s). {preview}"
+        return {
+            "tool": "personal_plans",
+            "ok": True,
+            "account_id": _text(payload.get("account_id")),
+            "person_id": _text(payload.get("person_id")),
+            "range": result.get("range"),
+            "date_from": result.get("date_from"),
+            "date_to": result.get("date_to"),
+            "limit": _as_int(result.get("limit"), 100, minimum=1, maximum=1000),
+            "events": events,
+            "event_count": len(events),
+            "summary_for_user": summary_for_user,
+        }
+
     account_id = _text(payload.get("account_id"))
     person_id = _text(payload.get("person_id"))
     days = _as_int(payload.get("days"), 60, minimum=0, maximum=3650)
@@ -7281,8 +8316,8 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
         },
         {
             "id": "personal_calendar",
-            "description": "Return upcoming calendar events for the active Person.",
-            "usage": '{"function":"personal_calendar","arguments":{"days":14,"limit":20}}',
+            "description": "Return calendar events from stored email and calendar profile data by upcoming window, day, week, or date range.",
+            "usage": '{"function":"personal_calendar","arguments":{"range":"week","date":"2026-05-20","limit":20}}',
         },
         {
             "id": "personal_subscriptions",
@@ -7733,6 +8768,20 @@ def _account_form_sections(
                 },
             ],
         },
+        {
+            "label": "Diagnostics",
+            "inline": True,
+            "fields": [
+                {
+                    "key": "account_test_target",
+                    "label": "Connection Test",
+                    "type": "select",
+                    "value": "email",
+                    "options": _PERSONAL_ACCOUNT_TEST_OPTIONS,
+                    "description": "Runs without saving, scanning, storing email, or writing calendar events.",
+                },
+            ],
+        },
     ]
 
 
@@ -7754,6 +8803,8 @@ def _personal_add_account_form(people_options: List[Dict[str, str]]) -> Dict[str
         "subtitle": "Create an account row and optionally link it to a master People profile.",
         "save_action": "personal_add_account",
         "save_label": "Add Account",
+        "run_action": "personal_test_account",
+        "run_label": "Run Selected Test",
         "sections": _account_form_sections(default_account, people_options=people_options, mode="add"),
     }
 
@@ -7771,6 +8822,8 @@ def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[st
         "subtitle": f"{_provider_key(account.get('provider'), default='imap')} - {account_id}",
         "save_action": "personal_save_account",
         "save_label": "Save Account",
+        "run_action": "personal_test_account",
+        "run_label": "Run Selected Test",
         "summary_rows": [
             {"label": "Status", "value": f"Linked to {person_name}" if person_id else "Not linked"},
             {"label": "Source", "value": source},
@@ -8003,8 +9056,80 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
     people_rows = _people_person_rows()
     people_options = _people_person_options()
     linked_accounts = _resolve_accounts(settings)
+    calendar_today = _personal_calendar_query({"range": "today", "limit": 100}, aggregate=aggregate)
+    calendar_week = _personal_calendar_query({"range": "week", "limit": 250}, aggregate=aggregate)
+    calendar_today_rows = _calendar_table_rows(list(calendar_today.get("items") or []), limit=100)
+    calendar_week_rows = _calendar_table_rows(list(calendar_week.get("items") or []), limit=160)
+    calendar_week_counts = calendar_week.get("counts_by_type") if isinstance(calendar_week.get("counts_by_type"), dict) else {}
+    calendar_api_examples = "\n".join(
+        [
+            "GET /api/cores/personal/webhook/calendar?range=day&date=2026-05-20",
+            "GET /api/cores/personal/webhook/calendar?range=week&date=2026-05-20",
+            "GET /api/cores/personal/webhook/calendar?date_from=2026-05-20&date_to=2026-05-27",
+            "POST /api/cores/personal/tab-action {\"action\":\"personal_calendar_query\",\"payload\":{\"range\":\"week\",\"date\":\"2026-05-20\"}}",
+        ]
+    )
 
     forms = [
+        {
+            "id": "__personal_calendar__",
+            "title": "Calendar",
+            "group": "calendar_dashboard",
+            "subtitle": "Stored calendar events, email-derived plans, actions, subscriptions, and deliveries.",
+            "summary_rows": [
+                {"label": "Today", "value": str(_as_int(calendar_today.get("item_count"), 0, minimum=0))},
+                {"label": "Next 7 Days", "value": str(_as_int(calendar_week.get("item_count"), 0, minimum=0))},
+                {"label": "Calendar Events", "value": str(_as_int(calendar_week_counts.get("calendar_event"), 0, minimum=0))},
+                {"label": "Email Events", "value": str(_as_int(calendar_week_counts.get("email_event"), 0, minimum=0))},
+                {"label": "Actions", "value": str(_as_int(calendar_week_counts.get("action"), 0, minimum=0))},
+            ],
+            "sections": [
+                {
+                    "label": "Today",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "calendar_today_table",
+                            "label": "Today",
+                            "type": "table",
+                            "columns": _table_columns(
+                                ["when", "type", "title", "source", "person", "location", "status"],
+                                ["When", "Type", "Title", "Source", "Person", "Location", "Status"],
+                            ),
+                            "rows": calendar_today_rows,
+                        }
+                    ],
+                },
+                {
+                    "label": "Next 7 Days",
+                    "inline": True,
+                    "fields": [
+                        {
+                            "key": "calendar_week_table",
+                            "label": "Next 7 Days",
+                            "type": "table",
+                            "columns": _table_columns(
+                                ["when", "type", "title", "source", "person", "location", "status"],
+                                ["When", "Type", "Title", "Source", "Person", "Location", "Status"],
+                            ),
+                            "rows": calendar_week_rows,
+                        }
+                    ],
+                },
+                {
+                    "label": "API",
+                    "fields": [
+                        {
+                            "key": "calendar_api_examples",
+                            "label": "Endpoints",
+                            "type": "textarea",
+                            "value": calendar_api_examples,
+                            "read_only": True,
+                        }
+                    ],
+                },
+            ],
+        },
         {
             "id": "__personal_overview__",
             "title": "Overview + Insights",
@@ -8300,8 +9425,15 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
         "kind": "settings_manager",
         "title": "Personal Core Manager",
         "empty_message": "No personal inbox or calendar data found yet.",
-        "default_tab": "overview",
+        "default_tab": "calendar",
         "manager_tabs": [
+            {
+                "key": "calendar",
+                "label": "Calendar",
+                "source": "items",
+                "item_group": "calendar_dashboard",
+                "empty_message": "No calendar data available.",
+            },
             {
                 "key": "overview",
                 "label": "Overview",
@@ -8781,6 +9913,28 @@ def _notification_test_settings_from_values(
     return settings
 
 
+def handle_core_webhook(
+    *,
+    webhook: str,
+    payload: Dict[str, Any],
+    query: Dict[str, Any],
+    body: str = "",
+    method: str = "GET",
+    redis_client=None,
+    **_kwargs,
+) -> Dict[str, Any]:
+    del body, method, redis_client
+    hook = _slug(webhook, default="")
+    if hook in {"calendar", "calendar_query", "schedule"}:
+        args: Dict[str, Any] = {}
+        if isinstance(query, dict):
+            args.update(query)
+        if isinstance(payload, dict):
+            args.update(payload)
+        return _personal_calendar_query(args)
+    raise KeyError(f"Unknown Personal Core webhook: {webhook}")
+
+
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
     del redis_client
     body = payload if isinstance(payload, dict) else {}
@@ -8817,6 +9971,18 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             confirm_text=_value("confirm_text"),
         )
         return {"ok": True, "message": message}
+
+    if action_name == "personal_calendar_query":
+        query_values = dict(values)
+        for key in ("range", "period", "span", "date", "day", "date_from", "date_to", "source", "types", "account_id", "person_id", "query", "limit"):
+            if key not in query_values and key in body:
+                query_values[key] = body.get(key)
+        result = _personal_calendar_query(query_values)
+        return {
+            "ok": True,
+            "message": _text(result.get("summary_for_user")) or "Calendar query complete.",
+            "data": result,
+        }
 
     if action_name == "personal_save_scan_settings":
         result = _save_personal_scan_settings(values)
@@ -8865,6 +10031,14 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         else:
             message = f"Saved account {_text(result.get('account_id'))} with no People link."
         return {"ok": True, "message": message, "data": result}
+
+    if action_name == "personal_test_account":
+        result = _run_account_test(_account_values())
+        return {
+            "ok": bool(result.get("ok")),
+            "message": _text(result.get("message")) or "Account test finished.",
+            "data": result,
+        }
 
     if action_name == "personal_remove_account":
         result = _remove_personal_account(_account_values())
