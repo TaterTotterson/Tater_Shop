@@ -75,6 +75,7 @@
 | `jackett_search_torrents` | Run Jackett torrent searches with filters and ranked results. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, homekit, matrix, telegram, xbmc |
 | `joke_api` | Fetch one joke from JokeAPI. | webui, macos, voice_core, homeassistant, homekit, discord, telegram, matrix, irc, meshtastic, xbmc |
 | `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
+| `microwakeword` | Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
 | `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, telegram |
 | `moltbook_account_summary` | Moltbook account snapshot with profile link and key counters. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
 | `moltbook_activity_on_posts` | Read /home activity buckets for your posts and summarize engagement. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |

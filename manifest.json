@@ -854,6 +854,36 @@
       "sha256": "b84f203b80cb07a745aaeacc81b58463483bdf222e3e852c52525831475cf99a"
     },
     {
+      "id": "microwakeword",
+      "name": "microWakeWord",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "webui",
+        "macos",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "microWakeWord",
+      "tags": [
+        "homeassistant",
+        "voice_core",
+        "microwakeword",
+        "wake-word"
+      ],
+      "entry": "verba/microwakeword.py",
+      "sha256": "ed2d5a7e4d925c35fb7377675d716b1afc98f4b7039faf93fddb3db5f5bbfe48"
+    },
+    {
       "id": "mister_remote",
       "name": "MiSTer Remote",
       "version": "1.1.9",
