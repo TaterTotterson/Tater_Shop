@@ -856,7 +856,7 @@
     {
       "id": "microwakeword",
       "name": "microWakeWord",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite.",
       "portals": [
@@ -881,7 +881,7 @@
         "wake-word"
       ],
       "entry": "verba/microwakeword.py",
-      "sha256": "ed2d5a7e4d925c35fb7377675d716b1afc98f4b7039faf93fddb3db5f5bbfe48"
+      "sha256": "eab329d75e507c8fea2ce293053f30d60e71585f12aff70c442dbcfe252bd0dd"
     },
     {
       "id": "mister_remote",

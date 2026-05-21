@@ -27,7 +27,7 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
@@ -184,8 +184,37 @@ class MicroWakeWordPlugin(ToolVerba):
         return text
 
     @classmethod
+    def _compact_words(cls, value: Any) -> str:
+        return cls._normalize_words(value).replace(" ", "")
+
+    @classmethod
     def _slugify(cls, value: Any) -> str:
         return cls._normalize_words(value).replace(" ", "_")
+
+    @classmethod
+    def _speech_variant_keys(cls, value: Any) -> set[str]:
+        text = cls._normalize_words(value)
+        if not text:
+            return set()
+
+        keys = {text, text.replace(" ", "")}
+        tokens = text.split()
+        for index, token in enumerate(tokens):
+            variants = {token}
+            if len(token) > 3 and token.endswith("er"):
+                variants.add(token[:-2] + "y")
+            if len(token) > 3 and token.endswith("y"):
+                variants.add(token[:-1] + "er")
+            for variant in variants:
+                if variant == token:
+                    continue
+                changed = list(tokens)
+                changed[index] = variant
+                phrase = " ".join(changed)
+                keys.add(phrase)
+                keys.add(phrase.replace(" ", ""))
+
+        return keys
 
     @classmethod
     def _wake_core_words(cls, value: Any) -> str:
@@ -354,15 +383,25 @@ class MicroWakeWordPlugin(ToolVerba):
         scored: List[Tuple[float, str, dict]] = []
         target_slug = self._slugify(norm_target)
         target_core = self._wake_core_words(norm_target)
+        target_compact = self._compact_words(norm_target)
+        target_keys = self._speech_variant_keys(norm_target)
+        target_core_keys = self._speech_variant_keys(target_core)
         for entry in entries:
             forms = entry.get("_norm_forms") if isinstance(entry.get("_norm_forms"), list) else self._entry_forms(entry)
             best = 0.0
             for form in forms:
                 score = difflib.SequenceMatcher(None, norm_target, form).ratio()
+                form_compact = self._compact_words(form)
+                if target_compact and form_compact:
+                    score = max(score, difflib.SequenceMatcher(None, target_compact, form_compact).ratio())
+                    if target_compact == form_compact:
+                        score += 1.0
                 if norm_target in form or form in norm_target:
                     score += 0.18
                 if self._slugify(form) == target_slug:
                     score += 1.0
+                if target_keys & self._speech_variant_keys(form):
+                    score = max(score, 1.16)
                 target_parts = set(norm_target.split())
                 form_parts = set(form.split())
                 if target_parts and form_parts:
@@ -371,6 +410,14 @@ class MicroWakeWordPlugin(ToolVerba):
                 if target_core and form_core and target_core != norm_target:
                     core_ratio = difflib.SequenceMatcher(None, target_core, form_core).ratio()
                     score = max(score, 0.55 + (0.55 * core_ratio))
+                    compact_core_ratio = difflib.SequenceMatcher(
+                        None,
+                        self._compact_words(target_core),
+                        self._compact_words(form_core),
+                    ).ratio()
+                    score = max(score, 0.55 + (0.55 * compact_core_ratio))
+                    if target_core_keys & self._speech_variant_keys(form_core):
+                        score = max(score, 1.28)
                     prefix_len = self._common_prefix_len(target_core, form_core)
                     if prefix_len:
                         score += min(0.24, 0.08 * prefix_len)
@@ -395,6 +442,7 @@ class MicroWakeWordPlugin(ToolVerba):
     def _exact_match(self, target: str, entries: List[dict]) -> Optional[dict]:
         norm_target = self._normalize_words(target)
         slug_target = self._slugify(target)
+        compact_target = self._compact_words(target)
         if not norm_target and slug_target not in self.RESET_VALUES:
             return None
 
@@ -403,8 +451,12 @@ class MicroWakeWordPlugin(ToolVerba):
                 return entry
             if self._text(entry.get("slug")) == slug_target:
                 return entry
+            if compact_target and self._compact_words(entry.get("slug")) == compact_target:
+                return entry
             forms = entry.get("_norm_forms") if isinstance(entry.get("_norm_forms"), list) else self._entry_forms(entry)
             if norm_target in forms:
+                return entry
+            if compact_target and any(self._compact_words(form) == compact_target for form in forms):
                 return entry
         return None
 
