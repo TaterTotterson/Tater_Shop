@@ -148,10 +148,9 @@ class DiscordAdminSetupPlugin(ToolVerba):
     name = "discord_admin_setup"
     verba_name = "Discord Admin Setup"
     pretty_name = "Discord Admin Setup"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     tags = ["discord", "setup"]
-    fixed_route = "setup"
     platforms = ["discord"]
     routing_keywords = [
         "discord",
@@ -734,10 +733,102 @@ class DiscordAdminSetupPlugin(ToolVerba):
         }
         return cls._sanitize_creative_outline(outline, request_text=request_text)
 
+    @staticmethod
+    def _normalize_admin_route(value: Any) -> str:
+        route = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if route in {"role", "roles", "role_action"}:
+            return "role"
+        if route in {"response_mode", "response", "always_respond", "respond"}:
+            return "response_mode"
+        if route in {"setup", "server_setup", "configure", "configuration"}:
+            return "setup"
+        if route in {"none", "unknown", ""}:
+            return "none"
+        return "none"
+
+    def _infer_admin_route_from_request(self, text: str) -> str:
+        lowered = self._normalized_request_text(text)
+        if not lowered:
+            return "none"
+        response_markers = (
+            "clear always respond",
+            "clear always-response",
+            "clear all always respond",
+            "disable always respond",
+            "disable always respond in this room",
+            "always talk in this room",
+            "always talk here",
+            "always respond here",
+            "reply to every message in this room",
+            "mention only here",
+            "only always respond here",
+            "only this room",
+            "this should be the only",
+            "only respond to ping here",
+            "stop always talking here",
+        )
+        if any(marker in lowered for marker in response_markers):
+            return "response_mode"
+        role_markers = (
+            "list roles",
+            "show roles",
+            "role me",
+            "role yourself",
+            "assign me role",
+            "give me role",
+            "grant me role",
+            "assign yourself",
+            "give yourself",
+            "grant yourself",
+        )
+        if any(marker in lowered for marker in role_markers):
+            return "role"
+        if re.search(r"\b(give|grant|assign|add|remove)\b.*\brole\b", lowered):
+            return "role"
+        setup = self._infer_setup_route_from_request(text)
+        if str(setup.get("route") or "") == "setup":
+            return "setup"
+        return "none"
+
+    async def _ai_pick_admin_route(self, text: str, llm_client) -> str:
+        if llm_client is None:
+            return "none"
+        prompt = (
+            "Choose the top-level route for one Discord admin request. Return strict JSON only.\n"
+            "Allowed routes:\n"
+            "- role: list roles or assign a requested role to the user/bot\n"
+            "- response_mode: change always-respond / mention-only behavior for this channel\n"
+            "- setup: configure, create, rename, style, or organize Discord server structure\n"
+            "- none: not a Discord admin action\n"
+            'Schema: {"route":"role|response_mode|setup|none"}\n\n'
+            f"Request: {text}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": "You output only strict JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=80,
+            )
+            raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
+            blob = extract_json(raw) if raw else None
+            if not blob:
+                return "none"
+            parsed = json.loads(blob)
+            if not isinstance(parsed, dict):
+                return "none"
+            return self._normalize_admin_route(parsed.get("route"))
+        except Exception as exc:
+            logger.warning(f"[discord_admin] route planning failed: {exc}")
+            return "none"
+
     async def _route_request_with_llm(self, text: str, message, llm_client) -> Dict[str, Any]:
         command_text = self._normalize_role_command_text(text, message)
         lowered = self._normalized_request_text(command_text)
-        route = str(getattr(self, "fixed_route", "") or "").strip().lower()
+        route = self._infer_admin_route_from_request(command_text)
+        if route == "none":
+            route = await self._ai_pick_admin_route(command_text, llm_client)
         if route not in {"role", "response_mode", "setup"}:
             route = "none"
 

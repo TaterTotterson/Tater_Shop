@@ -151,6 +151,105 @@ class PremiumizeBasePlugin(ToolVerbaAlias):
             return "all"
         return ""
 
+    def _infer_action_from_query(self, query: str, args: Dict[str, Any]) -> str:
+        data = args or {}
+        for key in ("action", "intent", "command", "operation", "task"):
+            action = self._normalize_action(data.get(key))
+            if action:
+                return action
+
+        text = str(query or "").strip().lower()
+        if not text:
+            return ""
+
+        if any(phrase in text for phrase in ("direct link", "direct links", "stream link", "stream links")):
+            return "get_links"
+        if re.search(r"\b(get|make|create|show|give|fetch)\b.*\b(links?|directdl|stream)\b", text):
+            return "get_links"
+        if re.search(r"\b(links?|directdl|stream)\b.*\b(for|from|to)\b", text):
+            return "get_links"
+
+        if re.search(r"\b(list|show|browse|open|view)\b.*\b(files?|folders?|cloud)\b", text):
+            return "list_files"
+        if re.search(r"\b(files?|folders?)\b.*\b(list|show|browse|open|view)\b", text):
+            return "list_files"
+
+        if self._extract_transfer_id_from_query(query) or re.search(
+            r"\b(check|status|progress|eta|look\s*up|lookup)\b.*\b(transfers?|downloads?)\b",
+            text,
+        ):
+            return "check_transfer"
+
+        if re.search(r"\b(list|show|view)\b.*\b(transfers?|queue|downloads?)\b", text):
+            return "list_transfers"
+        if re.search(r"\b(active|running|queued|finished|completed|failed)\b.*\b(transfers?|queue|downloads?)\b", text):
+            return "list_transfers"
+
+        source = (
+            self._extract_first_source(query)
+            or self._extract_first_local_torrent_path(query)
+            or self._explicit_source_from_args(data)
+            or self._explicit_torrent_path_from_args(data)
+        )
+        if source and re.search(r"\b(add|send|create|start|queue|cache|transfer|download)\b", text):
+            return "add_transfer"
+        if re.search(r"\b(add|send|create|start|queue|cache)\b.*\b(magnet|torrent|premiumize|transfer)\b", text):
+            return "add_transfer"
+
+        return ""
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _ai_pick_intent(self, llm_client, query: str) -> Dict[str, Any]:
+        if not llm_client:
+            return {}
+        prompt = f"""
+You are interpreting one natural-language request for a Premiumize verba.
+Choose the action the user wants and extract only concrete values present in the request.
+
+Allowed actions:
+- add_transfer: add/send/cache a magnet, torrent URL, attached .torrent, or local .torrent path as a transfer
+- list_transfers: list Premiumize transfers or queues
+- check_transfer: check one transfer's status/progress
+- list_files: browse/list Premiumize cloud files or folders
+- get_links: get direct/stream/download links for a cached item or source
+
+Return compact JSON with keys:
+action, status_filter, source, name_query, transfer_id, folder_id, item_id, index, local_torrent_path.
+Use an empty string for unknown fields. Do not invent IDs, URLs, paths, or names.
+
+Request: {query}
+""".strip()
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
+            data = self._json_object_from_text(str(raw or ""))
+            if not isinstance(data, dict):
+                return {}
+            data["action"] = self._normalize_action(data.get("action") or data.get("intent"))
+            data["status_filter"] = self._normalize_status_filter(data.get("status_filter") or data.get("status"))
+            return data
+        except Exception as exc:
+            logger.warning("[premiumize] _ai_pick_intent failed: %s", exc)
+            return {}
+
     def _settings(self) -> Dict[str, Any]:
         raw = redis_client.hgetall("verba_settings:Premiumize") or {}
         api_key = self._safe_text(raw.get("PREMIUMIZE_API_KEY"), "")
@@ -619,28 +718,50 @@ class PremiumizeBasePlugin(ToolVerbaAlias):
         )
 
     async def _resolve_intent(self, query: str, args: Dict[str, Any], llm_client) -> Dict[str, Any]:
-        _ = llm_client
-        action = self._normalize_action(getattr(self, "fixed_action", "")) or self._normalize_action((args or {}).get("action"))
-        status_filter = self._normalize_status_filter((args or {}).get("status_filter")) or self._infer_status_filter_from_query(
-            query
+        data = args or {}
+        action = self._infer_action_from_query(query, data)
+        ai_payload: Dict[str, Any] = {}
+        if not action:
+            ai_payload = await self._ai_pick_intent(llm_client, query)
+            action = self._normalize_action(ai_payload.get("action"))
+
+        status_filter = (
+            self._normalize_status_filter(data.get("status_filter"))
+            or self._normalize_status_filter(ai_payload.get("status_filter"))
+            or self._infer_status_filter_from_query(query)
         )
 
         source = self._extract_first_source(query)
         if not source:
-            source = self._safe_text((args or {}).get("source"))
+            source = self._safe_text(data.get("source")) or self._safe_text(ai_payload.get("source"))
             source = self._extract_first_source(source) or source
 
         source_type = self._source_type(source) if source else ""
         local_torrent_path = self._extract_first_local_torrent_path(query)
         if not local_torrent_path:
-            local_torrent_path = self._explicit_torrent_path_from_args(args or {})
-        name_query = self._safe_text((args or {}).get("name_query"))
-        transfer_id = self._safe_text((args or {}).get("transfer_id")) or self._extract_transfer_id_from_query(query)
-        folder_id = self._safe_text((args or {}).get("folder_id"))
-        item_id = self._safe_text((args or {}).get("item_id")) or self._extract_item_id_from_query(query)
-        index = self._clamp_int((args or {}).get("index"), 0, 500, self._extract_index_from_query(query))
+            local_torrent_path = self._explicit_torrent_path_from_args(data) or self._safe_text(ai_payload.get("local_torrent_path"))
+        name_query = (
+            self._safe_text(data.get("name_query"))
+            or self._safe_text(ai_payload.get("name_query"))
+            or self._safe_text(ai_payload.get("name"))
+        )
+        transfer_id = (
+            self._safe_text(data.get("transfer_id"))
+            or self._safe_text(ai_payload.get("transfer_id"))
+            or self._extract_transfer_id_from_query(query)
+        )
+        folder_id = self._safe_text(data.get("folder_id")) or self._safe_text(ai_payload.get("folder_id"))
+        item_id = (
+            self._safe_text(data.get("item_id"))
+            or self._safe_text(ai_payload.get("item_id"))
+            or self._extract_item_id_from_query(query)
+        )
+        inferred_index = self._extract_index_from_query(query)
+        if not inferred_index:
+            inferred_index = self._clamp_int(ai_payload.get("index"), 0, 500, 0)
+        index = self._clamp_int(data.get("index"), 0, 500, inferred_index)
 
-        explicit_source = self._explicit_source_from_args(args or {})
+        explicit_source = self._explicit_source_from_args(data)
         if explicit_source and not source:
             source = explicit_source
             source_type = self._source_type(source)
@@ -1917,13 +2038,12 @@ class PremiumizeBasePlugin(ToolVerbaAlias):
 class PremiumizeCheckTransferPlugin(PremiumizeBasePlugin):
     name = "premiumize_check_transfer"
     verba_name = "Premiumize Check Transfer"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     pretty_name = "Premiumize Check Transfer"
     settings_category = "Premiumize"
     platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
     tags = ["premiumize", "check_transfer"]
-    fixed_action = "check_transfer"
     usage = '{"function":"premiumize_check_transfer","arguments":{"query":"check progress for transfer 2"}}'
     description = "Check progress/status for one Premiumize transfer."
     verba_dec = "Inspect a Premiumize transfer and report status, progress, and related files."

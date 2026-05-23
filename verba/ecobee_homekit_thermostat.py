@@ -37,7 +37,7 @@ def _coerce_text(value: Any) -> str:
 class EcobeeHomeKitThermostatPlugin(ToolVerba):
     name = "ecobee_homekit_thermostat"
     verba_name = "Ecobee HomeKit Thermostat"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     pretty_name = "Ecobee HomeKit Thermostat"
     settings_category = "Ecobee (HomeKit)"
@@ -160,14 +160,20 @@ class EcobeeHomeKitThermostatPlugin(ToolVerba):
                 candidates.append(number)
         return candidates[-1] if candidates else None
 
-    def _normalize_action(self, args: Dict[str, Any], query: str) -> str:
-        explicit = self._coerce_text(args.get("action")).lower()
+    def _normalize_action_value(self, value: Any) -> str:
+        explicit = self._coerce_text(value).lower().replace("-", "_").replace(" ", "_")
         if explicit in {"status", "state", "get_state", "check"}:
             return "status"
         if explicit in {"set_temperature", "temperature", "set_temp", "setpoint"}:
             return "set_temperature"
         if explicit in {"set_hvac_mode", "mode", "hvac_mode", "turn_off", "turn_on"}:
             return "set_hvac_mode"
+        return ""
+
+    def _normalize_action(self, args: Dict[str, Any], query: str) -> str:
+        explicit = self._normalize_action_value(args.get("action"))
+        if explicit:
+            return explicit
 
         has_temp = self._temperature_value(args, query) is not None
         has_mode = bool(self._normalize_mode(args.get("mode") or args.get("hvac_mode"), query))
@@ -178,7 +184,61 @@ class EcobeeHomeKitThermostatPlugin(ToolVerba):
             return "set_hvac_mode"
         if has_temp:
             return "set_temperature"
-        return "status"
+        if re.search(r"\b(status|state|current|check|what|what's|whats|is|reading|set to)\b", text):
+            return "status"
+        return ""
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        clean = str(text or "").strip()
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.I)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+        try:
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", clean, flags=re.S)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    async def _ai_pick_action(self, llm_client, query: str) -> Dict[str, Any]:
+        if not llm_client:
+            return {}
+        text = self._coerce_text(query)
+        if not text:
+            return {}
+        prompt = (
+            "Choose the best Ecobee HomeKit thermostat action for the user request.\n"
+            "Allowed actions: status, set_temperature, set_hvac_mode.\n"
+            "Rules:\n"
+            "1) Use status for questions about current temperature, setpoint, HVAC state, or mode.\n"
+            "2) Use set_temperature when the user wants a numeric setpoint.\n"
+            "3) Use set_hvac_mode when the user wants off, heat, cool, auto, or heat_cool mode.\n"
+            "4) Include temperature, mode, and target when clearly present.\n"
+            "Respond with JSON: "
+            '{"action":"<allowed action or empty string>","temperature":"<number or empty string>","mode":"<off|heat|cool|auto|heat_cool or empty string>","target":"<thermostat target or empty string>"}'
+            "\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = ((resp or {}).get("message") or {}).get("content", "")
+            data = self._json_object_from_text(raw)
+            return {
+                "action": self._normalize_action_value(data.get("action")),
+                "temperature": self._coerce_text(data.get("temperature")),
+                "mode": self._normalize_mode(data.get("mode")),
+                "target": self._coerce_text(data.get("target")),
+            }
+        except Exception as exc:
+            logger.warning("[%s] _ai_pick_action failed: %s", self.name, exc)
+            return {}
 
     def _target_text(self, args: Dict[str, Any], query: str) -> str:
         target = self._coerce_text(args.get("target") or args.get("thermostat") or args.get("thermostat_name"))
@@ -265,6 +325,26 @@ class EcobeeHomeKitThermostatPlugin(ToolVerba):
         payload = self._normalize_handler_args(args)
         query = self._coerce_text(payload.get("query") or payload.get("text") or payload.get("prompt"))
         action = self._normalize_action(payload, query)
+        if not action:
+            ai_payload = await self._ai_pick_action(llm_client, query)
+            action = self._normalize_action_value(ai_payload.get("action"))
+            if ai_payload.get("temperature") and not any(
+                key in payload for key in ("temperature", "target_temperature", "setpoint", "target")
+            ):
+                payload["temperature"] = ai_payload.get("temperature")
+            if ai_payload.get("mode") and not any(payload.get(key) for key in ("mode", "hvac_mode")):
+                payload["mode"] = ai_payload.get("mode")
+            if ai_payload.get("target") and not any(
+                self._coerce_text(payload.get(key)) for key in ("target", "thermostat", "thermostat_name")
+            ):
+                payload["target"] = ai_payload.get("target")
+        if not action:
+            return action_failure(
+                code="unknown_action",
+                message="I couldn't determine the Ecobee HomeKit action from that request.",
+                needs=["Ask for Ecobee status, a target temperature, or mode off/heat/cool/auto."],
+                say_hint="Ask the user to restate the Ecobee request in one short sentence.",
+            )
 
         try:
             thermostats = list_homekit_thermostats()

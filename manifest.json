@@ -4,7 +4,7 @@
     {
       "id": "aladdin_connect",
       "name": "Aladdin Connect",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Control Aladdin Connect garage doors.",
       "portals": [
@@ -29,7 +29,7 @@
         "garage-door"
       ],
       "entry": "verba/aladdin_connect.py",
-      "sha256": "290d7ab6e3c377bacb775ed7d1fd1f862761c914d3fdb40b034409a6d32e1010"
+      "sha256": "3f69e92b0a2473ca1d2eb7c35a77fa78431fb70b067f7fc28a5428b77bc4e07e"
     },
     {
       "id": "automatic_plugin",
@@ -184,7 +184,7 @@
     {
       "id": "discord_admin_response_mode",
       "name": "Discord Admin Response Mode",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Toggle always-respond mode for the current Discord channel only.",
       "portals": [
@@ -197,12 +197,12 @@
         "response_mode"
       ],
       "entry": "verba/discord_admin_response_mode.py",
-      "sha256": "d78b918e8328cee8c4373b3787f1d492c348d3e1d954a9b18baeb7e30289f319"
+      "sha256": "110db3bba4ec21fb157386417d18806bcc7126e47447dbdc9516e5d30b320bb4"
     },
     {
       "id": "discord_admin_roles",
       "name": "Discord Admin Roles",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Discord role listing and role assignment commands.",
       "portals": [
@@ -215,12 +215,12 @@
         "roles"
       ],
       "entry": "verba/discord_admin_roles.py",
-      "sha256": "6dbc3cf1198b9facf31628e2b6d5890f1633ccea2f3e51ce1725cdfb4eaa6481"
+      "sha256": "58e49b6e6a541d9be34bf0415a91aec50ec97d75b827407723640d4ca266e96e"
     },
     {
       "id": "discord_admin_setup",
       "name": "Discord Admin Setup",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Discord server setup and structural admin changes.",
       "portals": [
@@ -233,12 +233,12 @@
         "setup"
       ],
       "entry": "verba/discord_admin_setup.py",
-      "sha256": "eaa08b7bcf59b933f3a67d487201abd1f7ad709580cf8782c9f0a91bc4a37aad"
+      "sha256": "e69b4e0f296dfc719b45f0ce63a2f9672e3735ae5e6298d2c6019be1d0cd38d1"
     },
     {
       "id": "ecobee_homekit_thermostat",
       "name": "Ecobee HomeKit Thermostat",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Control Ecobee thermostats through HomeKit pairing.",
       "portals": [
@@ -263,7 +263,7 @@
         "climate"
       ],
       "entry": "verba/ecobee_homekit_thermostat.py",
-      "sha256": "d538d9043c1609606d0acf81ab4f8f2aa0f01093a8f0c0760c799282102a327c"
+      "sha256": "79110b56f368512143ca7aef643b18b894aa77208c6432972b3df53d86fdb9ca"
     },
     {
       "id": "find_my_phone",
@@ -759,7 +759,7 @@
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
@@ -782,12 +782,12 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "127e80b6a6c3f8ee9b9ea4abf0bb602fe60b124fe36145d8214e12ff1d85e4fa"
+      "sha256": "d18c00d08859127eca48738df5acef3d201ee13efbce9e4005c31a4ee649084c"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -810,7 +810,7 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "ee26006019ff7932c5063a6208e0d8ee060cb38fd2e2733055bd583755c9459a"
+      "sha256": "3d424293d9b90b7a0ca66931869423f4daf4449bdabd173ddeabca91503d1086"
     },
     {
       "id": "joke_api",
@@ -856,7 +856,7 @@
     {
       "id": "microwakeword",
       "name": "microWakeWord",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite.",
       "portals": [
@@ -879,7 +879,7 @@
         "wake-word"
       ],
       "entry": "verba/microwakeword.py",
-      "sha256": "a827690a1b67f9f7ce8fa6761fe607a3c7623aa7cd86df7bec3a84eb0372e392"
+      "sha256": "c2106daabb980b44abbea5d1a3b7c96d2d092104c3efff0fab56677e2df53af3"
     },
     {
       "id": "mister_remote",
@@ -908,7 +908,7 @@
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Moltbook account snapshot with profile link and key counters.",
       "portals": [
@@ -931,12 +931,12 @@
         "account_summary"
       ],
       "entry": "verba/moltbook_account_summary.py",
-      "sha256": "a170c09fd0d8e818ecd35a36948551f75d614bd5599964ce0d1cf4c5ecd7c3a7"
+      "sha256": "c146d25de98259ad81b9a0597615d667e216704f5d0938a7e322f506c90127a6"
     },
     {
       "id": "moltbook_activity_on_posts",
       "name": "Moltbook Activity On Posts",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Read /home activity buckets for your posts and summarize engagement.",
       "portals": [
@@ -959,12 +959,12 @@
         "activity_on_my_posts"
       ],
       "entry": "verba/moltbook_activity_on_posts.py",
-      "sha256": "ca5f339ba173ad2cc2a21da5e8c868b2c76c05abae262065d70b07c3909cd658"
+      "sha256": "df31ba6e4c7d027943172cd558d2cb68dcbbaf620cbcf2cb0b25278227f0082b"
     },
     {
       "id": "moltbook_agent_profile",
       "name": "Moltbook Agent Profile",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Lookup target Moltbook agent profile details.",
       "portals": [
@@ -987,12 +987,12 @@
         "agent_profile"
       ],
       "entry": "verba/moltbook_agent_profile.py",
-      "sha256": "dc2e8185e39a0c3bc29d80073a7701a17c8ea96eb0679f3cd03e879d3a3ecb93"
+      "sha256": "e8ade717366a03ad84b7e3489da4b5816a9807fdee77d88cf2a5a03e19ca1923"
     },
     {
       "id": "moltbook_fellow_taters",
       "name": "Moltbook Fellow Taters",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Show tracked fellow Tater Moltbook agents.",
       "portals": [
@@ -1015,12 +1015,12 @@
         "fellow_taters"
       ],
       "entry": "verba/moltbook_fellow_taters.py",
-      "sha256": "b053e94fc627ad5c4c7fc10f3438b9636598a0438df095cfeaf56b6bd8487797"
+      "sha256": "4f46d88fcd14972065b6441c042e1b75ed63f994be2d1ec0e4e53b54f466cf91"
     },
     {
       "id": "moltbook_following",
       "name": "Moltbook Following",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "List known followed agents and active authors from following feed.",
       "portals": [
@@ -1043,12 +1043,12 @@
         "following"
       ],
       "entry": "verba/moltbook_following.py",
-      "sha256": "69698dfa326f238d14d4b0b0ab4c586c52740d92fcc23457e3f940b186bc8c7c"
+      "sha256": "c11247c7920f35f0ab662b0d0567aa2d7f4ade0b8745637fe7ca26fd0c0348c0"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Moltbook /home dashboard overview with unread/activity counters.",
       "portals": [
@@ -1071,12 +1071,12 @@
         "home_overview"
       ],
       "entry": "verba/moltbook_home_overview.py",
-      "sha256": "1542a2a82407c5492ec32e29ca42f101fce33fb7e4465c8659972a39a5bbbd52"
+      "sha256": "62a53ae11c37e374456c330c0d8fc2b704a9d4f17b3f2de42c286ade00123b88"
     },
     {
       "id": "moltbook_latest_announcement",
       "name": "Moltbook Latest Announcement",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Get the newest Moltbook announcement/news entry.",
       "portals": [
@@ -1099,12 +1099,12 @@
         "latest_announcement"
       ],
       "entry": "verba/moltbook_latest_announcement.py",
-      "sha256": "de2dba631378e22b1fb396a01d1c5fbb39e33e3468219d9913dbbc15aadebf55"
+      "sha256": "c27e397bd0c750c2c8917bc24555b46b9bbce2c331cf54965c7c44ab6b5267d9"
     },
     {
       "id": "moltbook_latest_posts",
       "name": "Moltbook Latest Posts",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Fetch latest posts authored by this Moltbook agent.",
       "portals": [
@@ -1127,12 +1127,12 @@
         "latest_posts"
       ],
       "entry": "verba/moltbook_latest_posts.py",
-      "sha256": "8b5c8dcfa2791812bc1a0026534ad463e7fc1c26165acec59b3efe47d774a40a"
+      "sha256": "847661a67945291557ce8702820095c6cf5d92716058a32d8bc6fa998dd53766"
     },
     {
       "id": "moltbook_monitoring_submolts",
       "name": "Moltbook Monitoring Submolts",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Read Moltbook portal settings for submolts to monitor/prefer/avoid.",
       "portals": [
@@ -1155,12 +1155,12 @@
         "monitoring_submolts"
       ],
       "entry": "verba/moltbook_monitoring_submolts.py",
-      "sha256": "5765a039c55d49a5e0836d9f4a238d028049168c7bb2f57fa9ab6cd6363bd52f"
+      "sha256": "95b4079ace2b0d6609bfd0d82f86b8bf94660926a1b4da6d7a9f6ba8f24488e6"
     },
     {
       "id": "moltbook_profile_link",
       "name": "Moltbook Profile Link",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Get the current Moltbook profile URL.",
       "portals": [
@@ -1183,12 +1183,12 @@
         "profile_link"
       ],
       "entry": "verba/moltbook_profile_link.py",
-      "sha256": "ed8cf4ddd5cbdb8cbae2ea71277f66569500af6b98bdeb9cdca16a9caae89563"
+      "sha256": "b0d20ce64fde8586dd1f335fba1e2e145f1ce30db059b990c0ca0778365888f5"
     },
     {
       "id": "moltbook_subscriptions",
       "name": "Moltbook Subscriptions",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Show subscribed submolts from Moltbook portal state.",
       "portals": [
@@ -1211,7 +1211,7 @@
         "subscriptions"
       ],
       "entry": "verba/moltbook_subscriptions.py",
-      "sha256": "1808edd4422fb209f1882c47ca98bf91305ff26c31163f4e39a3e323fefadbef"
+      "sha256": "19d37e0e4dfd60d3cad76366a28a70c65622093d690d2ef4c3cfbc51c75af630"
     },
     {
       "id": "music_assistant",
@@ -1345,7 +1345,7 @@
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1364,12 +1364,12 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "3359c2115395afdbfc8ba7fb295c02172753c92f38b00fb2a639d54dd4cb0234"
+      "sha256": "df5587ad92f9edf481f3e51d18e31b7ed93e836ea14e65b64be19a53822694c1"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
@@ -1388,12 +1388,12 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "8cc8491a408ecd1eac58518981a76a7bf14136554549a474ea1629b212f6c796"
+      "sha256": "12b9708e2c9fdbc0d849000e1f00179b8a10bb6669fce9d9c8a74d4681529a02"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1412,12 +1412,12 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "5d3539e4d395877751b8e20904ebda78fa4b98c7c3c6e8340351ca65ae3235d4"
+      "sha256": "7be30add10a8f3aa5a44d02a133b5c79c13f91e891860081f883b213f84ae782"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
@@ -1436,12 +1436,12 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "4c5d67a654eca1c6a8386e46ead5c398f5a3e5200b0c0e0cfe93fc587f977191"
+      "sha256": "44d41c4ce1d4f30e52807da58d737a9eede3e14187ce1de127dd725c29095ecd"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
@@ -1460,7 +1460,7 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "7c236ab35cc4cbc1862199b7a148cd4f5823f2dc3f81e508d5b1ea4a5d08472d"
+      "sha256": "36411c1a21a35d0c384eb9ed69c2612789cd96a4de3935df4a0dcbecadced790"
     },
     {
       "id": "sftpgo_account",
@@ -1528,7 +1528,7 @@
     {
       "id": "unifi_network_clients",
       "name": "UniFi Network Clients",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "List UniFi clients with wired/wireless counts and client details.",
       "portals": [
@@ -1551,12 +1551,12 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "8aac04c58eb310605d70874f87dd812d26ecc08fcc08ab5cb3352afa081d171c"
+      "sha256": "9c7720679d5ad358080121df60f41c5f19c40e90c00f38f458bc03be4fe138cb"
     },
     {
       "id": "unifi_network_devices",
       "name": "UniFi Network Devices",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "List UniFi devices with online/offline status and core details.",
       "portals": [
@@ -1579,12 +1579,12 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "ca87c08f08d317cb3de24bc7d5ecfc78b7162b70239be09347ec24421d0f485e"
+      "sha256": "cf6e91f140a3f30530e2fc0b2f29ba287aaf3db634fab85d863e397a8f11dccd"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
@@ -1607,12 +1607,12 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "a2b628268d773c7fe66c7e87f2b6e6e68f2bd2c18cdeaf891701199ff080cb9d"
+      "sha256": "e128acf8ea054134941b99ef687101de4b67fe7d89415cfb52d4e35ef4ddc32c"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
@@ -1635,12 +1635,12 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "296fd1c0a740909804edfb80283b3b6f1e51035aad875f95c087407a3c961e17"
+      "sha256": "1aeeff24ebe2bb92a0bbc18ef3a4405656ae9c291c47944bc9303568590b5e3e"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
@@ -1663,12 +1663,12 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "3c9827f7ea2f2afe6fe8e372b7412ea4538cd5d3800021194435de73e21d4a6b"
+      "sha256": "0796fc05e710544eb437cb1c285f3ff92200361b8be66c0664315a105b662ac6"
     },
     {
       "id": "unifi_protect_camera",
       "name": "UniFi Protect Camera",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Describe a single UniFi Protect camera snapshot.",
       "portals": [
@@ -1691,12 +1691,12 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "b34637406dc6c3888429c66e40d970acc367b426a6df340b79743ca3c24c8b62"
+      "sha256": "b98fbc2c9c6f4e7b55fe6c2a9c65ffbae6f1ec004b049c25168d6d085a16654c"
     },
     {
       "id": "unifi_protect_camera_info",
       "name": "UniFi Protect Camera Info",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "List UniFi Protect cameras.",
       "portals": [
@@ -1719,12 +1719,12 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "83a4ef0b07c80c02d86e86e79e25815c0a5e707295d36e7e080d7751671661c2"
+      "sha256": "1b3d78ccd4b621f76721d8bba1ab305bad6c80f21b5c7e86dba94078da198e7f"
     },
     {
       "id": "unifi_protect_sensors",
       "name": "UniFi Protect Sensors",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Check UniFi Protect sensor status and single-sensor detail.",
       "portals": [
@@ -1747,7 +1747,7 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "534fb8101d5bbf46271ee324e62c2aee857634313b3f6f1146bb2d5cfaa7df0e"
+      "sha256": "297fd547d99cbc0257bed0e6afad4f0139b6b287648843fec1a5282526417902"
     },
     {
       "id": "voicepe_remote_timer",

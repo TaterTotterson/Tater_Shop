@@ -1,5 +1,6 @@
 # verba/unifi_protect_camera_info.py
 import asyncio
+import json
 import logging
 import os
 import re
@@ -185,7 +186,7 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
 
     name = 'unifi_protect_camera_info'
     verba_name = 'UniFi Protect Camera Info'
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Camera Info'
     settings_category = "UniFi Protect"
@@ -193,7 +194,6 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
 
     platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     routing_keywords = ['unifi protect', 'protect', 'camera', 'cameras', 'list cameras', 'show cameras']
-    fixed_action = 'list_cameras'
 
     usage = '{"function":"unifi_protect_camera_info","arguments":{"query":"list my cameras"}}'
 
@@ -212,6 +212,123 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
     )
 
     required_settings = {}
+
+    _ALLOWED_ACTIONS = {"sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"}
+    _ACTION_ALIASES = {
+        "sensors": "sensors_status",
+        "sensor_status": "sensors_status",
+        "sensor_statuses": "sensors_status",
+        "sensor": "sensor_detail",
+        "camera": "describe_camera",
+        "snapshot": "describe_camera",
+        "camera_snapshot": "describe_camera",
+        "area": "describe_area",
+        "area_snapshot": "describe_area",
+        "cameras": "list_cameras",
+        "camera_list": "list_cameras",
+        "list_camera": "list_cameras",
+    }
+
+    def _normalize_action(self, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        key = re.sub(r"[^a-z0-9_]+", "_", text).strip("_")
+        if not key:
+            return ""
+        if key in self._ALLOWED_ACTIONS:
+            return key
+        return self._ACTION_ALIASES.get(key, "")
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> dict:
+        clean = _strip_code_fences(str(text or ""))
+        try:
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", clean, flags=re.S)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _infer_action(self, args: dict, query: str, target: str) -> Tuple[str, str]:
+        args = args or {}
+        for key in ("action", "intent", "command"):
+            raw = str(args.get(key) or "").strip()
+            if not raw:
+                continue
+            split_action, split_target = _split_action_and_target(raw)
+            action = self._normalize_action(split_action)
+            if action:
+                return action, split_target or target
+
+        if args.get("area") or args.get("area_name"):
+            return "describe_area", target
+        if args.get("camera") or args.get("camera_name"):
+            return "describe_camera", target
+        if args.get("sensor") or args.get("sensor_name"):
+            return "sensor_detail", target
+
+        guessed = self._normalize_action(_guess_action_from_text(query, target))
+        if guessed:
+            return guessed, target
+        return "", target
+
+    async def _ai_pick_action(self, llm_client, query: str, target: str) -> dict:
+        if not llm_client:
+            return {}
+        text = str(query or "").strip()
+        target_text = str(target or "").strip()
+        if not text and not target_text:
+            return {}
+        allowed = ", ".join(sorted(self._ALLOWED_ACTIONS))
+        prompt = (
+            "Choose the best UniFi Protect action for the user request.\n"
+            f"Allowed actions: {allowed}.\n"
+            "Rules:\n"
+            "1) Use list_cameras for requests to list or show available cameras.\n"
+            "2) Use describe_camera for one named camera, doorbell, snapshot, or camera view.\n"
+            "3) Use describe_area for areas such as front yard, back yard, porch, driveway, patio, or garage area.\n"
+            "4) Use sensors_status for overall door/window sensor status, low battery, temperature, or humidity questions.\n"
+            "5) Use sensor_detail for one named sensor or a specific door/window sensor question.\n"
+            "6) Include target for describe_camera, describe_area, or sensor_detail when the request names one.\n"
+            "Respond with JSON: "
+            '{"action":"<allowed action or empty string>","target":"<camera area or sensor target or empty string>"}'
+            "\n\n"
+            f'User request: "{text}"\n'
+            f'Existing target hint: "{target_text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = ((resp or {}).get("message") or {}).get("content", "")
+            data = self._json_object_from_text(raw)
+            return {
+                "action": self._normalize_action(data.get("action")),
+                "target": str(data.get("target") or "").strip(),
+            }
+        except Exception as e:
+            logger.warning("[%s] _ai_pick_action failed: %s", self.name, e)
+            return {}
+
+    async def _resolve_action(self, args: dict, query: str, target: str, llm_client) -> Tuple[str, str]:
+        action, resolved_target = self._infer_action(args, query, target)
+        ai_payload: dict = {}
+        if not action:
+            ai_payload = await self._ai_pick_action(llm_client, query, target)
+            action = self._normalize_action(ai_payload.get("action"))
+            resolved_target = resolved_target or str(ai_payload.get("target") or "").strip()
+        if not action:
+            raise ValueError("Could not determine a UniFi Protect action from the request.")
+        if action not in self._ALLOWED_ACTIONS:
+            raise ValueError(f"Invalid UniFi Protect action: {action}")
+        resolved_target = resolved_target or str(ai_payload.get("target") or "").strip()
+        if action == "sensors_status" and resolved_target:
+            action = "sensor_detail"
+        return action, resolved_target
 
     # ----------------------------
     # Settings / client
@@ -604,20 +721,26 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
         if not query:
             query = _extract_context_text(context)
 
-        allowed_actions = {"sensors_status", "sensor_detail", "list_cameras", "describe_camera", "describe_area"}
-        action = str(getattr(self, "fixed_action", "") or "").strip().lower()
-        if action not in allowed_actions:
+        if not query and target:
+            query = target
+
+        if not query and not target:
             return action_failure(
-                code="invalid_action",
-                message="This UniFi Protect verba is not configured with a valid fixed action.",
-                say_hint="Explain that this tool has an invalid fixed action and needs a configuration fix.",
+                code="missing_query",
+                message="Please provide a UniFi Protect request in `query`.",
+                needs=["Ask for sensors status, camera list, a camera description, or an area description."],
+                say_hint="Ask what UniFi Protect information the user wants.",
             )
 
-        if not query:
-            query = f"{action} {target}".strip()
-
-        if action == "sensors_status" and target:
-            action = "sensor_detail"
+        try:
+            action, target = await self._resolve_action(args, query, target, llm_client)
+        except Exception as e:
+            return action_failure(
+                code="unknown_action",
+                message=f"I couldn't determine the UniFi Protect action from that request: {e}",
+                needs=["Ask for sensors status, camera list, a camera description, or an area description."],
+                say_hint="Ask the user to restate the UniFi Protect request in one short sentence.",
+            )
 
         # ---- Sensors status / detail
         if action in ("sensors_status", "sensor_detail"):
@@ -857,7 +980,7 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
                 say_hint="Summarize area snapshots and notable activity from the provided facts.",
             )
 
-        # fallback
+        # Unknown action
         return action_failure(
             code="invalid_action",
             message="I couldn't figure out what to do with that request.",

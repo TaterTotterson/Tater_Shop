@@ -9,7 +9,7 @@
   <a href="https://taterassistant.com">taterassistant.com</a>
 </h3>
 
-Tater Shop is the modular source repo for Tater verbas, portals, and cores. Tater reads the generated manifests in this repo and downloads only the selected modules into the local runtime.
+Tater Shop is the modular source repo for Tater verbas, portals, and cores. Tater reads the generated manifests in this repo and downloads selected modules into the local runtime.
 
 The manifests are the source of the store inventory:
 
@@ -138,23 +138,26 @@ The manifest generator reads class attributes from the first `ToolVerba` subclas
 - `required_settings`: settings fields for the UI.
 - `tags`: optional store and routing tags.
 
-Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the request payload natural-language: prefer one field such as `query` or `request` containing what the user asked, for example `{"function":"example_lookup","arguments":{"query":"check the example status"}}`. Hydra should learn when to route to the verba and what argument shape to pass; the verba should parse, normalize, validate, and ask for missing details inside its own handler.
+Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the main request payload natural-language: prefer one field such as `query` or `request` containing what the user asked. The metadata and examples teach the routing model when to choose the verba and what argument shape to pass; the verba still owns the domain-specific interpretation after it receives that natural-language request.
 
-Treat Hydra's AI routing pass as a router, not as the plugin's domain interpreter. If a verba needs structured intent, make a second AI interpretation call inside the verba after routing, then validate the result against settings, known entities, and API constraints. See `verba/ha_lights.py` for a full example of this pattern:
+For flexible verbas, follow the `verba/mister_remote.py` pattern: accept one user request in `query`, extract the utterance, try a small deterministic command match, then use an internal `llm_client` call to choose from a constrained set of actions when code alone is not enough. After that, validate the result, resolve settings and known entities, fetch or act on real API data, and dispatch to the real action. Launch requests in MiSTer continue the same pattern with constrained helpers: normalize the title, choose a system from known MiSTer systems, and choose a game from actual search results.
 
 ```python
-usage = '{"function":"ha_lights","arguments":{"query":"turn off office lights"}}'
+usage = '{"function":"mister_remote","arguments":{"query":"play super mario world on snes"}}'
 
 async def _handle(self, args, llm_client):
-    query = self._coerce_text(args.get("query"))
-    if not query:
+    utterance = self._extract_utterance(args)
+    if not utterance:
         return action_failure(...)
 
-    intent = await self._interpret_query(query, llm_client)
-    if not intent:
+    command = self._infer_command_from_utterance(utterance)
+    if not command:
+        command = await self._ai_pick_command(llm_client, utterance)
+
+    if command not in {"play", "now_playing", "go_to_menu", "screenshot_take"}:
         return action_failure(...)
 
-    # Validate intent, resolve entities/settings, then execute the action.
+    # Validate settings/entities, resolve any API data needed, then execute.
 ```
 
 Handlers are platform-specific. Keep one private `_handle()` method when possible and let platform handlers normalize into it. Return `action_success(...)` or `action_failure(...)` so every portal can narrate results consistently.

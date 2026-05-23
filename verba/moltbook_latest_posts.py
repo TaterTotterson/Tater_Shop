@@ -157,12 +157,11 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookLatestPostsPlugin(ToolVerba):
     name = "moltbook_latest_posts"
     verba_name = "Moltbook Latest Posts"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Moltbook Latest Posts"
     settings_category = "Moltbook Info"
     tags = ['moltbook', 'latest_posts']
-    fixed_route = "latest_posts"
     platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     usage = (
@@ -368,13 +367,144 @@ class MoltbookLatestPostsPlugin(ToolVerba):
             return _decode_text(match.group(1)).strip().lower()
         return ""
 
-    def _resolve_route(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_route(value: Any) -> str:
+        text = _decode_text(value).strip().lower()
+        text = re.sub(r"[\s\-]+", "_", text)
+        aliases = {
+            "posts": "latest_posts",
+            "latest": "latest_posts",
+            "latest_self_posts": "latest_posts",
+            "recent_posts": "latest_posts",
+            "followed": "following",
+            "follows": "following",
+            "profile": "agent_profile",
+            "profile_url": "profile_link",
+            "url": "profile_link",
+            "link": "profile_link",
+            "account": "account_summary",
+            "summary": "account_summary",
+            "home": "home_overview",
+            "overview": "home_overview",
+            "announcement": "latest_announcement",
+            "announcements": "latest_announcement",
+            "activity": "activity_on_my_posts",
+            "post_activity": "activity_on_my_posts",
+            "submolts": "subscriptions",
+            "subscribed_submolts": "subscriptions",
+            "monitoring": "monitoring_submolts",
+            "monitored_submolts": "monitoring_submolts",
+            "taters": "fellow_taters",
+            "fellow_tater_agents": "fellow_taters",
+            "agent": "agent_profile",
+        }
+        route = aliases.get(text, text)
+        return route if route in VALID_ROUTES else ""
+
+    def _infer_route_from_query(self, query: str) -> str:
+        q = _decode_text(query).strip().lower()
+        if not q:
+            return ""
+        if re.search(r"\b(help|examples|what can you do)\b", q):
+            return "help"
+        if re.search(r"\b(profile\s+link|profile\s+url|my\s+moltbook\s+link|my\s+profile\s+link)\b", q):
+            return "profile_link"
+        if re.search(r"\b(profile\s+(?:for|of)|agent\s+profile|show\s+profile)\b", q):
+            return "agent_profile"
+        if re.search(r"\b(fellow\s+taters?|tater\s+agents?|known\s+taters?)\b", q):
+            return "fellow_taters"
+        if re.search(r"\b(subscription|subscribed|submolts?\s+am\s+i\s+subscribed)\b", q):
+            return "subscriptions"
+        if re.search(r"\b(monitoring|monitored)\b.*\bsubmolts?\b", q):
+            return "monitoring_submolts"
+        if re.search(r"\b(activity|comments?|likes?|replies?)\b.*\b(my\s+)?posts?\b", q):
+            return "activity_on_my_posts"
+        if re.search(r"\b(announcement|announcements|news)\b", q):
+            return "latest_announcement"
+        if re.search(r"\b(account\s+summary|my\s+account|account\s+status|profile\s+summary)\b", q):
+            return "account_summary"
+        if re.search(r"\b(home|overview|dashboard|feed)\b", q):
+            return "home_overview"
+        if re.search(r"\b(following|who\s+am\s+i\s+following|follows)\b", q):
+            return "following"
+        if re.search(r"\b(latest|recent|newest)\b.*\bposts?\b", q) or re.search(r"\b(my\s+)?posts?\b", q):
+            return "latest_posts"
+        return ""
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        raw = _decode_text(text).strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _ai_pick_route(self, llm_client, query: str) -> Dict[str, Any]:
+        if not llm_client:
+            return {}
+        prompt = f"""
+You are interpreting one natural-language request for a Moltbook verba.
+Choose the route and extract only concrete values present in the request.
+
+Allowed routes:
+- latest_posts: latest posts by this agent
+- following: accounts this agent follows
+- profile_link: this agent's Moltbook profile URL
+- account_summary: account/profile summary for this agent
+- home_overview: Moltbook home overview
+- latest_announcement: latest Moltbook announcement
+- activity_on_my_posts: activity on this agent's posts
+- subscriptions: subscribed submolts
+- monitoring_submolts: monitored submolts
+- fellow_taters: known fellow Tater agents
+- agent_profile: profile for another named agent
+- help: supported Moltbook examples
+
+Return compact JSON with keys: route, target_name, limit.
+Use an empty string for unknown text fields. Do not invent agent names.
+
+Request: {query}
+""".strip()
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
+            data = self._json_object_from_text(raw)
+            if not isinstance(data, dict):
+                return {}
+            data["route"] = self._normalize_route(data.get("route") or data.get("action") or data.get("intent"))
+            return data
+        except Exception as exc:
+            logger.warning("[moltbook] _ai_pick_route failed: %s", exc)
+            return {}
+
+    async def _resolve_route(self, args: Dict[str, Any], llm_client=None) -> Dict[str, Any]:
         query = self._extract_query(args)
-        route = _coalesce_str(getattr(self, "fixed_route", ""), default="help").strip().lower()
-        if route not in VALID_ROUTES:
-            route = "help"
+        route = ""
+        for key in ("route", "action", "intent", "command", "task"):
+            route = self._normalize_route(args.get(key))
+            if route:
+                break
+        if not route:
+            route = self._infer_route_from_query(query)
+        ai_payload: Dict[str, Any] = {}
+        if not route:
+            ai_payload = await self._ai_pick_route(llm_client, query)
+            route = self._normalize_route(ai_payload.get("route"))
         limit = _safe_int(args.get("limit"), default=5, minimum=1, maximum=20)
-        target_name = self._extract_target_name(args, query)
+        if args.get("limit") is None and ai_payload.get("limit") is not None:
+            limit = _safe_int(ai_payload.get("limit"), default=5, minimum=1, maximum=20)
+        target_name = self._extract_target_name(args, query) or _coalesce_str(ai_payload.get("target_name"), default="").strip().lower()
         return {"route": route, "limit": limit, "target_name": target_name, "query": query}
 
     # ----------------------------
@@ -949,12 +1079,16 @@ class MoltbookLatestPostsPlugin(ToolVerba):
     # Core dispatcher
     # ----------------------------
     async def _handle(self, _args: Dict[str, Any], llm_client) -> Dict[str, Any]:
-        _ = llm_client
         args = _args or {}
-        route_plan = self._resolve_route(args)
-        route = _coalesce_str(route_plan.get("route"), default="help").strip().lower()
+        route_plan = await self._resolve_route(args, llm_client)
+        route = _coalesce_str(route_plan.get("route"), default="").strip().lower()
         if route not in VALID_ROUTES:
-            route = "help"
+            return action_failure(
+                code="intent_unresolved",
+                message="Could not determine the Moltbook action from the request.",
+                needs=["Say one clear Moltbook action, such as latest posts, following, profile link, account summary, home overview, announcement, subscriptions, fellow Taters, or agent profile."],
+                say_hint="Explain the request could not be routed and ask for a clearer Moltbook action.",
+            )
         limit = _safe_int(route_plan.get("limit"), default=5, minimum=1, maximum=20)
         target_name = _coalesce_str(route_plan.get("target_name"), args.get("target_name"), default="").strip().lower()
 

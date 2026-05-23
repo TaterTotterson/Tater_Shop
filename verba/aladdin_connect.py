@@ -60,7 +60,7 @@ def _coerce_text(value: Any) -> str:
 class AladdinConnectPlugin(ToolVerba):
     name = "aladdin_connect"
     verba_name = "Aladdin Connect"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "Aladdin Connect"
     settings_category = "Aladdin Connect"
@@ -189,6 +189,52 @@ class AladdinConnectPlugin(ToolVerba):
             return "status"
         return ""
 
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        clean = str(text or "").strip()
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.I)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+        try:
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", clean, flags=re.S)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    async def _ai_pick_action(self, llm_client, query: str) -> Dict[str, str]:
+        if not llm_client:
+            return {}
+        text = self._coerce_text(query)
+        if not text:
+            return {}
+        prompt = (
+            "Choose the best Aladdin Connect garage door action for the user request.\n"
+            "Allowed actions: open, close, status.\n"
+            "Rules:\n"
+            "1) Use status for questions asking whether a door is open, closed, or what its state is.\n"
+            "2) Use open for commands to open, raise, or lift a garage door.\n"
+            "3) Use close for commands to close, shut, or lower a garage door.\n"
+            "4) Include target when the user names a specific door such as left, right, main, shop, or garage name.\n"
+            "Respond with JSON: {\"action\":\"<open|close|status or empty string>\",\"target\":\"<door target or empty string>\"}\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = ((resp or {}).get("message") or {}).get("content", "")
+            data = self._json_object_from_text(raw)
+            action = self._normalize_action(data.get("action"), "")
+            return {"action": action, "target": self._coerce_text(data.get("target"))}
+        except Exception as exc:
+            logger.warning("[%s] _ai_pick_action failed: %s", self.name, exc)
+            return {}
+
     def _target_text(self, args: dict, query: str) -> str:
         target = self._coerce_text(args.get("target") or args.get("door") or args.get("door_name"))
         if target:
@@ -253,6 +299,13 @@ class AladdinConnectPlugin(ToolVerba):
         payload = self._normalize_handler_args(args)
         query = self._coerce_text(payload.get("query") or payload.get("text") or payload.get("prompt"))
         action = self._normalize_action(payload.get("action"), query)
+        if not action:
+            ai_payload = await self._ai_pick_action(llm_client, query)
+            action = self._normalize_action(ai_payload.get("action"), "")
+            if ai_payload.get("target") and not any(
+                self._coerce_text(payload.get(key)) for key in ("target", "door", "door_name")
+            ):
+                payload["target"] = ai_payload.get("target")
         if not action:
             return action_failure(
                 code="missing_action",

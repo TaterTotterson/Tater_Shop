@@ -26,7 +26,7 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
@@ -476,8 +476,69 @@ class MicroWakeWordPlugin(ToolVerba):
         if re.search(r"\b(suggest|suggestion|options|choices|list|pick a few|show me)\b", text):
             return "suggest"
         if not target_norm:
-            return "suggest"
+            return ""
         return "set"
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        clean = str(text or "").strip()
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.I)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+        try:
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", clean, flags=re.S)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _normalize_action_choice(self, value: Any) -> str:
+        text = self._normalize_words(value)
+        if text in {"set", "change", "switch", "update"}:
+            return "set"
+        if text in {"suggest", "suggestions", "list", "options", "help"}:
+            return "suggest"
+        if text in {"reset", "default", "compiled", "restore"}:
+            return "reset"
+        if text in {"status", "state", "current", "read"}:
+            return "status"
+        return ""
+
+    async def _ai_pick_intent(self, llm_client, request_text: str) -> Dict[str, str]:
+        if not llm_client:
+            return {}
+        text = self._text(request_text)
+        if not text:
+            return {}
+        prompt = (
+            "Choose the best microWakeWord action for the user request.\n"
+            "Allowed actions: set, suggest, reset, status.\n"
+            "Rules:\n"
+            "1) Use set when the user gives a specific new wake word or name.\n"
+            "2) Use suggest when the user asks for options or ideas.\n"
+            "3) Use reset when the user asks for default or compiled wake word.\n"
+            "4) Use status when the user asks what the current wake word is.\n"
+            "5) Include wake_word for set requests when clearly present.\n"
+            "Respond with JSON: {\"action\":\"<set|suggest|reset|status or empty string>\",\"wake_word\":\"<wake word or empty string>\"}\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = ((resp or {}).get("message") or {}).get("content", "")
+            data = self._json_object_from_text(raw)
+            return {
+                "action": self._normalize_action_choice(data.get("action")),
+                "wake_word": self._strip_polite_tail(self._text(data.get("wake_word"))),
+            }
+        except Exception as exc:
+            logger.warning("[microwakeword] _ai_pick_intent failed: %s", exc)
+            return {}
 
     def _extract_target(self, args: Dict[str, Any], request_text: str) -> str:
         for key in ("wake_word", "target_wake_word", "new_wake_word", "name", "target"):
@@ -653,6 +714,19 @@ class MicroWakeWordPlugin(ToolVerba):
         request_text = self._merged_request_text(payload)
         target = self._extract_target(payload, request_text)
         action = self._infer_action(payload, request_text, target)
+        if not action:
+            ai_payload = await self._ai_pick_intent(llm_client, request_text)
+            action = self._normalize_action_choice(ai_payload.get("action"))
+            if not target and ai_payload.get("wake_word"):
+                target = ai_payload.get("wake_word", "")
+
+        if not action:
+            return action_failure(
+                code="unknown_action",
+                message="I couldn't determine the microWakeWord action from that request.",
+                needs=["Ask to set a wake word, suggest wake words, reset to default, or check status."],
+                say_hint="Ask the user to restate the wake-word request in one short sentence.",
+            )
 
         try:
             entries = self._load_entries()
@@ -675,6 +749,14 @@ class MicroWakeWordPlugin(ToolVerba):
 
         if action == "suggest":
             return self._suggestions_result(target, entries)
+
+        if action == "set" and not self._normalize_words(target):
+            return action_failure(
+                code="missing_wake_word",
+                message="Please include the wake word to use.",
+                needs=["Say the new wake word, for example: hey computer."],
+                say_hint="Ask which wake word the user wants to set.",
+            )
 
         match = self._exact_match(target, entries)
         if not match:

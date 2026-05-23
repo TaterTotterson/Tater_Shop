@@ -84,11 +84,10 @@ class UnifiNetworkClientsPlugin(ToolVerba):
 
     name = "unifi_network_clients"
     verba_name = "UniFi Network Clients"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "UniFi Network Clients"
     tags = ["unifi", "clients"]
-    fixed_intent = "list_clients"
     description = (
         "List UniFi Network clients and client counts."
     )
@@ -164,6 +163,36 @@ class UnifiNetworkClientsPlugin(ToolVerba):
         "count_clients_wireless",
         "count_devices_total",
         "count_devices_offline",
+    }
+    _INTENT_ALIASES = {
+        "clients": "list_clients",
+        "client_list": "list_clients",
+        "list_client": "list_clients",
+        "online_clients": "list_clients",
+        "devices": "list_devices",
+        "device_list": "list_devices",
+        "list_device": "list_devices",
+        "offline_devices": "count_devices_offline",
+        "network_health": "health",
+        "status": "health",
+        "network_status": "health",
+        "find": "find_any",
+        "lookup": "find_any",
+        "search": "find_any",
+        "find_clients": "find_client",
+        "lookup_client": "find_client",
+        "find_devices": "find_device",
+        "lookup_device": "find_device",
+        "count_clients": "count_clients_total",
+        "client_count": "count_clients_total",
+        "count_wired_clients": "count_clients_wired",
+        "wired_clients": "count_clients_wired",
+        "count_wireless_clients": "count_clients_wireless",
+        "wireless_clients": "count_clients_wireless",
+        "count_devices": "count_devices_total",
+        "device_count": "count_devices_total",
+        "count_offline_devices": "count_devices_offline",
+        "offline_device_count": "count_devices_offline",
     }
     missing_info_prompts = []
 
@@ -242,7 +271,11 @@ class UnifiNetworkClientsPlugin(ToolVerba):
         t = self._q_norm(q)
 
         # "find" style
-        if any(w in t for w in ("find ", "search ", "look up", "lookup", "where is", "ip address", "mac address")):
+        if (
+            any(w in t for w in ("find ", "search ", "look up", "lookup", "where is", "ip address", "mac address"))
+            or re.search(r"\b(?:ip|mac)(?:\s+address)?\s+(?:of|for)\b", t)
+            or re.search(r"\b(?:give|show|tell)\s+me\s+(?:the\s+)?(?:ip|mac)\b", t)
+        ):
             return "find"
 
         # list style
@@ -255,7 +288,7 @@ class UnifiNetworkClientsPlugin(ToolVerba):
         if any(w in t for w in ("health", "status", "how's the network", "hows the network", "network ok", "internet", "wan")):
             return "health"
 
-        # fallback
+        # unknown
         return "general"
 
     def _extract_find_target(self, query: str) -> str:
@@ -279,7 +312,13 @@ class UnifiNetworkClientsPlugin(ToolVerba):
             target = text
 
         # cleanup filler words and trailing nouns
-        target = re.sub(r"^[Tt]he\s+", "", target)
+        target = re.sub(
+            r"\s+(?:for|from|in|on)\s+(?:the\s+)?(?:unifi(?:\s+network)?|network\s+devices?|clients?|devices?)\s*$",
+            "",
+            target,
+            flags=re.I,
+        )
+        target = re.sub(r"^(?:the|my|a|an)\s+", "", target, flags=re.I)
         target = re.sub(r"\b(?:client|device)\b\s*$", "", target, flags=re.I)
         target = re.sub(r"\b(?:please|thanks|thank you)\b", "", target, flags=re.I)
         target = re.sub(r"[?.!,]+$", "", target).strip()
@@ -288,27 +327,150 @@ class UnifiNetworkClientsPlugin(ToolVerba):
             return ""
         return target
 
-    def _fixed_intent_payload(self, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        fixed_intent = str(getattr(self, "fixed_intent", "") or "").strip().lower()
-        if fixed_intent not in self._INTENT_VALUES:
-            raise ValueError("Invalid fixed_intent for this UniFi Network verba.")
+    def _normalize_intent(self, raw_intent: Any) -> str:
+        text = str(raw_intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+        key = re.sub(r"[^a-z0-9_]+", "_", text).strip("_")
+        if not key:
+            return ""
+        if key in self._INTENT_VALUES:
+            return key
+        return self._INTENT_ALIASES.get(key, "")
+
+    def _infer_intent_from_query(self, query: str, args: Optional[Dict[str, Any]] = None) -> str:
+        args = args or {}
+        explicit = self._normalize_intent(args.get("intent") or args.get("action") or args.get("command"))
+        if explicit:
+            return explicit
+
+        t = self._q_norm(query)
+        if not t:
+            return ""
+
+        if (
+            re.search(r"\b(?:ip|mac)(?:\s+address)?\s+(?:of|for)\b", t)
+            or re.search(r"\b(?:give|show|tell)\s+me\s+(?:the\s+)?(?:ip|mac)\b", t)
+            or re.search(r"\bwhat(?:'s| is)\s+(?:the\s+)?(?:ip|mac)\b", t)
+        ):
+            return "find_any"
+
+        if any(x in t for x in ("how many wireless", "wireless clients", "wifi clients", "wi-fi clients")):
+            return "count_clients_wireless" if any(x in t for x in ("how many", "count", "number of")) else "list_clients"
+        if any(x in t for x in ("how many wired", "wired clients")):
+            return "count_clients_wired" if any(x in t for x in ("how many", "count", "number of")) else "list_clients"
+        if any(x in t for x in ("how many clients", "number of clients", "client count", "count clients")):
+            return "count_clients_total"
+        if any(x in t for x in ("how many devices", "number of devices", "device count", "count devices")):
+            return "count_devices_total"
+        if any(x in t for x in ("any devices offline", "devices offline", "offline devices", "offline aps", "offline access points")):
+            return "count_devices_offline"
+
+        if any(w in t for w in ("find ", "search ", "look up", "lookup", "where is", "ip address", "mac address")):
+            if "client" in t and "device" not in t:
+                return "find_client"
+            if any(x in t for x in ("device", "ap", "access point", "switch", "gateway", "udm")):
+                return "find_device"
+            return "find_any"
+
+        if any(w in t for w in ("list clients", "show clients", "who is online", "who's online", "clients online")):
+            return "list_clients"
+        if any(w in t for w in ("list devices", "show devices", "devices", "aps", "access points", "switches", "udm", "gateway")):
+            return "list_devices"
+        if any(w in t for w in ("health", "status", "how's the network", "hows the network", "network ok", "internet", "wan")):
+            return "health"
+        return ""
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        clean = re.sub(r"^```(?:json)?\s*", "", (text or "").strip(), flags=re.I)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+        try:
+            parsed = json.loads(clean)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", clean, flags=re.S)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    async def _ai_pick_intent(self, llm_client, query: str) -> Dict[str, Any]:
+        if not llm_client:
+            return {}
+        text = str(query or "").strip()
+        if not text:
+            return {}
+        allowed = ", ".join(sorted(self._INTENT_VALUES))
+        prompt = (
+            "Choose the best UniFi Network intent for the user request.\n"
+            f"Allowed intents: {allowed}.\n"
+            "Rules:\n"
+            "1) Use list_clients for client lists, online users, wired/wireless client lists.\n"
+            "2) Use count_clients_total/count_clients_wired/count_clients_wireless for client count questions.\n"
+            "3) Use list_devices for UniFi devices such as APs, switches, gateways, consoles, or UDMs.\n"
+            "4) Use count_devices_total/count_devices_offline for device count or offline-device questions.\n"
+            "5) Use health for overall network, internet, WAN, or status checks.\n"
+            "6) Use find_any/find_client/find_device when looking up one named thing, IP, or MAC.\n"
+            "7) Include target when the intent is find_any, find_client, or find_device.\n"
+            "Respond with JSON: "
+            '{"intent":"<allowed intent or empty string>","target":"<lookup target or empty string>","target_kind":"any|client|device"}'
+            "\n\n"
+            f'User request: "{text}"\n'
+        )
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = ((resp or {}).get("message") or {}).get("content", "")
+            data = self._json_object_from_text(str(raw or ""))
+            intent_name = self._normalize_intent(data.get("intent"))
+            target_kind = str(data.get("target_kind") or "").strip().lower()
+            if target_kind not in {"any", "client", "device"}:
+                target_kind = "any"
+            return {
+                "intent": intent_name,
+                "target": str(data.get("target") or "").strip(),
+                "target_kind": target_kind,
+            }
+        except Exception as e:
+            logger.warning(f"[unifi_network] _ai_pick_intent failed: {e}")
+            return {}
+
+    async def _resolve_intent(self, query: str, args: Dict[str, Any], llm_client) -> Dict[str, Any]:
+        args = args or {}
+        inferred_intent = self._infer_intent_from_query(query, args)
+        ai_payload: Dict[str, Any] = {}
+        if not inferred_intent:
+            ai_payload = await self._ai_pick_intent(llm_client, query)
+            inferred_intent = self._normalize_intent(ai_payload.get("intent"))
+
+        intent_name = inferred_intent
+        if not intent_name:
+            raise ValueError("Could not determine a UniFi Network intent from the request.")
+        if intent_name not in self._INTENT_VALUES:
+            raise ValueError(f"Invalid UniFi Network intent: {intent_name}")
 
         target_hint = str(args.get("target") or args.get("name") or "").strip()
-        payload: Dict[str, Any] = {
-            "intent": fixed_intent,
-            "target": "",
-            "target_kind": "any",
-            "full_list": self._query_wants_full_list(query),
-        }
+        target = target_hint or str(ai_payload.get("target") or "").strip()
+        if intent_name in {"find_any", "find_client", "find_device"}:
+            target = target or self._extract_find_target(query)
 
-        if fixed_intent in {"find_any", "find_client", "find_device"}:
-            target = target_hint or self._extract_find_target(query)
-            payload["target"] = target
-            if fixed_intent == "find_client":
-                payload["target_kind"] = "client"
-            elif fixed_intent == "find_device":
-                payload["target_kind"] = "device"
-        return payload
+        target_kind = str(ai_payload.get("target_kind") or "any").strip().lower()
+        if intent_name == "find_client":
+            target_kind = "client"
+        elif intent_name == "find_device":
+            target_kind = "device"
+        elif target_kind not in {"any", "client", "device"}:
+            target_kind = "any"
+
+        full_list_arg = str(args.get("full_list") or args.get("all") or "").strip().lower()
+        return {
+            "intent": intent_name,
+            "target": target,
+            "target_kind": target_kind,
+            "full_list": self._query_wants_full_list(query) or full_list_arg in {"1", "true", "yes", "on"},
+        }
 
     def _client_link_counts(self, clients_payload: Dict[str, Any]) -> Dict[str, int]:
         """
@@ -333,7 +495,7 @@ class UnifiNetworkClientsPlugin(ToolVerba):
                 wireless += 1
                 continue
 
-            # fallbacks some builds use
+            # alternate fields some builds use
             if c.get("isWireless") is True:
                 wireless += 1
                 continue
@@ -782,18 +944,10 @@ class UnifiNetworkClientsPlugin(ToolVerba):
     async def _handle(self, args: Dict[str, Any], llm_client):
         args = args or {}
         query = (args.get("query") or args.get("request") or args.get("prompt") or "").strip()
-        fixed_intent = str(getattr(self, "fixed_intent", "") or "").strip().lower()
         target_hint = (args.get("target") or args.get("name") or "").strip()
 
-        if not query:
-            if fixed_intent == "list_clients":
-                query = "list clients"
-            elif fixed_intent == "list_devices":
-                query = "list devices"
-            elif fixed_intent == "health":
-                query = "how is the network right now"
-            elif fixed_intent in {"find_any", "find_client", "find_device"} and target_hint:
-                query = f"find {target_hint}"
+        if not query and target_hint:
+            query = f"find {target_hint}"
 
         if not query:
             return action_failure(
@@ -804,15 +958,16 @@ class UnifiNetworkClientsPlugin(ToolVerba):
             )
 
         try:
-            intent = self._fixed_intent_payload(query, args)
+            intent = await self._resolve_intent(query, args, llm_client)
         except Exception as e:
             return action_failure(
-                code="invalid_intent",
-                message=f"This UniFi Network verba has an invalid fixed intent: {e}",
-                say_hint="Explain that this UniFi Network tool has an invalid fixed intent setting.",
+                code="unknown_intent",
+                message=f"I couldn't determine the UniFi Network action from that request: {e}",
+                needs=["Ask for UniFi clients, devices, health, counts, or a lookup target."],
+                say_hint="Ask the user to restate the UniFi Network request in one short sentence.",
             )
 
-        if fixed_intent in {"find_any", "find_client", "find_device"} and not str(intent.get("target") or "").strip():
+        if str(intent.get("intent") or "").strip().lower() in {"find_any", "find_client", "find_device"} and not str(intent.get("target") or "").strip():
             return action_failure(
                 code="missing_target",
                 message="Please include the client or device name to look up in query (or pass target).",
