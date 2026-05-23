@@ -138,7 +138,24 @@ The manifest generator reads class attributes from the first `ToolVerba` subclas
 - `required_settings`: settings fields for the UI.
 - `tags`: optional store and routing tags.
 
-Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, with the user's natural-language request inside the argument field your handler accepts, such as `query` or `request`. These fields teach Hydra both when to route to the verba and what argument shape to pass, for example `{"function":"example_lookup","arguments":{"query":"status"}}`.
+Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the request payload natural-language: prefer one field such as `query` or `request` containing what the user asked, for example `{"function":"example_lookup","arguments":{"query":"check the example status"}}`. Hydra should learn when to route to the verba and what argument shape to pass; the verba should parse, normalize, validate, and ask for missing details inside its own handler.
+
+Treat Hydra's AI routing pass as a router, not as the plugin's domain interpreter. If a verba needs structured intent, make a second AI interpretation call inside the verba after routing, then validate the result against settings, known entities, and API constraints. See `verba/ha_lights.py` for a full example of this pattern:
+
+```python
+usage = '{"function":"ha_lights","arguments":{"query":"turn off office lights"}}'
+
+async def _handle(self, args, llm_client):
+    query = self._coerce_text(args.get("query"))
+    if not query:
+        return action_failure(...)
+
+    intent = await self._interpret_query(query, llm_client)
+    if not intent:
+        return action_failure(...)
+
+    # Validate intent, resolve entities/settings, then execute the action.
+```
 
 Handlers are platform-specific. Keep one private `_handle()` method when possible and let platform handlers normalize into it. Return `action_success(...)` or `action_failure(...)` so every portal can narrate results consistently.
 
