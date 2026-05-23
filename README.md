@@ -33,7 +33,9 @@ A verba is a tool Hydra can route to. Verbas should be narrow, predictable, and 
 Create `verba/example_lookup.py`:
 
 ```python
+import json
 import logging
+import re
 from typing import Any, Dict
 
 from verba_base import ToolVerba
@@ -65,6 +67,7 @@ class ExampleLookupPlugin(ToolVerba):
     platforms = ["webui", "macos", "voice_core", "discord", "telegram", "matrix", "irc", "meshtastic"]
     tags = ["example"]
     routing_keywords = ["example lookup", "example status"]
+    allowed_actions = {"status", "value", "details"}
 
     required_settings = {
         "EXAMPLE_TIMEOUT_SECONDS": {
@@ -79,6 +82,64 @@ class ExampleLookupPlugin(ToolVerba):
     def _query(args: Dict[str, Any]) -> str:
         return str((args or {}).get("query") or (args or {}).get("request") or "").strip()
 
+    @classmethod
+    def _infer_action(cls, query: str) -> str:
+        text = str(query or "").lower()
+        if "status" in text:
+            return "status"
+        if "detail" in text or "describe" in text:
+            return "details"
+        if "value" in text or "lookup" in text or "look up" in text:
+            return "value"
+        return ""
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> Dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _interpret_query(self, query: str, llm_client=None) -> Dict[str, Any]:
+        action = self._infer_action(query)
+        if action:
+            return {"action": action, "target": query}
+        if not llm_client:
+            return {}
+
+        prompt = f"""
+Interpret this Example Lookup request.
+Allowed actions: status, value, details.
+Return JSON with keys: action, target.
+Use an empty string for unknown fields.
+
+Request: {query}
+""".strip()
+        try:
+            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
+            data = self._json_object_from_text(raw)
+        except Exception as exc:
+            logger.warning("[example_lookup] interpretation failed: %s", exc)
+            return {}
+
+        action = str(data.get("action") or "").strip().lower()
+        if action not in self.allowed_actions:
+            return {}
+        return {"action": action, "target": str(data.get("target") or query).strip()}
+
     async def _handle(self, args: Dict[str, Any], llm_client=None) -> Dict[str, Any]:
         query = self._query(args)
         if not query:
@@ -89,7 +150,21 @@ class ExampleLookupPlugin(ToolVerba):
                 say_hint="Ask what the user wants to look up.",
             )
 
-        result = {"query": query, "value": "example result"}
+        intent = await self._interpret_query(query, llm_client)
+        action = str(intent.get("action") or "").strip()
+        if action not in self.allowed_actions:
+            return action_failure(
+                code="unknown_action",
+                message="Could not determine the Example Lookup action.",
+                needs=["Ask for status, value, or details."],
+                say_hint="Ask the user which lookup action they want.",
+            )
+
+        result = {
+            "action": action,
+            "target": str(intent.get("target") or query).strip(),
+            "value": "example result",
+        }
         return action_success(
             facts=result,
             summary_for_user=f"Example lookup returned: {result['value']}.",
@@ -140,21 +215,20 @@ The manifest generator reads class attributes from the first `ToolVerba` subclas
 
 Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the main request payload natural-language: prefer one field such as `query` or `request` containing what the user asked. The metadata and examples teach the routing model when to choose the verba and what argument shape to pass; the verba still owns the domain-specific interpretation after it receives that natural-language request.
 
-For flexible verbas, follow the `verba/mister_remote.py` pattern: accept one user request in `query`, extract the utterance, try a small deterministic command match, then use an internal `llm_client` call to choose from a constrained set of actions when code alone is not enough. After that, validate the result, resolve settings and known entities, fetch or act on real API data, and dispatch to the real action. Launch requests in MiSTer continue the same pattern with constrained helpers: normalize the title, choose a system from known MiSTer systems, and choose a game from actual search results.
+For flexible verbas, accept one user request in `query`, extract the natural-language request, try a small deterministic match, then use an internal `llm_client` call to choose from a constrained set of actions when code alone is not enough. After that, validate the result, resolve settings and known entities, fetch or act on real API data, and dispatch to the real action. If the request cannot be mapped to a known action, return `action_failure(...)` with the missing information instead of guessing.
 
 ```python
-usage = '{"function":"mister_remote","arguments":{"query":"play super mario world on snes"}}'
+usage = '{"function":"example_lookup","arguments":{"query":"check the example status"}}'
 
 async def _handle(self, args, llm_client):
-    utterance = self._extract_utterance(args)
-    if not utterance:
+    query = self._query(args)
+    if not query:
         return action_failure(...)
 
-    command = self._infer_command_from_utterance(utterance)
-    if not command:
-        command = await self._ai_pick_command(llm_client, utterance)
+    intent = await self._interpret_query(query, llm_client)
+    action = intent.get("action")
 
-    if command not in {"play", "now_playing", "go_to_menu", "screenshot_take"}:
+    if action not in {"status", "value", "details"}:
         return action_failure(...)
 
     # Validate settings/entities, resolve any API data needed, then execute.
