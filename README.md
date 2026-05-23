@@ -49,15 +49,16 @@ class ExampleLookupPlugin(ToolVerba):
     version = "1.0.0"
     min_tater_version = "59"
 
-    usage = '{"function":"example_lookup","arguments":{"query":"status"}}'
+    usage = "Ask Tater to look up an example value, such as: check the example status."
     description = "Look up an example value."
     verba_dec = "Look up an example value."
     when_to_use = "Use when the user asks for the example lookup."
-    how_to_use = "Pass a short query."
+    how_to_use = "Pass the user's natural-language request. Do not pass function-call JSON."
     common_needs = []
     missing_info_prompts = ["What should I look up?"]
     example_calls = [
-        '{"function":"example_lookup","arguments":{"query":"status"}}',
+        "Check the example status.",
+        "Look up the current example value.",
     ]
 
     settings_category = "Example Lookup"
@@ -136,6 +137,8 @@ The manifest generator reads class attributes from the first `ToolVerba` subclas
 - `settings_category`: settings bucket shown in Tater.
 - `required_settings`: settings fields for the UI.
 - `tags`: optional store and routing tags.
+
+Use natural language for `usage`, `how_to_use`, and `example_calls`. These fields teach Hydra when and how a user would ask for the verba; they should not contain function-call JSON such as `{"function":"example_lookup","arguments":{"query":"status"}}`.
 
 Handlers are platform-specific. Keep one private `_handle()` method when possible and let platform handlers normalize into it. Return `action_success(...)` or `action_failure(...)` so every portal can narrate results consistently.
 
