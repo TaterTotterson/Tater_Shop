@@ -746,7 +746,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.23"
+__version__ = "1.0.25"
 
 
 load_dotenv()
@@ -1102,6 +1102,48 @@ _ROOM_SCHEMA_PROMPT_TEXT = "\n".join(
     for category, fields in _ROOM_PROFILE_SCHEMA.items()
 )
 _ROOM_ALLOWED_FACT_KEYS_PROMPT = ", ".join(_ROOM_ALLOWED_FACT_KEYS)
+_DYNAMIC_FACT_KEY_BLOCKLIST_EXACT = {
+    "api_key",
+    "auth_token",
+    "credential",
+    "credentials",
+    "credit_card",
+    "current_task",
+    "current_user_request",
+    "cvv",
+    "jwt",
+    "latest_message",
+    "latest_user_request",
+    "misc",
+    "note",
+    "notes",
+    "otp",
+    "password",
+    "pin",
+    "private_key",
+    "recent_message",
+    "recent_user_request",
+    "secret",
+    "session_token",
+    "social_security_number",
+    "ssn",
+    "token",
+}
+_DYNAMIC_FACT_KEY_BLOCKLIST_PARTS = (
+    "api_key",
+    "auth_token",
+    "credential",
+    "credit_card",
+    "current_request",
+    "jwt",
+    "latest_request",
+    "one_time_code",
+    "password",
+    "private_key",
+    "recent_request",
+    "session_token",
+    "social_security",
+)
 
 
 def _is_transient_fact_key(fact_key: Any) -> bool:
@@ -1113,11 +1155,30 @@ def _is_transient_fact_key(fact_key: Any) -> bool:
     return any(key.startswith(prefix) for prefix in _TRANSIENT_FACT_PREFIXES)
 
 
+def _is_safe_dynamic_fact_key(fact_key: Any) -> bool:
+    key = normalize_fact_key(fact_key)
+    if not key:
+        return False
+    if key in _USER_ALLOWED_FACT_KEY_SET or key in _ROOM_ALLOWED_FACT_KEY_SET:
+        return True
+    if len(key) < 3:
+        return False
+    if _is_transient_fact_key(key):
+        return False
+    if key in _DYNAMIC_FACT_KEY_BLOCKLIST_EXACT:
+        return False
+    if any(part in key for part in _DYNAMIC_FACT_KEY_BLOCKLIST_PARTS):
+        return False
+    return True
+
+
 def _canonical_user_fact_key(raw_key: Any) -> str:
     fact_key = normalize_fact_key(raw_key)
     if not fact_key:
         return ""
     if fact_key in _USER_ALLOWED_FACT_KEY_SET:
+        return fact_key
+    if _is_safe_dynamic_fact_key(fact_key):
         return fact_key
     return ""
 
@@ -1127,6 +1188,8 @@ def _canonical_room_fact_key(raw_key: Any) -> str:
     if not fact_key:
         return ""
     if fact_key in _ROOM_ALLOWED_FACT_KEY_SET:
+        return fact_key
+    if _is_safe_dynamic_fact_key(fact_key):
         return fact_key
     return ""
 
@@ -1152,7 +1215,7 @@ def _scrub_non_schema_user_facts(doc: Dict[str, Any], *, now: Optional[float] = 
     facts = doc.get("facts")
     if not isinstance(facts, dict):
         return 0
-    drop = [key for key in list(facts.keys()) if normalize_fact_key(key) not in _USER_ALLOWED_FACT_KEY_SET]
+    drop = [key for key in list(facts.keys()) if not _is_safe_dynamic_fact_key(key)]
     if not drop:
         return 0
     for key in drop:
@@ -1167,7 +1230,7 @@ def _scrub_non_schema_room_facts(doc: Dict[str, Any], *, now: Optional[float] = 
     facts = doc.get("facts")
     if not isinstance(facts, dict):
         return 0
-    drop = [key for key in list(facts.keys()) if normalize_fact_key(key) not in _ROOM_ALLOWED_FACT_KEY_SET]
+    drop = [key for key in list(facts.keys()) if not _is_safe_dynamic_fact_key(key)]
     if not drop:
         return 0
     for key in drop:
@@ -2057,8 +2120,11 @@ def _llm_extract_observations(
         "Rules:\n"
         "- Use only explicit evidence from messages.\n"
         "- Keep keys short snake_case.\n"
-        "- User observations must use only exact allowed user keys (no aliases/prefixes/new keys).\n"
-        "- Room observations must use only exact allowed room keys (no aliases/prefixes/new keys).\n"
+        "- Prefer exact allowed user keys and room keys whenever one fits.\n"
+        "- If no allowed key fits a durable, explicit, useful fact, create a concise snake_case key.\n"
+        "- Dynamic user key examples: has_children, children_count, pet_names, favorite_console.\n"
+        "- Dynamic room key examples: preferred_meeting_time, release_branch, build_server_name.\n"
+        "- Do not create dynamic keys for one-off requests, current tasks, latest messages, credentials, secrets, tokens, passwords, or API keys.\n"
         "- Prefer concrete values (string/number/list) over booleans when possible.\n"
         "- Never guess sensitive profile attributes; include only directly stated details.\n"
         "- User observations must target one known_user_id.\n"
@@ -5343,6 +5409,89 @@ _HYDRA_MEMORY_MIN_CONFIDENCE_DEFAULT = 0.65
 _HYDRA_MEMORY_MAX_ITEMS_DEFAULT = 12
 _HYDRA_MEMORY_VALUE_MAX_CHARS_DEFAULT = 288
 _HYDRA_MEMORY_SUMMARY_MAX_CHARS_DEFAULT = 2100
+_HYDRA_MEMORY_RELEVANCE_CANDIDATE_CAP = 500
+_HYDRA_MEMORY_RELEVANCE_STOPWORDS = {
+    "a",
+    "about",
+    "again",
+    "all",
+    "also",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "ask",
+    "at",
+    "be",
+    "been",
+    "but",
+    "by",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "from",
+    "get",
+    "give",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "here",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "its",
+    "just",
+    "know",
+    "let",
+    "look",
+    "me",
+    "my",
+    "need",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "show",
+    "so",
+    "some",
+    "tell",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "they",
+    "this",
+    "to",
+    "up",
+    "us",
+    "use",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
+}
 
 
 def _hydra_origin_text(origin: Optional[Dict[str, Any]], *keys: str) -> str:
@@ -5372,6 +5521,268 @@ def _hydra_request_text(args: Dict[str, Any], origin: Optional[Dict[str, Any]]) 
         if value:
             return value
     return ""
+
+
+def _hydra_scope_tail(scope: Any) -> str:
+    text = _as_text(scope).strip()
+    if ":" in text:
+        return text.split(":", 1)[1].strip()
+    return text
+
+
+def _hydra_memory_history_key_candidates(
+    *,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+) -> List[str]:
+    normalized_platform = _hydra_platform(platform)
+    scope_tail = _hydra_scope_tail(scope)
+    candidates: List[str] = []
+
+    def add(key: Any) -> None:
+        text = _as_text(key).strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    if normalized_platform == "webui":
+        add("webui:chat_history")
+        return candidates
+
+    if normalized_platform == "discord":
+        channel_id = _hydra_origin_text(origin, "channel_id", "chat_id", "room_id") or scope_tail
+        if channel_id:
+            add(f"tater:channel:{channel_id}:history")
+            add(f"tater:discord:channel:{channel_id}:history")
+        dm_user_id = _hydra_origin_text(origin, "dm_user_id", "user_id")
+        if dm_user_id:
+            add(f"tater:discord:dm:{dm_user_id}:history")
+        return candidates
+
+    spec = _HISTORY_SCAN_SPECS.get(normalized_platform)
+    if not spec:
+        return candidates
+    _pattern, prefix, suffix = spec
+
+    scope_ids: List[str] = []
+    for value in (
+        scope_tail,
+        _hydra_origin_text(origin, "chat_id"),
+        _hydra_origin_text(origin, "room_id"),
+        _hydra_origin_text(origin, "channel_id"),
+        _hydra_origin_text(origin, "session_id"),
+        _hydra_origin_text(origin, "conversation_id"),
+        _hydra_origin_text(origin, "device_id"),
+        _hydra_origin_text(origin, "area_id"),
+    ):
+        text = _as_text(value).strip()
+        if text and text.lower() not in {"unknown", "unknown_scope", "chat", "general"} and text not in scope_ids:
+            scope_ids.append(text)
+
+    for scope_id in scope_ids:
+        add(f"{prefix}{scope_id}{suffix}")
+    return candidates
+
+
+def _hydra_latest_user_text_from_history(
+    *,
+    redis_obj: Any,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+) -> str:
+    if redis_obj is None:
+        return ""
+    for history_key in _hydra_memory_history_key_candidates(platform=platform, scope=scope, origin=origin):
+        try:
+            rows = redis_obj.lrange(history_key, -8, -1) or []
+        except Exception:
+            rows = []
+        for raw in reversed(rows):
+            text = _as_text(raw).strip()
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = {"role": "", "content": text}
+            if not isinstance(parsed, dict):
+                continue
+            role = _as_text(parsed.get("role")).strip().lower()
+            if role and role not in {"user", "human"}:
+                continue
+            content = _message_content_text(parsed.get("content")).strip()
+            if content and not content.startswith("[tool_call"):
+                return content
+    return ""
+
+
+def _hydra_memory_context_query_text(
+    *,
+    redis_obj: Any,
+    platform: str,
+    scope: str,
+    origin: Optional[Dict[str, Any]],
+    user_text: Any = None,
+    request_text: Any = None,
+) -> str:
+    for value in (user_text, request_text):
+        text = _as_text(value).strip()
+        if text:
+            return text
+    origin_text = _hydra_origin_text(
+        origin,
+        "request_text",
+        "user_text",
+        "message_text",
+        "message",
+        "content",
+        "body",
+        "query",
+        "request",
+        "raw_message",
+        "text",
+    )
+    if origin_text:
+        return origin_text
+    return _hydra_latest_user_text_from_history(
+        redis_obj=redis_obj,
+        platform=platform,
+        scope=scope,
+        origin=origin,
+    )
+
+
+def _hydra_memory_relevance_tokens(value: Any) -> List[str]:
+    text = _as_text(value).lower().replace("_", " ")
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9']*", text)
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in raw_tokens:
+        token = raw.strip("'")
+        if token.endswith("'s"):
+            token = token[:-2]
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if token in _HYDRA_MEMORY_RELEVANCE_STOPWORDS:
+            continue
+        variants = [token]
+        if len(token) > 4 and token.endswith("ies"):
+            variants.append(token[:-3] + "y")
+        elif len(token) > 3 and token.endswith("s"):
+            variants.append(token[:-1])
+        for variant in variants:
+            if variant and variant not in _HYDRA_MEMORY_RELEVANCE_STOPWORDS and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return out
+
+
+def _hydra_memory_fact_relevance_score(item: Dict[str, Any], query_tokens: List[str]) -> int:
+    if not query_tokens:
+        return 0
+    key = _as_text(item.get("key")).strip()
+    value_text = memory_core_value_to_text(item.get("value"), max_chars=1200)
+    key_tokens = set(_hydra_memory_relevance_tokens(key))
+    value_tokens = set(_hydra_memory_relevance_tokens(value_text))
+    if not key_tokens and not value_tokens:
+        return 0
+
+    score = 0
+    for token in query_tokens:
+        if token in key_tokens:
+            score += 4
+        if token in value_tokens:
+            score += 2
+
+    query_pairs = [
+        f"{query_tokens[idx]} {query_tokens[idx + 1]}"
+        for idx in range(0, max(0, len(query_tokens) - 1))
+    ]
+    haystack = f"{key.replace('_', ' ')} {value_text}".lower()
+    for pair in query_pairs:
+        if pair and pair in haystack:
+            score += 5
+    return score
+
+
+def _hydra_memory_context_items(
+    doc: Dict[str, Any],
+    *,
+    max_items: int,
+    min_confidence: float,
+    query_text: str = "",
+) -> List[Dict[str, Any]]:
+    item_limit = max(1, int(max_items))
+    baseline = summarize_memory_core_doc(
+        doc,
+        max_items=item_limit,
+        min_confidence=min_confidence,
+    )
+    query_tokens = _hydra_memory_relevance_tokens(query_text)
+    if not query_tokens:
+        return baseline
+
+    candidate_limit = max(item_limit, min(_HYDRA_MEMORY_RELEVANCE_CANDIDATE_CAP, item_limit * 10))
+    candidates = summarize_memory_core_doc(
+        doc,
+        max_items=candidate_limit,
+        min_confidence=min_confidence,
+    )
+    if len(candidates) <= item_limit:
+        return candidates
+
+    anchor_count = min(3, item_limit // 4)
+    selected: List[Dict[str, Any]] = []
+    selected_keys: set[str] = set()
+
+    for item in baseline[:anchor_count]:
+        key = _as_text(item.get("key")).strip()
+        if key and key not in selected_keys:
+            selected.append(item)
+            selected_keys.add(key)
+
+    scored: List[Tuple[int, float, float, str, Dict[str, Any]]] = []
+    for item in candidates:
+        key = _as_text(item.get("key")).strip()
+        if not key or key in selected_keys:
+            continue
+        score = _hydra_memory_fact_relevance_score(item, query_tokens)
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                score,
+                _as_float(item.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+                _as_float(item.get("updated_at"), 0.0, min_value=0.0),
+                key,
+                item,
+            )
+        )
+
+    if not scored:
+        return baseline
+
+    scored.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    for _score, _confidence, _updated_at, key, item in scored:
+        if len(selected) >= item_limit:
+            break
+        if key not in selected_keys:
+            selected.append(item)
+            selected_keys.add(key)
+
+    for source in (baseline, candidates):
+        for item in source:
+            if len(selected) >= item_limit:
+                break
+            key = _as_text(item.get("key")).strip()
+            if key and key not in selected_keys:
+                selected.append(item)
+                selected_keys.add(key)
+        if len(selected) >= item_limit:
+            break
+
+    return selected[:item_limit]
 
 
 def _hydra_people_identities_enabled(*, args: Dict[str, Any], redis_obj: Any) -> bool:
@@ -6309,6 +6720,8 @@ def get_hydra_memory_context_payload(
     scope: str,
     origin: Optional[Dict[str, Any]] = None,
     redis_client: Any = None,
+    user_text: Any = None,
+    request_text: Any = None,
     **_kwargs,
 ) -> Dict[str, Any]:
     redis_obj = redis_client if redis_client is not None else globals().get("redis_client")
@@ -6322,6 +6735,14 @@ def get_hydra_memory_context_payload(
     max_items = _hydra_memory_context_max_items(redis_obj)
     value_max_chars = _hydra_memory_context_value_max_chars(redis_obj)
     summary_max_chars = _hydra_memory_context_summary_max_chars(redis_obj)
+    query_text = _hydra_memory_context_query_text(
+        redis_obj=redis_obj,
+        platform=normalized_platform,
+        scope=scope,
+        origin=origin,
+        user_text=user_text,
+        request_text=request_text,
+    )
 
     out: Dict[str, Any] = {}
 
@@ -6366,10 +6787,11 @@ def get_hydra_memory_context_payload(
         except Exception:
             user_doc = {}
 
-        user_items = summarize_memory_core_doc(
+        user_items = _hydra_memory_context_items(
             user_doc,
             max_items=max_items,
             min_confidence=min_conf,
+            query_text=query_text,
         )
         user_summary = _hydra_memory_context_summary(user_items, value_max_chars=value_max_chars)
         if user_summary:
@@ -6395,10 +6817,11 @@ def get_hydra_memory_context_payload(
         except Exception:
             room_doc = {}
 
-        room_items = summarize_memory_core_doc(
+        room_items = _hydra_memory_context_items(
             room_doc,
             max_items=max_items,
             min_confidence=min_conf,
+            query_text=query_text,
         )
         room_summary = _hydra_memory_context_summary(room_items, value_max_chars=value_max_chars)
         if room_summary:
@@ -6420,6 +6843,8 @@ def get_hydra_system_prompt_fragments(
     origin: Optional[Dict[str, Any]] = None,
     redis_client: Any = None,
     memory_context: Optional[Dict[str, Any]] = None,
+    user_text: Any = None,
+    request_text: Any = None,
     **_kwargs,
 ) -> Dict[str, List[str]]:
     normalized_role = _as_text(role).strip().lower()
@@ -6428,6 +6853,8 @@ def get_hydra_system_prompt_fragments(
         scope=scope,
         origin=origin,
         redis_client=redis_client,
+        user_text=user_text,
+        request_text=request_text,
     )
     if not isinstance(payload, dict) or not payload:
         return {}
