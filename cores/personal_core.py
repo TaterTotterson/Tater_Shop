@@ -24,7 +24,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.47"
+__version__ = "1.0.48"
 
 load_dotenv()
 
@@ -7683,12 +7683,168 @@ def _upcoming_subscriptions_for_prompt(*, days: int, limit: int, profile_ids: Op
     return rows[:max_items]
 
 
+_PERSONAL_PROMPT_DEFAULT_SECTIONS = ["events", "merchants", "actions", "deliveries", "subscriptions"]
+_PERSONAL_PROMPT_INTENT_TIE_ORDER = ["deliveries", "events", "subscriptions", "actions", "merchants"]
+_PERSONAL_PROMPT_SECTION_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "events": (
+        "appointment",
+        "calendar",
+        "event",
+        "events",
+        "meeting",
+        "meetings",
+        "movie",
+        "plan",
+        "plans",
+        "reservation",
+        "schedule",
+        "trip",
+    ),
+    "merchants": (
+        "bought",
+        "buy",
+        "merchant",
+        "merchants",
+        "order",
+        "orders",
+        "purchase",
+        "purchases",
+        "shopping",
+        "spend",
+        "spending",
+        "store",
+        "stores",
+    ),
+    "actions": (
+        "action",
+        "actions",
+        "deadline",
+        "due",
+        "follow",
+        "reply",
+        "respond",
+        "task",
+        "tasks",
+        "todo",
+        "verify",
+        "verification",
+    ),
+    "deliveries": (
+        "carrier",
+        "deliver",
+        "delivered",
+        "delivery",
+        "eta",
+        "package",
+        "packages",
+        "parcel",
+        "shipment",
+        "shipments",
+        "shipping",
+        "tracking",
+    ),
+    "subscriptions": (
+        "bill",
+        "billing",
+        "charge",
+        "charges",
+        "invoice",
+        "payment",
+        "recurring",
+        "renew",
+        "renewal",
+        "subscription",
+        "subscriptions",
+    ),
+}
+_PERSONAL_PROMPT_BROAD_KEYWORDS = {
+    "all",
+    "anything",
+    "brief",
+    "context",
+    "dashboard",
+    "digest",
+    "everything",
+    "overview",
+    "personal",
+    "summary",
+}
+
+
+def _personal_prompt_request_text(*, user_text: Any = None, request_text: Any = None, origin: Optional[Dict[str, Any]] = None) -> str:
+    for value in (request_text, user_text):
+        text = _text(value)
+        if text:
+            return text
+    if isinstance(origin, dict):
+        for key in ("request_text", "user_text", "message_text", "message", "content", "body", "query", "request", "text"):
+            text = _text(origin.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _personal_prompt_tokens(text: Any) -> List[str]:
+    raw = _text(text).lower()
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9']*", raw):
+        token = token.strip("'")
+        if token.endswith("'s"):
+            token = token[:-2]
+        if len(token) < 2 and not token.isdigit():
+            continue
+        variants = [token]
+        if len(token) > 4 and token.endswith("ies"):
+            variants.append(token[:-3] + "y")
+        elif len(token) > 3 and token.endswith("s"):
+            variants.append(token[:-1])
+        for variant in variants:
+            if variant and variant not in seen:
+                seen.add(variant)
+                tokens.append(variant)
+    return tokens
+
+
+def _personal_prompt_section_order(request_text: Any) -> List[str]:
+    tokens = set(_personal_prompt_tokens(request_text))
+    if not tokens:
+        return list(_PERSONAL_PROMPT_DEFAULT_SECTIONS)
+
+    scored: List[Tuple[int, int, str]] = []
+    for section in _PERSONAL_PROMPT_DEFAULT_SECTIONS:
+        section_tokens = set(_PERSONAL_PROMPT_SECTION_KEYWORDS.get(section) or ())
+        score = len(tokens & section_tokens)
+        if score > 0:
+            tie_rank = _PERSONAL_PROMPT_INTENT_TIE_ORDER.index(section) if section in _PERSONAL_PROMPT_INTENT_TIE_ORDER else 99
+            scored.append((score, tie_rank, section))
+
+    if not scored or tokens & _PERSONAL_PROMPT_BROAD_KEYWORDS:
+        return list(_PERSONAL_PROMPT_DEFAULT_SECTIONS)
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [section for _score, _tie_rank, section in scored]
+
+
+def _personal_prompt_section_limit(section: str, *, base_limit: int, focused: bool) -> int:
+    base = max(1, int(base_limit))
+    if focused:
+        if section == "merchants":
+            return max(8, min(16, base * 2))
+        return max(6, min(14, base * 2))
+    if section == "merchants":
+        return min(6, base)
+    return min(8, base)
+
+
 def get_hydra_personal_context_payload(
     *,
     redis_client: Any = None,
     origin: Optional[Dict[str, Any]] = None,
     memory_context: Optional[Dict[str, Any]] = None,
     person_id: str = "",
+    user_text: Any = None,
+    request_text: Any = None,
     **_kwargs,
 ) -> Dict[str, Any]:
     del redis_client
@@ -7698,21 +7854,32 @@ def get_hydra_personal_context_payload(
     active_person_id = _text(person_id) or _active_person_id(origin=origin, memory_context=memory_context)
     profile_ids = _profile_ids_for_person(active_person_id)
     person_name = _people_person_name(active_person_id) if active_person_id else ""
+    prompt_request = _personal_prompt_request_text(user_text=user_text, request_text=request_text, origin=origin)
+    prompt_sections = _personal_prompt_section_order(prompt_request)
+    focused = prompt_sections != _PERSONAL_PROMPT_DEFAULT_SECTIONS
 
-    events = _upcoming_events_for_prompt(days=days, limit=limit, profile_ids=profile_ids)
+    events_limit = _personal_prompt_section_limit("events", base_limit=limit, focused=focused and "events" in prompt_sections)
+    merchants_limit = _personal_prompt_section_limit("merchants", base_limit=limit, focused=focused and "merchants" in prompt_sections)
+    deliveries_limit = _personal_prompt_section_limit("deliveries", base_limit=limit, focused=focused and "deliveries" in prompt_sections)
+    actions_limit = _personal_prompt_section_limit("actions", base_limit=limit, focused=focused and "actions" in prompt_sections)
+    subscriptions_limit = _personal_prompt_section_limit("subscriptions", base_limit=limit, focused=focused and "subscriptions" in prompt_sections)
+
+    events = _upcoming_events_for_prompt(days=days, limit=events_limit, profile_ids=profile_ids)
     merchant_rows = _aggregate_profiles(profile_ids=profile_ids).get("merchant_rows") or []
-    deliveries = _open_deliveries_for_prompt(limit=max(2, min(10, limit)), profile_ids=profile_ids)
-    actions = _due_actions_for_prompt(days=max(7, min(30, days)), limit=max(2, min(10, limit)), profile_ids=profile_ids)
-    subscriptions = _upcoming_subscriptions_for_prompt(days=max(30, days), limit=max(2, min(10, limit)), profile_ids=profile_ids)
+    deliveries = _open_deliveries_for_prompt(limit=max(2, deliveries_limit), profile_ids=profile_ids)
+    actions = _due_actions_for_prompt(days=max(7, min(30, days)), limit=max(2, actions_limit), profile_ids=profile_ids)
+    subscriptions = _upcoming_subscriptions_for_prompt(days=max(30, days), limit=max(2, subscriptions_limit), profile_ids=profile_ids)
 
     return {
         "person_id": active_person_id,
         "person_name": person_name,
         "upcoming_events": events,
-        "top_merchants": list(merchant_rows)[:8],
+        "top_merchants": list(merchant_rows)[:merchants_limit],
         "open_deliveries": deliveries,
         "action_items": actions,
         "upcoming_subscriptions": subscriptions,
+        "prompt_request": prompt_request,
+        "prompt_sections": prompt_sections,
         "summary_char_limit": 0,
         "horizon_days": days,
     }
@@ -7728,9 +7895,18 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
     subscriptions = payload.get("upcoming_subscriptions") if isinstance(payload.get("upcoming_subscriptions"), list) else []
     summary_limit = _as_int(payload.get("summary_char_limit"), 0, minimum=0)
     person_name = _text(payload.get("person_name"))
+    requested_sections = payload.get("prompt_sections") if isinstance(payload.get("prompt_sections"), list) else []
+    section_order = [
+        section
+        for section in requested_sections
+        if section in set(_PERSONAL_PROMPT_DEFAULT_SECTIONS)
+    ] or list(_PERSONAL_PROMPT_DEFAULT_SECTIONS)
 
     lines: List[str] = []
-    if events:
+
+    def _append_events() -> None:
+        if not events:
+            return
         lines.append("Upcoming plans from Personal Core:")
         for row in events[:12]:
             starts = _text(row.get("starts_at")) or _iso_from_ts(row.get("starts_ts"))
@@ -7746,7 +7922,9 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
                 segment += f" ({calendar_name})"
             lines.append(segment)
 
-    if merchants:
+    def _append_merchants() -> None:
+        if not merchants:
+            return
         lines.append("Likely favorite shopping places:")
         for row in merchants[:6]:
             merchant = _text(row.get("merchant") or row.get("name"))
@@ -7754,7 +7932,9 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
             if merchant:
                 lines.append(f"- {merchant} (${amount:.2f} observed)")
 
-    if action_items:
+    def _append_actions() -> None:
+        if not action_items:
+            return
         lines.append("Open action items from email:")
         for row in action_items[:8]:
             due = _text(row.get("due_at")) or "date n/a"
@@ -7762,7 +7942,9 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
             kind = _text(row.get("kind")) or "task"
             lines.append(f"- {due}: {title} [{kind}]")
 
-    if deliveries:
+    def _append_deliveries() -> None:
+        if not deliveries:
+            return
         lines.append("Open delivery updates:")
         for row in deliveries[:6]:
             carrier = _text(row.get("carrier")) or "carrier n/a"
@@ -7780,7 +7962,9 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
             item_text = f" {item_description}" if item_description else ""
             lines.append(f"- {carrier}{item_text} {ref}: {status} (ETA {eta})")
 
-    if subscriptions:
+    def _append_subscriptions() -> None:
+        if not subscriptions:
+            return
         lines.append("Upcoming subscription charges:")
         for row in subscriptions[:6]:
             merchant = _text(row.get("merchant")) or "Subscription"
@@ -7788,6 +7972,18 @@ def _personal_prompt_message_from_payload(payload: Dict[str, Any]) -> str:
             amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
             cadence = _text(row.get("cadence")) or "unknown"
             lines.append(f"- {charge}: {merchant} ${amount:.2f} [{cadence}]")
+
+    emitters = {
+        "events": _append_events,
+        "merchants": _append_merchants,
+        "actions": _append_actions,
+        "deliveries": _append_deliveries,
+        "subscriptions": _append_subscriptions,
+    }
+    for section in section_order:
+        emit = emitters.get(section)
+        if callable(emit):
+            emit()
 
     if not lines:
         return ""
@@ -7818,6 +8014,8 @@ def get_hydra_system_prompt_fragments(
     personal_context: Optional[Dict[str, Any]] = None,
     origin: Optional[Dict[str, Any]] = None,
     memory_context: Optional[Dict[str, Any]] = None,
+    user_text: Any = None,
+    request_text: Any = None,
     **_kwargs,
 ) -> Dict[str, List[str]]:
     normalized_role = _text(role).lower()
@@ -7832,7 +8030,13 @@ def get_hydra_system_prompt_fragments(
     payload = (
         personal_context
         if isinstance(personal_context, dict) and personal_context
-        else get_hydra_personal_context_payload(origin=origin, memory_context=memory_context, person_id=active_person_id)
+        else get_hydra_personal_context_payload(
+            origin=origin,
+            memory_context=memory_context,
+            person_id=active_person_id,
+            user_text=user_text,
+            request_text=request_text,
+        )
     )
     message = _personal_prompt_message_from_payload(payload)
     if not message:
