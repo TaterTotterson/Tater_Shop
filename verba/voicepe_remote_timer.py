@@ -9,12 +9,21 @@ import requests
 
 from verba_base import ToolVerba
 from helpers import redis_client
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from voice_core_entities import VoiceCoreEntityClient
 
 load_dotenv()
 logger = logging.getLogger("voicepe_remote_timer")
 logger.setLevel(logging.INFO)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
 _VOICE_CORE = VoiceCoreEntityClient()
 
 
@@ -34,7 +43,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.2.2"
+    version = "1.2.3"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"

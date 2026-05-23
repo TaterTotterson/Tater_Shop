@@ -8,24 +8,63 @@ from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import redis_client, get_tater_name, get_tater_personality
-from integrations.unifi_network import (
-    get_unifi_clients_all,
-    get_unifi_devices_all,
-    get_unifi_paged,
-    get_unifi_sites,
-    pick_unifi_site,
-    read_unifi_network_settings,
-    unifi_network_api_key,
-    unifi_network_base,
-    unifi_network_headers,
-    unifi_network_integration_url,
-    unifi_network_request,
-)
+from tateros import integration_store as integration_store_module
 from verba_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("unifi_network_clients")
 logger.setLevel(logging.INFO)
+
+
+def _unifi_network_module():
+    module = integration_store_module.integration_module("unifi_network")
+    if module is None:
+        raise RuntimeError("UniFi Network integration is not enabled.")
+    return module
+
+
+def read_unifi_network_settings(*args, **kwargs):
+    return _unifi_network_module().read_unifi_network_settings(*args, **kwargs)
+
+
+def unifi_network_base(*args, **kwargs):
+    return _unifi_network_module().unifi_network_base(*args, **kwargs)
+
+
+def unifi_network_api_key(*args, **kwargs):
+    return _unifi_network_module().unifi_network_api_key(*args, **kwargs)
+
+
+def unifi_network_headers(*args, **kwargs):
+    return _unifi_network_module().unifi_network_headers(*args, **kwargs)
+
+
+def unifi_network_request(*args, **kwargs):
+    return _unifi_network_module().unifi_network_request(*args, **kwargs)
+
+
+def unifi_network_integration_url(*args, **kwargs):
+    return _unifi_network_module().unifi_network_integration_url(*args, **kwargs)
+
+
+def get_unifi_sites(*args, **kwargs):
+    return _unifi_network_module().get_unifi_sites(*args, **kwargs)
+
+
+def pick_unifi_site(*args, **kwargs):
+    return _unifi_network_module().pick_unifi_site(*args, **kwargs)
+
+
+def get_unifi_paged(*args, **kwargs):
+    return _unifi_network_module().get_unifi_paged(*args, **kwargs)
+
+
+def get_unifi_clients_all(*args, **kwargs):
+    return _unifi_network_module().get_unifi_clients_all(*args, **kwargs)
+
+
+def get_unifi_devices_all(*args, **kwargs):
+    return _unifi_network_module().get_unifi_devices_all(*args, **kwargs)
 
 
 class UnifiNetworkClientsPlugin(ToolVerba):
@@ -45,7 +84,7 @@ class UnifiNetworkClientsPlugin(ToolVerba):
 
     name = "unifi_network_clients"
     verba_name = "UniFi Network Clients"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "UniFi Network Clients"
     tags = ["unifi", "clients"]

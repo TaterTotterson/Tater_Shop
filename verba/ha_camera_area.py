@@ -10,13 +10,22 @@ import requests
 import urllib3
 
 from helpers import extract_json, redis_client
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
 logger = logging.getLogger("ha_camera_area")
 logger.setLevel(logging.INFO)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
 
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -139,7 +148,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"

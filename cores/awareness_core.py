@@ -16,24 +16,39 @@ import requests
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
-from integrations.homeassistant import load_homeassistant_config
-from integrations.unifi_protect import (
-    load_unifi_protect_config as _unifi_protect_config,
-    unifi_protect_configured as _unifi_protect_configured,
-    unifi_protect_request as _unifi_request,
-)
 from notify import dispatch_notification
 from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_announcement_targets
+from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.3.9"
+__version__ = "3.4.0"
 
 load_dotenv()
 
 logger = logging.getLogger("awareness_core")
 logger.setLevel(logging.INFO)
+
+
+def _integration_module(integration_id: str):
+    return integration_store_module.integration_module(integration_id)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    module = _integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
+
+
+def _unifi_request(*args, **kwargs):
+    module = _integration_module("unifi_protect")
+    if module is None:
+        raise RuntimeError("UniFi Protect integration is not enabled.")
+    return module.unifi_protect_request(*args, **kwargs)
 
 CORE_SETTINGS = {
     "category": "Awareness Core Settings",
@@ -283,6 +298,8 @@ def _normalize_event_provider(value: Any) -> str:
     if token in {"ecobee", "homekit", "ecobee_homekit"}:
         token = "ecobee_homekit"
     if token not in _SUPPORTED_EVENT_PROVIDERS:
+        if re.fullmatch(r"[a-z0-9_]+", token) and integration_store_module.get_integration_enabled(token):
+            return token
         return "all"
     return token
 
@@ -369,6 +386,16 @@ def _provider_label(provider: str) -> str:
         return "Aladdin Connect"
     if token == "sonos":
         return "Sonos"
+    if token != "all":
+        try:
+            from integration_registry import get_integration_catalog
+
+            for row in get_integration_catalog():
+                if _text(row.get("id")).lower() == token:
+                    return _text(row.get("name")) or token.replace("_", " ").title()
+        except Exception:
+            pass
+        return token.replace("_", " ").title()
     return "Home Assistant"
 
 
@@ -1781,6 +1808,47 @@ async def _unifi_camera_snapshot(camera_id: str) -> bytes:
     return await asyncio.to_thread(_unifi_camera_snapshot_sync, camera_id)
 
 
+def _integration_camera_snapshot_sync(provider: str, camera_ref: str) -> Tuple[bytes, str]:
+    from integration_registry import run_integration_device_action
+
+    provider_token = _normalize_event_provider(provider)
+    device_ref = _text(camera_ref)
+    if device_ref.startswith("camera."):
+        device_ref = _unifi_camera_id_from_entity(device_ref) if provider_token == "unifi_protect" else device_ref
+    elif device_ref.startswith("camera:"):
+        device_ref = _text(device_ref.split(":", 1)[1])
+    result = run_integration_device_action(provider_token, "camera_snapshot", device_ref, {})
+    if isinstance(result, tuple) and len(result) >= 1:
+        content = result[0]
+        content_type = _text(result[1] if len(result) > 1 else "image/jpeg") or "image/jpeg"
+        if isinstance(content, (bytes, bytearray)):
+            return bytes(content), content_type
+    if isinstance(result, dict):
+        content = result.get("bytes") or result.get("content") or result.get("image_bytes")
+        content_type = _text(result.get("content_type") or result.get("mime_type") or "image/jpeg")
+        if isinstance(content, str) and content.startswith("data:") and "," in content:
+            header, payload = content.split(",", 1)
+            content_type = header[5:].split(";", 1)[0] or content_type
+            content = base64.b64decode(payload)
+        if isinstance(content, (bytes, bytearray)):
+            return bytes(content), content_type or "image/jpeg"
+    raise RuntimeError(f"{_provider_label(provider_token)} did not return snapshot bytes for {camera_ref}.")
+
+
+async def _integration_camera_snapshot(provider: str, camera_ref: str) -> Tuple[bytes, str]:
+    return await asyncio.to_thread(_integration_camera_snapshot_sync, provider, camera_ref)
+
+
+async def _capture_camera_snapshot(provider: str, camera_target: str) -> Tuple[bytes, str]:
+    provider_token = _normalize_event_provider(provider)
+    if provider_token == "homeassistant":
+        ha = _ha_config()
+        return await _camera_snapshot(ha["base"], ha["token"], camera_target), "image/jpeg"
+    if provider_token == "unifi_protect":
+        return await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target)), "image/jpeg"
+    return await _integration_camera_snapshot(provider_token, camera_target)
+
+
 def _vision_describe_sync(
     *,
     image_bytes: bytes,
@@ -3043,13 +3111,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
     ignore_vehicles = _bool(rule.get("ignore_vehicles"), False)
 
     try:
-        if snapshot_provider == "unifi_protect":
-            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
-        elif snapshot_provider == "homeassistant":
-            ha = _ha_config()
-            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
-        else:
-            raise ValueError(f"{_provider_label(snapshot_provider)} does not expose camera snapshots to Awareness yet.")
+        jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
         summary = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -3076,7 +3138,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
             "skipped": "nothing_notable",
         }
 
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
     trigger_entity = _text(event.get("entity_id"))
     event_payload = {
         "source": _slug(area),
@@ -3185,14 +3247,9 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     tts_model = _text(shared_tts.get("model"))
     tts_voice = _text(shared_tts.get("voice"))
     jpeg: bytes = b""
+    snapshot_content_type = "image/jpeg"
     try:
-        if snapshot_provider == "unifi_protect":
-            jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
-        elif snapshot_provider == "homeassistant":
-            ha = _ha_config()
-            jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
-        else:
-            raise ValueError(f"{_provider_label(snapshot_provider)} does not expose doorbell camera snapshots to Awareness yet.")
+        jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
         spoken_line = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
@@ -3206,7 +3263,7 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     except Exception:
         logger.exception("[awareness] doorbell snapshot/vision failed for %s", camera)
         spoken_line = "Someone is at the door."
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
     tts_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "no_players", "backend": tts_backend}
     if players:
         try:
@@ -3334,15 +3391,8 @@ async def _execute_entry_sensor_rule(
     snapshot_store: Dict[str, Any] = {}
     if camera:
         try:
-            jpeg = b""
-            if snapshot_provider == "unifi_protect":
-                jpeg = await _unifi_camera_snapshot(_unifi_camera_id_from_entity(camera_target))
-            elif snapshot_provider == "homeassistant":
-                ha = _ha_config()
-                jpeg = await _camera_snapshot(ha["base"], ha["token"], camera_target)
-            else:
-                raise ValueError(f"{_provider_label(snapshot_provider)} does not expose camera snapshots to Awareness yet.")
-            snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type="image/jpeg")
+            jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
+            snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
         except Exception as exc:
             logger.warning("[awareness] entry sensor snapshot failed for %s (%s): %s", camera, provider, exc)
             snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
@@ -3795,16 +3845,19 @@ def _device_label(provider_name: str, device: Dict[str, Any], device_id: str) ->
     return f"{suffix} ({device_id})"
 
 
-def _integration_devices_catalog() -> Dict[str, List[Tuple[str, str]]]:
+def _integration_devices_catalog(provider_filter: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
     catalog = _empty_entity_catalog()
     from integration_registry import get_integration_catalog, get_integration_device_group
+    filter_provider = _normalize_event_provider(provider_filter or "all")
 
     for integration in get_integration_catalog():
         if not isinstance(integration, dict):
             continue
         integration_id = _text(integration.get("id"))
         provider = _normalize_event_provider(integration_id)
-        if provider in {"all", "homeassistant", "unifi_protect"}:
+        if provider == "all":
+            continue
+        if filter_provider != "all" and provider != filter_provider:
             continue
         payload = get_integration_device_group(integration_id)
         group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
@@ -3818,41 +3871,68 @@ def _integration_devices_catalog() -> Dict[str, List[Tuple[str, str]]]:
                 continue
             device_type = _text(device.get("type")).lower()
             details = device.get("details") if isinstance(device.get("details"), dict) else {}
-            if provider == "hue" and device_type in {"motion", "contact", "light", "temperature"}:
-                entity = f"{device_type}:{device_id}"
-            elif provider == "unifi_network":
-                entity = f"{'client' if device_type == 'client' else 'device'}:{device_id}"
-            elif provider == "aladdin" and device_type in {"garage", "garage_door"}:
-                entity = f"garage_door:{device_id}"
-            elif provider == "ecobee_homekit" and device_type == "thermostat":
-                entity = device_id
-            else:
-                entity = f"{device_type or 'device'}:{device_id}"
+            capabilities = {str(item).strip().lower() for item in (device.get("capabilities") or []) if str(item).strip()}
+            entity = _text(device.get("ref"))
+            if not entity:
+                if provider == "hue" and device_type in {"motion", "contact", "light", "temperature"}:
+                    entity = f"{device_type}:{device_id}"
+                elif provider == "unifi_network":
+                    entity = f"{'client' if device_type == 'client' else 'device'}:{device_id}"
+                elif provider == "aladdin" and device_type in {"garage", "garage_door"}:
+                    entity = f"garage_door:{device_id}"
+                elif provider == "ecobee_homekit" and device_type == "thermostat":
+                    entity = device_id
+                else:
+                    entity = f"{device_type or 'device'}:{device_id}"
             ref = _provider_ref(provider, entity)
             label = _device_label(provider_name, device, entity)
-            if device_type == "motion":
+
+            if "camera" in capabilities or device_type == "camera":
+                catalog["cameras"].append((ref, label))
+            if "doorbell" in capabilities:
+                catalog["doorbell_triggers"].append((ref, label))
+            if "motion" in capabilities or device_type == "motion":
                 catalog["triggers"].append((ref, label))
-            elif device_type == "contact":
+            if "entry_sensor" in capabilities or device_type in {"contact", "entry_sensor", "garage_door"}:
                 catalog["entry_sensors"].append((ref, label))
                 name_hint = f"{_text(device.get('name')).lower()} {_text(details.get('resource_type')).lower()}"
-                if "window" in name_hint:
+                if "window" in capabilities or "window" in name_hint:
                     catalog["entry_sensors_window"].append((ref, label))
+                elif "garage" in capabilities or "garage" in name_hint:
+                    catalog["entry_sensors_garage"].append((ref, label))
                 else:
                     catalog["entry_sensors_door"].append((ref, label))
                 catalog["triggers"].append((ref, label))
-            elif device_type in {"garage", "garage_door"}:
-                catalog["entry_sensors"].append((ref, label))
-                catalog["entry_sensors_garage"].append((ref, label))
-                catalog["triggers"].append((ref, label))
-            elif device_type == "temperature":
+            if "temperature" in capabilities or device_type in {"temperature", "thermostat"}:
                 catalog["weather_sensors"].append((ref, label))
                 catalog["weather_temp"].append((ref, label))
-            elif device_type == "thermostat":
+            if "humidity" in capabilities:
                 catalog["weather_sensors"].append((ref, label))
-                catalog["weather_temp"].append((ref, label))
-            elif provider == "unifi_network":
-                catalog["triggers"].append((ref, label))
-            elif device_type in {"light", "switch", "client", "network_device"}:
+
+            for event_source in device.get("event_sources") or []:
+                if not isinstance(event_source, dict):
+                    continue
+                source_ref = _text(event_source.get("ref"))
+                if not source_ref:
+                    continue
+                source_type = _text(event_source.get("type")).lower()
+                full_ref = _provider_ref(provider, source_ref)
+                source_label = f"{provider_name}: {_text(device.get('name')) or device_id} {source_type or 'event'} ({source_ref})"
+                if source_type == "doorbell":
+                    catalog["doorbell_triggers"].append((full_ref, source_label))
+                elif source_type in {"door", "window", "garage", "contact", "entry_sensor"}:
+                    catalog["entry_sensors"].append((full_ref, source_label))
+                    if source_type == "window":
+                        catalog["entry_sensors_window"].append((full_ref, source_label))
+                    elif source_type == "garage":
+                        catalog["entry_sensors_garage"].append((full_ref, source_label))
+                    else:
+                        catalog["entry_sensors_door"].append((full_ref, source_label))
+                    catalog["triggers"].append((full_ref, source_label))
+                else:
+                    catalog["triggers"].append((full_ref, source_label))
+
+            if provider == "unifi_network" or device_type in {"light", "switch", "client", "network_device"}:
                 catalog["triggers"].append((ref, label))
     return catalog
 
@@ -3865,6 +3945,7 @@ def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, L
     _catalog_extend(catalog, _prefixed_event_catalog(_ha_entity_catalog(force_refresh=force_refresh), "homeassistant"))
     _catalog_extend(catalog, _prefixed_event_catalog(_unifi_entity_catalog(force_refresh=force_refresh), "unifi_protect"))
     _catalog_extend(catalog, _integration_devices_catalog())
+    catalog = _finalize_catalog(catalog)
     catalog = _catalog_with_announcement_targets(catalog)
     _set_cached_catalog("all", catalog)
     return catalog
@@ -3876,7 +3957,15 @@ def _entity_catalog(force_refresh: bool = False, *, provider: Optional[str] = No
         return _all_integrations_entity_catalog(force_refresh=force_refresh)
     if active_provider == "unifi_protect":
         return _unifi_entity_catalog(force_refresh=force_refresh)
-    return _ha_entity_catalog(force_refresh=force_refresh)
+    if active_provider == "homeassistant":
+        return _ha_entity_catalog(force_refresh=force_refresh)
+    cached = _cached_catalog(active_provider, force_refresh=force_refresh)
+    if cached is not None:
+        return cached
+    catalog = _integration_devices_catalog(provider_filter=active_provider)
+    catalog = _finalize_catalog(catalog)
+    _set_cached_catalog(active_provider, catalog)
+    return catalog
 
 
 def _choices_from_pairs(
@@ -5898,6 +5987,33 @@ async def _handle_integration_runtime_event(event: Dict[str, Any]) -> None:
     }:
         await _handle_unifi_network_runtime_event(kind, payload)
         _runtime_set(redis_client, last_ws_event_ts=event_ts, last_error="")
+        return
+
+    if provider != "all":
+        entity_id = _text(
+            payload.get("entity_id")
+            or payload.get("ref")
+            or payload.get("device_ref")
+            or payload.get("resource_ref")
+            or payload.get("id")
+            or payload.get("device_id")
+        )
+        if entity_id:
+            attrs = payload.get("attributes") if isinstance(payload.get("attributes"), dict) else dict(payload)
+            new_state = payload.get("new_state") if isinstance(payload.get("new_state"), dict) else {}
+            old_state = payload.get("old_state") if isinstance(payload.get("old_state"), dict) else {}
+            if not new_state:
+                new_state = {
+                    "state": _text(payload.get("state") or payload.get("status") or "on"),
+                    "attributes": attrs,
+                }
+            if not old_state:
+                old_state = {
+                    "state": _text(payload.get("old_state_value") or payload.get("previous_state") or ""),
+                    "attributes": payload.get("previous_attributes") if isinstance(payload.get("previous_attributes"), dict) else {},
+                }
+            await _handle_trigger_state_change(provider=provider, entity_id=entity_id, new_state=new_state, old_state=old_state)
+            _runtime_set(redis_client, last_ws_event_ts=event_ts, last_error="")
         return
 
 

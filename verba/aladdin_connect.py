@@ -4,19 +4,53 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from integrations.aladdin import (
-    ALADDIN_DEFAULT_API_BASE_URL,
-    AladdinConnectClient,
-    normalize_aladdin_api_base,
-    read_aladdin_settings,
-)
+from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("aladdin_connect")
 logger.setLevel(logging.INFO)
 
+ALADDIN_DEFAULT_API_BASE_URL = "https://api.smartgarage.systems"
 SETTINGS_CATEGORY = "Aladdin Connect"
+
+
+def _aladdin_module(*, required: bool = True):
+    module = integration_store_module.integration_module("aladdin")
+    if module is None and required:
+        raise RuntimeError("Aladdin Connect integration is not enabled.")
+    return module
+
+
+def normalize_aladdin_api_base(*args, **kwargs) -> str:
+    module = _aladdin_module(required=False)
+    if module is not None:
+        return module.normalize_aladdin_api_base(*args, **kwargs)
+    value = args[0] if args else kwargs.get("value")
+    text = _coerce_text(value) or ALADDIN_DEFAULT_API_BASE_URL
+    if "://" not in text:
+        text = f"https://{text}"
+    parsed = urlparse(text)
+    netloc = parsed.netloc or parsed.path
+    if not netloc:
+        return ALADDIN_DEFAULT_API_BASE_URL
+    return f"{parsed.scheme or 'https'}://{netloc}".rstrip("/")
+
+
+def read_aladdin_settings(*args, **kwargs) -> Dict[str, str]:
+    module = _aladdin_module(required=False)
+    if module is not None:
+        return module.read_aladdin_settings(*args, **kwargs)
+    return {
+        "ALADDIN_USERNAME": "",
+        "ALADDIN_PASSWORD": "",
+        "ALADDIN_API_BASE_URL": ALADDIN_DEFAULT_API_BASE_URL,
+        "ALADDIN_TIMEOUT_SECONDS": "5",
+    }
+
+
+def AladdinConnectClient(*args, **kwargs):
+    return _aladdin_module().AladdinConnectClient(*args, **kwargs)
 
 
 def _coerce_text(value: Any) -> str:
@@ -26,7 +60,7 @@ def _coerce_text(value: Any) -> str:
 class AladdinConnectPlugin(ToolVerba):
     name = "aladdin_connect"
     verba_name = "Aladdin Connect"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Aladdin Connect"
     settings_category = "Aladdin Connect"
@@ -115,7 +149,7 @@ class AladdinConnectPlugin(ToolVerba):
             "aladdin_api_base_url": "set" if parsed.scheme in {"http", "https"} and bool(parsed.netloc) else "invalid",
         }
 
-    def _get_client(self) -> Optional[AladdinConnectClient]:
+    def _get_client(self) -> Optional[Any]:
         try:
             return AladdinConnectClient()
         except Exception as exc:

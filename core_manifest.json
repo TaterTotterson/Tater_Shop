@@ -19,7 +19,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.3.9",
+      "version": "3.4.0",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,13 +27,13 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "b1dbe59f6737e39f411fed2825721ef34eac1f6339b5b12f37ad1c9aa4c6d700"
+      "sha256": "3790b08b91e28ee64c27ed28207a3afd8ac7dd2c467035a9c6644f24ca81fdef"
     },
     {
       "id": "environment",
       "name": "Environment Core",
       "module_key": "environment_core",
-      "version": "1.4.16",
+      "version": "1.4.18",
       "min_tater_version": "59",
       "description": "Local environment telemetry receiver for weather stations and configured sensor integrations.",
       "settings_category": "Environment Core Settings",
@@ -46,7 +46,7 @@
         "telemetry"
       ],
       "entry": "cores/environment_core.py",
-      "sha256": "d364eec5eab69fbf41fb6523e8401c46389153224875fc2dd10e9be09d92ce72"
+      "sha256": "34478cbc1732bdc806fc3c13c2ce225d9e89ff16778786f4ae90bedd08f9863a"
     },
     {
       "id": "memory",
@@ -66,7 +66,7 @@
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.46",
+      "version": "1.0.47",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -74,7 +74,7 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "a0443db63a1631c2e0bc193ef6b4fa70c761bb3c92b75e7e04f48717285c4e52"
+      "sha256": "844270e3ad737d87cfc94ad6e954e51917ed0d6859ccd5dd52ff558d97fdee3f"
     },
     {
       "id": "rss",

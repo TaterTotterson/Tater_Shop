@@ -5,13 +5,22 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from helpers import extract_json, redis_client
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("ha_media_players")
 logger.setLevel(logging.INFO)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
 
 
 class HAClient:
@@ -54,7 +63,7 @@ class HAClient:
 class HAMediaPlayersPlugin(ToolVerba):
     name = "ha_media_players"
     verba_name = "Home Assistant Media Players"
-    version = "2.0.7"
+    version = "2.0.8"
     min_tater_version = "59"
     pretty_name = "Home Assistant Media Players"
     settings_category = "Home Assistant Control"

@@ -11,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from helpers import redis_client
-from integrations.homeassistant import entity_registry_list, load_homeassistant_config
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from voice_core_entities import VoiceCoreEntityClient
@@ -27,13 +26,12 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.1"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
     platforms = [
         "voice_core",
-        "homeassistant",
         "homekit",
         "xbmc",
         "webui",
@@ -44,7 +42,7 @@ class MicroWakeWordPlugin(ToolVerba):
         "irc",
         "meshtastic",
     ]
-    tags = ["homeassistant", "voice_core", "microwakeword", "wake-word"]
+    tags = ["voice_core", "microwakeword", "wake-word"]
 
     usage = (
         '{"function":"microwakeword","arguments":{"query":"change your wake word to hey computer"}}'
@@ -58,7 +56,7 @@ class MicroWakeWordPlugin(ToolVerba):
         "or asks to reset the microWakeWord model to the compiled default."
     )
     how_to_use = (
-        "Pass one natural-language request in query. Optional explicit fields: action, wake_word, entity_id. "
+        "Pass one natural-language request in query. Optional explicit fields: action and wake_word. "
         "Examples: change your wake word to hey computer; suggest a few wake words; reset your wake word."
     )
     common_needs = ["A requested wake word, or a request for suggestions."]
@@ -84,10 +82,6 @@ class MicroWakeWordPlugin(ToolVerba):
                 "type": "string",
                 "description": "Optional action: set, suggest, reset, or status.",
             },
-            "entity_id": {
-                "type": "string",
-                "description": "Optional Home Assistant text entity to set, e.g. text.office_microwakeword_model_url.",
-            },
         },
         "required": [],
     }
@@ -99,11 +93,11 @@ class MicroWakeWordPlugin(ToolVerba):
             "default": "https://raw.githubusercontent.com/TaterTotterson/microWakeWords/main/wake_word_manifest.json",
             "description": "Manifest catalog URL or local file path for available microWakeWord models.",
         },
-        "MICROWAKEWORD_TEXT_ENTITY": {
-            "label": "microWakeWord Text Entity (optional)",
+        "MICROWAKEWORD_VOICE_CORE_SELECTOR": {
+            "label": "Voice Core Satellite Selector (optional)",
             "type": "string",
             "default": "",
-            "description": "Optional explicit HA text entity, e.g. text.office_microwakeword_model_url.",
+            "description": "Optional host: selector for web UI or chat requests that are not sent from a satellite.",
         },
         "MAX_SUGGESTIONS": {
             "label": "Max Suggestions",
@@ -244,19 +238,6 @@ class MicroWakeWordPlugin(ToolVerba):
             flags=re.I,
         )
         return re.sub(r"\s+", " ", text).strip(" .!?\"'")
-
-    @staticmethod
-    def _ctx_text(context: dict | None, *keys: str) -> str:
-        ctx = context if isinstance(context, dict) else {}
-        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
-        for key in keys:
-            raw = ctx.get(key)
-            if raw in (None, ""):
-                raw = origin.get(key)
-            txt = str(raw or "").strip()
-            if txt:
-                return txt
-        return ""
 
     def _normalize_args(self, args: Any) -> Dict[str, Any]:
         if isinstance(args, dict):
@@ -533,11 +514,14 @@ class MicroWakeWordPlugin(ToolVerba):
         return ""
 
     # -------------------------------------------------------------
-    # Entity resolution: Voice Core and Home Assistant
+    # Entity resolution: Voice Core
     # -------------------------------------------------------------
 
     def _voice_core_selector(self, context: dict | None) -> str:
-        return VoiceCoreEntityClient.selector_from_context(context)
+        selector = VoiceCoreEntityClient.selector_from_context(context)
+        if selector:
+            return selector
+        return self._text(self._get_settings().get("MICROWAKEWORD_VOICE_CORE_SELECTOR"))
 
     def _voice_core_entities_sync(self, selector: str) -> dict:
         return _VOICE_CORE.get_entities(selector)
@@ -565,137 +549,6 @@ class MicroWakeWordPlugin(ToolVerba):
             return selector, None, []
         entries = payload.get("entities") if isinstance(payload.get("entities"), list) else []
         return selector, self._pick_voice_core_text_entry(entries), entries
-
-    def _ha_settings(self) -> dict:
-        ha = load_homeassistant_config(required=False)
-        return {"base_url": self._text(ha.get("base")), "token": self._text(ha.get("token"))}
-
-    def _ha_headers(self, token: str) -> dict:
-        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    def _ha_get(self, base_url: str, token: str, path: str, timeout: int = 20):
-        resp = requests.get(f"{base_url}{path}", headers=self._ha_headers(token), timeout=timeout)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Home Assistant HTTP {resp.status_code}: {resp.text[:200]}")
-        return resp.json() if resp.text else {}
-
-    def _ha_call_service(self, base_url: str, token: str, domain: str, service: str, payload: dict):
-        resp = requests.post(
-            f"{base_url}/api/services/{domain}/{service}",
-            headers=self._ha_headers(token),
-            json=payload,
-            timeout=20,
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Home Assistant {domain}.{service} failed: HTTP {resp.status_code}: {resp.text[:200]}")
-        try:
-            return resp.json()
-        except Exception:
-            return {}
-
-    def _candidate_prefixes_from_context(self, context: dict | None) -> List[str]:
-        values = [
-            self._ctx_text(context, "device_name", "satellite_name", "device"),
-            self._ctx_text(context, "entity_id", "satellite_entity_id", "assist_satellite_entity_id"),
-            self._ctx_text(context, "device_id"),
-        ]
-        prefixes: List[str] = []
-        for value in values:
-            raw = self._text(value)
-            if not raw:
-                continue
-            if raw.startswith("assist_satellite.") and "." in raw:
-                raw = raw.split(".", 1)[1]
-            slug = self._slugify(raw)
-            if not slug:
-                continue
-            prefixes.append(slug)
-            for suffix in ("_assist_satellite", "_satellite_assist", "_satellite", "_voice_assistant"):
-                if slug.endswith(suffix):
-                    prefixes.append(slug[: -len(suffix)])
-            if "assist_satellite" in slug:
-                prefixes.append(slug.replace("assist_satellite", "").strip("_"))
-        return list(dict.fromkeys([p for p in prefixes if p]))
-
-    @staticmethod
-    def _is_microwakeword_text_entity(entity_id: str, name: str = "") -> bool:
-        low = f"{entity_id} {name}".lower()
-        compact = low.replace("_", "").replace(" ", "")
-        return entity_id.startswith("text.") and (
-            "microwakewordmodelurl" in compact
-            or ("wakeword" in compact and "model" in compact and "url" in compact)
-        )
-
-    def _pick_ha_text_entity_from_states(self, states: List[dict], context: dict | None) -> Tuple[str, List[str]]:
-        prefixes = self._candidate_prefixes_from_context(context)
-        candidates: List[Tuple[int, str]] = []
-        for state in states if isinstance(states, list) else []:
-            if not isinstance(state, dict):
-                continue
-            entity_id = self._text(state.get("entity_id")).lower()
-            attrs = state.get("attributes") if isinstance(state.get("attributes"), dict) else {}
-            name = self._text(attrs.get("friendly_name"))
-            if not self._is_microwakeword_text_entity(entity_id, name):
-                continue
-            score = 100
-            low = f"{entity_id} {name}".lower()
-            for prefix in prefixes:
-                if prefix and prefix in low:
-                    score += 50 + min(len(prefix), 30)
-            candidates.append((score, entity_id))
-
-        candidates.sort(reverse=True)
-        ids = [entity_id for _, entity_id in candidates]
-        if not ids:
-            return "", []
-        if len(ids) == 1:
-            return ids[0], ids
-        if prefixes and candidates[0][0] > candidates[1][0]:
-            return candidates[0][1], ids
-        return "", ids
-
-    async def _resolve_ha_text_entity(self, args: Dict[str, Any], context: dict | None) -> Tuple[str, List[str]]:
-        explicit = self._text(args.get("entity_id") or args.get("text_entity_id"))
-        if explicit:
-            return explicit, [explicit]
-
-        setting_entity = self._text(self._get_settings().get("MICROWAKEWORD_TEXT_ENTITY"))
-        if setting_entity:
-            return setting_entity, [setting_entity]
-
-        ha = self._ha_settings()
-        if not ha["token"]:
-            return "", []
-
-        device_id = self._ctx_text(context, "device_id")
-        if device_id:
-            try:
-                rows = await entity_registry_list(ha["base_url"], ha["token"], timeout_s=30.0)
-                ids = []
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    if self._text(row.get("device_id")) != device_id:
-                        continue
-                    if row.get("disabled_by") not in (None, ""):
-                        continue
-                    entity_id = self._text(row.get("entity_id")).lower()
-                    name = self._text(row.get("name") or row.get("original_name"))
-                    if self._is_microwakeword_text_entity(entity_id, name):
-                        ids.append(entity_id)
-                if len(ids) == 1:
-                    return ids[0], ids
-                if len(ids) > 1:
-                    return "", ids
-            except Exception as exc:
-                logger.warning("[microwakeword] HA entity-registry lookup failed for %s: %s", device_id, exc)
-
-        try:
-            states = await asyncio.to_thread(self._ha_get, ha["base_url"], ha["token"], "/api/states", 20)
-        except Exception as exc:
-            logger.warning("[microwakeword] HA state scan failed: %s", exc)
-            return "", []
-        return self._pick_ha_text_entity_from_states(states if isinstance(states, list) else [], context)
 
     # -------------------------------------------------------------
     # Actions
@@ -737,139 +590,65 @@ class MicroWakeWordPlugin(ToolVerba):
             logger.error("[microwakeword] Voice Core text_set failed for %s: %s", selector, exc)
             return False, selector, str(exc)
 
-    async def _set_ha_model(self, args: Dict[str, Any], context: dict | None, model_url: str) -> Tuple[bool, str, str, List[str]]:
-        ha = self._ha_settings()
-        if not ha["token"]:
-            return False, "", "missing_homeassistant_token", []
-        entity_id, candidates = await self._resolve_ha_text_entity(args, context)
-        if not entity_id:
-            return False, "", "ambiguous_or_missing_text_entity", candidates
-        try:
-            await asyncio.to_thread(
-                self._ha_call_service,
-                ha["base_url"],
-                ha["token"],
-                "text",
-                "set_value",
-                {"entity_id": entity_id, "value": model_url},
-            )
-            return True, entity_id, "", candidates
-        except Exception as exc:
-            logger.error("[microwakeword] HA text.set_value failed for %s: %s", entity_id, exc)
-            return False, entity_id, str(exc), candidates
-
-    async def _read_status(self, args: Dict[str, Any], context: dict | None, entries: List[dict], prefer_voice_core: bool) -> dict:
-        if prefer_voice_core:
-            selector, entry, _ = await self._resolve_voice_core_text_entity(context)
-            if entry:
-                raw = VoiceCoreEntityClient.state_value(entry)
-                value = self._text(raw)
-                match = self._exact_match(value, entries)
-                label = self._format_option(match) if match else (value or "compiled default")
-                return action_success(
-                    facts={"action": "status", "wake_word": label, "model_url": value, "target": selector},
-                    summary_for_user=f"The current microWakeWord setting is {label}.",
-                    say_hint="Report the current microWakeWord setting.",
-                )
-
-        ha = self._ha_settings()
-        if not ha["token"]:
-            return action_failure(
-                code="ha_not_configured",
-                message="Home Assistant token is not configured.",
-                needs=["Set Home Assistant base URL and token, or use this from a Voice Core satellite."],
-                say_hint="Explain Home Assistant is not configured.",
-            )
-
-        entity_id, candidates = await self._resolve_ha_text_entity(args, context)
-        if not entity_id:
-            return self._missing_entity_result(candidates)
-        try:
-            state = await asyncio.to_thread(self._ha_get, ha["base_url"], ha["token"], f"/api/states/{entity_id}", 20)
-            value = self._text((state or {}).get("state"))
-        except Exception as exc:
-            return action_failure(
-                code="ha_status_failed",
-                message=f"Could not read {entity_id}: {exc}",
-                say_hint="Explain the microWakeWord entity could not be read.",
-            )
+    async def _read_status(self, context: dict | None, entries: List[dict]) -> dict:
+        selector, entry, _ = await self._resolve_voice_core_text_entity(context)
+        if not entry:
+            return self._missing_entity_result(selector)
+        raw = VoiceCoreEntityClient.state_value(entry)
+        value = self._text(raw)
         match = self._exact_match(value, entries)
         label = self._format_option(match) if match else (value or "compiled default")
         return action_success(
-            facts={"action": "status", "wake_word": label, "model_url": value, "entity_id": entity_id},
+            facts={"action": "status", "wake_word": label, "model_url": value, "target": selector},
             summary_for_user=f"The current microWakeWord setting is {label}.",
             say_hint="Report the current microWakeWord setting.",
         )
 
-    def _missing_entity_result(self, candidates: List[str] | None = None) -> dict:
-        candidates = [self._text(x) for x in (candidates or []) if self._text(x)]
-        needs = [
-            "Use this request from the satellite you want to change, or configure MICROWAKEWORD_TEXT_ENTITY in the Verba settings."
-        ]
-        if candidates:
-            needs.append("Available matching text entities: " + ", ".join(candidates[:8]))
+    def _missing_entity_result(self, selector: str = "") -> dict:
+        needs = []
+        if not self._text(selector):
+            needs.append(
+                "Use this request from the target Voice Core satellite, or configure MICROWAKEWORD_VOICE_CORE_SELECTOR in the Verba settings."
+            )
+        else:
+            needs.append(
+                "Make sure the selected Voice Core satellite exposes a text entity whose name includes microWakeWord, model, and URL."
+            )
         return action_failure(
             code="microwakeword_text_entity_not_found",
-            message="Could not determine which microWakeWord Model URL text entity to set.",
+            message="Could not find the Voice Core microWakeWord Model URL text entity.",
             needs=needs,
             say_hint=(
-                "Explain that the wake-word text entity could not be uniquely identified. "
-                "Ask the user to try from the target satellite or configure the entity id."
+                "Explain that the wake-word text entity could not be found. "
+                "Ask the user to try from the target satellite or configure the Voice Core selector."
             ),
         )
 
     async def _apply_model_url(
         self,
-        args: Dict[str, Any],
         context: dict | None,
         model_url: str,
         label: str,
-        prefer_voice_core: bool,
     ) -> dict:
-        if prefer_voice_core:
-            ok, target, error = await self._set_voice_core_model(context, model_url)
-            if ok:
-                return action_success(
-                    facts={"action": "set", "wake_word": label, "model_url": model_url, "target": target},
-                    summary_for_user=f"microWakeWord is now set to {label}.",
-                    say_hint=(
-                        f"Confirm the new wake word is {label}. Mention it may take a few moments for the satellite "
-                        "to download and activate the model."
-                    ),
-                )
-            if error not in {"missing_selector", "missing_text_entity"}:
-                return action_failure(
-                    code="voice_core_text_set_failed",
-                    message=f"Voice Core could not set the microWakeWord text entity: {error}",
-                    say_hint="Explain the Voice Core entity update failed.",
-                )
-
-        ok, entity_id, error, candidates = await self._set_ha_model(args, context, model_url)
+        ok, target, error = await self._set_voice_core_model(context, model_url)
         if ok:
             return action_success(
-                facts={"action": "set", "wake_word": label, "model_url": model_url, "entity_id": entity_id},
+                facts={"action": "set", "wake_word": label, "model_url": model_url, "target": target},
                 summary_for_user=f"microWakeWord is now set to {label}.",
                 say_hint=(
                     f"Confirm the new wake word is {label}. Mention it may take a few moments for the satellite "
                     "to download and activate the model."
                 ),
             )
-        if error == "ambiguous_or_missing_text_entity":
-            return self._missing_entity_result(candidates)
-        if error == "missing_homeassistant_token":
-            return action_failure(
-                code="ha_not_configured",
-                message="Home Assistant token is not configured.",
-                needs=["Set Home Assistant base URL and token, or use this from a Voice Core satellite."],
-                say_hint="Explain Home Assistant is not configured.",
-            )
+        if error in {"missing_selector", "missing_text_entity"}:
+            return self._missing_entity_result(target)
         return action_failure(
-            code="ha_text_set_failed",
-            message=f"Home Assistant could not set {entity_id or 'the microWakeWord text entity'}: {error}",
-            say_hint="Explain the Home Assistant text entity update failed.",
+            code="voice_core_text_set_failed",
+            message=f"Voice Core could not set the microWakeWord text entity: {error}",
+            say_hint="Explain the Voice Core entity update failed.",
         )
 
-    async def _handle(self, args: Any, llm_client=None, context: dict | None = None, *, prefer_voice_core: bool = False):
+    async def _handle(self, args: Any, llm_client=None, context: dict | None = None):
         payload = self._normalize_args(args)
         request_text = self._merged_request_text(payload)
         target = self._extract_target(payload, request_text)
@@ -885,15 +664,13 @@ class MicroWakeWordPlugin(ToolVerba):
             )
 
         if action == "status":
-            return await self._read_status(payload, context, entries, prefer_voice_core=prefer_voice_core)
+            return await self._read_status(context, entries)
 
         if action == "reset":
             return await self._apply_model_url(
-                payload,
                 context,
                 "compiled",
                 "the compiled default wake word",
-                prefer_voice_core=prefer_voice_core,
             )
 
         if action == "suggest":
@@ -906,11 +683,9 @@ class MicroWakeWordPlugin(ToolVerba):
         model_url = self._text(match.get("download_url") or match.get("url"))
         label = self._format_option(match)
         return await self._apply_model_url(
-            payload,
             context,
             model_url,
             label,
-            prefer_voice_core=prefer_voice_core,
         )
 
     # -------------------------------------------------------------
@@ -918,19 +693,16 @@ class MicroWakeWordPlugin(ToolVerba):
     # -------------------------------------------------------------
 
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        return await self._handle(args or {}, llm_client, context=context, prefer_voice_core=True)
-
-    async def handle_homeassistant(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        return await self._handle(args or {}, llm_client, context=context, prefer_voice_core=False)
+        return await self._handle(args or {}, llm_client, context=context)
 
     async def handle_homekit(self, args=None, llm_client=None, context=None):
-        return await self._handle(args or {}, llm_client, context=context, prefer_voice_core=False)
+        return await self._handle(args or {}, llm_client, context=context)
 
     async def handle_xbmc(self, args=None, llm_client=None, context=None):
-        return await self._handle(args or {}, llm_client, context=context, prefer_voice_core=False)
+        return await self._handle(args or {}, llm_client, context=context)
 
     async def handle_webui(self, args=None, llm_client=None, context=None):
-        return await self._handle(args or {}, llm_client, context=context, prefer_voice_core=False)
+        return await self._handle(args or {}, llm_client, context=context)
 
     async def handle_macos(self, args=None, llm_client=None, context=None):
         return await self.handle_webui(args=args, llm_client=llm_client, context=context)

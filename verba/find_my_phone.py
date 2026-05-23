@@ -13,12 +13,21 @@ from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import redis_client
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from verba_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("find_my_phone")
 logger.setLevel(logging.INFO)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
 
 
 class FindMyPhonePlugin(ToolVerba):
@@ -35,7 +44,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'

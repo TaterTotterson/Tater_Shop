@@ -1,3 +1,5 @@
+# Tater Shop
+
 <div align="center">
   <a href="https://taterassistant.com">
     <img src="images/tater-repo-logo.png" alt="Tater Shop" width="460"/>
@@ -7,120 +9,466 @@
   <a href="https://taterassistant.com">taterassistant.com</a>
 </h3>
 
-<!-- AUTO:VERBA_TABLES:BEGIN -->
-## 🧠 Core Store
+Tater Shop is the modular source repo for Tater verbas, portals, and cores. Tater reads the generated manifests in this repo and downloads only the selected modules into the local runtime.
 
-| Core ID | Module | Description |
-|-------------|--------|-------------|
-| `ai_task` | `ai_task_core` | AI Task Scheduler Core integration core for Tater. |
-| `awareness` | `awareness_core` | Awareness Core integration core for Tater. |
-| `environment` | `environment_core` | Local environment telemetry receiver for weather stations and configured sensor integrations. |
-| `memory` | `memory_core` | Memory Core integration core for Tater. |
-| `personal` | `personal_core` | Personal Core integration core for Tater. |
-| `rss` | `rss_core` | RSS Core integration core for Tater. |
+The manifests are the source of the store inventory:
 
-## 🌐 Portal Store
+- `manifest.json` for verbas.
+- `portal_manifest.json` for portals.
+- `core_manifest.json` for cores.
 
-| Portal ID | Module | Description |
-|-------------|--------|-------------|
-| `discord` | `discord_portal` | Discord integration portal for Tater. |
-| `homekit` | `homekit_portal` | HomeKit / Siri integration portal for Tater. |
-| `irc` | `irc_portal` | IRC integration portal for Tater. |
-| `macos` | `macos_portal` | macOS integration portal for Tater. |
-| `matrix` | `matrix_portal` | Matrix integration portal for Tater. |
-| `meshtastic` | `meshtastic_portal` | Meshtastic integration portal for Tater. |
-| `moltbook` | `moltbook_portal` | Moltbook social/research integration portal for Tater. |
-| `telegram` | `telegram_portal` | Telegram integration portal for Tater. |
-| `xbmc` | `xbmc_portal` | XBMC / Original Xbox integration portal for Tater. |
+The README is intentionally not an inventory table. It is the authoring guide for adding new shop packages.
 
-## 🧩 Verba Store
+## Repo Layout
 
-### 💬 Interactive / Conversational Verbas
+- `verba/`: Hydra-callable tools, usually one user-facing skill or action per file.
+- `portals/`: platform runtimes such as Discord, Matrix, IRC, HomeKit, or macOS.
+- `cores/`: background services, web UI panels, Hydra kernel tools, and shared context providers.
+- `tools/`: manifest generators for the three shop package types.
 
-| Verba ID | Description | Portals |
-|------------|-------------|----------|
-| `aladdin_connect` | Control Aladdin Connect garage doors. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `automatic_plugin` | Create one image from a natural-language image request. | discord, webui, macos, telegram |
-| `broadcast` | Send a one-time spoken announcement to your configured broadcast targets. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
-| `comfyui_audio_ace` | Compose a music track from a prompt with ComfyUI Audio Ace. | discord, webui, macos, voice_core, homeassistant, matrix, telegram |
-| `comfyui_image_plugin` | Generate a still image from a text prompt using your ComfyUI workflow. | discord, webui, macos, matrix, telegram |
-| `comfyui_image_video` | Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI. | webui, macos |
-| `comfyui_music_video` | Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI. | webui, macos |
-| `comfyui_video_plugin` | Create a short video from a text prompt by stitching ComfyUI-generated clips. | webui, macos |
-| `device_compare` | Natural-language device comparison with spec tables and optional per-game FPS benchmarks. | discord, webui, macos, matrix, telegram |
-| `discord_admin_response_mode` | Toggle always-respond mode for the current Discord channel only. | discord |
-| `discord_admin_roles` | Discord role listing and role assignment commands. | discord |
-| `discord_admin_setup` | Discord server setup and structural admin changes. | discord |
-| `ecobee_homekit_thermostat` | Control Ecobee thermostats through HomeKit pairing. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `find_my_phone` | Ping or ring your phone through Home Assistant so you can locate it. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `ftp_browser` | Browse and download files from the configured FTP server. | discord |
-| `ha_camera_area` | Find cameras in a Home Assistant area and describe what they see. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_climate` | Control Home Assistant thermostats and HVAC entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_covers` | Control Home Assistant covers and garage doors. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_fans` | Control Home Assistant fans. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_lights` | Control Home Assistant lights. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_locks` | Control Home Assistant lock entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_media_players` | Media-player control for Home Assistant. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_remotes` | Control Home Assistant remote entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_scenes` | Control Home Assistant scenes. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_scripts` | Control Home Assistant scripts. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_sensors` | Read Home Assistant sensor and binary_sensor entities. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_switches` | Control Home Assistant switches and plugs. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `ha_temperature` | Read Home Assistant ambient temperatures. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `hue_lights` | Control Philips Hue Bridge lights. | voice_core, homeassistant, webui, macos, xbmc, homekit, discord, telegram, matrix, irc, meshtastic |
-| `irc_admin_op` | Gives the user op or voice in the current IRC channel. | irc, meshtastic |
-| `irc_admin_slap` | Slaps the requested user in the current IRC channel. | irc, meshtastic |
-| `irc_admin_topic` | Sets the current IRC channel topic to the requested text. | irc, meshtastic |
-| `jackett_recent_uploads` | List and rank recent Jackett uploads across selected indexers. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, homekit, matrix, telegram, xbmc |
-| `jackett_search_torrents` | Run Jackett torrent searches with filters and ranked results. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, homekit, matrix, telegram, xbmc |
-| `joke_api` | Fetch one joke from JokeAPI. | webui, macos, voice_core, homeassistant, homekit, discord, telegram, matrix, irc, meshtastic, xbmc |
-| `lowfi_video` | Create a cozy lofi video by generating music and looping a matching animation. | webui, macos |
-| `microwakeword` | Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
-| `mister_remote` | Control your MiSTer FPGA setup—launch games, check status, or take screenshots. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, telegram |
-| `moltbook_account_summary` | Moltbook account snapshot with profile link and key counters. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_activity_on_posts` | Read /home activity buckets for your posts and summarize engagement. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_agent_profile` | Lookup target Moltbook agent profile details. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_fellow_taters` | Show tracked fellow Tater Moltbook agents. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_following` | List known followed agents and active authors from following feed. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_home_overview` | Moltbook /home dashboard overview with unread/activity counters. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_latest_announcement` | Get the newest Moltbook announcement/news entry. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_latest_posts` | Fetch latest posts authored by this Moltbook agent. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_monitoring_submolts` | Read Moltbook portal settings for submolts to monitor/prefer/avoid. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_profile_link` | Get the current Moltbook profile URL. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `moltbook_subscriptions` | Show subscribed submolts from Moltbook portal state. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `music_assistant` | Play music and control playback via Music Assistant in Home Assistant. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `obsidian_note` | Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags. | webui, macos |
-| `obsidian_search` | Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis. | webui, macos |
-| `overseerr_details` | Fetch details for a specific movie or TV show from Overseerr. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, telegram |
-| `overseerr_request` | Request a movie or TV show in Overseerr by title. | webui, macos, voice_core, homeassistant, homekit, discord, telegram, matrix, irc, meshtastic |
-| `overseerr_trending` | List trending or upcoming movies/TV from Overseerr. | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, telegram |
-| `premiumize_add_transfer` | Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `premiumize_check_transfer` | Inspect a Premiumize transfer and report status, progress, and related files. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `premiumize_get_links` | Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `premiumize_list_files` | List Premiumize cloud folder contents with file/folder counts. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `premiumize_list_transfers` | Show Premiumize transfer queue/status with active, finished, and failed counts. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `sftpgo_account` | Create an SFTPGo account for the user and return login details. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `sftpgo_activity` | Show current connection activity on the SFTPGo server. | discord, webui, macos, irc, meshtastic, matrix, telegram |
-| `tater_gits_add_feed` | Add a GitHub releases feed to the tater-gits watcher with smart naming. | webui, macos, discord, irc, meshtastic, matrix, telegram |
-| `unifi_network_clients` | List UniFi clients with wired/wireless counts and client details. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_network_devices` | List UniFi devices with online/offline status and core details. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_network_health` | Get UniFi network health summary including client/device totals and offline device signals. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_network_lookup` | Look up a UniFi client/device and return matching identity and network details. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_protect_area` | Describe activity across multiple cameras in a named area. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_protect_camera` | Describe a single UniFi Protect camera snapshot. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_protect_camera_info` | List UniFi Protect cameras. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `unifi_protect_sensors` | Check UniFi Protect sensor status and single-sensor detail. | webui, macos, voice_core, homeassistant, homekit, xbmc, discord, telegram, matrix, irc, meshtastic |
-| `voicepe_remote_timer` | Start, cancel, or check a Voice PE (ESPHome) timer device. | voice_core, homeassistant, homekit, xbmc, webui, macos, discord, telegram, matrix, irc, meshtastic |
-| `weather_forecast` | Fetch WeatherAPI.com weather through Tater integrations and answer only what the user asked (LLM-guided). | discord, webui, macos, irc, meshtastic, voice_core, homeassistant, matrix, homekit, xbmc, telegram |
-| `webdav_browser` | Browse and download files from the configured WebDAV server. | discord |
-| `youtube_summary` | Summarize a YouTube video using its transcript. | discord, webui, macos, irc, meshtastic, matrix, telegram |
+## Build A Verba
 
-### ⚙️ Automation Verbas (Home Assistant)
+A verba is a tool Hydra can route to. Verbas should be narrow, predictable, and explicit about when they should be used.
 
-*(none)*
+Create `verba/example_lookup.py`:
 
-### 📡 RSS Notifier Verbas
+```python
+import logging
+from typing import Any, Dict
 
-*(none)*
+from verba_base import ToolVerba
+from verba_result import action_failure, action_success
 
-<!-- AUTO:VERBA_TABLES:END -->
+logger = logging.getLogger("example_lookup")
+
+
+class ExampleLookupPlugin(ToolVerba):
+    name = "example_lookup"
+    verba_name = "Example Lookup"
+    pretty_name = "Example Lookup"
+    version = "1.0.0"
+    min_tater_version = "59"
+
+    usage = '{"function":"example_lookup","arguments":{"query":"status"}}'
+    description = "Look up an example value."
+    verba_dec = "Look up an example value."
+    when_to_use = "Use when the user asks for the example lookup."
+    how_to_use = "Pass a short query."
+    common_needs = []
+    missing_info_prompts = ["What should I look up?"]
+    example_calls = [
+        '{"function":"example_lookup","arguments":{"query":"status"}}',
+    ]
+
+    settings_category = "Example Lookup"
+    platforms = ["webui", "macos", "voice_core", "discord", "telegram", "matrix", "irc", "meshtastic"]
+    tags = ["example"]
+    routing_keywords = ["example lookup", "example status"]
+
+    required_settings = {
+        "EXAMPLE_TIMEOUT_SECONDS": {
+            "label": "Timeout Seconds",
+            "type": "number",
+            "default": 10,
+            "description": "Timeout for example requests.",
+        },
+    }
+
+    @staticmethod
+    def _query(args: Dict[str, Any]) -> str:
+        return str((args or {}).get("query") or (args or {}).get("request") or "").strip()
+
+    async def _handle(self, args: Dict[str, Any], llm_client=None) -> Dict[str, Any]:
+        query = self._query(args)
+        if not query:
+            return action_failure(
+                code="missing_query",
+                message="No example lookup query was provided.",
+                needs=["Provide a query."],
+                say_hint="Ask what the user wants to look up.",
+            )
+
+        result = {"query": query, "value": "example result"}
+        return action_success(
+            facts=result,
+            summary_for_user=f"Example lookup returned: {result['value']}.",
+            say_hint="Summarize the example lookup result.",
+        )
+
+    async def handle_webui(self, args, llm_client):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_macos(self, args, llm_client, context=None):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_discord(self, message, args, llm_client):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_telegram(self, update, args, llm_client):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
+        return await self._handle(args or {}, llm_client)
+
+    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
+        return await self._handle(args or {}, llm_client)
+
+
+verba = ExampleLookupPlugin()
+```
+
+### Verba Contract
+
+The manifest generator reads class attributes from the first `ToolVerba` subclass:
+
+- `name`: stable tool id. Use lowercase snake case.
+- `verba_name` or `pretty_name`: display name.
+- `version`: bump when behavior changes.
+- `min_tater_version`: minimum supported Tater version.
+- `description` and `verba_dec`: short store and routing description.
+- `platforms` or `portals`: supported surfaces.
+- `settings_category`: settings bucket shown in Tater.
+- `required_settings`: settings fields for the UI.
+- `tags`: optional store and routing tags.
+
+Handlers are platform-specific. Keep one private `_handle()` method when possible and let platform handlers normalize into it. Return `action_success(...)` or `action_failure(...)` so every portal can narrate results consistently.
+
+## Build A Portal
+
+A portal is a runtime bridge for one platform. It receives platform events, builds an origin/context payload, calls Hydra, and sends the response back to the platform.
+
+Create `portals/example_portal.py`:
+
+```python
+"""Example integration portal for Tater."""
+
+import logging
+import time
+from typing import Any, Dict
+
+from helpers import get_llm_client_from_env, redis_client
+from hydra import run_hydra_turn
+
+__version__ = "1.0.0"
+MIN_TATER_VERSION = "59"
+PORTAL_DESCRIPTION = "Example integration portal for Tater."
+TAGS = ["example"]
+
+logger = logging.getLogger("example_portal")
+
+PORTAL_SETTINGS = {
+    "category": "Example Portal Settings",
+    "tags": TAGS,
+    "required": {
+        "poll_interval_seconds": {
+            "label": "Poll Interval Seconds",
+            "type": "number",
+            "default": 5,
+            "description": "How often the example portal polls for messages.",
+        },
+    },
+}
+
+
+def _settings() -> Dict[str, str]:
+    return redis_client.hgetall("example_portal_settings") or {}
+
+
+def _poll_interval() -> float:
+    try:
+        return max(1.0, float(_settings().get("poll_interval_seconds") or 5))
+    except Exception:
+        return 5.0
+
+
+def run(stop_event=None) -> None:
+    llm_client = get_llm_client_from_env()
+    logger.info("[example_portal] started")
+    try:
+        while not (stop_event and stop_event.is_set()):
+            # Replace this with platform polling, websocket handling, or API processing.
+            time.sleep(_poll_interval())
+
+            # Example Hydra call shape:
+            # result = await run_hydra_turn(
+            #     user_text="hello",
+            #     llm_client=llm_client,
+            #     platform="example",
+            #     origin={"platform": "example", "user_id": "user", "room_id": "room"},
+            # )
+            # Send result text/artifacts back to the platform.
+    finally:
+        logger.info("[example_portal] stopped")
+```
+
+### Portal Contract
+
+The portal manifest generator reads:
+
+- File name: `*_portal.py`.
+- `__version__` or `VERSION`.
+- `MIN_TATER_VERSION`.
+- `PORTAL_DESCRIPTION` or `DESCRIPTION`.
+- `TAGS`.
+- `PORTAL_SETTINGS`.
+- `run(stop_event=None)`.
+
+Use `PORTAL_SETTINGS["required"]` for settings fields. Keep credentials in `password` fields. Make `run()` cooperative: it must check `stop_event.is_set()` and exit cleanly.
+
+Portals should not implement business logic that belongs in a verba or core. Their job is transport, identity/origin normalization, message history, platform-specific formatting, and delivery.
+
+## Build A Core
+
+A core is a background service. Cores can also expose custom Web UI tabs, Hydra kernel tools, and context/prompt fragments.
+
+Create `cores/example_core.py`:
+
+```python
+import logging
+import time
+from typing import Any, Dict, List, Optional
+
+from helpers import redis_client
+
+__version__ = "1.0.0"
+MIN_TATER_VERSION = "59"
+CORE_DESCRIPTION = "Example background core for Tater."
+TAGS = ["example"]
+
+logger = logging.getLogger("example_core")
+
+CORE_SETTINGS = {
+    "category": "Example Core Settings",
+    "hydra_tools_require_running": False,
+    "required": {
+        "poll_interval_seconds": {
+            "label": "Poll Interval Seconds",
+            "type": "number",
+            "default": 30,
+            "description": "How often Example Core refreshes data.",
+        },
+    },
+    "tags": TAGS,
+}
+
+CORE_WEBUI_TAB = {
+    "label": "Example",
+    "order": 50,
+    "requires_running": False,
+}
+
+
+def _settings(client: Any = None) -> Dict[str, Any]:
+    store = client or redis_client
+    return store.hgetall("example_core_settings") or {}
+
+
+def _poll_interval(client: Any = None) -> float:
+    try:
+        return max(5.0, float(_settings(client).get("poll_interval_seconds") or 30))
+    except Exception:
+        return 30.0
+
+
+def run(stop_event=None) -> None:
+    logger.info("[example_core] started")
+    try:
+        while not (stop_event and stop_event.is_set()):
+            redis_client.hset("example_core:status", mapping={"last_seen": str(time.time())})
+            interval = _poll_interval()
+            deadline = time.time() + interval
+            while time.time() < deadline:
+                if stop_event and stop_event.is_set():
+                    break
+                time.sleep(0.5)
+    finally:
+        logger.info("[example_core] stopped")
+
+
+def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    status = client.hgetall("example_core:status") or {}
+    return {
+        "summary": "Example Core status.",
+        "stats": [
+            {"label": "Last Seen", "value": status.get("last_seen") or "never"},
+        ],
+        "empty_message": "No example data yet.",
+        "ui": {
+            "kind": "settings_manager",
+            "title": "Example Core",
+            "manager_tabs": [
+                {"key": "overview", "label": "Overview", "source": "items"},
+                {"key": "create", "label": "Create", "source": "add_form"},
+            ],
+            "default_tab": "overview",
+            "add_form": {
+                "action": "example_create",
+                "submit_label": "Create",
+                "fields": [
+                    {"key": "name", "label": "Name", "type": "text", "required": True},
+                ],
+            },
+            "item_forms": [
+                {
+                    "id": "example",
+                    "title": "Example Item",
+                    "subtitle": "Stored by Example Core",
+                    "fields": [
+                        {"key": "name", "label": "Name", "type": "text", "value": "Example"},
+                    ],
+                    "actions": [
+                        {"action": "example_save", "label": "Save"},
+                        {"action": "example_delete", "label": "Delete", "danger": True},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    values = (payload or {}).get("values") if isinstance((payload or {}).get("values"), dict) else {}
+    if action == "example_create":
+        name = str(values.get("name") or "").strip()
+        if not name:
+            raise ValueError("Name is required.")
+        client.hset("example_core:item", mapping={"name": name})
+        return {"ok": True, "message": "Created example item."}
+    raise KeyError(f"Unsupported Example Core UI action: {action}")
+
+
+def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": "example_status",
+            "description": "Read Example Core status.",
+            "usage": '{"function":"example_status","arguments":{}}',
+        }
+    ]
+
+
+async def run_hydra_kernel_tool(
+    *,
+    tool_id: str,
+    args: Optional[Dict[str, Any]] = None,
+    platform: str = "",
+    scope: str = "",
+    origin: Optional[Dict[str, Any]] = None,
+    llm_client: Any = None,
+    redis_client: Any = None,
+    **_kwargs,
+) -> Optional[Dict[str, Any]]:
+    if tool_id != "example_status":
+        return None
+    client = redis_client or globals().get("redis_client")
+    status = client.hgetall("example_core:status") or {}
+    return {
+        "tool": "example_status",
+        "ok": True,
+        "status": status,
+        "summary_for_user": "Example Core is available.",
+    }
+```
+
+### Core Contract
+
+The core manifest generator reads:
+
+- File name: `*_core.py`.
+- `__version__` or `VERSION`.
+- `MIN_TATER_VERSION`.
+- `CORE_DESCRIPTION` or `DESCRIPTION`.
+- `CORE_SETTINGS`.
+- `CORE_WEBUI_TAB`.
+- `TAGS`.
+- `run(stop_event=None)`.
+
+`CORE_SETTINGS` drives the Settings UI and runtime behavior. Set `hydra_tools_require_running` to `False` when Hydra tools are useful even if the background loop is stopped.
+
+### Core Web UI
+
+`CORE_WEBUI_TAB` makes a tab available in Tater's Web UI. `get_htmlui_tab_data()` returns the payload for that tab. For richer management screens, return `ui.kind = "settings_manager"`.
+
+Common `settings_manager` keys:
+
+- `title`: panel title.
+- `stats`: top-level summary counters from the outer payload.
+- `manager_tabs`: tab definitions with `key`, `label`, `source`, and optional `item_group`.
+- `add_form`: create form with `action`, `submit_label`, and `fields`.
+- `item_forms`: existing item cards/forms.
+- `stats_refresh_button`: show a refresh button.
+- `item_fields_dropdown`, `item_fields_popup`, `item_sections_in_dropdown`: controls how item fields are displayed.
+
+Common field types:
+
+- `text`
+- `textarea`
+- `number`
+- `password`
+- `checkbox`
+- `select`
+- `multiselect`
+- `hidden`
+
+UI actions call `handle_htmlui_tab_action(action=..., payload=..., redis_client=...)`. Raise `ValueError` for invalid input and `KeyError` for unsupported actions.
+
+### Hydra Kernel Tools
+
+Cores can add tools directly to Hydra without creating a separate verba:
+
+- `get_hydra_kernel_tools(platform="", **kwargs)` returns tool definitions.
+- `run_hydra_kernel_tool(tool_id=..., args=..., platform=..., scope=..., origin=..., llm_client=..., redis_client=...)` executes one tool.
+
+Use kernel tools for core-owned data and workflows, such as memory lookup, event history, weather conditions, or scheduling. Return structured dictionaries with `ok`, relevant data, and `summary_for_user`.
+
+Optional context hooks:
+
+- `get_hydra_system_prompt_fragments(...)`: add core-owned prompt context.
+- `get_hydra_memory_context_payload(...)` or similar core-specific payload helpers: expose compact context to Hydra.
+
+Keep kernel tools narrow. They should be safe to call repeatedly and should not require a portal-specific transport.
+
+## Manifest Generation
+
+After editing shop files, regenerate the relevant manifest:
+
+```bash
+python3 tools/generate_manifest.py
+python3 tools/generate_core_manifest.py
+python3 tools/generate_portal_manifest.py
+```
+
+The GitHub workflow also regenerates these manifests on push. README generation is intentionally removed.
+
+## Validation
+
+Compile-check changed modules:
+
+```bash
+python3 -m py_compile verba/example_lookup.py
+python3 -m py_compile portals/example_portal.py
+python3 -m py_compile cores/example_core.py
+```
+
+Regenerate manifests and inspect the diff. The generated manifest entry should include the expected `id`, `name`, `version`, `description`, `entry`, and `sha256`.
+
+## Design Rules
+
+- Keep package ids stable and lowercase snake case.
+- Bump `version` or `__version__` whenever behavior changes.
+- Keep imports lightweight. Do not perform network calls or long discovery during import.
+- Put provider credentials in settings or integrations, not hardcoded constants.
+- Prefer shared integrations for external device APIs.
+- Prefer a generic core or kernel tool when behavior should work across providers.
+- Prefer a provider-specific verba when the tool is intentionally tied to one integration.
+- Make `run(stop_event=None)` loops cooperative and quick to stop.
+- Return structured results so portals can narrate consistently.
+- Keep UI payloads compact and stable; large histories should be paged, filtered, or summarized.

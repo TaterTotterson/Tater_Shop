@@ -13,14 +13,19 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote
 
 from helpers import extract_json, redis_client
+from tateros import integration_store as integration_store_module
 
-__version__ = "1.4.16"
+__version__ = "1.4.18"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
 
 logger = logging.getLogger("environment_core")
 logger.setLevel(logging.INFO)
+
+
+def _integration_module(integration_id: str):
+    return integration_store_module.integration_module(integration_id)
 
 CORE_SETTINGS = {
     "category": "Environment Core Settings",
@@ -61,6 +66,40 @@ LATEST_PROVIDER_KEYS = {
     "hue": LATEST_HUE_KEY,
     "homeassistant": LATEST_HOMEASSISTANT_KEY,
     "weather_api": LATEST_WEATHER_API_KEY,
+}
+LATEST_PROVIDER_KEY_PREFIX = "environment:latest:"
+
+DEDICATED_ENVIRONMENT_PROVIDERS = {
+    "ecowitt",
+    "unifi_protect",
+    "ecobee_homekit",
+    "homekit",
+    "hue",
+    "homeassistant",
+    "weather_api",
+}
+
+ENVIRONMENT_CAPABILITY_CATEGORIES = {
+    "temperature": "temperature",
+    "temp": "temperature",
+    "thermostat": "temperature",
+    "humidity": "humidity",
+    "relative_humidity": "humidity",
+    "pressure": "pressure",
+    "atmospheric_pressure": "pressure",
+    "battery": "battery",
+    "battery_level": "battery",
+    "illuminance": "solar",
+    "lux": "solar",
+    "light_level": "solar",
+    "uv": "solar",
+    "air_quality": "air",
+    "aqi": "air",
+    "pm25": "air",
+    "pm2_5": "air",
+    "co2": "air",
+    "condition": "condition",
+    "weather": "condition",
 }
 
 PROVIDER_LABELS = {
@@ -622,7 +661,18 @@ def _apply_ecowitt_areas(snapshot: Dict[str, Any], settings: Dict[str, Any]) -> 
 
 def _provider_label(provider: Any) -> str:
     token = _clean_key(provider)
-    return PROVIDER_LABELS.get(token, _humanize_key(token) if token else "Environment")
+    if token in PROVIDER_LABELS:
+        return PROVIDER_LABELS[token]
+    if token:
+        try:
+            from integration_registry import get_integration_catalog
+
+            for row in get_integration_catalog():
+                if _clean_key(row.get("id")) == token:
+                    return _text(row.get("name")) or _humanize_key(token)
+        except Exception:
+            pass
+    return _humanize_key(token) if token else "Environment"
 
 
 def _reading_row(
@@ -690,6 +740,13 @@ def _snapshot_from_readings(
         "readings": clean_readings,
         "raw": raw if isinstance(raw, dict) else {},
     }
+
+
+def _provider_latest_key(provider: Any) -> str:
+    provider_key = _clean_key(provider)
+    if not provider_key:
+        return LATEST_KEY
+    return LATEST_PROVIDER_KEYS.get(provider_key) or f"{LATEST_PROVIDER_KEY_PREFIX}{provider_key}"
 
 
 def _flatten_scalars(value: Any, prefix: str = "", depth: int = 0) -> Iterable[Tuple[str, str, Any]]:
@@ -863,6 +920,15 @@ def _selected_by_provider(provider: str, client: Any = None) -> Dict[str, Dict[s
         for row in _load_selected_sensors(client)
         if _clean_key(row.get("provider")) == wanted and _as_bool(row.get("enabled"), True)
     }
+
+
+def _dynamic_environment_providers(client: Any = None) -> List[str]:
+    providers: set[str] = set()
+    for row in _load_selected_sensors(client):
+        provider = _clean_key(row.get("provider"))
+        if provider and provider not in LATEST_PROVIDER_KEYS:
+            providers.add(provider)
+    return sorted(providers)
 
 
 def _load_candidate_cache(client: Any = None) -> Dict[str, Any]:
@@ -1231,33 +1297,30 @@ def _store_snapshot(snapshot: Dict[str, Any], client: Any = None, provider_key: 
     blob = json.dumps(snapshot, sort_keys=True)
     provider = _clean_key(provider_key or snapshot.get("provider") or "environment")
     store.set(LATEST_KEY, blob)
-    latest_key = LATEST_PROVIDER_KEYS.get(provider)
-    if latest_key:
-        store.set(latest_key, blob)
+    if provider and provider != "environment":
+        store.set(_provider_latest_key(provider), blob)
     store.hset(SOURCES_KEY, snapshot.get("source_id") or f"{provider}:unknown", blob)
     store.lpush(HISTORY_KEY, blob)
     store.ltrim(HISTORY_KEY, 0, max(0, int(settings.get("history_limit") or DEFAULT_HISTORY_LIMIT) - 1))
 
 
 def _unifi_protect_configured(client: Any = None) -> Tuple[bool, str]:
+    module = _integration_module("unifi_protect")
+    if module is None:
+        return False, "Enable UniFi Protect in Settings > Integrations."
     try:
-        from integrations.unifi_protect import unifi_protect_configured
-    except Exception as exc:
-        return False, f"UniFi Protect integration unavailable: {exc}"
-    try:
-        configured = bool(unifi_protect_configured(client))
+        configured = bool(module.unifi_protect_configured(client))
     except Exception as exc:
         return False, str(exc)
     return configured, "Configured" if configured else "Set up UniFi Protect in Settings > Integrations."
 
 
 def _ecobee_homekit_configured() -> Tuple[bool, str]:
+    module = _integration_module("homekit")
+    if module is None:
+        return False, "Enable Ecobee HomeKit in Settings > Integrations."
     try:
-        from integrations.homekit import integration_status
-    except Exception as exc:
-        return False, f"Ecobee HomeKit integration unavailable: {exc}"
-    try:
-        status = integration_status()
+        status = module.integration_status()
     except Exception as exc:
         return False, str(exc)
     configured = bool(status.get("configured"))
@@ -1265,12 +1328,11 @@ def _ecobee_homekit_configured() -> Tuple[bool, str]:
 
 
 def _hue_configured(client: Any = None) -> Tuple[bool, str]:
+    module = _integration_module("hue")
+    if module is None:
+        return False, "Enable Philips Hue in Settings > Integrations."
     try:
-        from integrations.hue import read_hue_settings
-    except Exception as exc:
-        return False, f"Philips Hue integration unavailable: {exc}"
-    try:
-        settings = read_hue_settings(client)
+        settings = module.read_hue_settings(client)
     except Exception as exc:
         return False, str(exc)
     configured = bool(_text(settings.get("HUE_APP_KEY")))
@@ -1278,12 +1340,11 @@ def _hue_configured(client: Any = None) -> Tuple[bool, str]:
 
 
 def _homeassistant_configured(client: Any = None) -> Tuple[bool, str]:
+    module = _integration_module("homeassistant")
+    if module is None:
+        return False, "Enable Home Assistant in Settings > Integrations."
     try:
-        from integrations.homeassistant import load_homeassistant_config
-    except Exception as exc:
-        return False, f"Home Assistant integration unavailable: {exc}"
-    try:
-        config = load_homeassistant_config(required=False, client=client)
+        config = module.load_homeassistant_config(required=False, client=client)
     except Exception as exc:
         return False, str(exc)
     configured = bool(_text(config.get("base")) and _text(config.get("token")))
@@ -1291,12 +1352,11 @@ def _homeassistant_configured(client: Any = None) -> Tuple[bool, str]:
 
 
 def _weather_api_configured(client: Any = None) -> Tuple[bool, str]:
+    module = _integration_module("weather_api")
+    if module is None:
+        return False, "Enable WeatherAPI.com in Settings > Integrations."
     try:
-        from integrations.weather_api import weatherapi_configured
-    except Exception as exc:
-        return False, f"WeatherAPI.com integration unavailable: {exc}"
-    try:
-        configured = bool(weatherapi_configured(client))
+        configured = bool(module.weatherapi_configured(client))
     except Exception as exc:
         return False, str(exc)
     return configured, "Configured" if configured else "Set up WeatherAPI.com in Settings > Integrations."
@@ -1327,10 +1387,12 @@ def _hue_get_resource(resource: str, client: Any = None) -> List[Dict[str, Any]]
         import requests
         import warnings
         from requests.packages.urllib3.exceptions import InsecureRequestWarning
-        from integrations.hue import read_hue_settings
     except Exception as exc:
         raise RuntimeError(f"Philips Hue integration unavailable: {exc}") from exc
-    settings = read_hue_settings(client)
+    module = _integration_module("hue")
+    if module is None:
+        raise RuntimeError("Philips Hue integration is not enabled.")
+    settings = module.read_hue_settings(client)
     bridge = _hue_api_root(settings.get("HUE_BRIDGE_HOST"))
     app_key = _text(settings.get("HUE_APP_KEY"))
     timeout = _as_int(settings.get("HUE_TIMEOUT_SECONDS"), 10, minimum=2, maximum=60)
@@ -1447,10 +1509,12 @@ def _discover_hue_candidates(client: Any = None) -> List[Dict[str, Any]]:
 def _homeassistant_states(client: Any = None) -> List[Dict[str, Any]]:
     try:
         import requests
-        from integrations.homeassistant import load_homeassistant_config
     except Exception as exc:
         raise RuntimeError(f"Home Assistant integration unavailable: {exc}") from exc
-    config = load_homeassistant_config(required=True, client=client)
+    module = _integration_module("homeassistant")
+    if module is None:
+        raise RuntimeError("Home Assistant integration is not enabled.")
+    config = module.load_homeassistant_config(required=True, client=client)
     base = _text(config.get("base")).rstrip("/")
     token = _text(config.get("token"))
     response = requests.get(
@@ -1556,11 +1620,10 @@ def _discover_unifi_candidates(client: Any = None) -> List[Dict[str, Any]]:
     configured, _message = _unifi_protect_configured(client)
     if not configured:
         return []
-    try:
-        from integrations.unifi_protect import list_unifi_sensors
-    except Exception:
+    module = _integration_module("unifi_protect")
+    if module is None:
         return []
-    sensors = list_unifi_sensors()
+    sensors = module.list_unifi_sensors()
     readings = _normalize_unifi_protect_sensors(sensors if isinstance(sensors, list) else [])
     grouped: Dict[str, Dict[str, Any]] = {}
     for row in readings:
@@ -1600,15 +1663,11 @@ def _discover_ecobee_candidates(client: Any = None) -> List[Dict[str, Any]]:
     configured, _message = _ecobee_homekit_configured()
     if not configured:
         return []
-    try:
-        from integrations.homekit import list_homekit_thermostats
-    except Exception:
+    module = _integration_module("homekit")
+    if module is None:
         return []
-    try:
-        from integrations.homekit import list_homekit_environment_sensors
-    except Exception:
-        list_homekit_environment_sensors = None
-    thermostats = list_homekit_thermostats()
+    thermostats = module.list_homekit_thermostats()
+    list_homekit_environment_sensors = getattr(module, "list_homekit_environment_sensors", None)
     try:
         sensor_services = list_homekit_environment_sensors() if callable(list_homekit_environment_sensors) else []
     except Exception:
@@ -1657,6 +1716,268 @@ def _discover_ecobee_candidates(client: Any = None) -> List[Dict[str, Any]]:
     return rows
 
 
+def _integration_device_ref(device: Dict[str, Any]) -> str:
+    ref = _text(device.get("ref") or device.get("resource_ref"))
+    if ref:
+        return ref
+    device_id = _text(device.get("id") or device.get("device_id") or device.get("entity_id"))
+    device_type = _clean_key(device.get("type")) or "device"
+    return f"{device_type}:{device_id}" if device_id else ""
+
+
+def _integration_device_caps(device: Dict[str, Any]) -> set[str]:
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    tokens: set[str] = set()
+    for value in device.get("capabilities") or []:
+        token = _clean_key(value)
+        if token:
+            tokens.add(token)
+    for value in (
+        device.get("type"),
+        device.get("kind"),
+        details.get("device_class"),
+        details.get("resource_type"),
+        details.get("sensor_type"),
+    ):
+        token = _clean_key(value)
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def _generic_environment_categories(device: Dict[str, Any]) -> List[str]:
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    caps = _integration_device_caps(device)
+    haystack = " ".join(
+        _clean_key(part)
+        for part in (
+            device.get("id"),
+            device.get("name"),
+            device.get("type"),
+            details.get("device_class"),
+            details.get("resource_type"),
+            details.get("sensor_type"),
+            details.get("unit_of_measurement"),
+            details.get("unit"),
+        )
+        if _text(part)
+    )
+    categories: List[str] = []
+
+    def add(category: str) -> None:
+        category_key = _clean_key(category)
+        if category_key and category_key not in categories:
+            categories.append(category_key)
+
+    for token, category in ENVIRONMENT_CAPABILITY_CATEGORIES.items():
+        token_key = _clean_key(token)
+        if token_key in caps or token_key in haystack:
+            add(category)
+
+    unit = _text(details.get("unit_of_measurement") or details.get("unit") or details.get("native_unit"))
+    if _temperature_unit(unit, "") in {"C", "F"}:
+        add("temperature")
+    elif unit == "%" and ("humidity" in caps or "relative_humidity" in caps or "humidity" in haystack):
+        add("humidity")
+    elif unit.lower() in {"lx", "lux"}:
+        add("solar")
+
+    return categories
+
+
+def _generic_unit_for_category(
+    *,
+    category: str,
+    details: Dict[str, Any],
+    flat: List[Tuple[str, str, Any]],
+    value_path: str,
+) -> str:
+    detail_unit = ""
+    for key in ("unit_of_measurement", "unit", "native_unit", "source_unit"):
+        unit = _text(details.get(key))
+        if unit:
+            detail_unit = unit
+            break
+    path = _path_token(value_path)
+    if category == "temperature":
+        if detail_unit:
+            return _temperature_unit(detail_unit, detail_unit)
+        if path.endswith("_f") or "fahrenheit" in path:
+            return "F"
+        if path.endswith("_c") or "celsius" in path:
+            return "C"
+        return _unit_hint(flat, "temperature", "")
+    if category == "humidity":
+        if detail_unit == "%":
+            return "%"
+        return _unit_hint(flat, "humidity", "%") or "%"
+    if category == "battery":
+        if detail_unit == "%":
+            return "%"
+        return _unit_hint(flat, "battery", "%") or "%"
+    if category == "pressure":
+        if detail_unit and _temperature_unit(detail_unit, "") not in {"C", "F"}:
+            return detail_unit
+        return _unit_hint(flat, "pressure", "")
+    if category == "solar":
+        if detail_unit.lower() in {"lx", "lux"}:
+            return detail_unit
+        return _unit_hint(flat, "illuminance", "lx")
+    if category == "air":
+        if detail_unit and _temperature_unit(detail_unit, "") not in {"C", "F"}:
+            return detail_unit
+        return _unit_hint(flat, "air", "")
+    return ""
+
+
+def _generic_numeric_value(device: Dict[str, Any], category: str) -> Tuple[Optional[float], str]:
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    flat = list(_flatten_scalars({"state": device.get("state"), "status": device.get("status"), **details}))
+    include_by_category = {
+        "temperature": (
+            "temperature",
+            "current_temperature",
+            "ambient_temperature",
+            "temperature_c",
+            "temperature_f",
+            "tempc",
+            "tempf",
+            "temp",
+        ),
+        "humidity": ("humidity", "relative_humidity", "current_humidity", "humidity_percent"),
+        "pressure": ("pressure", "atmospheric_pressure", "barometric_pressure"),
+        "battery": ("battery", "battery_level", "battery_percent", "battery_percentage"),
+        "solar": ("illuminance", "lux", "light_level", "uv"),
+        "air": ("aqi", "air_quality", "pm25", "pm2_5", "co2"),
+    }
+    value, path = _first_numeric_field(
+        flat,
+        include_by_category.get(category, (category,)),
+        exclude_tokens=("target", "desired", "threshold", "limit", "minimum", "maximum", "min", "max"),
+    )
+    if value is not None:
+        return value, path
+    if category in _generic_environment_categories(device):
+        state_value = _as_float(device.get("state"))
+        if state_value is not None:
+            return state_value, "state"
+    return None, ""
+
+
+def _generic_condition_value(device: Dict[str, Any]) -> Tuple[str, str]:
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    flat = list(_flatten_scalars({"state": device.get("state"), "status": device.get("status"), **details}))
+    value, path = _first_text_field(flat, ("condition", "weather", "state"))
+    text = _text(value)
+    if text.lower() in {"online", "offline", "available", "unavailable", "unknown"}:
+        return "", ""
+    return text, path
+
+
+def _generic_integration_device_readings(provider: str, device: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(device, dict):
+        return []
+    provider_key = _clean_key(provider)
+    source_ref = _integration_device_ref(device)
+    if not provider_key or not source_ref:
+        return []
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    flat = list(_flatten_scalars({"state": device.get("state"), "status": device.get("status"), **details}))
+    source_name = _text(device.get("name")) or source_ref
+    source_id = f"{provider_key}:{source_ref}"
+    key_base = f"{provider_key}_{_clean_key(source_ref)}"
+    rows: List[Dict[str, Any]] = []
+    for category in _generic_environment_categories(device):
+        if category == "condition":
+            condition, condition_path = _generic_condition_value(device)
+            if not condition:
+                continue
+            rows.append(
+                _reading_row(
+                    key=f"{key_base}_condition",
+                    label=f"{source_name} Condition",
+                    category="condition",
+                    unit="",
+                    value=condition,
+                    display=condition,
+                    provider=provider_key,
+                    source_id=source_id,
+                    source_name=source_name,
+                    area=_text(device.get("area")),
+                )
+            )
+            rows[-1]["value_path"] = condition_path
+            continue
+
+        value, value_path = _generic_numeric_value(device, category)
+        if value is None:
+            continue
+        unit = _generic_unit_for_category(category=category, details=details, flat=flat, value_path=value_path)
+        label_suffix = CATEGORY_LABELS.get(category, _humanize_key(category))
+        rows.append(
+            _reading_row(
+                key=f"{key_base}_{category}",
+                label=f"{source_name} {label_suffix}".strip(),
+                category=category,
+                unit=unit,
+                value=value,
+                provider=provider_key,
+                source_id=source_id,
+                source_name=source_name,
+                area=_text(device.get("area")),
+                tone="danger" if category == "battery" and unit == "%" and value <= 20 else "",
+            )
+        )
+        rows[-1]["value_path"] = value_path
+    return rows
+
+
+def _discover_generic_integration_candidates(client: Any = None) -> List[Dict[str, Any]]:
+    try:
+        from integration_registry import get_integration_catalog, get_integration_device_group
+    except Exception as exc:
+        logger.warning("[Environment] generic integration discovery unavailable: %s", exc)
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for integration in get_integration_catalog():
+        if not isinstance(integration, dict):
+            continue
+        provider = _clean_key(integration.get("id"))
+        if not provider or provider in DEDICATED_ENVIRONMENT_PROVIDERS:
+            continue
+        try:
+            payload = get_integration_device_group(provider)
+        except Exception as exc:
+            logger.warning("[Environment] %s generic sensor discovery failed: %s", provider, exc)
+            continue
+        group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
+        devices = group.get("devices") if isinstance(group.get("devices"), list) else []
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            readings = _generic_integration_device_readings(provider, device)
+            if not readings:
+                continue
+            source_ref = _integration_device_ref(device)
+            categories = [_clean_key(row.get("category")) for row in readings if _clean_key(row.get("category"))]
+            primary_category = next((item for item in categories if item != "battery"), categories[0] if categories else "other")
+            rows.append(
+                _candidate_row(
+                    provider=provider,
+                    sensor_id=source_ref,
+                    label=_text(device.get("name")) or source_ref,
+                    category=primary_category,
+                    unit=_text(readings[0].get("unit")),
+                    measurement="sensor",
+                    area=_text(device.get("area")),
+                    current_display=", ".join(_text(row.get("display")) for row in readings if _text(row.get("display")))[:90],
+                    capabilities=[CATEGORY_LABELS.get(item, _humanize_key(item)) for item in dict.fromkeys(categories)],
+                )
+            )
+    return rows
+
+
 def _discover_environment_sensor_candidates(client: Any = None) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -1671,6 +1992,11 @@ def _discover_environment_sensor_candidates(client: Any = None) -> Dict[str, Any
         except Exception as exc:
             logger.warning("[Environment] %s sensor discovery failed: %s", provider, exc)
             errors.append(f"{_provider_label(provider)}: {exc}")
+    try:
+        results.extend(_discover_generic_integration_candidates(client))
+    except Exception as exc:
+        logger.warning("[Environment] generic integration sensor discovery failed: %s", exc)
+        errors.append(f"Generic integrations: {exc}")
     deduped: Dict[str, Dict[str, Any]] = {}
     for row in results:
         key = _text(row.get("key"))
@@ -1703,12 +2029,11 @@ def _poll_unifi_protect(client: Any = None) -> Dict[str, Any]:
     configured, message = _unifi_protect_configured(client)
     if not configured:
         return {"ok": False, "provider": "unifi_protect", "message": message}
+    module = _integration_module("unifi_protect")
+    if module is None:
+        return {"ok": False, "provider": "unifi_protect", "message": "UniFi Protect integration is not enabled."}
     try:
-        from integrations.unifi_protect import list_unifi_sensors
-    except Exception as exc:
-        return {"ok": False, "provider": "unifi_protect", "message": f"UniFi Protect integration unavailable: {exc}"}
-    try:
-        rows = list_unifi_sensors()
+        rows = module.list_unifi_sensors()
     except Exception as exc:
         logger.warning("[Environment] UniFi Protect sensor poll failed: %s", exc)
         return {"ok": False, "provider": "unifi_protect", "message": str(exc)}
@@ -1756,16 +2081,12 @@ def _poll_ecobee_homekit(client: Any = None) -> Dict[str, Any]:
     configured, message = _ecobee_homekit_configured()
     if not configured:
         return {"ok": False, "provider": "ecobee_homekit", "message": message}
+    module = _integration_module("homekit")
+    if module is None:
+        return {"ok": False, "provider": "ecobee_homekit", "message": "Ecobee HomeKit integration is not enabled."}
+    list_homekit_environment_sensors = getattr(module, "list_homekit_environment_sensors", None)
     try:
-        from integrations.homekit import list_homekit_thermostats
-    except Exception as exc:
-        return {"ok": False, "provider": "ecobee_homekit", "message": f"Ecobee HomeKit integration unavailable: {exc}"}
-    try:
-        from integrations.homekit import list_homekit_environment_sensors
-    except Exception:
-        list_homekit_environment_sensors = None
-    try:
-        rows = list_homekit_thermostats()
+        rows = module.list_homekit_thermostats()
         sensor_rows = list_homekit_environment_sensors() if callable(list_homekit_environment_sensors) else []
     except Exception as exc:
         logger.warning("[Environment] Ecobee HomeKit poll failed: %s", exc)
@@ -2180,13 +2501,12 @@ def _poll_weather_api(client: Any = None) -> Dict[str, Any]:
     configured, message = _weather_api_configured(client)
     if not configured:
         return {"ok": False, "provider": "weather_api", "message": message}
+    module = _integration_module("weather_api")
+    if module is None:
+        return {"ok": False, "provider": "weather_api", "message": "WeatherAPI.com integration is not enabled."}
     try:
-        from integrations.weather_api import fetch_weatherapi_forecast, read_weatherapi_settings
-    except Exception as exc:
-        return {"ok": False, "provider": "weather_api", "message": f"WeatherAPI.com integration unavailable: {exc}"}
-    try:
-        weather_settings = read_weatherapi_settings(client)
-        data, error = fetch_weatherapi_forecast(
+        weather_settings = module.read_weatherapi_settings(client)
+        data, error = module.fetch_weatherapi_forecast(
             location=weather_settings.get("DEFAULT_LOCATION"),
             days=weather_settings.get("DEFAULT_DAYS"),
             include_aqi=weather_settings.get("INCLUDE_AQI"),
@@ -2238,6 +2558,68 @@ def _poll_weather_api(client: Any = None) -> Dict[str, Any]:
     }
 
 
+def _poll_generic_integration(provider: str, client: Any = None) -> Dict[str, Any]:
+    provider_key = _clean_key(provider)
+    if not provider_key:
+        return {"ok": False, "provider": "", "message": "Integration provider is required."}
+    if not integration_store_module.get_integration_enabled(provider_key):
+        return {"ok": False, "provider": provider_key, "message": f"{_provider_label(provider_key)} integration is not enabled."}
+    selected = _selected_by_provider(provider_key, client)
+    if not selected:
+        return {
+            "ok": True,
+            "provider": provider_key,
+            "reading_count": 0,
+            "source_count": 0,
+            "message": f"No {_provider_label(provider_key)} sensors are selected.",
+        }
+    try:
+        from integration_registry import get_integration_device_group
+
+        payload = get_integration_device_group(provider_key)
+    except Exception as exc:
+        logger.warning("[Environment] %s generic integration poll failed: %s", provider_key, exc)
+        return {"ok": False, "provider": provider_key, "message": str(exc)}
+    group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
+    devices = group.get("devices") if isinstance(group.get("devices"), list) else []
+    readings = [
+        _apply_selection_to_reading(row, selection)
+        for device in devices
+        if isinstance(device, dict)
+        for row in _generic_integration_device_readings(provider_key, device)
+        for selection in [_selection_for_source(provider_key, row.get("source_id"), selected)]
+        if selection
+    ]
+    raw = {
+        "device_count": len(devices),
+        "device_names": [_text(row.get("name")) or _text(row.get("id")) for row in devices if isinstance(row, dict)][:50],
+    }
+    if not readings:
+        return {
+            "ok": True,
+            "provider": provider_key,
+            "reading_count": 0,
+            "source_count": len(devices),
+            "message": f"Selected {_provider_label(provider_key)} sensors returned no environment readings.",
+        }
+    snapshot = _snapshot_from_readings(
+        provider=provider_key,
+        source_id=f"{provider_key}:sensors",
+        readings=readings,
+        raw=raw,
+        model=_provider_label(provider_key),
+    )
+    _store_snapshot(snapshot, client, provider_key=provider_key)
+    logger.info("[Environment] %s poll stored %d readings.", _provider_label(provider_key), len(readings))
+    return {
+        "ok": True,
+        "provider": provider_key,
+        "reading_count": len(readings),
+        "source_count": len(devices),
+        "message": f"Stored {len(readings)} {_provider_label(provider_key)} environment reading{'s' if len(readings) != 1 else ''}.",
+    }
+
+
 def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     settings = _load_settings(client)
@@ -2256,6 +2638,8 @@ def _poll_enabled_integrations(client: Any = None) -> Dict[str, Any]:
     for provider, poller in pollers.items():
         if provider in selected_providers:
             results.append(poller(client))
+    for provider in sorted(selected_providers - set(pollers) - {"ecowitt", "weather_api"}):
+        results.append(_poll_generic_integration(provider, client))
     if forecast_provider == "weather_api":
         results.append(_poll_weather_api(client))
     if not results:
@@ -2322,6 +2706,10 @@ def _load_provider_snapshots(client: Any = None) -> Dict[str, Dict[str, Any]]:
         snapshot = _load_json_key(key, client)
         if snapshot:
             snapshots[provider] = _normalize_temperature_snapshot(snapshot, settings=settings)
+    for provider in _dynamic_environment_providers(client):
+        snapshot = _load_json_key(_provider_latest_key(provider), client)
+        if snapshot:
+            snapshots[provider] = _normalize_temperature_snapshot(snapshot, settings=settings)
     latest = _load_json_key(LATEST_KEY, client)
     if latest:
         provider = _clean_key(latest.get("provider") or "ecowitt")
@@ -2343,7 +2731,8 @@ def _renormalize_temperature_cache(client: Any = None) -> None:
         normalized = _normalize_temperature_snapshot(parsed, settings=settings)
         return json.dumps(normalized, sort_keys=True)
 
-    for key in [LATEST_KEY, *LATEST_PROVIDER_KEYS.values()]:
+    provider_keys = [LATEST_KEY, *LATEST_PROVIDER_KEYS.values(), *[_provider_latest_key(provider) for provider in _dynamic_environment_providers(store)]]
+    for key in provider_keys:
         try:
             raw = store.get(key)
         except Exception:
@@ -2497,6 +2886,34 @@ def _status_word(*, configured: bool) -> str:
     return "Ready" if configured else "Needs setup"
 
 
+def _generic_integration_configured(provider: str, client: Any = None) -> Tuple[bool, str]:
+    provider_key = _clean_key(provider)
+    if not provider_key:
+        return False, "Integration provider is missing."
+    if not integration_store_module.get_integration_enabled(provider_key):
+        return False, f"Enable {_provider_label(provider_key)} in Settings > Integrations."
+    module = _integration_module(provider_key)
+    if module is None:
+        return False, f"{_provider_label(provider_key)} integration is not installed."
+    status_fn = getattr(module, "integration_status", None)
+    if callable(status_fn):
+        try:
+            status = status_fn()
+        except Exception as exc:
+            return False, str(exc)
+        if isinstance(status, dict):
+            if "configured" in status:
+                configured = _as_bool(status.get("configured"), False)
+                return configured, _text(status.get("message")) or ("Configured" if configured else "Needs setup")
+            if "ok" in status:
+                configured = _as_bool(status.get("ok"), False)
+                return configured, _text(status.get("message")) or ("Ready" if configured else "Needs setup")
+            message = _text(status.get("message") or status.get("status"))
+            if message:
+                return True, message
+    return True, "Enabled"
+
+
 def _provider_status_rows(
     _settings: Dict[str, Any],
     provider_snapshots: Dict[str, Dict[str, Any]],
@@ -2549,6 +2966,23 @@ def _provider_status_rows(
             "selected": "Forecast Provider" if weather_selected else "Not selected",
         },
     ]
+    static_providers = {_clean_key(spec.get("provider")) for spec in specs}
+    dynamic_providers = sorted(
+        {
+            provider
+            for provider in set(selected_counts) | {_clean_key(provider) for provider in provider_snapshots}
+            if provider and provider not in static_providers and provider not in DEDICATED_ENVIRONMENT_PROVIDERS
+        }
+    )
+    for provider in dynamic_providers:
+        configured, message = _generic_integration_configured(provider, client)
+        specs.append(
+            {
+                "provider": provider,
+                "configured": configured,
+                "setup": "Configured" if configured else message,
+            }
+        )
     rows: List[Dict[str, str]] = []
     for spec in specs:
         provider = _clean_key(spec.get("provider"))
@@ -2751,7 +3185,15 @@ def _environment_display_source_options(
     include_condition_only: bool,
 ) -> List[Dict[str, Any]]:
     provider_options: List[Dict[str, str]] = []
-    provider_order = ("ecowitt", "weather_api", "unifi_protect", "ecobee_homekit", "hue", "homeassistant")
+    provider_order = ["ecowitt", "weather_api", "unifi_protect", "ecobee_homekit", "hue", "homeassistant"]
+    dynamic_providers = sorted(
+        {
+            _clean_key(provider)
+            for provider in set(provider_snapshots) | {_clean_key(row.get("provider")) for row in selected_sensors or [] if isinstance(row, dict)}
+            if _clean_key(provider) and _clean_key(provider) not in provider_order
+        }
+    )
+    provider_order.extend(dynamic_providers)
     for provider in provider_order:
         snapshot = provider_snapshots.get(provider) or {}
         if include_condition_only and provider != "weather_api" and not _snapshot_has_category(snapshot, "condition"):
@@ -2877,9 +3319,8 @@ def _overview_card(
 
 def _weatherapi_units(client: Any = None) -> str:
     try:
-        from integrations.weather_api import read_weatherapi_settings
-
-        settings = read_weatherapi_settings(client)
+        module = _integration_module("weather_api")
+        settings = module.read_weatherapi_settings(client) if module is not None else {}
     except Exception:
         settings = {}
     units = _text(settings.get("DEFAULT_UNITS")).lower()
@@ -4101,11 +4542,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     received_at = snapshot.get("received_at") if snapshot else 0
     stale_after_s = int(settings.get("stale_after_minutes") or DEFAULT_STALE_AFTER_MINUTES) * 60
     stale = bool(received_at and (time.time() - float(received_at)) > stale_after_s)
-    provider_labels = [
-        _provider_label(provider)
-        for provider in LATEST_PROVIDER_KEYS
-        if provider_snapshots.get(provider)
-    ]
+    provider_order = [*LATEST_PROVIDER_KEYS.keys()]
+    provider_order.extend(sorted(provider for provider in provider_snapshots if provider not in LATEST_PROVIDER_KEYS))
+    provider_labels = [_provider_label(provider) for provider in provider_order if provider_snapshots.get(provider)]
 
     return {
         "summary": "Local environment telemetry from Ecowitt and enabled integration sensors.",

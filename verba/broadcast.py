@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from helpers import get_tater_name, redis_client
 from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
@@ -19,12 +19,21 @@ logger = logging.getLogger("broadcast")
 logger.setLevel(logging.INFO)
 
 
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
+
+
 class BroadcastPlugin(ToolVerba):
     """Broadcast a spoken announcement to configured Voice Core, Sonos, or Home Assistant media-player targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.13"
+    version = "1.1.14"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (

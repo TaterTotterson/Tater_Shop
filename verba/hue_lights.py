@@ -7,14 +7,7 @@ from urllib.parse import urlparse
 import requests
 
 from helpers import extract_json, redis_client
-from integrations.hue import (
-    HUE_DEFAULT_BRIDGE_HOST,
-    HUE_DEFAULT_DEVICE_TYPE,
-    HUE_DEFAULT_TIMEOUT_SECONDS,
-    normalize_hue_bridge_root,
-    pair_hue_bridge,
-    read_hue_settings,
-)
+from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_diagnostics import needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -22,10 +15,52 @@ from verba_result import action_failure, action_success
 logger = logging.getLogger("hue_lights")
 logger.setLevel(logging.INFO)
 
+HUE_DEFAULT_BRIDGE_HOST = "http://philips-hue.local"
+HUE_DEFAULT_DEVICE_TYPE = "tater_shop#tater"
+HUE_DEFAULT_TIMEOUT_SECONDS = 10
 PLUGIN_SETTINGS_KEYS = (
     "verba_settings:Philips Hue Control",
     "verba_settings: Philips Hue Control",
 )
+
+
+def _hue_module(*, required: bool = True):
+    module = integration_store_module.integration_module("hue")
+    if module is None and required:
+        raise RuntimeError("Philips Hue integration is not enabled.")
+    return module
+
+
+def normalize_hue_bridge_root(raw_host: Any) -> str:
+    module = _hue_module(required=False)
+    if module is not None:
+        return module.normalize_hue_bridge_root(raw_host)
+    text = _coerce_text(raw_host) or HUE_DEFAULT_BRIDGE_HOST
+    if "://" not in text:
+        text = f"http://{text}"
+    parsed = urlparse(text)
+    if not parsed.netloc and parsed.path:
+        parsed = urlparse(f"http://{text}")
+    scheme = parsed.scheme or "http"
+    netloc = parsed.netloc or parsed.path
+    root = f"{scheme}://{netloc}".rstrip("/")
+    return root or HUE_DEFAULT_BRIDGE_HOST
+
+
+def read_hue_settings(*args, **kwargs) -> Dict[str, Any]:
+    module = _hue_module(required=False)
+    if module is not None:
+        return module.read_hue_settings(*args, **kwargs)
+    return {
+        "HUE_BRIDGE_HOST": HUE_DEFAULT_BRIDGE_HOST,
+        "HUE_APP_KEY": "",
+        "HUE_DEVICE_TYPE": HUE_DEFAULT_DEVICE_TYPE,
+        "HUE_TIMEOUT_SECONDS": str(HUE_DEFAULT_TIMEOUT_SECONDS),
+    }
+
+
+def pair_hue_bridge(*args, **kwargs):
+    return _hue_module().pair_hue_bridge(*args, **kwargs)
 
 
 def _coerce_text(value: Any) -> str:
@@ -333,7 +368,7 @@ class HueClient:
 class HueLightsPlugin(ToolVerba):
     name = "hue_lights"
     verba_name = "Philips Hue Lights"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Philips Hue Lights"
     settings_category = "Philips Hue Control"

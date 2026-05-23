@@ -3,16 +3,31 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from integrations.homekit import (
-    list_homekit_thermostats,
-    set_homekit_thermostat_mode,
-    set_homekit_thermostat_temperature,
-)
+from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("ecobee_homekit_thermostat")
 logger.setLevel(logging.INFO)
+
+
+def _homekit_module():
+    module = integration_store_module.integration_module("homekit")
+    if module is None:
+        raise RuntimeError("Ecobee HomeKit integration is not enabled.")
+    return module
+
+
+def list_homekit_thermostats(*args, **kwargs):
+    return _homekit_module().list_homekit_thermostats(*args, **kwargs)
+
+
+def set_homekit_thermostat_mode(*args, **kwargs):
+    return _homekit_module().set_homekit_thermostat_mode(*args, **kwargs)
+
+
+def set_homekit_thermostat_temperature(*args, **kwargs):
+    return _homekit_module().set_homekit_thermostat_temperature(*args, **kwargs)
 
 
 def _coerce_text(value: Any) -> str:
@@ -22,7 +37,7 @@ def _coerce_text(value: Any) -> str:
 class EcobeeHomeKitThermostatPlugin(ToolVerba):
     name = "ecobee_homekit_thermostat"
     verba_name = "Ecobee HomeKit Thermostat"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     pretty_name = "Ecobee HomeKit Thermostat"
     settings_category = "Ecobee (HomeKit)"

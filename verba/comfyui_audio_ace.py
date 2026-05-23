@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote
 from verba_base import ToolVerba
 from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
-from integrations.homeassistant import load_homeassistant_config
+from tateros import integration_store as integration_store_module
 from verba_result import action_failure, action_success
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -32,10 +32,19 @@ logger = logging.getLogger("comfyui_audio_ace")
 logger.setLevel(logging.INFO)
 
 
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> dict:
+    module = integration_store_module.integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
+
+
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.16"
+    version = "1.0.17"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."

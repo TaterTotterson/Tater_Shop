@@ -9,16 +9,42 @@ from dotenv import load_dotenv
 
 from verba_base import ToolVerba
 from helpers import get_tater_name
-from integrations.weather_api import (
-    fetch_weatherapi_forecast,
-    read_weatherapi_settings,
-)
+from tateros import integration_store as integration_store_module
 from verba_diagnostics import needs_from_diagnosis
 from verba_result import action_failure, action_success
 
 load_dotenv()
 logger = logging.getLogger("weather_forecast")
 logger.setLevel(logging.INFO)
+
+
+def _weather_api_module():
+    return integration_store_module.integration_module("weather_api")
+
+
+def read_weatherapi_settings(*args, **kwargs) -> Dict[str, Any]:
+    module = _weather_api_module()
+    if module is not None:
+        return module.read_weatherapi_settings(*args, **kwargs)
+    return {
+        "WEATHERAPI_KEY": "",
+        "DEFAULT_LOCATION": "60614",
+        "DEFAULT_DAYS": 3,
+        "DEFAULT_UNITS": "us",
+        "INCLUDE_AQI": True,
+        "INCLUDE_POLLEN": True,
+        "INCLUDE_ALERTS": True,
+        "SHOW_HOURLY_PEEK": 6,
+        "MAX_RESPONSE_CHARS": 650,
+        "TIMEOUT_SECONDS": 12,
+    }
+
+
+def fetch_weatherapi_forecast(*args, **kwargs):
+    module = _weather_api_module()
+    if module is None:
+        return None, "WeatherAPI is not configured. Enable the WeatherAPI.com integration in Settings > Integrations."
+    return module.fetch_weatherapi_forecast(*args, **kwargs)
 
 
 class WeatherForecastPlugin(ToolVerba):
@@ -39,7 +65,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.1.9"
+    version = "1.1.10"
     min_tater_version = "59"
     routing_keywords = [
         "weather",

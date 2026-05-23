@@ -32,7 +32,7 @@ logger.setLevel(logging.INFO)
 class DeviceComparePlugin(ToolVerba):
     name = "device_compare"
     verba_name = "Device Compare"
-    version = "1.1.1"
+    version = "1.1.3"
     min_tater_version = "59"
     usage = (
         '{"function":"device_compare","arguments":{"query":"Natural-language request naming two devices to compare '
@@ -110,19 +110,7 @@ class DeviceComparePlugin(ToolVerba):
         def val(key, default=""):
             return self._decode_text(s.get(key, default), str(default))
 
-        def redis_val(key, default=""):
-            v = redis_client.get(key)
-            if v is None:
-                return default
-            return self._decode_text(v, str(default))
-
-        # Use only global WebUI search config.
-        global_api_key = redis_val("tater:web_search:google_api_key", "").strip()
-        global_cx = redis_val("tater:web_search:google_cx", "").strip()
-
         return {
-            "api_key": global_api_key,
-            "cx": global_cx,
             "spec_results": self._to_int(val("RESULTS_PER_QUERY", 10), default=10, minimum=1, maximum=10),
             "fps_results": self._to_int(val("FPS_RESULTS_PER_QUERY", 10), default=10, minimum=1, maximum=10),
             "timeout": self._to_int(val("FETCH_TIMEOUT_SECONDS", 12), default=12, minimum=3, maximum=60),
@@ -130,26 +118,41 @@ class DeviceComparePlugin(ToolVerba):
             "max_fps_rows": self._to_int(val("MAX_FPS_ROWS", 20), default=20, minimum=1, maximum=100),
         }
 
-    def google_search(self, query: str, n: int) -> List[Dict[str, str]]:
+    def web_search(self, query: str, n: int) -> List[Dict[str, str]]:
         cfg = self._get_settings()
-        if not cfg["api_key"] or not cfg["cx"]:
-            logger.warning("DeviceCompare: Google CSE not configured.")
-            return []
         query_n = self._to_int(n, default=cfg["spec_results"], minimum=1, maximum=10)
+        self._last_search_error = ""
         try:
-            r = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={"key": cfg["api_key"], "cx": cfg["cx"], "q": query, "num": query_n},
-                timeout=cfg["timeout"],
+            from kernel_tools import search_web
+
+            result = search_web(
+                query,
+                num_results=query_n,
+                timeout_sec=cfg["timeout"],
             )
-            if r.status_code != 200:
-                logger.error(f"DeviceCompare: CSE HTTP {r.status_code}: {r.text}")
+            if not bool(result.get("ok")):
+                self._last_search_error = str(result.get("error") or "Web search failed.")
+                logger.error(f"DeviceCompare: web search error: {self._last_search_error}")
                 return []
-            items = r.json().get("items", []) or []
-            return [{"title": it.get("title",""), "href": it.get("link",""), "snippet": it.get("snippet","")} for it in items]
+            items = result.get("results") or []
+            if not isinstance(items, list):
+                return []
+            return [
+                {
+                    "title": str(it.get("title") or ""),
+                    "href": str(it.get("url") or ""),
+                    "snippet": str(it.get("snippet") or ""),
+                }
+                for it in items
+                if isinstance(it, dict)
+            ]
         except Exception as e:
-            logger.error(f"DeviceCompare: google_search error: {e}")
+            self._last_search_error = str(e)
+            logger.error(f"DeviceCompare: web_search error: {e}")
             return []
+
+    def google_search(self, query: str, n: int) -> List[Dict[str, str]]:
+        return self.web_search(query, n)
     
     async def _pick_specs_with_retries(
         self,
@@ -760,14 +763,14 @@ class DeviceComparePlugin(ToolVerba):
     # ---------- main pipeline ----------
     async def _pipeline(self, device_a: str, device_b: str, llm_client) -> Dict[str, Any]:
         cfg = self._get_settings()
-        if not cfg["api_key"] or not cfg["cx"]:
-            return {"error": "Search is not configured. Please set Google API Key and CX in WebUI Settings > Web Search."}
         if llm_client is None:
             return {"error": "Device Compare requires an available LLM client to extract specs and FPS data."}
 
-        results_a = self.google_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
-        results_b = self.google_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])
+        results_a = self.web_search(f"{device_a} official hardware specifications tech specs", cfg["spec_results"])
+        results_b = self.web_search(f"{device_b} official hardware specifications tech specs", cfg["spec_results"])
         if not results_a or not results_b:
+            if getattr(self, "_last_search_error", ""):
+                return {"error": f"Web search failed: {self._last_search_error}"}
             return {"error": "No results found for one or both devices."}
 
         specs_a, spec_src_a = await self._pick_specs_with_retries(llm_client, device_a, results_a, max_attempts=3)
@@ -783,7 +786,7 @@ class DeviceComparePlugin(ToolVerba):
 
             if should_a:
                 fps_q_a = f'{device_a} gaming fps'
-                fps_res_a = self.google_search(fps_q_a, cfg["fps_results"]) or []
+                fps_res_a = self.web_search(fps_q_a, cfg["fps_results"]) or []
                 fps_a, fps_src_a = await self._pick_fps_with_retries(
                     llm_client, device_a, fps_res_a, max_attempts=3
                 )
@@ -792,7 +795,7 @@ class DeviceComparePlugin(ToolVerba):
 
             if should_b:
                 fps_q_b = f'{device_b} gaming fps'
-                fps_res_b = self.google_search(fps_q_b, cfg["fps_results"]) or []
+                fps_res_b = self.web_search(fps_q_b, cfg["fps_results"]) or []
                 fps_b, fps_src_b = await self._pick_fps_with_retries(
                     llm_client, device_b, fps_res_b, max_attempts=3
                 )

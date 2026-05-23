@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Tuple
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from helpers import redis_client
-from integrations.unifi_protect import ProtectClient
+from tateros import integration_store as integration_store_module
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
     if not isinstance(binary, (bytes, bytearray)):
@@ -24,6 +24,13 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 
 logger = logging.getLogger("unifi_protect_camera")
 logger.setLevel(logging.INFO)
+
+
+def _protect_client():
+    module = integration_store_module.integration_module("unifi_protect")
+    if module is None:
+        raise RuntimeError("UniFi Protect integration is not enabled.")
+    return module.ProtectClient()
 
 
 # ----------------------------
@@ -178,7 +185,7 @@ class UniFiProtectCameraPlugin(ToolVerba):
 
     name = 'unifi_protect_camera'
     verba_name = 'UniFi Protect Camera'
-    version = '1.0.3'
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Camera'
     settings_category = "UniFi Protect"
@@ -209,9 +216,9 @@ class UniFiProtectCameraPlugin(ToolVerba):
     # ----------------------------
     # Settings / client
     # ----------------------------
-    def _get_client(self) -> Optional[ProtectClient]:
+    def _get_client(self) -> Optional[Any]:
         try:
-            return ProtectClient()
+            return _protect_client()
         except Exception as e:
             logger.error(f"[unifi_protect_camera] Failed to init client: {e}")
             return None

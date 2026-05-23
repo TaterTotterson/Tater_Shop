@@ -21,15 +21,28 @@ import requests
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
-from integrations.homeassistant import load_homeassistant_config
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
+from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.46"
+__version__ = "1.0.47"
 
 load_dotenv()
 
 logger = logging.getLogger("personal_core")
 logger.setLevel(logging.INFO)
+
+
+def _integration_module(integration_id: str):
+    return integration_store_module.integration_module(integration_id)
+
+
+def load_homeassistant_config(*, required: bool = False, client: Any = None) -> Dict[str, str]:
+    module = _integration_module("homeassistant")
+    if module is not None:
+        return module.load_homeassistant_config(required=required, client=client)
+    if required:
+        raise ValueError("Home Assistant integration is not enabled.")
+    return {"base": "", "token": ""}
 
 
 _PERSONAL_INTERVAL_OPTIONS = [
