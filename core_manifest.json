@@ -49,6 +49,26 @@
       "sha256": "34478cbc1732bdc806fc3c13c2ce225d9e89ff16778786f4ae90bedd08f9863a"
     },
     {
+      "id": "guardian",
+      "name": "Guardian Core",
+      "module_key": "guardian_core",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Network guardian core for device inventory, change detection, tunnels, and health monitoring.",
+      "settings_category": "Guardian Core Settings",
+      "required_settings_count": 19,
+      "autostart_key": "guardian_core_running",
+      "tags": [
+        "guardian",
+        "network",
+        "monitoring",
+        "unifi",
+        "tunnel"
+      ],
+      "entry": "cores/guardian_core.py",
+      "sha256": "cda90685bf5dceb8d2d1335c6cb7c04cee93b85de16fe5eb16822b4ac823ddbf"
+    },
+    {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
