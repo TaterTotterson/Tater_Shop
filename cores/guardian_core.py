@@ -18,7 +18,7 @@ from urllib.parse import quote
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.2"
+__version__ = "1.3.5"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -1325,6 +1325,7 @@ def _guardian_ai_error(message: Any) -> Dict[str, Any]:
         "generated_at": time.time(),
         "headline": "AI analysis unavailable",
         "summary": "",
+        "overview": "",
         "posture": "unknown",
         "risk_level": "unknown",
         "confidence": 0.0,
@@ -1437,6 +1438,7 @@ def _guardian_ai_prompt() -> str:
         "{"
         "\"headline\":\"\","
         "\"summary\":\"\","
+        "\"overview\":\"\","
         "\"posture\":\"healthy|watch|attention|critical|unknown\","
         "\"risk_level\":\"low|medium|high|critical|unknown\","
         "\"confidence\":0.0,"
@@ -1445,7 +1447,9 @@ def _guardian_ai_prompt() -> str:
         "\"watch_target_suggestions\":[{\"label\":\"\",\"host\":\"\",\"port\":0,\"reason\":\"\",\"confidence\":0.0}],"
         "\"questions\":[\"\"]"
         "}\n"
-        "Rules: keep summaries practical, avoid alarmist language, cite evidence from payload fields, and return empty arrays when there is not enough evidence."
+        "Rules: summary is one concise operator sentence. overview is a compact operator brief that covers the whole payload: "
+        "inventory, sources, watch checks, events, human confirmations, posture, risk, and what to inspect next. "
+        "Keep summaries practical, avoid alarmist language, cite evidence from payload fields, and return empty arrays when there is not enough evidence."
     )
 
 
@@ -1500,6 +1504,7 @@ def _guardian_ai_normalize(parsed: Dict[str, Any]) -> Dict[str, Any]:
         "generated_at": time.time(),
         "headline": _compact(parsed.get("headline"), 140),
         "summary": _compact(parsed.get("summary"), 900),
+        "overview": _compact(parsed.get("overview") or parsed.get("summary"), 1400),
         "posture": posture,
         "risk_level": risk_level,
         "confidence": _as_float(parsed.get("confidence"), 0.0),
@@ -1520,7 +1525,7 @@ async def _guardian_ai_analyze_async(llm_client: Any, snapshot: Dict[str, Any]) 
                 {"role": "system", "content": _guardian_ai_prompt()},
                 {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
             ],
-            max_tokens=1500,
+            max_tokens=1800,
             temperature=0.1,
         )
     except Exception as exc:
@@ -2322,7 +2327,12 @@ def _ai_analysis_visual_data_uri(analysis: Dict[str, Any]) -> str:
     return "data:image/svg+xml;charset=utf-8," + quote(svg)
 
 
-def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
+def _ai_analysis_card(
+    analysis: Dict[str, Any],
+    *,
+    group: str = "overview",
+    card_id: str = "overview:ai_analysis",
+) -> Dict[str, Any]:
     ok = bool(analysis.get("ok"))
     risk = _text(analysis.get("risk_level")) or "unknown"
     posture = _text(analysis.get("posture")) or "unknown"
@@ -2334,8 +2344,8 @@ def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
     question_count = len(_guardian_question_entries(analysis))
     visual_src = _ai_analysis_visual_data_uri(analysis)
     return {
-        "id": "overview:ai_analysis",
-        "group": "overview",
+        "id": card_id,
+        "group": group,
         "title": "AI Network Analysis",
         "subtitle": _text(analysis.get("headline")) or ("Unavailable" if analysis else "Waiting for first analysis"),
         "detail": _text(analysis.get("summary")) or _text(analysis.get("error")) or "Guardian will ask the LLM to interpret network facts after the next poll.",
@@ -2428,6 +2438,361 @@ def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _guardian_ai_overview_text(analysis: Dict[str, Any]) -> str:
+    if analysis.get("ok"):
+        return (
+            _text(analysis.get("overview"))
+            or _text(analysis.get("summary"))
+            or _text(analysis.get("headline"))
+            or "Guardian AI generated an overview, but the text was empty."
+        )
+    if analysis:
+        return _text(analysis.get("error")) or "Guardian AI overview is unavailable."
+    return "No Guardian AI overview has been generated yet. Run Generate Overview after Guardian has inventory data."
+
+
+def _ai_overview_signal_rows(
+    *,
+    stats: Dict[str, Any],
+    check_state: Dict[str, Any],
+    runtime: Dict[str, Any],
+    analysis: Dict[str, Any],
+    current_questions: List[Dict[str, str]],
+    confirmations: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    ai_status = "Ready" if analysis.get("ok") else "Unavailable" if analysis else "Not generated"
+    return [
+        {
+            "signal": "AI brief",
+            "value": ai_status,
+            "context": _age_label(analysis.get("generated_at")) if analysis else "never generated",
+        },
+        {
+            "signal": "Inventory",
+            "value": f"{stats.get('total', 0)} devices",
+            "context": f"{stats.get('online', 0)} online, {stats.get('offline', 0)} offline",
+        },
+        {
+            "signal": "Trust posture",
+            "value": f"{stats.get('untrusted', 0)} untrusted",
+            "context": f"{stats.get('critical', 0)} critical, {stats.get('critical_offline', 0)} critical offline",
+        },
+        {
+            "signal": "Discovery sources",
+            "value": f"{stats.get('sources_ok', 0)}/{stats.get('sources', 0)} OK",
+            "context": _text(runtime.get("last_error")) or "no source error",
+        },
+        {
+            "signal": "Watch checks",
+            "value": check_state["label"],
+            "context": f"{check_state['ok']} passing, {check_state['failed']} failing",
+        },
+        {
+            "signal": "Guided questions",
+            "value": str(len(current_questions)),
+            "context": f"{len(confirmations)} saved answer{'s' if len(confirmations) != 1 else ''}",
+        },
+    ]
+
+
+def _ai_overview_question_rows(
+    analysis: Dict[str, Any],
+    confirmations: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    latest = _confirmation_latest_map(confirmations)
+    rows: List[Dict[str, str]] = []
+    for item in _guardian_question_entries(analysis):
+        question_id = _text(item.get("id"))
+        prior = latest.get(question_id) or {}
+        answer = _confirmation_answer_label(prior.get("answer"))
+        rows.append(
+            {
+                "question": _compact(item.get("question"), 180),
+                "status": "Answered" if answer else "Open",
+                "answer": answer or "-",
+            }
+        )
+    return rows
+
+
+def _guardian_ai_overview_art_data_uri(
+    *,
+    analysis: Dict[str, Any],
+    stats: Dict[str, Any],
+    checks: List[Dict[str, Any]],
+    settings: Dict[str, Any],
+    runtime: Dict[str, Any],
+    confirmations: List[Dict[str, Any]],
+) -> str:
+    check_state = _check_summary(checks, settings)
+    score = _guardian_health_score(stats, checks, settings)
+    posture = _text(analysis.get("posture")) or "unknown"
+    risk = _text(analysis.get("risk_level")) or "unknown"
+    confidence = _as_float(analysis.get("confidence"), 0.0)
+    finding_count = len(analysis.get("findings") if isinstance(analysis.get("findings"), list) else [])
+    question_count = len(_guardian_question_entries(analysis))
+    confirmation_count = len(confirmations)
+    total = max(1, _as_int(stats.get("total"), 0))
+    online_pct = max(0, min(100, (_as_int(stats.get("online"), 0) / total) * 100))
+    untrusted_pct = max(0, min(100, (_as_int(stats.get("untrusted"), 0) / total) * 100))
+    failed_check_pct = 0.0
+    if check_state["total"]:
+        failed_check_pct = max(0, min(100, (check_state["failed"] / max(1, check_state["total"])) * 100))
+    tone = (
+        "danger"
+        if risk in {"high", "critical"} or posture == "critical" or score < 65
+        else "warning"
+        if risk == "medium" or posture in {"watch", "attention"} or score < 85
+        else "good"
+        if analysis.get("ok")
+        else "muted"
+    )
+    palette = {
+        "good": {"accent": "#4fd18c", "glow": "#8ce99a", "panel": "#16241d", "line": "#63e6be"},
+        "warning": {"accent": "#f08345", "glow": "#ffc078", "panel": "#2a1c15", "line": "#f08c00"},
+        "danger": {"accent": "#ff5c5c", "glow": "#ff9b9b", "panel": "#2a1717", "line": "#ff6b6b"},
+        "muted": {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"},
+    }.get(tone, {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"})
+    accent = palette["accent"]
+    glow = palette["glow"]
+    panel = palette["panel"]
+    line = palette["line"]
+    headline = _compact(analysis.get("headline"), 42) or ("Awaiting AI overview" if not analysis else "AI overview unavailable")
+    generated = _age_label(analysis.get("generated_at")) if analysis else "never"
+    ai_state = "Model brief ready" if analysis.get("ok") else "Generate overview"
+    runtime_state = _text(runtime.get("status")) or "waiting"
+    source_label = f"{stats.get('sources_ok', 0)}/{stats.get('sources', 0)} sources"
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="320" viewBox="0 0 980 320">
+  <defs>
+    <linearGradient id="ai_overview_bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#111213"/>
+      <stop offset="1" stop-color="{html_escape(panel)}"/>
+    </linearGradient>
+    <radialGradient id="ai_overview_glow" cx="50%" cy="50%" r="55%">
+      <stop offset="0" stop-color="{html_escape(glow)}" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="{html_escape(glow)}" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="ai_overview_soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .guardian-ai-scan {{ transform-origin: 214px 160px; animation: guardianSpin 7.6s linear infinite; }}
+      .guardian-ai-ring {{ animation: guardianPulse 3.2s ease-in-out infinite; transform-origin: 214px 160px; }}
+      .guardian-ai-flow {{ stroke-dasharray: 10 18; animation: guardianDash 5.2s linear infinite; }}
+      .guardian-ai-node {{ animation: guardianGlow 2.8s ease-in-out infinite; }}
+      .guardian-ai-node.b {{ animation-delay: .45s; }}
+      .guardian-ai-node.c {{ animation-delay: .9s; }}
+      .guardian-ai-node.d {{ animation-delay: 1.35s; }}
+      @keyframes guardianSpin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
+      @keyframes guardianPulse {{ 0%,100% {{ opacity: .24; transform: scale(.92); }} 50% {{ opacity: .72; transform: scale(1.05); }} }}
+      @keyframes guardianDash {{ to {{ stroke-dashoffset: -56; }} }}
+      @keyframes guardianGlow {{ 0%,100% {{ opacity: .64; }} 50% {{ opacity: 1; }} }}
+    </style>
+  </defs>
+  <rect width="980" height="320" rx="24" fill="#111213"/>
+  <rect x="18" y="18" width="944" height="284" rx="22" fill="url(#ai_overview_bg)" stroke="#2a2c30" stroke-width="1.4"/>
+  <rect x="38" y="38" width="352" height="244" rx="20" fill="#151617" stroke="#2a2c30" stroke-width="1.1"/>
+  <rect x="410" y="38" width="526" height="244" rx="20" fill="#1a1b1d" stroke="#2a2c30" stroke-width="1.1"/>
+  <circle cx="214" cy="160" r="108" fill="url(#ai_overview_glow)" opacity="0.75"/>
+  <circle class="guardian-ai-ring" cx="214" cy="160" r="92" fill="none" stroke="{html_escape(glow)}" stroke-width="2"/>
+  <circle cx="214" cy="160" r="64" fill="none" stroke="#31524a" stroke-width="1.5" opacity="0.8"/>
+  <line class="guardian-ai-scan" x1="214" y1="160" x2="214" y2="58" stroke="{html_escape(accent)}" stroke-width="5" stroke-linecap="round" opacity="0.82" filter="url(#ai_overview_soft)"/>
+  <path class="guardian-ai-flow" d="M96 112 C138 82 186 78 214 160 C238 226 288 226 330 198" fill="none" stroke="{html_escape(line)}" stroke-width="3" opacity="0.66"/>
+  <path class="guardian-ai-flow" d="M92 210 C142 248 196 246 214 160 C232 78 284 76 334 112" fill="none" stroke="#7048e8" stroke-width="3" opacity="0.5"/>
+  <g class="guardian-ai-node">
+    <circle cx="118" cy="112" r="13" fill="{html_escape(accent)}"/>
+    <text x="118" y="145" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">inventory</text>
+  </g>
+  <g class="guardian-ai-node b">
+    <circle cx="318" cy="112" r="13" fill="#1971c2"/>
+    <text x="318" y="145" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">sources</text>
+  </g>
+  <g class="guardian-ai-node c">
+    <circle cx="320" cy="214" r="13" fill="#7048e8"/>
+    <text x="320" y="247" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">checks</text>
+  </g>
+  <g class="guardian-ai-node d">
+    <circle cx="112" cy="214" r="13" fill="#d65a1f"/>
+    <text x="112" y="247" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">answers {confirmation_count}</text>
+  </g>
+  <path d="M214 120 L254 136 V162 C254 194 235 214 214 228 C193 214 174 194 174 162 V136 Z" fill="{html_escape(accent)}" filter="url(#ai_overview_soft)"/>
+  <path d="M199 166 L211 178 L232 146" fill="none" stroke="#f7fbf9" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="438" y="76" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="900">{html_escape(headline)}</text>
+  <text x="438" y="104" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">{html_escape(ai_state)} - generated {html_escape(generated)} - runtime {html_escape(runtime_state.title())}</text>
+  <rect x="438" y="128" width="444" height="18" rx="9" fill="#2a2c30"/>
+  <rect x="438" y="128" width="{max(8, min(444, confidence * 444)):.1f}" height="18" rx="9" fill="{html_escape(accent)}"/>
+  <text x="900" y="142" text-anchor="end" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="800">{round(confidence * 100)}% confidence</text>
+  <g>
+    <rect x="438" y="170" width="104" height="72" rx="12" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+    <text x="456" y="196" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Posture</text>
+    <text x="456" y="222" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="900">{html_escape(posture.title())}</text>
+    <rect x="558" y="170" width="104" height="72" rx="12" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+    <text x="576" y="196" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Risk</text>
+    <text x="576" y="222" fill="{html_escape(line)}" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="900">{html_escape(risk.title())}</text>
+    <rect x="678" y="170" width="104" height="72" rx="12" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+    <text x="696" y="196" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Findings</text>
+    <text x="696" y="222" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="900">{finding_count}</text>
+    <rect x="798" y="170" width="104" height="72" rx="12" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+    <text x="816" y="196" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Questions</text>
+    <text x="816" y="222" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="900">{question_count}</text>
+  </g>
+  <rect x="438" y="258" width="134" height="10" rx="5" fill="#2a2c30"/>
+  <rect x="438" y="258" width="{max(4, min(134, online_pct * 1.34)):.1f}" height="10" rx="5" fill="#4fd18c"/>
+  <text x="438" y="286" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">online {round(online_pct)}%</text>
+  <rect x="598" y="258" width="134" height="10" rx="5" fill="#2a2c30"/>
+  <rect x="598" y="258" width="{max(0, min(134, untrusted_pct * 1.34)):.1f}" height="10" rx="5" fill="#f08345"/>
+  <text x="598" y="286" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">untrusted {round(untrusted_pct)}%</text>
+  <rect x="758" y="258" width="134" height="10" rx="5" fill="#2a2c30"/>
+  <rect x="758" y="258" width="{max(0, min(134, failed_check_pct * 1.34)):.1f}" height="10" rx="5" fill="#ff5c5c"/>
+  <text x="758" y="286" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">{html_escape(source_label)} - checks {html_escape(check_state['label'])}</text>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
+def _ai_overview_cards(
+    rows: List[Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    runtime: Dict[str, Any],
+    settings: Dict[str, Any],
+    client: Any = None,
+) -> List[Dict[str, Any]]:
+    stats = _stats(rows, events, runtime, settings)
+    checks = _load_checks(client)
+    check_state = _check_summary(checks, settings)
+    analysis = _load_ai_analysis(client)
+    confirmations = _load_confirmations(client)
+    current_questions = _guardian_question_entries(analysis)
+    overview_text = _guardian_ai_overview_text(analysis)
+    posture = _text(analysis.get("posture")) or "unknown"
+    risk = _text(analysis.get("risk_level")) or "unknown"
+    posture_tone = "danger" if posture == "critical" else "warning" if posture in {"watch", "attention"} else "good" if posture == "healthy" else "muted"
+    risk_tone = "danger" if risk in {"high", "critical"} else "warning" if risk == "medium" else "good" if risk == "low" else "muted"
+    overview_card = {
+        "id": "ai_overview:brief",
+        "group": "ai_overview",
+        "title": "AI Generated Overview",
+        "subtitle": _text(analysis.get("headline")) or ("Unavailable" if analysis else "Not generated yet"),
+        "detail": "Model-written overview from Guardian inventory, source health, watch checks, recent events, and saved confirmations.",
+        "hero_badges": [
+            {"label": "AI Ready" if analysis.get("ok") else "Needs Model", "tone": "good" if analysis.get("ok") else "warning"},
+            {"label": f"Posture: {posture.title()}", "tone": posture_tone},
+            {"label": f"Risk: {risk.title()}", "tone": risk_tone},
+            {"label": f"{len(current_questions)} questions", "tone": "warning" if current_questions else "muted"},
+        ],
+        "summary_rows": [
+            {"label": "Generated", "value": _age_label(analysis.get("generated_at")) if analysis else "never"},
+            {"label": "Confidence", "value": f"{round(_as_float(analysis.get('confidence'), 0.0) * 100)}%"},
+            {"label": "Devices", "value": str(stats.get("total", 0))},
+            {"label": "Sources", "value": f"{stats.get('sources_ok', 0)}/{stats.get('sources', 0)} OK"},
+            {"label": "Watch Checks", "value": check_state["label"]},
+            {"label": "Saved Answers", "value": str(len(confirmations))},
+        ],
+        "sections": [
+            {
+                "label": "Network Intelligence",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "guardian_ai_overview_art",
+                        "label": "Guardian AI overview art",
+                        "type": "image",
+                        "src": _guardian_ai_overview_art_data_uri(
+                            analysis=analysis,
+                            stats=stats,
+                            checks=checks,
+                            settings=settings,
+                            runtime=runtime,
+                            confirmations=confirmations,
+                        ),
+                        "alt": "Guardian AI generated overview",
+                        "hide_label": True,
+                        "read_only": True,
+                    }
+                ],
+            },
+            {
+                "label": "AI Overview",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "guardian_ai_overview_text",
+                        "label": "Generated Overview",
+                        "type": "textarea",
+                        "value": overview_text,
+                        "read_only": True,
+                    },
+                    {
+                        "key": "guardian_ai_overview_signals",
+                        "label": "What Guardian Knows",
+                        "type": "table",
+                        "columns": [
+                            {"key": "signal", "label": "Signal"},
+                            {"key": "value", "label": "Value"},
+                            {"key": "context", "label": "Context"},
+                        ],
+                        "rows": _ai_overview_signal_rows(
+                            stats=stats,
+                            check_state=check_state,
+                            runtime=runtime,
+                            analysis=analysis,
+                            current_questions=current_questions,
+                            confirmations=confirmations,
+                        ),
+                        "read_only": True,
+                    },
+                ],
+            },
+            {
+                "label": "Model Priorities",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "guardian_ai_overview_findings",
+                        "label": "Top Findings",
+                        "type": "table",
+                        "columns": [
+                            {"key": "severity", "label": "Severity"},
+                            {"key": "finding", "label": "Finding"},
+                            {"key": "detail", "label": "Detail"},
+                            {"key": "action", "label": "Action"},
+                        ],
+                        "rows": _ai_finding_rows(analysis)[:5],
+                        "read_only": True,
+                    },
+                    {
+                        "key": "guardian_ai_overview_questions",
+                        "label": "Questions",
+                        "type": "table",
+                        "columns": [
+                            {"key": "question", "label": "Question"},
+                            {"key": "status", "label": "Status"},
+                            {"key": "answer", "label": "Answer"},
+                        ],
+                        "rows": _ai_overview_question_rows(analysis, confirmations),
+                        "read_only": True,
+                    },
+                ],
+            },
+        ],
+        "run_action": "guardian_ai_analyze_now",
+        "run_label": "Generate Overview",
+        "fields_popup": False,
+        "sections_in_dropdown": False,
+    }
+    detail_card = _ai_analysis_card(
+        analysis,
+        group="ai_overview",
+        card_id="ai_overview:analysis",
+    )
+    detail_card["title"] = "AI Detail"
+    detail_card["run_label"] = "Refresh Analysis"
+    return [overview_card, detail_card]
+
+
 def _overview_cards(
     rows: List[Dict[str, Any]],
     events: List[Dict[str, Any]],
@@ -2472,10 +2837,8 @@ def _overview_cards(
             "read_only": True,
         }
     )
-    ai_analysis = _load_ai_analysis(client)
     posture_src = _guardian_posture_card_data_uri(stats, checks, settings)
     cards = [
-        _ai_analysis_card(ai_analysis),
         {
             "id": "overview:posture",
             "group": "overview",
@@ -2664,6 +3027,80 @@ def _overview_cards(
     return cards
 
 
+def _guardian_device_badge_data_uri(row: Dict[str, Any]) -> str:
+    status = _text(row.get("status")).lower() or "unknown"
+    trusted = _as_bool(row.get("trusted"), False)
+    critical = _as_bool(row.get("critical"), False)
+    category = _text(row.get("category")) or "device"
+    connection = _text(row.get("connection_type")) or _text(row.get("source")) or "network"
+    title = _compact(_device_title(row), 28)
+    ip = _compact(row.get("ip"), 24) or "no IP"
+    network = _compact(row.get("network"), 24) or _compact(row.get("site_name"), 24) or "network"
+    if critical and status == "offline":
+        tone = "danger"
+    elif status == "offline" or not trusted:
+        tone = "warning"
+    elif status == "online":
+        tone = "good"
+    else:
+        tone = "muted"
+    palette = {
+        "good": {"accent": "#4fd18c", "glow": "#8ce99a", "panel": "#16241d", "line": "#63e6be"},
+        "warning": {"accent": "#f08345", "glow": "#ffc078", "panel": "#2a1c15", "line": "#f08c00"},
+        "danger": {"accent": "#ff5c5c", "glow": "#ff9b9b", "panel": "#2a1717", "line": "#ff6b6b"},
+        "muted": {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"},
+    }.get(tone, {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"})
+    accent = palette["accent"]
+    glow = palette["glow"]
+    panel = palette["panel"]
+    line = palette["line"]
+    glyph = "AP" if _clean_key(category) == "infrastructure" else "IoT" if not trusted else "DEV"
+    trust_label = "trusted" if trusted else "review"
+    critical_label = "critical" if critical else "standard"
+    activity_opacity = "0.9" if status == "online" else "0.34"
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="220" viewBox="0 0 320 220">
+  <defs>
+    <linearGradient id="device_panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#111213"/>
+      <stop offset="1" stop-color="{html_escape(panel)}"/>
+    </linearGradient>
+    <filter id="device_glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .device-ring {{ animation: devicePulse 3.4s ease-in-out infinite; transform-origin: 92px 94px; }}
+      .device-scan {{ animation: deviceSpin 6.8s linear infinite; transform-origin: 92px 94px; }}
+      .device-flow {{ stroke-dasharray: 8 14; animation: deviceDash 4.8s linear infinite; }}
+      @keyframes devicePulse {{ 0%,100% {{ opacity: .16; transform: scale(.92); }} 50% {{ opacity: .58; transform: scale(1.06); }} }}
+      @keyframes deviceSpin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
+      @keyframes deviceDash {{ to {{ stroke-dashoffset: -44; }} }}
+    </style>
+  </defs>
+  <rect width="320" height="220" rx="18" fill="#111213"/>
+  <rect x="12" y="12" width="296" height="196" rx="16" fill="url(#device_panel)" stroke="#2a2c30" stroke-width="1.2"/>
+  <circle class="device-ring" cx="92" cy="94" r="58" fill="none" stroke="{html_escape(glow)}" stroke-width="2"/>
+  <circle cx="92" cy="94" r="42" fill="#202225" stroke="{html_escape(accent)}" stroke-width="3" filter="url(#device_glow)"/>
+  <line class="device-scan" x1="92" y1="94" x2="92" y2="42" stroke="{html_escape(line)}" stroke-width="3" stroke-linecap="round" opacity="{activity_opacity}"/>
+  <text x="92" y="101" text-anchor="middle" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="900">{html_escape(glyph)}</text>
+  <path class="device-flow" d="M152 78 C182 54 224 54 254 78" fill="none" stroke="{html_escape(line)}" stroke-width="2.6" opacity="{activity_opacity}"/>
+  <path class="device-flow" d="M152 110 C184 132 224 132 254 110" fill="none" stroke="#7048e8" stroke-width="2.4" opacity="0.45"/>
+  <circle cx="152" cy="78" r="6" fill="{html_escape(accent)}"/>
+  <circle cx="254" cy="78" r="6" fill="#1971c2"/>
+  <circle cx="152" cy="110" r="5" fill="#7048e8"/>
+  <circle cx="254" cy="110" r="5" fill="#d65a1f"/>
+  <text x="28" y="176" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="850">{html_escape(title)}</text>
+  <text x="28" y="196" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">{html_escape(ip)} - {html_escape(network)}</text>
+  <rect x="188" y="150" width="94" height="20" rx="10" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+  <text x="235" y="164" text-anchor="middle" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="850">{html_escape(status.title())}</text>
+  <text x="188" y="190" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="11">{html_escape(trust_label)} / {html_escape(critical_label)}</text>
+  <text x="188" y="204" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="10">{html_escape(_compact(connection, 20))}</text>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
 def _device_forms(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     forms: List[Dict[str, Any]] = []
     for row in rows[:MAX_UI_DEVICES]:
@@ -2684,6 +3121,8 @@ def _device_forms(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "title": title,
                 "subtitle": " - ".join(bit for bit in subtitle_bits if bit),
                 "detail": f"{_text(row.get('ip')) or 'no IP'} / {_text(row.get('mac')) or 'no MAC'}",
+                "hero_image_src": _guardian_device_badge_data_uri(row),
+                "hero_image_alt": f"{title} Guardian device badge",
                 "hero_badges": [
                     {"label": status.title(), "tone": "good" if status == "online" else "warning" if status == "offline" else "muted"},
                     {"label": "Trusted" if trusted else "Untrusted", "tone": "good" if trusted else "warning"},
@@ -2713,6 +3152,8 @@ def _device_forms(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 ],
                 "save_action": "guardian_save_device",
                 "save_label": "Save Device",
+                "settings_label": "See Details",
+                "settings_title": f"{title} Details",
                 "remove_action": "guardian_forget_device",
                 "remove_label": "Forget",
                 "remove_confirm": f"Forget {title} from Guardian inventory?",
@@ -2721,28 +3162,357 @@ def _device_forms(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return forms
 
 
+def _event_kind_label(kind: Any) -> str:
+    return _text(kind).replace("_", " ").title() or "Event"
+
+
+def _event_tone(event: Dict[str, Any]) -> str:
+    severity = _text(event.get("severity")).lower()
+    kind = _text(event.get("kind")).lower()
+    if severity in {"error", "critical"} or kind in {"tcp_check_failed"}:
+        return "danger"
+    if severity == "warning" or kind in {"device_seen", "device_offline"}:
+        return "warning"
+    if kind == "device_online":
+        return "good"
+    return "muted"
+
+
+def _event_palette(tone: str) -> Dict[str, str]:
+    return {
+        "good": {"accent": "#4fd18c", "glow": "#8ce99a", "panel": "#16241d", "line": "#63e6be"},
+        "warning": {"accent": "#f08345", "glow": "#ffc078", "panel": "#2a1c15", "line": "#f08c00"},
+        "danger": {"accent": "#ff5c5c", "glow": "#ff9b9b", "panel": "#2a1717", "line": "#ff6b6b"},
+        "muted": {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"},
+    }.get(tone, {"accent": "#a8a096", "glow": "#d4cec6", "panel": "#1a1b1d", "line": "#868e96"})
+
+
+def _event_summary_counts(events: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {
+        "total": len(events),
+        "warnings": 0,
+        "critical": 0,
+        "online": 0,
+        "offline": 0,
+        "new": 0,
+        "ip_changes": 0,
+        "checks": 0,
+    }
+    for event in events:
+        severity = _text(event.get("severity")).lower()
+        kind = _text(event.get("kind")).lower()
+        if severity == "warning":
+            counts["warnings"] += 1
+        if severity in {"error", "critical"} or kind == "tcp_check_failed":
+            counts["critical"] += 1
+        if kind == "device_online":
+            counts["online"] += 1
+        elif kind == "device_offline":
+            counts["offline"] += 1
+        elif kind == "device_seen":
+            counts["new"] += 1
+        elif kind == "ip_changed":
+            counts["ip_changes"] += 1
+        elif kind == "tcp_check_failed":
+            counts["checks"] += 1
+    return counts
+
+
+def _event_chart_points(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    counts: Dict[str, int] = {}
+    for event in events:
+        label = _event_kind_label(event.get("kind"))
+        counts[label] = counts.get(label, 0) + 1
+    return [
+        {"label": label, "value": count, "display": str(count)}
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ]
+
+
+def _guardian_event_timeline_data_uri(events: List[Dict[str, Any]]) -> str:
+    counts = _event_summary_counts(events)
+    tone = "danger" if counts["critical"] else "warning" if counts["warnings"] or counts["offline"] or counts["new"] else "good" if events else "muted"
+    palette = _event_palette(tone)
+    accent = palette["accent"]
+    glow = palette["glow"]
+    panel = palette["panel"]
+    line = palette["line"]
+    headline = "Event Timeline" if events else "No Events Yet"
+    subline = (
+        f"{counts['total']} recent events, {counts['warnings']} warnings, {counts['critical']} critical"
+        if events
+        else "Guardian will build this timeline as devices change."
+    )
+    nodes = []
+    for index, event in enumerate(events[:7]):
+        x = 118 + index * 112
+        y = 142 + (20 if index % 2 else -20)
+        event_tone = _event_tone(event)
+        event_color = _event_palette(event_tone)["accent"]
+        label = _compact(_event_kind_label(event.get("kind")), 14)
+        age = _compact(_age_label(event.get("ts")), 16)
+        nodes.append(
+            f'<g class="event-node n{index}">'
+            f'<circle cx="{x}" cy="{y}" r="15" fill="{html_escape(event_color)}" filter="url(#timeline_glow)"/>'
+            f'<circle cx="{x}" cy="{y}" r="28" fill="none" stroke="{html_escape(event_color)}" stroke-width="2" opacity="0.22"/>'
+            f'<text x="{x}" y="{y + 48}" text-anchor="middle" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="800">{html_escape(label)}</text>'
+            f'<text x="{x}" y="{y + 64}" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="10">{html_escape(age)}</text>'
+            f'</g>'
+        )
+    node_track = ""
+    if events:
+        node_track = '<path class="timeline-flow" d="M86 142 C190 88 302 196 414 142 S638 88 750 142 S862 196 914 142" fill="none" stroke="' + html_escape(line) + '" stroke-width="4" opacity="0.58"/>'
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="270" viewBox="0 0 980 270">
+  <defs>
+    <linearGradient id="timeline_panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#111213"/>
+      <stop offset="1" stop-color="{html_escape(panel)}"/>
+    </linearGradient>
+    <filter id="timeline_glow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .timeline-flow {{ stroke-dasharray: 12 18; animation: timelineDash 5.6s linear infinite; }}
+      .event-node {{ animation: eventPulse 3.1s ease-in-out infinite; }}
+      .event-node.n1 {{ animation-delay: .25s; }}
+      .event-node.n2 {{ animation-delay: .5s; }}
+      .event-node.n3 {{ animation-delay: .75s; }}
+      .event-node.n4 {{ animation-delay: 1s; }}
+      .event-node.n5 {{ animation-delay: 1.25s; }}
+      .event-node.n6 {{ animation-delay: 1.5s; }}
+      @keyframes timelineDash {{ to {{ stroke-dashoffset: -60; }} }}
+      @keyframes eventPulse {{ 0%,100% {{ opacity: .72; }} 50% {{ opacity: 1; }} }}
+    </style>
+  </defs>
+  <rect width="980" height="270" rx="22" fill="#111213"/>
+  <rect x="18" y="18" width="944" height="234" rx="20" fill="url(#timeline_panel)" stroke="#2a2c30" stroke-width="1.3"/>
+  <text x="48" y="64" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="900">{html_escape(headline)}</text>
+  <text x="48" y="91" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="13">{html_escape(subline)}</text>
+  <rect x="726" y="44" width="178" height="36" rx="18" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+  <text x="815" y="67" text-anchor="middle" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="900">{counts['total']} events</text>
+  {node_track}
+  {''.join(nodes)}
+  <g>
+    <rect x="54" y="210" width="116" height="18" rx="9" fill="#202225"/>
+    <rect x="54" y="210" width="{max(0, min(116, counts['offline'] * 18))}" height="18" rx="9" fill="#ff5c5c"/>
+    <text x="186" y="224" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">offline {counts['offline']}</text>
+    <rect x="278" y="210" width="116" height="18" rx="9" fill="#202225"/>
+    <rect x="278" y="210" width="{max(0, min(116, counts['new'] * 18))}" height="18" rx="9" fill="#f08345"/>
+    <text x="410" y="224" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">new {counts['new']}</text>
+    <rect x="502" y="210" width="116" height="18" rx="9" fill="#202225"/>
+    <rect x="502" y="210" width="{max(0, min(116, counts['online'] * 18))}" height="18" rx="9" fill="#4fd18c"/>
+    <text x="634" y="224" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">online {counts['online']}</text>
+    <rect x="726" y="210" width="116" height="18" rx="9" fill="#202225"/>
+    <rect x="726" y="210" width="{max(0, min(116, counts['checks'] * 18))}" height="18" rx="9" fill="#7048e8"/>
+    <text x="858" y="224" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">checks {counts['checks']}</text>
+  </g>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
+def _guardian_event_badge_data_uri(event: Dict[str, Any]) -> str:
+    tone = _event_tone(event)
+    palette = _event_palette(tone)
+    accent = palette["accent"]
+    glow = palette["glow"]
+    panel = palette["panel"]
+    line = palette["line"]
+    kind = _compact(_event_kind_label(event.get("kind")), 24)
+    severity = _text(event.get("severity")).title() or "Info"
+    device = _compact(event.get("device_name") or event.get("device_id"), 28) or "Network"
+    age = _age_label(event.get("ts"))
+    glyph = "!" if tone in {"danger", "warning"} else "+" if _text(event.get("kind")) == "device_online" else "i"
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="205" viewBox="0 0 320 205">
+  <defs>
+    <linearGradient id="event_panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#111213"/>
+      <stop offset="1" stop-color="{html_escape(panel)}"/>
+    </linearGradient>
+    <filter id="event_glow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .event-sweep {{ animation: eventSweep 5.8s linear infinite; transform-origin: 90px 88px; }}
+      .event-path {{ stroke-dasharray: 7 12; animation: eventPath 4.2s linear infinite; }}
+      @keyframes eventSweep {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
+      @keyframes eventPath {{ to {{ stroke-dashoffset: -38; }} }}
+    </style>
+  </defs>
+  <rect width="320" height="205" rx="18" fill="#111213"/>
+  <rect x="12" y="12" width="296" height="181" rx="16" fill="url(#event_panel)" stroke="#2a2c30" stroke-width="1.2"/>
+  <circle cx="90" cy="88" r="48" fill="#202225" stroke="{html_escape(accent)}" stroke-width="3" filter="url(#event_glow)"/>
+  <circle cx="90" cy="88" r="66" fill="none" stroke="{html_escape(glow)}" stroke-width="2" opacity="0.18"/>
+  <line class="event-sweep" x1="90" y1="88" x2="90" y2="30" stroke="{html_escape(line)}" stroke-width="3" stroke-linecap="round" opacity="0.76"/>
+  <text x="90" y="98" text-anchor="middle" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="900">{html_escape(glyph)}</text>
+  <path class="event-path" d="M152 75 C178 56 218 56 246 75 S280 112 246 130 S178 148 152 130" fill="none" stroke="{html_escape(line)}" stroke-width="2.5" opacity="0.62"/>
+  <circle cx="152" cy="75" r="5" fill="{html_escape(accent)}"/>
+  <circle cx="246" cy="75" r="5" fill="#1971c2"/>
+  <circle cx="246" cy="130" r="5" fill="#7048e8"/>
+  <text x="28" y="158" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="850">{html_escape(kind)}</text>
+  <text x="28" y="179" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">{html_escape(device)} - {html_escape(age)}</text>
+  <rect x="190" y="146" width="88" height="22" rx="11" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+  <text x="234" y="161" text-anchor="middle" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="900">{html_escape(severity)}</text>
+</svg>
+""".strip()
+    return "data:image/svg+xml;charset=utf-8," + quote(svg)
+
+
+def _event_detail_rows(event: Dict[str, Any]) -> List[Dict[str, str]]:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    rows = [
+        {"field": "Kind", "value": _event_kind_label(event.get("kind"))},
+        {"field": "Severity", "value": _text(event.get("severity")).title() or "Info"},
+        {"field": "Device", "value": _text(event.get("device_name")) or _text(event.get("device_id")) or "-"},
+        {"field": "Source", "value": _source_label(event.get("source")) or "-"},
+        {"field": "Category", "value": _text(event.get("category")).title() or "-"},
+        {"field": "Status", "value": _text(event.get("status")).title() or "-"},
+        {"field": "Age", "value": _age_label(event.get("ts"))},
+    ]
+    if details:
+        for key, value in list(details.items())[:8]:
+            rows.append({"field": _text(key).replace("_", " ").title(), "value": _compact(value, 160) or "-"})
+    return rows
+
+
+def _event_summary_card(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts = _event_summary_counts(events)
+    chart_points = _event_chart_points(events)
+    tone = "danger" if counts["critical"] else "warning" if counts["warnings"] or counts["offline"] or counts["new"] else "good" if events else "muted"
+    return {
+        "id": "events:timeline",
+        "group": "events",
+        "title": "Event Timeline",
+        "subtitle": f"{counts['total']} recent event{'s' if counts['total'] != 1 else ''}",
+        "detail": "Guardian events are grouped into a visual timeline so changes, alerts, and recoveries are easier to scan.",
+        "hero_badges": [
+            {"label": f"{counts['warnings']} warnings", "tone": "warning" if counts["warnings"] else "muted"},
+            {"label": f"{counts['critical']} critical", "tone": "danger" if counts["critical"] else "muted"},
+            {"label": f"{counts['new']} new devices", "tone": "warning" if counts["new"] else "muted"},
+            {"label": f"{counts['online']} online", "tone": "good" if counts["online"] else "muted"},
+        ],
+        "summary_rows": [
+            {"label": "Recent Events", "value": str(counts["total"])},
+            {"label": "Warnings", "value": str(counts["warnings"])},
+            {"label": "Critical", "value": str(counts["critical"])},
+            {"label": "Offline", "value": str(counts["offline"])},
+            {"label": "Online", "value": str(counts["online"])},
+            {"label": "IP Changes", "value": str(counts["ip_changes"])},
+        ],
+        "sections": [
+            {
+                "label": "Timeline",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "guardian_event_timeline_art",
+                        "label": "Guardian event timeline",
+                        "type": "image",
+                        "src": _guardian_event_timeline_data_uri(events),
+                        "alt": "Guardian event timeline",
+                        "hide_label": True,
+                        "read_only": True,
+                    },
+                    {
+                        "key": "guardian_event_kind_mix",
+                        "label": "Event Mix",
+                        "type": "bar_chart",
+                        "points": chart_points,
+                        "read_only": True,
+                    },
+                ],
+            },
+            {
+                "label": "Recent Event Table",
+                "fields": [
+                    {
+                        "key": "guardian_event_recent_rows",
+                        "label": "Recent Event Table",
+                        "type": "table",
+                        "columns": [
+                            {"key": "age", "label": "Age"},
+                            {"key": "kind", "label": "Kind"},
+                            {"key": "device", "label": "Device"},
+                            {"key": "severity", "label": "Severity"},
+                            {"key": "message", "label": "Message"},
+                        ],
+                        "rows": _recent_event_rows(events, limit=12),
+                        "read_only": True,
+                    }
+                ],
+            },
+        ],
+        "run_action": "guardian_poll_now",
+        "run_label": "Poll Now",
+        "fields_popup": False,
+        "sections_in_dropdown": False,
+    }
+
+
 def _event_forms(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    forms: List[Dict[str, Any]] = []
+    forms: List[Dict[str, Any]] = [_event_summary_card(events)]
     for event in events[:MAX_UI_EVENTS]:
         severity = _text(event.get("severity")) or "info"
         severity_key = severity.lower()
+        kind_label = _event_kind_label(event.get("kind"))
+        event_tone = _event_tone(event)
+        event_id = _text(event.get("id"))
+        message = _text(event.get("message")) or kind_label
         forms.append(
             {
-                "id": f"event:{_text(event.get('id'))}",
+                "id": f"event:{event_id}",
                 "group": "events",
-                "title": _text(event.get("message")) or _text(event.get("kind")) or "Guardian Event",
-                "subtitle": f"{_age_label(event.get('ts'))} - {severity}",
+                "title": message,
+                "subtitle": f"{_age_label(event.get('ts'))} - {kind_label}",
                 "detail": _text(event.get("device_name")) or _text(event.get("device_id")),
+                "hero_image_src": _guardian_event_badge_data_uri(event),
+                "hero_image_alt": f"{kind_label} Guardian event badge",
                 "hero_badges": [
-                    {"label": severity.title(), "tone": "warning" if severity_key == "warning" else "danger" if severity_key == "error" else "muted"},
-                    {"label": _text(event.get("kind")).replace("_", " ").title() or "Event", "tone": "muted"},
+                    {"label": severity.title(), "tone": "warning" if severity_key == "warning" else "danger" if severity_key in {"error", "critical"} else "muted"},
+                    {"label": kind_label, "tone": event_tone},
+                    {"label": _source_label(event.get("source")) or "Source", "tone": "muted"},
                 ],
                 "summary_rows": [
-                    {"label": "Kind", "value": _text(event.get("kind"))},
+                    {"label": "Kind", "value": kind_label},
                     {"label": "Device", "value": _text(event.get("device_name")) or "-"},
                     {"label": "Source", "value": _text(event.get("source")) or "-"},
                     {"label": "Status", "value": _text(event.get("status")) or "-"},
+                    {"label": "Category", "value": _text(event.get("category")).title() or "-"},
+                    {"label": "Age", "value": _age_label(event.get("ts"))},
                 ],
+                "sensor_title": "Event Signals",
+                "sensor_rows": [
+                    {"label": "Severity", "value": severity.title(), "meta": kind_label},
+                    {"label": "Device", "value": _compact(event.get("device_name") or event.get("device_id"), 28) or "-", "meta": _text(event.get("status")).title()},
+                    {"label": "Source", "value": _source_label(event.get("source")) or "-", "meta": _text(event.get("category")).title()},
+                    {"label": "Observed", "value": _age_label(event.get("ts")), "meta": event_id[:8]},
+                ],
+                "popup_fields": [
+                    {
+                        "key": f"event_message__{event_id}",
+                        "label": "Event Message",
+                        "type": "textarea",
+                        "value": message,
+                        "read_only": True,
+                    },
+                    {
+                        "key": f"event_details__{event_id}",
+                        "label": "Event Details",
+                        "type": "table",
+                        "columns": [
+                            {"key": "field", "label": "Field"},
+                            {"key": "value", "label": "Value"},
+                        ],
+                        "rows": _event_detail_rows(event),
+                        "read_only": True,
+                    },
+                ],
+                "settings_label": "See Details",
+                "settings_title": "Event Details",
             }
         )
     return forms
@@ -2851,11 +3621,8 @@ def _guardian_manager_ui(
 ) -> Dict[str, Any]:
     ai_analysis = _load_ai_analysis(client)
     confirmations = _load_confirmations(client)
-    current_questions = _guardian_question_entries(ai_analysis)
-    latest_confirmations = _confirmation_latest_map(confirmations)
-    answered_questions = sum(1 for item in current_questions if item.get("id") in latest_confirmations)
-    open_questions = max(0, len(current_questions) - answered_questions)
     item_forms: List[Dict[str, Any]] = []
+    item_forms.extend(_ai_overview_cards(rows, events, runtime, settings, client))
     item_forms.append(_guardian_confirmations_card(ai_analysis, confirmations))
     item_forms.extend(_overview_cards(rows, events, runtime, settings, client))
     item_forms.extend(_device_forms(rows))
@@ -2868,13 +3635,14 @@ def _guardian_manager_ui(
         "stats_refresh_label": "Refresh",
         "empty_message": "Guardian has not discovered network devices yet.",
         "manager_tabs": [
+            {"key": "ai_overview", "label": "AI Overview", "source": "items", "item_group": "ai_overview"},
             {"key": "confirm", "label": "Confirm", "source": "items", "item_group": "confirm"},
             {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
-            {"key": "devices", "label": "Devices", "source": "items", "item_group": "devices", "selector": True},
+            {"key": "devices", "label": "Devices", "source": "items", "item_group": "devices", "empty_message": "Guardian has not discovered any devices yet."},
             {"key": "events", "label": "Events", "source": "items", "item_group": "events"},
             {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
         ],
-        "default_tab": "confirm" if open_questions else "overview",
+        "default_tab": "ai_overview",
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Details",
         "item_fields_popup": True,
