@@ -52,11 +52,11 @@
       "id": "guardian",
       "name": "Guardian Core",
       "module_key": "guardian_core",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "min_tater_version": "59",
       "description": "Network guardian core for device inventory, change detection, tunnels, and health monitoring.",
       "settings_category": "Guardian Core Settings",
-      "required_settings_count": 19,
+      "required_settings_count": 21,
       "autostart_key": "guardian_core_running",
       "tags": [
         "guardian",
@@ -66,7 +66,7 @@
         "tunnel"
       ],
       "entry": "cores/guardian_core.py",
-      "sha256": "cda90685bf5dceb8d2d1335c6cb7c04cee93b85de16fe5eb16822b4ac823ddbf"
+      "sha256": "a3e9f92697ff27ff544f8b3406a17bdf8787ae4f620821eedb879c85e045f671"
     },
     {
       "id": "memory",
