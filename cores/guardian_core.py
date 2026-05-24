@@ -18,7 +18,7 @@ from urllib.parse import quote
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -1836,11 +1836,11 @@ def _guardian_posture_card_data_uri(
     label = _guardian_health_label(stats, score, checks, settings)
     tone = _guardian_tone(stats, score, checks, settings)
     palette = {
-        "good": {"accent": "#2f9e44", "glow": "#8ce99a", "scan": "#40c057", "panel": "#10221a"},
-        "warning": {"accent": "#f08c00", "glow": "#ffd43b", "scan": "#fab005", "panel": "#271b0b"},
-        "danger": {"accent": "#e03131", "glow": "#ff8787", "scan": "#ff6b6b", "panel": "#2a1114"},
-        "muted": {"accent": "#5c6773", "glow": "#a7b1ba", "scan": "#868e96", "panel": "#15191f"},
-    }.get(tone, {"accent": "#2f9e44", "glow": "#8ce99a", "scan": "#40c057", "panel": "#10221a"})
+        "good": {"accent": "#4fd18c", "glow": "#8ce99a", "scan": "#4fd18c", "panel": "#16241d"},
+        "warning": {"accent": "#f08345", "glow": "#ffc078", "scan": "#d65a1f", "panel": "#2a1c15"},
+        "danger": {"accent": "#ff5c5c", "glow": "#ff9b9b", "scan": "#ff5c5c", "panel": "#2a1717"},
+        "muted": {"accent": "#a8a096", "glow": "#d4cec6", "scan": "#a8a096", "panel": "#1a1b1d"},
+    }.get(tone, {"accent": "#4fd18c", "glow": "#8ce99a", "scan": "#4fd18c", "panel": "#16241d"})
     accent = palette["accent"]
     glow = palette["glow"]
     scan = palette["scan"]
@@ -1853,9 +1853,9 @@ def _guardian_posture_card_data_uri(
     failed_checks = _as_int(check_state.get("failed"), 0)
     risk_signals = offline + untrusted + source_errors + failed_checks
     bar_items = [
-        ("Online", _as_int(stats.get("online"), 0), "#2f9e44"),
-        ("Offline", offline, "#e03131"),
-        ("Untrusted", untrusted, "#f08c00"),
+        ("Online", _as_int(stats.get("online"), 0), "#4fd18c"),
+        ("Offline", offline, "#ff5c5c"),
+        ("Untrusted", untrusted, "#d65a1f"),
         ("Checks Failing", failed_checks, "#7048e8"),
     ]
     bars = []
@@ -1866,18 +1866,18 @@ def _guardian_posture_card_data_uri(
             check_total = max(1, _as_int(check_state.get("total"), 0))
             width = 0 if value <= 0 else max(10, min(256, (value / check_total) * 256))
         bars.append(
-            f'<text x="812" y="{y}" fill="#45515d" font-family="Inter, Arial, sans-serif" font-size="15">{html_escape(name)}</text>'
-            f'<rect x="940" y="{y - 13}" width="256" height="14" rx="7" fill="#dfe7e4"/>'
+            f'<text x="812" y="{y}" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="15">{html_escape(name)}</text>'
+            f'<rect x="940" y="{y - 13}" width="256" height="14" rx="7" fill="#2a2c30"/>'
             f'<rect x="940" y="{y - 13}" width="{width:.1f}" height="14" rx="7" fill="{html_escape(color)}"/>'
-            f'<text x="1220" y="{y}" text-anchor="end" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="800">{value}</text>'
+            f'<text x="1220" y="{y}" text-anchor="end" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="800">{value}</text>'
         )
     event_count = _as_int(stats.get("events"), 0)
     status_nodes = [
         ("Router", "sources", stats.get("sources_ok", 0), 498, 124, "#15aabf"),
-        ("Clients", "online", stats.get("online", 0), 628, 72, "#2f9e44"),
+        ("Clients", "online", stats.get("online", 0), 628, 72, "#4fd18c"),
         ("Watch", "checks", check_state.get("ok", 0), 720, 164, "#7048e8"),
         ("Events", "logged", event_count, 622, 260, "#1971c2"),
-        ("Alerts", "risk", risk_signals, 488, 260, "#e03131" if risk_signals else "#2f9e44"),
+        ("Alerts", "risk", risk_signals, 488, 260, "#ff5c5c" if risk_signals else "#4fd18c"),
     ]
     node_svg = []
     line_svg = []
@@ -1898,24 +1898,24 @@ def _guardian_posture_card_data_uri(
         )
         node_svg.append(
             f'<g opacity="{opacity}">'
-            f'<circle cx="{x}" cy="{y}" r="25" fill="#f7fbf9" stroke="{html_escape(color)}" stroke-width="4"/>'
+            f'<circle cx="{x}" cy="{y}" r="25" fill="#202225" stroke="{html_escape(color)}" stroke-width="4"/>'
             f'<circle cx="{x}" cy="{y}" r="10" fill="{html_escape(color)}"/>'
-            f'<text x="{x}" y="{y + 47}" text-anchor="middle" fill="#e8f2ef" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="760">{html_escape(node_label)}</text>'
-            f'<text x="{x}" y="{y + 64}" text-anchor="middle" fill="#94aaa1" font-family="Inter, Arial, sans-serif" font-size="12">{html_escape(str(value))} {html_escape(meta)}</text>'
+            f'<text x="{x}" y="{y + 47}" text-anchor="middle" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="760">{html_escape(node_label)}</text>'
+            f'<text x="{x}" y="{y + 64}" text-anchor="middle" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">{html_escape(str(value))} {html_escape(meta)}</text>'
             f'</g>'
         )
     grid_lines = []
     for x in range(366, 780, 48):
-        grid_lines.append(f'<line x1="{x}" y1="44" x2="{x}" y2="304" stroke="#24423a" stroke-width="1" opacity="0.45"/>')
+        grid_lines.append(f'<line x1="{x}" y1="44" x2="{x}" y2="304" stroke="#2a2c30" stroke-width="1" opacity="0.78"/>')
     for y in range(52, 304, 42):
-        grid_lines.append(f'<line x1="348" y1="{y}" x2="778" y2="{y}" stroke="#24423a" stroke-width="1" opacity="0.42"/>')
+        grid_lines.append(f'<line x1="348" y1="{y}" x2="778" y2="{y}" stroke="#2a2c30" stroke-width="1" opacity="0.72"/>')
     alert_label = "All Quiet" if risk_signals == 0 else f"{risk_signals} Signals"
     watch_label = "Watch Active" if check_state["enabled"] else "Watch Idle"
     svg = f"""
 <svg xmlns="http://www.w3.org/2000/svg" width="1248" height="386" viewBox="0 0 1248 386">
   <defs>
     <linearGradient id="guardian_panel" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#101820"/>
+      <stop offset="0" stop-color="#111213"/>
       <stop offset="1" stop-color="{html_escape(panel)}"/>
     </linearGradient>
     <linearGradient id="guardian_scan" x1="0" x2="1" y1="0" y2="0">
@@ -1924,36 +1924,36 @@ def _guardian_posture_card_data_uri(
       <stop offset="1" stop-color="{html_escape(scan)}" stop-opacity="0"/>
     </linearGradient>
     <filter id="soft_shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f171d" flood-opacity="0.22"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.34"/>
     </filter>
     <filter id="signal_glow" x="-60%" y="-60%" width="220%" height="220%">
       <feGaussianBlur stdDeviation="5" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
-  <rect width="1248" height="386" rx="24" fill="#f4f8f6"/>
-  <rect x="24" y="24" width="1220" height="338" rx="22" fill="#eef5f2"/>
+  <rect width="1248" height="386" rx="24" fill="#111213"/>
+  <rect x="24" y="24" width="1220" height="338" rx="22" fill="#151617" stroke="#2a2c30" stroke-width="1.5"/>
   <rect x="38" y="38" width="284" height="310" rx="18" fill="url(#guardian_panel)" filter="url(#soft_shadow)"/>
-  <rect x="342" y="38" width="454" height="310" rx="18" fill="#101820" filter="url(#soft_shadow)"/>
-  <rect x="812" y="38" width="410" height="310" rx="18" fill="#ffffff" filter="url(#soft_shadow)"/>
+  <rect x="342" y="38" width="454" height="310" rx="18" fill="#1a1b1d" stroke="#2a2c30" stroke-width="1.2" filter="url(#soft_shadow)"/>
+  <rect x="812" y="38" width="410" height="310" rx="18" fill="#1a1b1d" stroke="#2a2c30" stroke-width="1.2" filter="url(#soft_shadow)"/>
 
-  <text x="64" y="78" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="850">Guardian Core</text>
-  <text x="64" y="106" fill="#a8bdb5" font-family="Inter, Arial, sans-serif" font-size="14">Network security posture</text>
+  <text x="64" y="78" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="850">Guardian Core</text>
+  <text x="64" y="106" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">Network security posture</text>
   <path d="M82 132 L162 102 L242 132 V184 C242 246 206 286 162 310 C118 286 82 246 82 184 Z" fill="{html_escape(accent)}" opacity="0.96" filter="url(#signal_glow)"/>
   <path d="M112 148 L162 128 L212 148 V184 C212 224 190 252 162 270 C134 252 112 224 112 184 Z" fill="#f7fbf9" opacity="0.94"/>
   <path d="M144 190 L158 205 L184 168" fill="none" stroke="{html_escape(accent)}" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="64" y="268" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="62" font-weight="900">{score}</text>
+  <text x="64" y="268" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="62" font-weight="900">{score}</text>
   <text x="166" y="267" fill="{html_escape(glow)}" font-family="Inter, Arial, sans-serif" font-size="23" font-weight="850">/100</text>
-  <text x="64" y="303" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="800">{html_escape(label)}</text>
-  <text x="64" y="329" fill="#a8bdb5" font-family="Inter, Arial, sans-serif" font-size="14">Last poll {html_escape(_text(stats.get('last_poll_label')))}</text>
+  <text x="64" y="303" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="800">{html_escape(label)}</text>
+  <text x="64" y="329" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">Last poll {html_escape(_text(stats.get('last_poll_label')))}</text>
 
   {''.join(grid_lines)}
   <rect x="346" y="46" width="446" height="294" rx="15" fill="url(#guardian_scan)" opacity="0.0">
     <animate attributeName="x" values="346;552;346" dur="7.2s" repeatCount="indefinite"/>
     <animate attributeName="opacity" values="0.05;0.75;0.05" dur="7.2s" repeatCount="indefinite"/>
   </rect>
-  <text x="366" y="74" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="850">Security Map</text>
-  <text x="366" y="98" fill="#94aaa1" font-family="Inter, Arial, sans-serif" font-size="13">{stats.get('sources_ok', 0)}/{stats.get('sources', 0)} sources OK - {check_state['ok']}/{check_state['total']} watch checks OK</text>
+  <text x="366" y="74" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="850">Security Map</text>
+  <text x="366" y="98" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="13">{stats.get('sources_ok', 0)}/{stats.get('sources', 0)} sources OK - {check_state['ok']}/{check_state['total']} watch checks OK</text>
   {''.join(line_svg)}
   {''.join(pulse_svg)}
   <path d="M590 125 L628 140 V166 C628 196 610 216 590 228 C570 216 552 196 552 166 V140 Z" fill="{html_escape(accent)}" opacity="0.96" filter="url(#signal_glow)"/>
@@ -1965,16 +1965,16 @@ def _guardian_posture_card_data_uri(
   </circle>
   {''.join(node_svg)}
 
-  <text x="840" y="78" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="850">Defense Signals</text>
-  <text x="840" y="104" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="14">{html_escape(alert_label)} - {html_escape(watch_label)}</text>
-  <rect x="840" y="120" width="354" height="42" rx="10" fill="#f4f8f6"/>
-  <text x="860" y="146" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="800">Inventory</text>
+  <text x="840" y="78" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="850">Defense Signals</text>
+  <text x="840" y="104" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">{html_escape(alert_label)} - {html_escape(watch_label)}</text>
+  <rect x="840" y="120" width="354" height="42" rx="10" fill="#202225" stroke="#2a2c30" stroke-width="1"/>
+  <text x="860" y="146" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="800">Inventory</text>
   <text x="1190" y="146" text-anchor="end" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="900">{stats.get('total', 0)} devices</text>
   {''.join(bars)}
-  <rect x="840" y="304" width="354" height="20" rx="10" fill="#dfe7e4"/>
+  <rect x="840" y="304" width="354" height="20" rx="10" fill="#2a2c30"/>
   <rect x="840" y="304" width="{max(8, min(354, score * 3.54)):.1f}" height="20" rx="10" fill="{html_escape(accent)}"/>
-  <text x="840" y="340" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="13">Posture strength</text>
-  <text x="1194" y="340" text-anchor="end" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="800">{score}%</text>
+  <text x="840" y="340" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="13">Posture strength</text>
+  <text x="1194" y="340" text-anchor="end" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="800">{score}%</text>
 </svg>
 """.strip()
     return "data:image/svg+xml;charset=utf-8," + quote(svg)
@@ -2077,41 +2077,41 @@ def _confirmation_visual_data_uri(open_count: int, answered_current: int, recent
     recent_count = max(0, recent_count)
     total_current = max(1, open_count + answered_current)
     complete_pct = min(1.0, answered_current / total_current)
-    accent = "#1971c2" if open_count else "#2f9e44"
-    scan = "#63e6be" if not open_count else "#74c0fc"
+    accent = "#d65a1f" if open_count else "#4fd18c"
+    scan = "#f08345" if open_count else "#4fd18c"
     status = f"{open_count} open" if open_count else "all clear"
     svg = f"""
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="230" viewBox="0 0 900 230">
   <defs>
     <linearGradient id="confirm_bg" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#0f1720"/>
-      <stop offset="1" stop-color="#102b2a"/>
+      <stop offset="0" stop-color="#1a1b1d"/>
+      <stop offset="1" stop-color="#202225"/>
     </linearGradient>
     <filter id="confirm_glow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="5" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
-  <rect width="900" height="230" rx="20" fill="#f4f8f6"/>
-  <rect x="18" y="18" width="864" height="194" rx="18" fill="url(#confirm_bg)"/>
+  <rect width="900" height="230" rx="20" fill="#111213"/>
+  <rect x="18" y="18" width="864" height="194" rx="18" fill="url(#confirm_bg)" stroke="#2a2c30" stroke-width="1.4"/>
   <path d="M128 70 L196 98 V132 C196 169 170 190 128 202 C86 190 60 169 60 132 V98 Z" fill="none" stroke="{html_escape(scan)}" stroke-width="4" opacity="0.88"/>
   <path d="M128 90 L172 108 V132 C172 156 156 172 128 182 C100 172 84 156 84 132 V108 Z" fill="{html_escape(accent)}" opacity="0.28"/>
   <circle cx="128" cy="132" r="13" fill="{html_escape(scan)}" filter="url(#confirm_glow)"/>
   <line x1="128" y1="132" x2="128" y2="69" stroke="{html_escape(scan)}" stroke-width="3" stroke-linecap="round" opacity="0.78">
     <animateTransform attributeName="transform" type="rotate" from="0 128 132" to="360 128 132" dur="7.5s" repeatCount="indefinite"/>
   </line>
-  <text x="236" y="78" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="850">Guardian Question Queue</text>
-  <text x="236" y="108" fill="#a9c5bd" font-family="Inter, Arial, sans-serif" font-size="14">Guided answers only - no open chat prompt</text>
-  <rect x="236" y="132" width="396" height="18" rx="9" fill="#253942"/>
+  <text x="236" y="78" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="850">Guardian Question Queue</text>
+  <text x="236" y="108" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">Guided answers only - no open chat prompt</text>
+  <rect x="236" y="132" width="396" height="18" rx="9" fill="#2a2c30"/>
   <rect x="236" y="132" width="{max(8, complete_pct * 396):.1f}" height="18" rx="9" fill="{html_escape(accent)}"/>
   <text x="236" y="174" fill="{html_escape(scan)}" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="800">{html_escape(status.title())}</text>
   <g>
-    <rect x="676" y="58" width="154" height="46" rx="12" fill="#f7fbf9" opacity="0.96"/>
-    <text x="694" y="78" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="12">Current Answers</text>
-    <text x="694" y="98" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="900">{answered_current}</text>
-    <rect x="676" y="118" width="154" height="46" rx="12" fill="#f7fbf9" opacity="0.96"/>
-    <text x="694" y="138" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="12">Saved Context</text>
-    <text x="694" y="158" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="900">{recent_count}</text>
+    <rect x="676" y="58" width="154" height="46" rx="12" fill="#151617" stroke="#2a2c30" stroke-width="1"/>
+    <text x="694" y="78" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Current Answers</text>
+    <text x="694" y="98" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="900">{answered_current}</text>
+    <rect x="676" y="118" width="154" height="46" rx="12" fill="#151617" stroke="#2a2c30" stroke-width="1"/>
+    <text x="694" y="138" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="12">Saved Context</text>
+    <text x="694" y="158" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="900">{recent_count}</text>
   </g>
 </svg>
 """.strip()
@@ -2262,18 +2262,18 @@ def _ai_analysis_visual_data_uri(analysis: Dict[str, Any]) -> str:
     watch_count = len(analysis.get("watch_target_suggestions") if isinstance(analysis.get("watch_target_suggestions"), list) else [])
     tone = "danger" if risk in {"high", "critical"} or posture == "critical" else "warning" if risk == "medium" or posture in {"watch", "attention"} else "good" if ok else "muted"
     palette = {
-        "good": {"accent": "#2f9e44", "scan": "#63e6be", "panel": "#10221a"},
-        "warning": {"accent": "#f08c00", "scan": "#ffd43b", "panel": "#271b0b"},
-        "danger": {"accent": "#e03131", "scan": "#ff8787", "panel": "#2a1114"},
-        "muted": {"accent": "#5c6773", "scan": "#adb5bd", "panel": "#15191f"},
-    }.get(tone, {"accent": "#5c6773", "scan": "#adb5bd", "panel": "#15191f"})
+        "good": {"accent": "#4fd18c", "scan": "#63e6be", "panel": "#16241d"},
+        "warning": {"accent": "#d65a1f", "scan": "#f08345", "panel": "#2a1c15"},
+        "danger": {"accent": "#ff5c5c", "scan": "#ff8787", "panel": "#2a1717"},
+        "muted": {"accent": "#a8a096", "scan": "#d4cec6", "panel": "#1a1b1d"},
+    }.get(tone, {"accent": "#a8a096", "scan": "#d4cec6", "panel": "#1a1b1d"})
     accent = palette["accent"]
     scan = palette["scan"]
     panel = palette["panel"]
     headline = _compact(analysis.get("headline"), 70) or ("Waiting for LLM analysis" if not analysis else "AI analysis unavailable")
     generated = _age_label(analysis.get("generated_at")) if analysis else "never"
     metrics = [
-        ("Findings", finding_count, "#e03131" if finding_count else "#2f9e44"),
+        ("Findings", finding_count, "#ff5c5c" if finding_count else "#4fd18c"),
         ("Device Ideas", suggestion_count, "#7048e8"),
         ("Watch Ideas", watch_count, "#1971c2"),
     ]
@@ -2281,15 +2281,15 @@ def _ai_analysis_visual_data_uri(analysis: Dict[str, Any]) -> str:
     for index, (label, value, color) in enumerate(metrics):
         x = 462 + index * 142
         metric_svg.append(
-            f'<rect x="{x}" y="151" width="124" height="74" rx="12" fill="#f7fbf9" opacity="0.96"/>'
-            f'<text x="{x + 18}" y="181" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="13">{html_escape(label)}</text>'
+            f'<rect x="{x}" y="151" width="124" height="74" rx="12" fill="#202225" stroke="#2a2c30" stroke-width="1"/>'
+            f'<text x="{x + 18}" y="181" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="13">{html_escape(label)}</text>'
             f'<text x="{x + 18}" y="211" fill="{html_escape(color)}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900">{value}</text>'
         )
     svg = f"""
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="260" viewBox="0 0 900 260">
   <defs>
     <linearGradient id="ai_panel" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#101820"/>
+      <stop offset="0" stop-color="#111213"/>
       <stop offset="1" stop-color="{html_escape(panel)}"/>
     </linearGradient>
     <filter id="ai_glow" x="-80%" y="-80%" width="260%" height="260%">
@@ -2297,10 +2297,11 @@ def _ai_analysis_visual_data_uri(analysis: Dict[str, Any]) -> str:
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
-  <rect width="900" height="260" rx="20" fill="#f4f8f6"/>
-  <rect x="18" y="18" width="388" height="224" rx="18" fill="url(#ai_panel)"/>
-  <text x="44" y="58" fill="#f7fbf9" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="850">AI Threat Brief</text>
-  <text x="44" y="84" fill="#9fb6ad" font-family="Inter, Arial, sans-serif" font-size="13">Generated {html_escape(generated)}</text>
+  <rect width="900" height="260" rx="20" fill="#111213"/>
+  <rect x="18" y="18" width="388" height="224" rx="18" fill="url(#ai_panel)" stroke="#2a2c30" stroke-width="1.2"/>
+  <rect x="424" y="18" width="458" height="224" rx="18" fill="#1a1b1d" stroke="#2a2c30" stroke-width="1.2"/>
+  <text x="44" y="58" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="850">AI Threat Brief</text>
+  <text x="44" y="84" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="13">Generated {html_escape(generated)}</text>
   <circle cx="208" cy="148" r="72" fill="none" stroke="#31524a" stroke-width="2"/>
   <circle cx="208" cy="148" r="44" fill="none" stroke="#31524a" stroke-width="2"/>
   <line x1="208" y1="148" x2="208" y2="70" stroke="{html_escape(scan)}" stroke-width="4" stroke-linecap="round" opacity="0.75" filter="url(#ai_glow)">
@@ -2311,9 +2312,9 @@ def _ai_analysis_visual_data_uri(analysis: Dict[str, Any]) -> str:
   <circle cx="176" cy="190" r="6" fill="#7048e8"/>
   <circle cx="256" cy="182" r="6" fill="#1971c2"/>
   <text x="44" y="226" fill="{html_escape(accent)}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800">{html_escape(posture.title())} / {html_escape(risk.title())}</text>
-  <text x="442" y="58" fill="#172027" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="850">{html_escape(headline)}</text>
-  <text x="442" y="88" fill="#64717a" font-family="Inter, Arial, sans-serif" font-size="14">LLM confidence {round(confidence * 100)}%</text>
-  <rect x="442" y="104" width="408" height="20" rx="10" fill="#dfe7e4"/>
+  <text x="442" y="58" fill="#f1eee8" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="850">{html_escape(headline)}</text>
+  <text x="442" y="88" fill="#a8a096" font-family="Inter, Arial, sans-serif" font-size="14">LLM confidence {round(confidence * 100)}%</text>
+  <rect x="442" y="104" width="408" height="20" rx="10" fill="#2a2c30"/>
   <rect x="442" y="104" width="{max(8, min(408, confidence * 408)):.1f}" height="20" rx="10" fill="{html_escape(accent)}"/>
   {''.join(metric_svg)}
 </svg>
