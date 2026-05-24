@@ -21,7 +21,7 @@ from urllib.parse import quote
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, tunnels, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "tunnel"]
@@ -2690,6 +2690,7 @@ def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
     device_rows = _ai_device_suggestion_rows(analysis)
     watch_rows = _ai_watch_suggestion_rows(analysis)
     question_text = "; ".join(_text(item) for item in (analysis.get("questions") if isinstance(analysis.get("questions"), list) else []) if _text(item))
+    visual_src = _ai_analysis_visual_data_uri(analysis)
     return {
         "id": "overview:ai_analysis",
         "group": "overview",
@@ -2717,7 +2718,7 @@ def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
                         "key": "guardian_ai_threat_brief",
                         "label": "AI Threat Brief",
                         "type": "image",
-                        "src": _ai_analysis_visual_data_uri(analysis),
+                        "src": visual_src,
                         "alt": "Guardian AI threat brief",
                         "hide_label": True,
                         "read_only": True,
@@ -2780,6 +2781,8 @@ def _ai_analysis_card(analysis: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "run_action": "guardian_ai_analyze_now",
         "run_label": "Analyze Now",
+        "fields_popup": False,
+        "sections_in_dropdown": False,
     }
 
 
@@ -2831,7 +2834,8 @@ def _overview_cards(
         }
     )
     ai_analysis = _load_ai_analysis(client)
-    return [
+    posture_src = _guardian_posture_card_data_uri(stats, checks, settings, status_map)
+    cards = [
         _ai_analysis_card(ai_analysis),
         {
             "id": "overview:posture",
@@ -2863,7 +2867,7 @@ def _overview_cards(
                             "key": "guardian_posture_card",
                             "label": "Network Posture",
                             "type": "image",
-                            "src": _guardian_posture_card_data_uri(stats, checks, settings, status_map),
+                            "src": posture_src,
                             "alt": "Guardian network posture summary",
                             "hide_label": True,
                             "read_only": True,
@@ -3057,6 +3061,10 @@ def _overview_cards(
             ],
         },
     ]
+    for card in cards:
+        card["fields_popup"] = False
+        card["sections_in_dropdown"] = False
+    return cards
 
 
 def _device_forms(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
