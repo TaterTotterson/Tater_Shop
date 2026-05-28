@@ -117,7 +117,7 @@
     {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "portals": [
@@ -128,12 +128,12 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "verba/comfyui_image_video.py",
-      "sha256": "47e7aa81d71d016496dfe15d41ea884b5e6787c43e79879a9c69ff02c4a57d90"
+      "sha256": "64b18c642a31394f5dbcd81c0dbbbd59551d42bec101740e6da595a82d3bfcae"
     },
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "portals": [
@@ -144,7 +144,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_music_video.py",
-      "sha256": "4df8b9f9e13b2f94738d3462bb1de1c1c7cdd241922e366a2718d02a9a1e837a"
+      "sha256": "0398bff06e2f850429204376ce661fb81f0b8065d09e9c75d636bc72970454ff"
     },
     {
       "id": "comfyui_video_plugin",
@@ -840,7 +840,7 @@
     {
       "id": "lowfi_video",
       "name": "ComfyUI Lofi Video",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Create a cozy ComfyUI lofi video by generating music and looping a matching animation.",
       "portals": [
@@ -851,7 +851,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/lowfi_video.py",
-      "sha256": "e7a6fb7f9da36da9482d959cc4f5b976199ebe12cf8ef95107da769bdf5fa0a0"
+      "sha256": "5940bb3e0dbbdb5def030388b65b215c957577a2757c10cbc492969e781dcf3e"
     },
     {
       "id": "microwakeword",

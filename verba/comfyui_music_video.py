@@ -901,7 +901,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolVerba):
     name = "comfyui_music_video"
     verba_name = "ComfyUI Music Video"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI verba."

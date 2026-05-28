@@ -529,7 +529,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolVerba):
     name = "lowfi_video"
     verba_name = "ComfyUI Lofi Video"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates a ComfyUI lofi audio track via AceStep and loops a cozy animation to full length (MP4)."

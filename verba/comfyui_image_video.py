@@ -32,7 +32,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolVerba):
     name = "comfyui_image_video"
     verba_name = "ComfyUI Animate Image"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
