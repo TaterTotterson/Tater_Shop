@@ -234,34 +234,209 @@ class _ComfyUIImageVideoHelper:
         return r.content
 
     @staticmethod
-    def get_fps_from_workflow(wf: dict, default: int = 16) -> int:
+    def _node_title(node: dict) -> str:
+        return ((node.get("_meta", {}) or {}).get("title", "") or "").strip().lower()
+
+    @staticmethod
+    def _coerce_int(value, default=None):
         try:
-            for node in wf.values():
-                if node.get("class_type") == "CreateVideo":
-                    return int(node["inputs"].get("fps", default))
+            if isinstance(value, bool):
+                return int(value)
+            return int(float(str(value).strip()))
         except Exception:
-            pass
+            return default
+
+    @staticmethod
+    def _eval_numeric_expression(expression: str, variables: dict):
+        import ast
+        import operator
+
+        if not expression or len(expression) > 120:
+            return None
+
+        bin_ops = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.FloorDiv: operator.floordiv,
+            ast.Mod: operator.mod,
+        }
+        unary_ops = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+        def visit(node):
+            if isinstance(node, ast.Expression):
+                return visit(node.body)
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+                return node.value
+            if isinstance(node, ast.Name) and node.id in variables:
+                return variables[node.id]
+            if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:
+                return unary_ops[type(node.op)](visit(node.operand))
+            if isinstance(node, ast.BinOp) and type(node.op) in bin_ops:
+                return bin_ops[type(node.op)](visit(node.left), visit(node.right))
+            raise ValueError("unsupported expression")
+
+        try:
+            return visit(ast.parse(expression, mode="eval"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolve_numeric_input(workflow: dict, value, default=None, seen=None):
+        parsed = _ComfyUIImageVideoHelper._coerce_int(value, None)
+        if parsed is not None:
+            return parsed
+
+        if not isinstance(value, list) or not value:
+            return default
+
+        node_id = str(value[0])
+        seen = set(seen or ())
+        if node_id in seen:
+            return default
+        seen.add(node_id)
+
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
+            return default
+
+        inputs = node.get("inputs") or {}
+        class_type = str(node.get("class_type") or "")
+
+        if class_type in {"PrimitiveInt", "PrimitiveFloat"}:
+            return _ComfyUIImageVideoHelper._coerce_int(inputs.get("value"), default)
+
+        if class_type == "ComfyMathExpression":
+            variables = {}
+            for key, linked_value in inputs.items():
+                if not str(key).startswith("values."):
+                    continue
+                var_name = str(key).split(".", 1)[1]
+                resolved = _ComfyUIImageVideoHelper._resolve_numeric_input(
+                    workflow, linked_value, None, seen=set(seen)
+                )
+                if resolved is not None:
+                    variables[var_name] = resolved
+            result = _ComfyUIImageVideoHelper._eval_numeric_expression(
+                str(inputs.get("expression") or "").strip(), variables
+            )
+            return _ComfyUIImageVideoHelper._coerce_int(result, default)
+
+        for key in ("value", "fps", "frame_rate", "length"):
+            if key in inputs:
+                resolved = _ComfyUIImageVideoHelper._resolve_numeric_input(
+                    workflow, inputs.get(key), None, seen=set(seen)
+                )
+                if resolved is not None:
+                    return resolved
+
+        return default
+
+    @staticmethod
+    def _set_primitive_prompt_nodes(workflow: dict, prompt_text: str) -> bool:
+        patched = False
+        fallback_candidates = []
+
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") not in {"PrimitiveStringMultiline", "PrimitiveString"}:
+                continue
+
+            title = _ComfyUIImageVideoHelper._node_title(node)
+            if "negative" in title:
+                continue
+
+            node.setdefault("inputs", {})
+            if "prompt" in title or "positive" in title:
+                node["inputs"]["value"] = prompt_text
+                patched = True
+            else:
+                fallback_candidates.append(node)
+
+        if not patched and len(fallback_candidates) == 1:
+            fallback_candidates[0].setdefault("inputs", {})
+            fallback_candidates[0]["inputs"]["value"] = prompt_text
+            patched = True
+
+        return patched
+
+    @staticmethod
+    def _set_direct_clip_prompt(workflow: dict, prompt_text: str, allow_fallback: bool) -> bool:
+        encode_nodes = [
+            node for node in workflow.values()
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode"
+        ]
+
+        for node in encode_nodes:
+            title = _ComfyUIImageVideoHelper._node_title(node)
+            inputs = node.setdefault("inputs", {})
+            if "positive" in title and not isinstance(inputs.get("text"), list):
+                inputs["text"] = prompt_text
+                node["widgets_values"] = [prompt_text]
+                return True
+
+        if not allow_fallback:
+            return False
+
+        for node in encode_nodes:
+            title = _ComfyUIImageVideoHelper._node_title(node)
+            inputs = node.setdefault("inputs", {})
+            if "negative" in title or isinstance(inputs.get("text"), list):
+                continue
+            inputs["text"] = prompt_text
+            node["widgets_values"] = [prompt_text]
+            return True
+
+        return False
+
+    @staticmethod
+    def get_fps_from_workflow(wf: dict, default: int = 16) -> int:
+        for node in wf.values():
+            if not isinstance(node, dict) or node.get("class_type") != "CreateVideo":
+                continue
+            fps = _ComfyUIImageVideoHelper._resolve_numeric_input(wf, (node.get("inputs") or {}).get("fps"), None)
+            if fps:
+                return fps
+
+        for node in wf.values():
+            if not isinstance(node, dict) or node.get("class_type") != "PrimitiveInt":
+                continue
+            title = _ComfyUIImageVideoHelper._node_title(node)
+            if "frame rate" in title or "fps" in title:
+                fps = _ComfyUIImageVideoHelper._coerce_int((node.get("inputs") or {}).get("value"), None)
+                if fps:
+                    return fps
+
         return default
 
     @staticmethod
     def _apply_overrides(workflow: dict, prompt_text: str, uploaded_image_path: str, width: int, height: int, frames: int):
-        patched_first_prompt = False
+        fps = _ComfyUIImageVideoHelper.get_fps_from_workflow(workflow, default=16)
+        prompt_is_primitive = _ComfyUIImageVideoHelper._set_primitive_prompt_nodes(workflow, prompt_text)
+        _ComfyUIImageVideoHelper._set_direct_clip_prompt(
+            workflow, prompt_text, allow_fallback=not prompt_is_primitive
+        )
+
         for node in workflow.values():
             if not isinstance(node, dict):
                 continue
+            inputs = node.setdefault("inputs", {})
 
             if node.get("class_type") == "LoadImage":
-                node.setdefault("inputs", {})
-                node["inputs"]["image"] = uploaded_image_path
+                inputs["image"] = uploaded_image_path
 
-            if node.get("class_type") == "CLIPTextEncode" and (
-                "Positive" in node.get("_meta", {}).get("title", "") or
-                "Prompt" in node.get("_meta", {}).get("title", "")
-            ):
-                if not patched_first_prompt:
-                    node.setdefault("inputs", {})
-                    node["inputs"]["text"] = prompt_text
-                    patched_first_prompt = True
+            if node.get("class_type") == "PrimitiveInt":
+                title = _ComfyUIImageVideoHelper._node_title(node)
+                if "width" in title:
+                    inputs["value"] = int(width)
+                elif "height" in title:
+                    inputs["value"] = int(height)
+                elif "frame rate" in title or "fps" in title:
+                    inputs["value"] = int(fps)
+                elif "duration" in title and fps:
+                    inputs["value"] = max(1, int(round(int(frames) / int(fps))))
 
             if node.get("class_type") in {
                 "WanImageToVideo",
@@ -269,10 +444,19 @@ class _ComfyUIImageVideoHelper:
                 "CosmosPredict2ImageToVideoLatent",
                 "Wan22ImageToVideoLatent",
             }:
-                node.setdefault("inputs", {})
-                node["inputs"]["width"] = width
-                node["inputs"]["height"] = height
-                node["inputs"]["length"] = frames
+                inputs["width"] = width
+                inputs["height"] = height
+                inputs["length"] = frames
+
+            if node.get("class_type") == "EmptyLTXVLatentVideo":
+                inputs["length"] = int(frames)
+            elif node.get("class_type") == "LTXVEmptyLatentAudio":
+                inputs["frames_number"] = int(frames)
+                if not isinstance(inputs.get("frame_rate"), list):
+                    inputs["frame_rate"] = int(fps)
+            elif node.get("class_type") == "LTXVConditioning":
+                if not isinstance(inputs.get("frame_rate"), list):
+                    inputs["frame_rate"] = int(fps)
 
     @staticmethod
     def process_prompt(prompt: str, image_bytes: bytes, filename: str, width: int = None, height: int = None, length: int = None):
@@ -308,12 +492,13 @@ class _ComfyUIImageVideoHelper:
         for node in wf.values():
             if not isinstance(node, dict):
                 continue
-            if node.get("class_type") in {"KSampler", "KSamplerAdvanced"}:
-                inputs = node.get("inputs", {})
-                if inputs.get("add_noise") == "enable" and "noise_seed" in inputs:
-                    inputs["noise_seed"] = int(random_seed)
-                if "seed" in inputs:
-                    inputs["seed"] = int(random_seed)
+            inputs = node.get("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            if "noise_seed" in inputs and not isinstance(inputs.get("noise_seed"), list):
+                inputs["noise_seed"] = int(random_seed)
+            if "seed" in inputs and not isinstance(inputs.get("seed"), list):
+                inputs["seed"] = int(random_seed)
 
         _ComfyUIImageVideoHelper._apply_overrides(wf, prompt, uploaded, w, h, frames)
 
