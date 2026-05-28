@@ -529,7 +529,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolVerba):
     name = "lowfi_video"
     verba_name = "ComfyUI Lofi Video"
-    version = "1.1.4"
+    version = "1.1.5"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates a ComfyUI lofi audio track via AceStep and loops a cozy animation to full length (MP4)."
@@ -957,9 +957,8 @@ class LowfiVideoPlugin(ToolVerba):
             ws = websocket.WebSocket()
             ws.connect(ws_url, timeout=20)
             ws.settimeout(1.0)
-            deadline = time.time() + max(240, seconds * 2)
             try:
-                while time.time() < deadline:
+                while True:
                     try:
                         msg = ws.recv()
                     except websocket.WebSocketTimeoutException:
@@ -973,7 +972,6 @@ class LowfiVideoPlugin(ToolVerba):
                             d = data.get("data", {})
                             if d.get("prompt_id") == prompt_id and d.get("node") is None:
                                 return
-                raise RuntimeError("Timed out waiting for ComfyUI audio workflow completion.")
             finally:
                 ws.close()
 
