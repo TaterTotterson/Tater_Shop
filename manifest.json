@@ -149,7 +149,7 @@
     {
       "id": "comfyui_video_plugin",
       "name": "ComfyUI Video",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
       "portals": [
@@ -160,7 +160,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_video_plugin.py",
-      "sha256": "87aa525838545b5295bf37508c99541cbe9bb295e11d6c6dfaec0721adc79b08"
+      "sha256": "8cce6751904a664ffe13ba78955a803d596c5574105c88dff8e9bc9db47fea68"
     },
     {
       "id": "device_compare",

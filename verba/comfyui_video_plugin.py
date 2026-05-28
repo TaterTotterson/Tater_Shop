@@ -540,7 +540,7 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolVerba):
     name = "comfyui_video_plugin"
     verba_name = "ComfyUI Video"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"comfyui_video_plugin","arguments":{"prompt":"<Describe the video you want>"}}'
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
