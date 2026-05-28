@@ -5,7 +5,6 @@ import uuid
 import asyncio
 import requests
 import subprocess
-import websocket
 import random
 import copy
 import secrets
@@ -529,7 +528,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolVerba):
     name = "lowfi_video"
     verba_name = "ComfyUI Lofi Video"
-    version = "1.1.5"
+    version = "1.1.6"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates a ComfyUI lofi audio track via AceStep and loops a cozy animation to full length (MP4)."
@@ -943,39 +942,8 @@ class LowfiVideoPlugin(ToolVerba):
             base = f"http://{base}"
 
         server_http = base.rstrip("/")
-        client_id = str(uuid.uuid4())
-        ws_url = self._to_ws_url(server_http) + f"/ws?clientId={client_id}"
-
-        def _post_prompt():
-            r = requests.post(f"{server_http}/prompt", json={"prompt": wf, "client_id": client_id}, timeout=60)
-            r.raise_for_status()
-            return r.json()["prompt_id"]
-
-        prompt_id = await asyncio.to_thread(_post_prompt)
-
-        def _wait_ws_done():
-            ws = websocket.WebSocket()
-            ws.connect(ws_url, timeout=20)
-            ws.settimeout(1.0)
-            try:
-                while True:
-                    try:
-                        msg = ws.recv()
-                    except websocket.WebSocketTimeoutException:
-                        continue
-                    if isinstance(msg, str):
-                        try:
-                            data = json.loads(msg)
-                        except Exception:
-                            continue
-                        if data.get("type") == "executing":
-                            d = data.get("data", {})
-                            if d.get("prompt_id") == prompt_id and d.get("node") is None:
-                                return
-            finally:
-                ws.close()
-
-        await asyncio.to_thread(_wait_ws_done)
+        server_ws = self._to_ws_url(server_http)
+        prompt_id, _ = await asyncio.to_thread(run_comfy_prompt, server_http, server_ws, wf)
 
         def _fetch_mp3():
             for _ in range(60):
