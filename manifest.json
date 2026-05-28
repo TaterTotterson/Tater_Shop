@@ -840,7 +840,7 @@
     {
       "id": "lowfi_video",
       "name": "ComfyUI Lofi Video",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "min_tater_version": "59",
       "description": "Create a cozy ComfyUI lofi video by generating music and looping a matching animation.",
       "portals": [
@@ -851,7 +851,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/lowfi_video.py",
-      "sha256": "1020be0671ff48e716c21b27e8b57fe913263589c85ebfd3a94222273fe4dc6f"
+      "sha256": "57251757293f51bdfe70b2c20108ce323abe7ee5e9a20b032f84464e7288682f"
     },
     {
       "id": "microwakeword",
