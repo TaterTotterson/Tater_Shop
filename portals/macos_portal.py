@@ -25,13 +25,17 @@ from helpers import (
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify.core import dispatch_notification_sync
 from notify.media import load_queue_attachments
 from notify.queue import is_expired as notify_item_is_expired, queue_key as notify_queue_key
 from verba_kernel import verba_supports_platform
 from verba_result import action_failure, narrate_result, result_artifacts
 from tool_runtime import execute_plugin_call
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 
 load_dotenv()
@@ -916,7 +920,7 @@ def ensure_portal_api_ready(*_args, **_kwargs):
     global _llm
     if _llm is None:
         try:
-            _llm = get_llm_client_from_env()
+            _llm = _get_primary_llm_client_from_env()
             logger.info(f"[macOS] LLM client -> {build_llm_host_from_env()}")
         except Exception as exc:
             logger.warning("[macOS] LLM client is not ready: %s", exc)

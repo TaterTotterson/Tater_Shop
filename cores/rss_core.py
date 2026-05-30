@@ -10,9 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from helpers import get_llm_client_from_env, redis_client
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 
 logger = logging.getLogger("rss")
@@ -1350,7 +1354,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
 
 def run(stop_event=None):
     logger.info("[RSS] Core starting.")
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

@@ -10,6 +10,18 @@ import requests
 import urllib3
 
 from helpers import extract_json, redis_client
+try:
+    from helpers import (
+        _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
+        _normalize_hydra_llm_provider as _shared_normalize_hydra_llm_provider,
+        describe_image_with_local_llm as _shared_describe_image_with_local_llm,
+        resolve_hydra_base_servers as _shared_resolve_hydra_base_servers,
+    )
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _shared_is_local_hydra_llm_provider = None
+    _shared_normalize_hydra_llm_provider = None
+    _shared_describe_image_with_local_llm = None
+    _shared_resolve_hydra_base_servers = None
 from tateros import integration_store as integration_store_module
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
@@ -44,6 +56,67 @@ def _to_data_url(image_bytes: bytes, filename: str = "image.jpg") -> str:
     mime = mimetypes.guess_type(filename)[0] or "image/jpeg"
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime};base64,{b64}"
+
+
+def _normalize_llm_provider(value: Any) -> str:
+    if callable(_shared_normalize_hydra_llm_provider):
+        try:
+            return str(_shared_normalize_hydra_llm_provider(value) or "openai_compatible")
+        except Exception:
+            pass
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return "hf_transformers"
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return "llama_cpp"
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return "mlx_lm"
+    return "openai_compatible"
+
+
+def _is_local_llm_provider(provider: Any) -> bool:
+    if callable(_shared_is_local_hydra_llm_provider):
+        try:
+            return bool(_shared_is_local_hydra_llm_provider(provider))
+        except Exception:
+            pass
+    return _normalize_llm_provider(provider) in {"hf_transformers", "llama_cpp", "mlx_lm"}
+
+
+def _vision_base_local_target() -> Tuple[str, str]:
+    if not callable(_shared_resolve_hydra_base_servers):
+        return "", ""
+    try:
+        rows = _shared_resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        logger.exception("[ha_camera_area] failed to read base LLM settings for vision routing")
+        return "", ""
+    row = dict(rows[0]) if rows and isinstance(rows[0], dict) else {}
+    return _normalize_llm_provider(row.get("provider")), str(row.get("model") or "").strip()
+
+
+def _call_local_vision(
+    *,
+    image_bytes: bytes,
+    filename: str,
+    provider: str,
+    model: str,
+    prompt: str,
+) -> str:
+    if not callable(_shared_describe_image_with_local_llm):
+        raise RuntimeError("Local vision support is unavailable in this Tater runtime.")
+    result = _shared_describe_image_with_local_llm(
+        provider=provider,
+        model=model,
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=prompt,
+        timeout=90.0,
+    )
+    description = str((result or {}).get("description") or "").strip()
+    if not description:
+        raise RuntimeError("Local vision model returned an empty description.")
+    return description
 
 
 def _extract_context_text(context: Optional[dict]) -> str:
@@ -148,7 +221,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
@@ -176,6 +249,8 @@ class HACameraAreaPlugin(ToolVerba):
         self.vision_api_base = str(vision_settings.get("api_base") or "http://127.0.0.1:1234").strip().rstrip("/")
         self.vision_model = str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct").strip()
         self.vision_api_key = str(vision_settings.get("api_key") or "").strip()
+        self.vision_mode = str(vision_settings.get("mode") or "api").strip().lower()
+        self.vision_provider = str(vision_settings.get("provider") or "openai_compatible").strip().lower()
 
     def _get_client(self) -> Optional[HAClient]:
         try:
@@ -416,6 +491,35 @@ class HACameraAreaPlugin(ToolVerba):
         )
 
     def _call_vision(self, image_bytes: bytes, *, prompt: str, filename: str) -> str:
+        routing_mode = self.vision_mode if self.vision_mode in {"api", "auto", "base", "dedicated"} else "api"
+        provider = _normalize_llm_provider(self.vision_provider)
+        if routing_mode == "dedicated" and _is_local_llm_provider(provider):
+            return _call_local_vision(
+                image_bytes=image_bytes,
+                filename=filename,
+                provider=provider,
+                model=self.vision_model,
+                prompt=prompt,
+            )
+
+        if routing_mode in {"auto", "base"}:
+            base_provider, base_model = _vision_base_local_target()
+            if _is_local_llm_provider(base_provider) and base_model:
+                try:
+                    return _call_local_vision(
+                        image_bytes=image_bytes,
+                        filename=filename,
+                        provider=base_provider,
+                        model=base_model,
+                        prompt=prompt,
+                    )
+                except Exception:
+                    if routing_mode == "base":
+                        raise
+                    logger.exception("[ha_camera_area] local base vision failed; falling back to configured vision API")
+            elif routing_mode == "base":
+                raise RuntimeError("Vision is set to use the base model, but the base LLM is not a local provider.")
+
         url = f"{self.vision_api_base}/v1/chat/completions"
         payload = {
             "model": self.vision_model,

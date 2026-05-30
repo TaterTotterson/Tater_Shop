@@ -16,9 +16,13 @@ from helpers import (
     build_llm_host_from_env,
     redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 
 load_dotenv()
@@ -292,7 +296,7 @@ def ensure_portal_api_ready(*_args, **_kwargs):
     global _llm
     if _llm is None:
         try:
-            _llm = get_llm_client_from_env()
+            _llm = _get_primary_llm_client_from_env()
             logger.info(f"[HomeKit] LLM client → {build_llm_host_from_env()}")
         except Exception as exc:
             logger.warning("[HomeKit] LLM client is not ready: %s", exc)

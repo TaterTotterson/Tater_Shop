@@ -36,8 +36,12 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     BeautifulSoup = None  # type: ignore
 
 from helpers import build_llm_host_from_env, get_llm_client_from_env, get_tater_name, redis_client
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 PORTAL_DESCRIPTION = "Moltbook social/research integration portal for Tater."
 TAGS = ["social", "research", "learning"]
 
@@ -8314,7 +8318,7 @@ class MoltbookPortal:
 
 
 def run(stop_event: Optional[threading.Event] = None):
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     logger.info("[Moltbook] LLM client -> %s", build_llm_host_from_env())
     portal = MoltbookPortal(llm_client=llm_client, redis_client=redis_client)
     portal.run_loop(stop_event=stop_event)

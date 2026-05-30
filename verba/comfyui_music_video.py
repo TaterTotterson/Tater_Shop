@@ -14,11 +14,24 @@ import logging
 import requests
 import mimetypes
 import uuid
+from typing import Any, Tuple
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from verba_base import ToolVerba
 from verba_settings import get_verba_settings
 from helpers import redis_client, run_comfy_prompt
+try:
+    from helpers import (
+        _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
+        _normalize_hydra_llm_provider as _shared_normalize_hydra_llm_provider,
+        describe_image_with_local_llm as _shared_describe_image_with_local_llm,
+        resolve_hydra_base_servers as _shared_resolve_hydra_base_servers,
+    )
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _shared_is_local_hydra_llm_provider = None
+    _shared_normalize_hydra_llm_provider = None
+    _shared_describe_image_with_local_llm = None
+    _shared_resolve_hydra_base_servers = None
 from verba_result import action_failure, action_success
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
@@ -37,6 +50,60 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 
 logger = logging.getLogger("comfyui_music_video")
 logger.setLevel(logging.INFO)
+
+
+def _normalize_llm_provider(value: Any) -> str:
+    if callable(_shared_normalize_hydra_llm_provider):
+        try:
+            return str(_shared_normalize_hydra_llm_provider(value) or "openai_compatible")
+        except Exception:
+            pass
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return "hf_transformers"
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return "llama_cpp"
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return "mlx_lm"
+    return "openai_compatible"
+
+
+def _is_local_llm_provider(provider: Any) -> bool:
+    if callable(_shared_is_local_hydra_llm_provider):
+        try:
+            return bool(_shared_is_local_hydra_llm_provider(provider))
+        except Exception:
+            pass
+    return _normalize_llm_provider(provider) in {"hf_transformers", "llama_cpp", "mlx_lm"}
+
+
+def _vision_base_local_target() -> Tuple[str, str]:
+    if not callable(_shared_resolve_hydra_base_servers):
+        return "", ""
+    try:
+        rows = _shared_resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        logger.exception("[comfyui_music_video] failed to read base LLM settings for vision routing")
+        return "", ""
+    row = dict(rows[0]) if rows and isinstance(rows[0], dict) else {}
+    return _normalize_llm_provider(row.get("provider")), str(row.get("model") or "").strip()
+
+
+def _call_local_vision(image_bytes: bytes, prompt: str, filename: str, provider: str, model: str) -> str:
+    if not callable(_shared_describe_image_with_local_llm):
+        raise RuntimeError("Local vision support is unavailable in this Tater runtime.")
+    result = _shared_describe_image_with_local_llm(
+        provider=provider,
+        model=model,
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=prompt,
+        timeout=90.0,
+    )
+    description = str((result or {}).get("description") or "").strip()
+    if not description:
+        raise RuntimeError("Local vision model returned an empty description.")
+    return description
 
 
 class _ComfyUIImageHelper:
@@ -834,16 +901,23 @@ class _VisionHelper:
     settings_category = SETTINGS_CATEGORY
 
     @staticmethod
-    def get_vision_settings():
+    def get_vision_settings_dict():
         settings = get_shared_vision_settings(
             default_api_base="http://127.0.0.1:1234",
             default_model="gemma3-27b-abliterated-dpo",
         )
-        return (
-            str(settings.get("api_base") or "http://127.0.0.1:1234").rstrip("/"),
-            str(settings.get("model") or "gemma3-27b-abliterated-dpo"),
-            str(settings.get("api_key") or ""),
-        )
+        return {
+            "mode": str(settings.get("mode") or "api").strip().lower(),
+            "provider": str(settings.get("provider") or "openai_compatible").strip().lower(),
+            "api_base": str(settings.get("api_base") or "http://127.0.0.1:1234").rstrip("/"),
+            "model": str(settings.get("model") or "gemma3-27b-abliterated-dpo"),
+            "api_key": str(settings.get("api_key") or ""),
+        }
+
+    @staticmethod
+    def get_vision_settings():
+        settings = _VisionHelper.get_vision_settings_dict()
+        return (settings["api_base"], settings["model"], settings["api_key"])
 
     @staticmethod
     def _to_data_url(image_bytes: bytes, filename: str = "image.png") -> str:
@@ -888,7 +962,33 @@ class _VisionHelper:
             "You are an expert visual assistant. Describe the contents of this image in detail, "
             "mentioning key objects, scenes, or actions if recognizable."
         )
-        api_base, model, _ = _VisionHelper.get_vision_settings()
+        settings = _VisionHelper.get_vision_settings_dict()
+        routing_mode = settings["mode"] if settings["mode"] in {"api", "auto", "base", "dedicated"} else "api"
+        provider = _normalize_llm_provider(settings["provider"])
+        model = settings["model"]
+        if routing_mode == "dedicated" and _is_local_llm_provider(provider):
+            return await asyncio.to_thread(_call_local_vision, image_bytes, prompt, filename, provider, model)
+
+        if routing_mode in {"auto", "base"}:
+            base_provider, base_model = _vision_base_local_target()
+            if _is_local_llm_provider(base_provider) and base_model:
+                try:
+                    return await asyncio.to_thread(
+                        _call_local_vision,
+                        image_bytes,
+                        prompt,
+                        filename,
+                        base_provider,
+                        base_model,
+                    )
+                except Exception:
+                    if routing_mode == "base":
+                        raise
+                    logger.exception("[comfyui_music_video] local base vision failed; falling back to configured vision API")
+            elif routing_mode == "base":
+                raise RuntimeError("Vision is set to use the base model, but the base LLM is not a local provider.")
+
+        api_base = settings["api_base"]
         return await asyncio.to_thread(
             _VisionHelper._call_openai_vision,
             api_base,
@@ -901,7 +1001,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolVerba):
     name = "comfyui_music_video"
     verba_name = "ComfyUI Music Video"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI verba."

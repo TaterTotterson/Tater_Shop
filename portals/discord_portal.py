@@ -25,6 +25,10 @@ from helpers import (
     redis_blob_client,
     redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from admin_gate import (
     admin_denial_message,
     is_admin_only_plugin,
@@ -35,7 +39,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 
 load_dotenv()
@@ -1287,7 +1291,7 @@ def run(stop_event=None):
         DISCORD_SETTINGS_KEY, RESPONSE_CHANNEL_MAP_FIELD
     )
 
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     logger.info(f"[Discord] LLM client → {build_llm_host_from_env()}")
 
     if not token:

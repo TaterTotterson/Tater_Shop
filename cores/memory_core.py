@@ -15,6 +15,10 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 # Built-in local memory store module for single-file Memory Core distribution.
 _MEMORY_CORE_STORE_LOCAL_SOURCE = r"""
 import json
@@ -746,7 +750,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.25"
+__version__ = "1.0.26"
 
 
 load_dotenv()
@@ -2405,7 +2409,7 @@ def run(stop_event=None):
 
         if llm_client is None:
             try:
-                llm_client = get_llm_client_from_env()
+                llm_client = _get_primary_llm_client_from_env()
                 if not llm_ready_logged and llm_client is not None:
                     llm_ready_logged = True
                     logger.info("[memory_core] LLM client initialized")

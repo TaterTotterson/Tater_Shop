@@ -27,6 +27,10 @@ from helpers import (
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from admin_gate import (
     admin_denial_message,
     is_admin_only_plugin,
@@ -71,7 +75,7 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 # Tables plugin: handle both modern and legacy module names, else no-op
@@ -1603,7 +1607,7 @@ class MatrixPlatform:
 # ---------------- Runner ----------------
 def run(stop_event: Optional[threading.Event] = None):
     global llm_client
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     logger.info(f"[Matrix] LLM client → {build_llm_host_from_env()}")
 
     bot = MatrixPlatform()

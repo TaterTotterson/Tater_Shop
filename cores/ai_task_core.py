@@ -17,6 +17,10 @@ from helpers import (
     get_llm_client_from_env,
     redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from hydra import run_hydra_turn, resolve_agent_limits
 from notify import dispatch_notification, notifier_destination_catalog
 from notify.queue import (
@@ -28,7 +32,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.37"
+__version__ = "1.0.38"
 
 load_dotenv()
 
@@ -1122,7 +1126,7 @@ def _ai_tasks_legacy_llm_schedule_parse(
     now_ts: float,
     request_text: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     if llm_client is None:
         return None, "LLM schedule parser is unavailable."
 
@@ -1469,7 +1473,7 @@ def _ai_tasks_ui_auto_title(command_text: str, *, max_words: int = 4, max_chars:
     seed = " ".join(str(command_text or "").split()).strip()
     if not seed:
         return "Scheduled task"
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     if llm_client is None:
         return "Scheduled task"
     try:
@@ -3306,7 +3310,7 @@ def run(stop_event: Optional[object] = None):
     except Exception:
         queued = 0
     logger.info("[AI Tasks] Scheduler service started (queued=%d).", queued)
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

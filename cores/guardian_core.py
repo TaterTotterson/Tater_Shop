@@ -16,9 +16,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.6"
+__version__ = "1.3.7"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -1600,7 +1604,7 @@ async def _guardian_ai_analyze_async(llm_client: Any, snapshot: Dict[str, Any]) 
 
 def _guardian_llm_client_from_env() -> Any:
     try:
-        return get_llm_client_from_env()
+        return _get_primary_llm_client_from_env()
     except Exception as exc:
         logger.debug("[Guardian] LLM client unavailable: %s", exc)
         return None

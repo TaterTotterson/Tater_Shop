@@ -14,6 +14,10 @@ from typing import Any
 from urllib.parse import quote
 from verba_base import ToolVerba
 from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 from verba_result import action_failure, action_success
 
@@ -44,7 +48,7 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.17"
+    version = "1.0.18"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
@@ -98,7 +102,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             kwargs["host"] = host
         if model:
             kwargs["model"] = model
-        return get_llm_client_from_env(**kwargs)
+        return _get_primary_llm_client_from_env(**kwargs)
 
 
     # ---------------------------

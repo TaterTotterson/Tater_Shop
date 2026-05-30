@@ -77,7 +77,7 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.17",
+      "version": "1.0.18",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
@@ -93,7 +93,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "f8e582dabff8cf75c2f9e992a7a12028681e0c4b635ca394177348d460635c6e"
+      "sha256": "90772ca2fa7e86726287e27e2342584c8c731a83b53294941af4dde03cd01329"
     },
     {
       "id": "comfyui_image_plugin",
@@ -133,7 +133,7 @@
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "portals": [
@@ -144,7 +144,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_music_video.py",
-      "sha256": "0398bff06e2f850429204376ce661fb81f0b8065d09e9c75d636bc72970454ff"
+      "sha256": "d5a417b2a3e0073bee1534947c44048847a9c03b2bebbef13dfede325e26e038"
     },
     {
       "id": "comfyui_video_plugin",
@@ -308,7 +308,7 @@
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
@@ -332,7 +332,7 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "8ec34c67055d4dda9e0e7899540f1e75e047425878d60e191a9291e1cf9b9c40"
+      "sha256": "4096fbdd05af127ffd337e95cc649802d8f9d1582e098dfa1d44745219eac4a0"
     },
     {
       "id": "ha_climate",

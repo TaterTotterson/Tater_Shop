@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
+try:
     from helpers import (
         _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
         _normalize_hydra_llm_provider as _shared_normalize_hydra_llm_provider,
@@ -35,7 +39,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.1"
+__version__ = "3.4.2"
 
 load_dotenv()
 
@@ -6312,7 +6316,7 @@ async def run_hydra_kernel_tool(
 
 
 def run(stop_event=None):
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

@@ -24,6 +24,10 @@ from helpers import (
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
 )
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from admin_gate import (
     admin_denial_message,
     is_admin_only_plugin,
@@ -33,7 +37,7 @@ from admin_gate import (
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 
 load_dotenv()
@@ -1357,7 +1361,7 @@ def run(stop_event=None):
         logger.warning("Missing Telegram bot token in Telegram Settings.")
         return
 
-    llm_client = get_llm_client_from_env()
+    llm_client = _get_primary_llm_client_from_env()
     logger.info(f"[Telegram] LLM client -> {build_llm_host_from_env()}")
 
     platform = TelegramPlatform(

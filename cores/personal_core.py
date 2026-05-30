@@ -21,10 +21,14 @@ import requests
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.48"
+__version__ = "1.0.49"
 
 load_dotenv()
 
@@ -6492,7 +6496,7 @@ def run(stop_event: Optional[object] = None) -> None:
 
         if llm_client is None:
             try:
-                llm_client = get_llm_client_from_env()
+                llm_client = _get_primary_llm_client_from_env()
                 if llm_client is not None and not llm_ready_logged:
                     llm_ready_logged = True
                     logger.info("[personal_core] LLM client initialized")
@@ -9856,7 +9860,7 @@ def _run_ui_tool_action(
         settings = _load_settings()
         llm_client = None
         try:
-            llm_client = get_llm_client_from_env()
+            llm_client = _get_primary_llm_client_from_env()
         except Exception:
             llm_client = None
         cycle_start = time.time()
@@ -10270,7 +10274,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         current = _load_settings()
         llm_client = None
         try:
-            llm_client = get_llm_client_from_env()
+            llm_client = _get_primary_llm_client_from_env()
         except Exception:
             llm_client = None
         test_settings = _notification_test_settings_from_values(
