@@ -16,6 +16,18 @@ import requests
 from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
+try:
+    from helpers import (
+        _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
+        _normalize_hydra_llm_provider as _shared_normalize_hydra_llm_provider,
+        describe_image_with_local_llm as _shared_describe_image_with_local_llm,
+        resolve_hydra_base_servers as _shared_resolve_hydra_base_servers,
+    )
+except Exception:  # pragma: no cover - keeps older Tater runtimes from failing import.
+    _shared_is_local_hydra_llm_provider = None
+    _shared_normalize_hydra_llm_provider = None
+    _shared_describe_image_with_local_llm = None
+    _shared_resolve_hydra_base_servers = None
 from notify import dispatch_notification
 from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_announcement_targets
@@ -23,12 +35,37 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.0"
+__version__ = "3.4.1"
 
 load_dotenv()
 
 logger = logging.getLogger("awareness_core")
 logger.setLevel(logging.INFO)
+
+
+def _awareness_normalize_llm_provider(value: Any) -> str:
+    if callable(_shared_normalize_hydra_llm_provider):
+        try:
+            return str(_shared_normalize_hydra_llm_provider(value) or "openai_compatible")
+        except Exception:
+            pass
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return "hf_transformers"
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return "llama_cpp"
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return "mlx_lm"
+    return "openai_compatible"
+
+
+def _awareness_is_local_llm_provider(provider: Any) -> bool:
+    if callable(_shared_is_local_hydra_llm_provider):
+        try:
+            return bool(_shared_is_local_hydra_llm_provider(provider))
+        except Exception:
+            pass
+    return _awareness_normalize_llm_provider(provider) in {"hf_transformers", "llama_cpp", "mlx_lm"}
 
 
 def _integration_module(integration_id: str):
@@ -1849,18 +1886,7 @@ async def _capture_camera_snapshot(provider: str, camera_target: str) -> Tuple[b
     return await _integration_camera_snapshot(provider_token, camera_target)
 
 
-def _vision_describe_sync(
-    *,
-    image_bytes: bytes,
-    api_base: str,
-    model: str,
-    api_key: str,
-    query: str,
-    ignore_vehicles: bool,
-    mode: str,
-) -> str:
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{b64}"
+def _vision_describe_prompts(*, query: str, ignore_vehicles: bool, mode: str) -> Tuple[str, str]:
     if mode == "doorbell":
         prompt = (
             "Write one spoken doorbell sentence. Start with 'Someone is at the door'. "
@@ -1894,6 +1920,20 @@ def _vision_describe_sync(
         "Never list absent objects or use 'no X visible' phrasing. "
         "For camera mode when there are no people or animals, output exactly: Nothing notable."
     )
+    return system_prompt, prompt
+
+
+def _vision_describe_openai_sync(
+    *,
+    image_bytes: bytes,
+    api_base: str,
+    model: str,
+    api_key: str,
+    system_prompt: str,
+    prompt: str,
+) -> str:
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
     payload = {
         "model": model,
         "messages": [
@@ -1923,6 +1963,101 @@ def _vision_describe_sync(
     return _text(((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
 
 
+def _vision_describe_local_sync(
+    *,
+    image_bytes: bytes,
+    provider: str,
+    model: str,
+    prompt: str,
+    mode: str,
+) -> str:
+    if not callable(_shared_describe_image_with_local_llm):
+        raise RuntimeError("Local vision support is unavailable in this Tater runtime.")
+    filename = "awareness-doorbell.jpg" if mode == "doorbell" else "awareness-camera.jpg"
+    result = _shared_describe_image_with_local_llm(
+        provider=provider,
+        model=model,
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=prompt,
+        timeout=90.0,
+    )
+    return _text((result or {}).get("description")).strip()
+
+
+def _vision_base_local_target() -> Tuple[str, str]:
+    if not callable(_shared_resolve_hydra_base_servers):
+        return "", ""
+    try:
+        rows = _shared_resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        logger.exception("[awareness] failed to read base LLM settings for vision routing")
+        return "", ""
+    row = dict(rows[0]) if rows and isinstance(rows[0], dict) else {}
+    provider = _awareness_normalize_llm_provider(row.get("provider"))
+    model = _text(row.get("model"))
+    return provider, model
+
+
+def _vision_describe_sync(
+    *,
+    image_bytes: bytes,
+    api_base: str,
+    model: str,
+    api_key: str,
+    query: str,
+    ignore_vehicles: bool,
+    mode: str,
+    vision_mode: str,
+    vision_provider: str,
+) -> str:
+    system_prompt, prompt = _vision_describe_prompts(
+        query=query,
+        ignore_vehicles=ignore_vehicles,
+        mode=mode,
+    )
+    routing_mode = _text(vision_mode).strip().lower() or "api"
+    if routing_mode not in {"api", "auto", "base", "dedicated"}:
+        routing_mode = "api"
+    provider = _awareness_normalize_llm_provider(vision_provider)
+
+    if routing_mode == "dedicated" and _awareness_is_local_llm_provider(provider):
+        return _vision_describe_local_sync(
+            image_bytes=image_bytes,
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            mode=mode,
+        )
+
+    if routing_mode in {"auto", "base"}:
+        base_provider, base_model = _vision_base_local_target()
+        if _awareness_is_local_llm_provider(base_provider) and base_model:
+            try:
+                return _vision_describe_local_sync(
+                    image_bytes=image_bytes,
+                    provider=base_provider,
+                    model=base_model,
+                    prompt=prompt,
+                    mode=mode,
+                )
+            except Exception:
+                if routing_mode == "base":
+                    raise
+                logger.exception("[awareness] local base vision failed; falling back to configured vision API")
+        elif routing_mode == "base":
+            raise RuntimeError("Vision is set to use the base model, but the base LLM is not a local provider.")
+
+    return _vision_describe_openai_sync(
+        image_bytes=image_bytes,
+        api_base=api_base,
+        model=model,
+        api_key=api_key,
+        system_prompt=system_prompt,
+        prompt=prompt,
+    )
+
+
 async def _vision_describe(
     *,
     image_bytes: bytes,
@@ -1932,6 +2067,8 @@ async def _vision_describe(
     query: str,
     ignore_vehicles: bool,
     mode: str,
+    vision_mode: str,
+    vision_provider: str,
 ) -> str:
     return await asyncio.to_thread(
         _vision_describe_sync,
@@ -1942,6 +2079,8 @@ async def _vision_describe(
         query=query,
         ignore_vehicles=ignore_vehicles,
         mode=mode,
+        vision_mode=vision_mode,
+        vision_provider=vision_provider,
     )
 
 
@@ -3120,6 +3259,8 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
             query=query,
             ignore_vehicles=ignore_vehicles,
             mode="camera",
+            vision_mode=_text(vision.get("mode")),
+            vision_provider=_text(vision.get("provider")),
         )
         summary = _compact(summary, limit=180) or "Nothing notable."
     except Exception:
@@ -3258,6 +3399,8 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
             query="doorbell alert",
             ignore_vehicles=False,
             mode="doorbell",
+            vision_mode=_text(vision.get("mode")),
+            vision_provider=_text(vision.get("provider")),
         )
         spoken_line = _compact(spoken_line, limit=180) or "Someone is at the door."
     except Exception:
