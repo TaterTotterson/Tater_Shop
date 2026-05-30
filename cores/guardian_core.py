@@ -18,7 +18,7 @@ from urllib.parse import quote
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.5"
+__version__ = "1.3.6"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -1453,6 +1453,61 @@ def _guardian_ai_prompt() -> str:
     )
 
 
+def _guardian_ai_json_kwargs() -> Dict[str, Any]:
+    return {"response_format": {"type": "json_object"}}
+
+
+async def _guardian_ai_chat_json(llm_client: Any, *, messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
+    try:
+        return await llm_client.chat(
+            messages=messages,
+            **_guardian_ai_json_kwargs(),
+            **kwargs,
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if "response_format" not in message and "json_object" not in message:
+            raise
+        logger.debug("[Guardian] LLM JSON mode hint unsupported; retrying without response_format: %s", exc)
+    return await llm_client.chat(messages=messages, **kwargs)
+
+
+def _guardian_ai_parse_json(text: Any) -> Dict[str, Any]:
+    raw = _text(text)
+    blob = extract_json(raw) or raw
+    parsed = json.loads(blob)
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM returned a non-object JSON payload.")
+    return parsed
+
+
+async def _guardian_ai_repair_json(llm_client: Any, raw_text: str, parse_error: Exception) -> Dict[str, Any]:
+    response = await _guardian_ai_chat_json(
+        llm_client,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Repair the assistant payload into one valid strict JSON object. "
+                    "Preserve the same Guardian analysis facts, labels, and arrays. "
+                    "Do not add new findings or prose. Return JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"JSON parse error: {parse_error}\n\n"
+                    "Malformed payload:\n"
+                    f"{_text(raw_text)[:12000]}"
+                ),
+            },
+        ],
+        max_tokens=2400,
+        temperature=0,
+    )
+    return _guardian_ai_parse_json(((response or {}).get("message") or {}).get("content"))
+
+
 def _guardian_ai_normalize(parsed: Dict[str, Any]) -> Dict[str, Any]:
     posture = _clean_key(parsed.get("posture")) or "unknown"
     if posture not in {"healthy", "watch", "attention", "critical", "unknown"}:
@@ -1520,25 +1575,26 @@ async def _guardian_ai_analyze_async(llm_client: Any, snapshot: Dict[str, Any]) 
     if llm_client is None:
         return _guardian_ai_error("LLM client is unavailable.")
     try:
-        response = await llm_client.chat(
+        response = await _guardian_ai_chat_json(
+            llm_client,
             messages=[
                 {"role": "system", "content": _guardian_ai_prompt()},
                 {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
             ],
-            max_tokens=1800,
+            max_tokens=2400,
             temperature=0.1,
         )
     except Exception as exc:
         logger.warning("[Guardian] AI analysis failed: %s", exc)
         return _guardian_ai_error(exc)
     text = _text(((response or {}).get("message") or {}).get("content"))
-    blob = extract_json(text) or text
     try:
-        parsed = json.loads(blob)
+        parsed = _guardian_ai_parse_json(text)
     except Exception as exc:
-        return _guardian_ai_error(f"LLM returned invalid JSON: {exc}")
-    if not isinstance(parsed, dict):
-        return _guardian_ai_error("LLM returned a non-object JSON payload.")
+        try:
+            parsed = await _guardian_ai_repair_json(llm_client, text, exc)
+        except Exception as repair_exc:
+            return _guardian_ai_error(f"LLM returned invalid JSON: {exc}; repair failed: {repair_exc}")
     return _guardian_ai_normalize(parsed)
 
 
