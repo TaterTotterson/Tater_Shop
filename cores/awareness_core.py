@@ -39,7 +39,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.2"
+__version__ = "3.4.3"
 
 load_dotenv()
 
@@ -139,6 +139,7 @@ _DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 _FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 _S3BOX_FIRMWARE_PROFILE_KEY = "template:s3box_display"
 _AWARENESS_WORKER_COUNT = 10
+_AWARENESS_STARTED_TS = time.time()
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
@@ -324,6 +325,24 @@ def _settings(client: Any) -> Dict[str, str]:
 
 def _setting_int(client: Any, key: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
     return _as_int(_settings(client).get(key), default, minimum=minimum, maximum=maximum)
+
+
+def _camera_startup_defer_seconds(client: Any) -> int:
+    raw_default = _text(os.getenv("TATER_AWARENESS_CAMERA_STARTUP_DEFER_SECONDS") or "60")
+    default = _as_int(raw_default, 60, minimum=0, maximum=1800)
+    return _setting_int(client, "camera_startup_defer_seconds", default, minimum=0, maximum=1800)
+
+
+def _camera_startup_defer_remaining(client: Any, rule: Dict[str, Any], reason: str) -> float:
+    if _text(reason).lower() == "manual":
+        return 0.0
+    kind = _text((rule or {}).get("kind")).lower()
+    if kind not in {"camera", "doorbell"}:
+        return 0.0
+    defer_seconds = _camera_startup_defer_seconds(client)
+    if defer_seconds <= 0:
+        return 0.0
+    return max(0.0, (_AWARENESS_STARTED_TS + float(defer_seconds)) - time.time())
 
 
 def _normalize_event_provider(value: Any) -> str:
@@ -1147,6 +1166,42 @@ def _enqueue_execution(client: Any, *, rule_id: str, reason: str, event: Optiona
     }
     redis_obj.lpush(_EXEC_QUEUE_KEY, json.dumps(payload))
     _runtime_set(redis_obj, queue_depth=_queue_depth(redis_obj))
+
+
+def _enqueue_execution_after_delay(
+    client: Any,
+    *,
+    rule_id: str,
+    reason: str,
+    event: Optional[Dict[str, Any]] = None,
+    delay_seconds: float = 0.0,
+) -> bool:
+    redis_obj = client or redis_client
+    delay = max(0.0, float(delay_seconds or 0.0))
+    if delay <= 0.0:
+        _enqueue_execution(redis_obj, rule_id=rule_id, reason=reason, event=event)
+        return True
+
+    rid = _text(rule_id)
+    if not rid:
+        return False
+    dedupe_key = f"awareness:startup_defer:{rid}"
+    try:
+        if redis_obj.set(dedupe_key, "1", ex=max(30, int(delay) + 60), nx=True) is None:
+            return False
+    except Exception:
+        logger.debug("[awareness] failed to reserve startup defer key %s", dedupe_key, exc_info=True)
+
+    def _later() -> None:
+        try:
+            _enqueue_execution(redis_obj, rule_id=rid, reason=reason, event=event)
+        except Exception:
+            logger.debug("[awareness] failed to enqueue deferred execution for %s", rid, exc_info=True)
+
+    timer = threading.Timer(delay, _later)
+    timer.daemon = True
+    timer.start()
+    return True
 
 
 def _dequeue_execution(client: Any) -> Optional[Dict[str, Any]]:
@@ -5438,7 +5493,26 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
         if not _bool(rule.get("enabled"), True) and reason != "manual":
             continue
         try:
-            result = await _execute_rule(rule, llm_client, reason, event_payload)
+            startup_defer = _camera_startup_defer_remaining(redis_client, rule, reason)
+            if startup_defer > 0.0:
+                requeued = _enqueue_execution_after_delay(
+                    redis_client,
+                    rule_id=rule_id,
+                    reason=f"{reason or 'trigger'}_startup_deferred",
+                    event=event_payload,
+                    delay_seconds=startup_defer + 1.0,
+                )
+                result = {
+                    "ok": True,
+                    "summary": (
+                        f"Camera vision warmup active; requeued in {int(startup_defer) + 1}s."
+                        if requeued
+                        else "Camera vision warmup active; already requeued."
+                    ),
+                    "skipped": "startup_warmup",
+                }
+            else:
+                result = await _execute_rule(rule, llm_client, reason, event_payload)
             now_ts = time.time()
             rule_updates = result.get("rule_updates") if isinstance(result, dict) else {}
             if isinstance(rule_updates, dict):

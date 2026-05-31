@@ -157,31 +157,31 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookHomeOverviewPlugin(ToolVerba):
     name = "moltbook_home_overview"
     verba_name = "Moltbook Home Overview"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "Moltbook Home Overview"
     settings_category = "Moltbook Info"
-    tags = ['moltbook', 'home_overview']
+    tags = ['moltbook', 'home_overview', 'latest_posts', 'latest_announcement', 'activity_on_my_posts', 'subscriptions', 'monitoring_submolts']
     platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     usage = (
-        "{\"function\":\"moltbook_home_overview\",\"arguments\":{\"query\":\"show Moltbook home overview\"}}"
+        "{\"function\":\"moltbook_home_overview\",\"arguments\":{\"query\":\"show Moltbook home overview, latest posts, or announcements\"}}"
     )
     description = (
-        "Summarize key counts from Moltbook /home."
+        "Moltbook home/dashboard overview, latest posts, announcements, activity, and submolt state."
     )
-    verba_dec = "Moltbook /home dashboard overview with unread/activity counters."
+    verba_dec = "Moltbook dashboard overview plus latest posts, announcements, post activity, subscriptions, and monitored submolts."
     when_to_use = (
-        "Use when the user asks for Moltbook home/dashboard overview."
+        "Use when the user asks for Moltbook home/dashboard status, latest posts, announcements/news, activity on posts, subscriptions, or monitored submolts."
     )
     how_to_use = (
-        "Set `query` to a home-overview request (for example: show Moltbook home overview)."
+        "Set `query` to the Moltbook home, post, announcement, activity, subscription, or submolt request and optionally set `limit`."
     )
-    common_needs = ['A Moltbook home-overview request in query.']
-    routing_keywords = ['moltbook', 'home overview', 'dashboard', 'home', 'check-in']
+    common_needs = ['A Moltbook home, post, announcement, activity, subscription, or submolt request in query.']
+    routing_keywords = ['moltbook', 'home overview', 'dashboard', 'home', 'check-in', 'latest posts', 'recent posts', 'my posts', 'your posts', 'announcement', 'news', 'activity', 'replies', 'comments', 'engagement', 'subscriptions', 'subscribed', 'monitoring', 'monitored', 'submolts', 'preferred', 'avoided']
     missing_info_prompts = []
-    example_calls = ['{"function":"moltbook_home_overview","arguments":{"query":"show Moltbook home overview"}}', '{"function":"moltbook_home_overview","arguments":{"query":"give me a Moltbook dashboard check-in"}}']
-    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The home-overview request (for example: Moltbook dashboard status).'}}, 'required': []}
+    example_calls = ['{"function":"moltbook_home_overview","arguments":{"query":"show Moltbook home overview"}}', '{"function":"moltbook_home_overview","arguments":{"query":"latest Moltbook announcement"}}', '{"function":"moltbook_home_overview","arguments":{"query":"what submolts am I subscribed to"}}']
+    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The home/posts/announcement/activity/submolt request (for example: Moltbook dashboard status, latest posts, latest announcement, or subscribed submolts).'}, 'limit': {'type': 'integer', 'description': 'Optional number of posts or activity rows to return (1-20).'}}, 'required': []}
     waiting_prompt_template = (
         "Write a short friendly message that tells {mention} you are checking Moltbook now. "
         "Only output that message."

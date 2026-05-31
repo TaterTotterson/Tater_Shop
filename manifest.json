@@ -908,9 +908,9 @@
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
-      "description": "Moltbook account snapshot with profile link and key counters.",
+      "description": "Moltbook account/profile summary, profile URL, following/fellow agents, and target agent profiles.",
       "portals": [
         "webui",
         "macos",
@@ -928,129 +928,21 @@
       "settings_category": "Moltbook Info",
       "tags": [
         "moltbook",
-        "account_summary"
-      ],
-      "entry": "verba/moltbook_account_summary.py",
-      "sha256": "c146d25de98259ad81b9a0597615d667e216704f5d0938a7e322f506c90127a6"
-    },
-    {
-      "id": "moltbook_activity_on_posts",
-      "name": "Moltbook Activity On Posts",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Read /home activity buckets for your posts and summarize engagement.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "activity_on_my_posts"
-      ],
-      "entry": "verba/moltbook_activity_on_posts.py",
-      "sha256": "df31ba6e4c7d027943172cd558d2cb68dcbbaf620cbcf2cb0b25278227f0082b"
-    },
-    {
-      "id": "moltbook_agent_profile",
-      "name": "Moltbook Agent Profile",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Lookup target Moltbook agent profile details.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "agent_profile"
-      ],
-      "entry": "verba/moltbook_agent_profile.py",
-      "sha256": "e8ade717366a03ad84b7e3489da4b5816a9807fdee77d88cf2a5a03e19ca1923"
-    },
-    {
-      "id": "moltbook_fellow_taters",
-      "name": "Moltbook Fellow Taters",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Show tracked fellow Tater Moltbook agents.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
+        "account_summary",
+        "profile_link",
+        "agent_profile",
+        "following",
         "fellow_taters"
       ],
-      "entry": "verba/moltbook_fellow_taters.py",
-      "sha256": "4f46d88fcd14972065b6441c042e1b75ed63f994be2d1ec0e4e53b54f466cf91"
-    },
-    {
-      "id": "moltbook_following",
-      "name": "Moltbook Following",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "List known followed agents and active authors from following feed.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "following"
-      ],
-      "entry": "verba/moltbook_following.py",
-      "sha256": "c11247c7920f35f0ab662b0d0567aa2d7f4ade0b8745637fe7ca26fd0c0348c0"
+      "entry": "verba/moltbook_account_summary.py",
+      "sha256": "bc5910302b8108eabe7434410f25bc3ebf59200d2d3e94127f9af15bdb754f5c"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
-      "description": "Moltbook /home dashboard overview with unread/activity counters.",
+      "description": "Moltbook dashboard overview plus latest posts, announcements, post activity, subscriptions, and monitored submolts.",
       "portals": [
         "webui",
         "macos",
@@ -1068,150 +960,15 @@
       "settings_category": "Moltbook Info",
       "tags": [
         "moltbook",
-        "home_overview"
-      ],
-      "entry": "verba/moltbook_home_overview.py",
-      "sha256": "62a53ae11c37e374456c330c0d8fc2b704a9d4f17b3f2de42c286ade00123b88"
-    },
-    {
-      "id": "moltbook_latest_announcement",
-      "name": "Moltbook Latest Announcement",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Get the newest Moltbook announcement/news entry.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "latest_announcement"
-      ],
-      "entry": "verba/moltbook_latest_announcement.py",
-      "sha256": "c27e397bd0c750c2c8917bc24555b46b9bbce2c331cf54965c7c44ab6b5267d9"
-    },
-    {
-      "id": "moltbook_latest_posts",
-      "name": "Moltbook Latest Posts",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Fetch latest posts authored by this Moltbook agent.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "latest_posts"
-      ],
-      "entry": "verba/moltbook_latest_posts.py",
-      "sha256": "847661a67945291557ce8702820095c6cf5d92716058a32d8bc6fa998dd53766"
-    },
-    {
-      "id": "moltbook_monitoring_submolts",
-      "name": "Moltbook Monitoring Submolts",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Read Moltbook portal settings for submolts to monitor/prefer/avoid.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
+        "home_overview",
+        "latest_posts",
+        "latest_announcement",
+        "activity_on_my_posts",
+        "subscriptions",
         "monitoring_submolts"
       ],
-      "entry": "verba/moltbook_monitoring_submolts.py",
-      "sha256": "95b4079ace2b0d6609bfd0d82f86b8bf94660926a1b4da6d7a9f6ba8f24488e6"
-    },
-    {
-      "id": "moltbook_profile_link",
-      "name": "Moltbook Profile Link",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Get the current Moltbook profile URL.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "profile_link"
-      ],
-      "entry": "verba/moltbook_profile_link.py",
-      "sha256": "b0d20ce64fde8586dd1f335fba1e2e145f1ce30db059b990c0ca0778365888f5"
-    },
-    {
-      "id": "moltbook_subscriptions",
-      "name": "Moltbook Subscriptions",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Show subscribed submolts from Moltbook portal state.",
-      "portals": [
-        "webui",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Moltbook Info",
-      "tags": [
-        "moltbook",
-        "subscriptions"
-      ],
-      "entry": "verba/moltbook_subscriptions.py",
-      "sha256": "19d37e0e4dfd60d3cad76366a28a70c65622093d690d2ef4c3cfbc51c75af630"
+      "entry": "verba/moltbook_home_overview.py",
+      "sha256": "a404bd61e291b78494f4ef5439cfda1a82f85bf1ca4770950e8b98ab7207365a"
     },
     {
       "id": "music_assistant",

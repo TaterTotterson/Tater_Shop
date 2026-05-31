@@ -157,31 +157,31 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookAccountSummaryPlugin(ToolVerba):
     name = "moltbook_account_summary"
     verba_name = "Moltbook Account Summary"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "Moltbook Account Summary"
     settings_category = "Moltbook Info"
-    tags = ['moltbook', 'account_summary']
+    tags = ['moltbook', 'account_summary', 'profile_link', 'agent_profile', 'following', 'fellow_taters']
     platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     usage = (
-        "{\"function\":\"moltbook_account_summary\",\"arguments\":{\"query\":\"give me your Moltbook account summary\"}}"
+        "{\"function\":\"moltbook_account_summary\",\"arguments\":{\"query\":\"give me your Moltbook account summary or profile link\"}}"
     )
     description = (
-        "Show Moltbook account stats and profile summary."
+        "Moltbook account/profile summary, profile link, social lists, and agent lookup."
     )
-    verba_dec = "Moltbook account snapshot with profile link and key counters."
+    verba_dec = "Moltbook account/profile summary, profile URL, following/fellow agents, and target agent profiles."
     when_to_use = (
-        "Use for Moltbook account summary, profile snapshot, or account stats questions."
+        "Use for Moltbook account/profile questions, profile links, following/fellow Tater agents, or a specific agent profile."
     )
     how_to_use = (
-        "Set `query` to the summary request (for example: give me your Moltbook account summary)."
+        "Set `query` to the Moltbook request and optionally set `target_name` for agent profile lookups or `limit` for lists."
     )
-    common_needs = ['A Moltbook account-summary request in query.']
-    routing_keywords = ['moltbook', 'account summary', 'profile summary', 'stats', 'karma', 'followers']
+    common_needs = ['A Moltbook account, profile, following, fellow-Tater, or agent-profile request in query.']
+    routing_keywords = ['moltbook', 'account summary', 'profile summary', 'stats', 'karma', 'followers', 'profile link', 'profile url', 'following', 'follow list', 'fellow taters', 'fellow agents', 'agent profile', 'profile for', 'tater agents']
     missing_info_prompts = []
-    example_calls = ['{"function":"moltbook_account_summary","arguments":{"query":"give me your Moltbook account summary"}}', '{"function":"moltbook_account_summary","arguments":{"query":"show your Moltbook profile stats"}}']
-    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The account-summary request (for example: show Moltbook stats).'}}, 'required': []}
+    example_calls = ['{"function":"moltbook_account_summary","arguments":{"query":"give me your Moltbook account summary"}}', '{"function":"moltbook_account_summary","arguments":{"query":"share your Moltbook profile URL"}}', '{"function":"moltbook_account_summary","arguments":{"query":"agent profile for botalpha","target_name":"botalpha"}}']
+    argument_schema = {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The account/profile/social request (for example: show Moltbook stats, profile link, following, or agent profile).'}, 'target_name': {'type': 'string', 'description': 'Optional Moltbook agent name for agent profile lookups.'}, 'limit': {'type': 'integer', 'description': 'Optional display/sample limit for list-style requests (1-20).'}}, 'required': []}
     waiting_prompt_template = (
         "Write a short friendly message that tells {mention} you are checking Moltbook now. "
         "Only output that message."
