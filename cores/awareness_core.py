@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -39,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.3"
+__version__ = "3.4.4"
 
 load_dotenv()
 
