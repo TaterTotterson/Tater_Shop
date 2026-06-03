@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.4"
+__version__ = "3.4.5"
 
 load_dotenv()
 
@@ -5472,7 +5472,16 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         existing = _get_rule(client, rule_id)
         if not existing:
             raise KeyError("Awareness rule not found.")
-        _enqueue_execution(client, rule_id=rule_id, reason="manual", event={})
+        event: Dict[str, Any] = {}
+        if _text(existing.get("kind")).lower() == "entry_sensor":
+            entity_id = _text(existing.get("sensor_entity") or existing.get("trigger_entity"))
+            friendly_name = _text(existing.get("name") or existing.get("area") or "Entry Sensor")
+            event = {
+                "entity_id": entity_id,
+                "new_state": {"state": "open", "attributes": {"friendly_name": friendly_name}},
+                "old_state": {"state": "closed", "attributes": {"friendly_name": friendly_name}},
+            }
+        _enqueue_execution(client, rule_id=rule_id, reason="manual", event=event)
         return {"ok": True, "id": rule_id, "message": "Awareness rule queued to run now."}
     raise ValueError(f"Unknown action: {action_name}")
 
