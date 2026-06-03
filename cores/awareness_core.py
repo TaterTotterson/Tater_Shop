@@ -837,13 +837,6 @@ def _normalize_trigger_entities(value: Any) -> List[str]:
     return out
 
 
-def _json_safe_snapshot(value: Any) -> Any:
-    try:
-        return json.loads(json.dumps(value, default=str))
-    except Exception:
-        return {"repr": _compact(repr(value), limit=1200)}
-
-
 def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
@@ -867,7 +860,6 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "last_status": _text(raw.get("last_status")),
         "last_summary": _text(raw.get("last_summary")),
         "last_error": _text(raw.get("last_error")),
-        "last_result": _json_safe_snapshot(raw.get("last_result")) if raw.get("last_result") is not None else {},
     }
     if not _text(base.get("provider")):
         return None
@@ -990,7 +982,6 @@ _RULE_FINGERPRINT_IGNORE_KEYS = {
     "last_status",
     "last_summary",
     "last_error",
-    "last_result",
 }
 
 
@@ -1664,28 +1655,6 @@ def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_s
     return attr_expected == attr_text or attr_expected in attr_text
 
 
-def _unifi_entry_sensor_camera_alias_matches(
-    rule: Dict[str, Any],
-    *,
-    provider_token: str,
-    event_entity: str,
-) -> bool:
-    if provider_token != "unifi_protect":
-        return False
-    if _text(rule.get("kind")).lower() != "entry_sensor":
-        return False
-
-    event_sensor_id = _text(_unifi_sensor_id_from_entity(event_entity)).lower()
-    if not event_sensor_id:
-        return False
-
-    camera_provider, camera_entity = _split_provider_ref(rule.get("camera_entity"), _rule_provider(rule))
-    if camera_provider not in {"all", "unifi_protect"}:
-        return False
-    camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
-    return bool(camera_id and camera_id == event_sensor_id)
-
-
 def _rule_matches_event(
     rule: Dict[str, Any],
     *,
@@ -1712,12 +1681,7 @@ def _rule_matches_event(
                 matched_entity = True
                 break
         if not matched_entity:
-            if not _unifi_entry_sensor_camera_alias_matches(
-                rule,
-                provider_token=provider_token,
-                event_entity=event_entity,
-            ):
-                return False
+            return False
     elif rule_provider not in {"all", provider_token}:
         return False
     return _state_matches_custom(rule, new_state, old_state)
@@ -5559,7 +5523,6 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             rule["last_status"] = "ok"
             rule["last_summary"] = _text(result.get("summary"))
             rule["last_error"] = ""
-            rule["last_result"] = _json_safe_snapshot(result)
             rule["updated_at"] = now_ts
             _save_rule(redis_client, rule)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error="")
@@ -5574,9 +5537,7 @@ async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) 
             logger.exception("[awareness] rule execution failed for %s", rule_id)
             rule["last_run_ts"] = now_ts
             rule["last_status"] = "error"
-            rule["last_summary"] = ""
             rule["last_error"] = str(exc)
-            rule["last_result"] = {"ok": False, "error": str(exc)}
             rule["updated_at"] = now_ts
             _save_rule(redis_client, rule)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error=str(exc))
