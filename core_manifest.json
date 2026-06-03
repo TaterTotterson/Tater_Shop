@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "da52d67b79ff2beeaedec87dbab6e915cfe82499f21c6e82755af1353e16290e"
+      "sha256": "81be045c96a3348791347d0456524847dfd98471ccb89e5f74dcde716a0e5d9d"
     },
     {
       "id": "environment",
