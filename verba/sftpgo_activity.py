@@ -10,7 +10,7 @@ from verba_result import action_failure, action_success
 class SFTPGoActivityPlugin(ToolVerba):
     name = "sftpgo_activity"
     verba_name = "SFTPGo Activity"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_activity","arguments":{}}'
     description = "Retrieves current connection activity from the SFTPGo server."
@@ -18,7 +18,7 @@ class SFTPGoActivityPlugin(ToolVerba):
     pretty_name = "Checking FTP Activity"
     settings_category = "SFTPGo"
     waiting_prompt_template = "Write a friendly message telling {mention} you’re accessing the server to see who’s using it now! Only output that message."
-    platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "irc", "meshtastic", "matrix", "telegram"]
     required_settings = {
         "SFTPGO_API_URL": {
             "label": "SFTPGo API URL",
@@ -189,6 +189,9 @@ class SFTPGoActivityPlugin(ToolVerba):
             return await self._get_activity_summary(llm_client)
         except RuntimeError:
             return asyncio.run(self._get_activity_summary(llm_client))
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     # Telegram
 

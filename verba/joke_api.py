@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 class JokeAPIPlugin(ToolVerba):
     name = "joke_api"
     verba_name = "Joke API"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "59"
     pretty_name = "Joke API"
     usage = '{"function":"joke_api","arguments":{}}'
@@ -32,7 +32,7 @@ class JokeAPIPlugin(ToolVerba):
         '{"function":"joke_api","arguments":{}}',
     ]
     settings_category = "Joke API"
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic', 'xbmc']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic', 'xbmc']
     routing_keywords = [
         "joke",
         "jokes",
@@ -256,6 +256,9 @@ class JokeAPIPlugin(ToolVerba):
 
     async def handle_webui(self, args: Dict[str, Any], llm_client: Any):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

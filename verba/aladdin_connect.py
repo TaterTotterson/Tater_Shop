@@ -60,14 +60,14 @@ def _coerce_text(value: Any) -> str:
 class AladdinConnectPlugin(ToolVerba):
     name = "aladdin_connect"
     verba_name = "Aladdin Connect"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "Aladdin Connect"
     settings_category = "Aladdin Connect"
     platforms = [
         "voice_core",
         "homeassistant",
-        "webui",
+        "webui", "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -425,6 +425,9 @@ class AladdinConnectPlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         return await self._handle(args, llm_client)

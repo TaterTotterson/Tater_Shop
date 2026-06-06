@@ -22,7 +22,7 @@ logger.setLevel(logging.INFO)
 class SFTPGoAccountPlugin(ToolVerba):
     name = "sftpgo_account"
     verba_name = "SFTPGo Account"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_account","arguments":{"username":"<optional custom username>"}}'
     description = "Creates an SFTPGo account for the user and returns their credentials."
@@ -62,7 +62,7 @@ class SFTPGoAccountPlugin(ToolVerba):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
-    platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "irc", "meshtastic", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -301,6 +301,9 @@ class SFTPGoAccountPlugin(ToolVerba):
             message="Failed to create the SFTP account. Please try again later.",
             say_hint="Explain account creation failed and suggest retrying.",
         )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

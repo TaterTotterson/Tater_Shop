@@ -221,11 +221,11 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
-    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['voice_core', 'homeassistant', 'webui', 'little_spud', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     tags = ["homeassistant", "camera", "area"]
 
     usage = '{"function":"ha_camera_area","arguments":{"query":"what is happening in the front yard"}}'
@@ -564,6 +564,9 @@ class HACameraAreaPlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="webui", context=context)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
     async def handle_macos(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="macos", context=context)

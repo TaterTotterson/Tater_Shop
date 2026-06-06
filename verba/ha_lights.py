@@ -65,11 +65,11 @@ class HAClient:
 class HALightsPlugin(ToolVerba):
     name = 'ha_lights'
     verba_name = 'Home Assistant Lights'
-    version = "2.1.8"
+    version = "2.1.9"
     min_tater_version = "59"
     pretty_name = 'Home Assistant Lights'
     settings_category = "Home Assistant Control"
-    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['voice_core', 'homeassistant', 'webui', 'little_spud', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     tags = ['homeassistant', 'light']
 
     forced_route = 'light'
@@ -1062,6 +1062,9 @@ class HALightsPlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         return await self._handle(args, llm_client)

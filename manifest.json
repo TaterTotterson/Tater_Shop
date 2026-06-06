@@ -4,13 +4,14 @@
     {
       "id": "aladdin_connect",
       "name": "Aladdin Connect",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Control Aladdin Connect garage doors.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -29,17 +30,18 @@
         "garage-door"
       ],
       "entry": "verba/aladdin_connect.py",
-      "sha256": "3f69e92b0a2473ca1d2eb7c35a77fa78431fb70b067f7fc28a5428b77bc4e07e"
+      "sha256": "976430c0b0b327bae6eed7debf290532771336281c13f901c96df3eac490e7ac"
     },
     {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Create one image from a natural-language image request.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "telegram"
       ],
@@ -47,12 +49,12 @@
       "settings_category": "Automatic111",
       "tags": [],
       "entry": "verba/automatic_plugin.py",
-      "sha256": "bcefde8ba2ca8edfe051b7e2ae3acd04b5b9c71157b5b56c071d6abe8917b431"
+      "sha256": "27314a4c88eef653c9642a793748e397d84e6d76d59b88756dd498a13ed2b50d"
     },
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.14",
+      "version": "1.1.15",
       "min_tater_version": "59",
       "description": "Send a one-time spoken announcement to your configured broadcast targets.",
       "portals": [
@@ -61,6 +63,7 @@
         "homekit",
         "xbmc",
         "webui",
+        "little_spud",
         "macos",
         "discord",
         "telegram",
@@ -72,17 +75,18 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "711abd64e17c8fc21b443633e84888ab423717671810af307cdb89fb3791fc1d"
+      "sha256": "164ffacf6171e5411e2550353dbfd2ee50cb5c51bc3b5a7f3fe9d22e0d3cd23d"
     },
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.18",
+      "version": "1.0.19",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -93,17 +97,18 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "90772ca2fa7e86726287e27e2342584c8c731a83b53294941af4dde03cd01329"
+      "sha256": "1f5a5cb1f2480dd5cee45eda01051e77d8cbd6f62f4e48545fff7cb4a8a82c74"
     },
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "matrix",
         "telegram"
@@ -112,65 +117,69 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "verba/comfyui_image_plugin.py",
-      "sha256": "31ef3f688eab59b79c338619b861794a726b04c63be8b3bb3c838965eb01d959"
+      "sha256": "c0ba675c8ba780b9add17b5ade82ed324fd815367c5cb20336a4caa75a86bb34"
     },
     {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "verba/comfyui_image_video.py",
-      "sha256": "64b18c642a31394f5dbcd81c0dbbbd59551d42bec101740e6da595a82d3bfcae"
+      "sha256": "0bba867d6c5d460dd21df19c006d5a4847876d35ed676e0b8a6af34f87a45445"
     },
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_music_video.py",
-      "sha256": "d5a417b2a3e0073bee1534947c44048847a9c03b2bebbef13dfede325e26e038"
+      "sha256": "af2d595e063b653832899ceb72b482b95dd5e8fc1d3038f4f8fdd268b19e21fd"
     },
     {
       "id": "comfyui_video_plugin",
       "name": "ComfyUI Video",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_video_plugin.py",
-      "sha256": "8cce6751904a664ffe13ba78955a803d596c5574105c88dff8e9bc9db47fea68"
+      "sha256": "2319d089cedbe54bdfb23053a4968486d839fb8cdfe73367422a2cde293b08f7"
     },
     {
       "id": "device_compare",
       "name": "Device Compare",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Natural-language device comparison with spec tables and optional per-game FPS benchmarks.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "matrix",
         "telegram"
@@ -179,7 +188,7 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "verba/device_compare.py",
-      "sha256": "167149d346131119a41031b22c12f0b370967c00b07d45b30928dcaef69f8c2a"
+      "sha256": "186dbc2c185f9a5d90f324d9e9d901ac8e02568b62c6b97caae7460262cc9f2e"
     },
     {
       "id": "discord_admin_response_mode",
@@ -238,13 +247,14 @@
     {
       "id": "ecobee_homekit_thermostat",
       "name": "Ecobee HomeKit Thermostat",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Control Ecobee thermostats through HomeKit pairing.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -263,16 +273,17 @@
         "climate"
       ],
       "entry": "verba/ecobee_homekit_thermostat.py",
-      "sha256": "79110b56f368512143ca7aef643b18b894aa77208c6432972b3df53d86fdb9ca"
+      "sha256": "5007e962f7483b61574001494a9c2831ad835e8f1a4c30f33a537a0a3b4ca699"
     },
     {
       "id": "find_my_phone",
       "name": "Find My Phone",
-      "version": "1.0.10",
+      "version": "1.0.11",
       "min_tater_version": "59",
       "description": "Ping or ring your phone through Home Assistant so you can locate it.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -288,7 +299,7 @@
       "settings_category": "Find My Phone",
       "tags": [],
       "entry": "verba/find_my_phone.py",
-      "sha256": "dccb9c98cdbb5fecd0ac4bd95b2fb7fa0b1d15daa340bcdcee3a6b21d8ff04c8"
+      "sha256": "950b667823bd3aadedd4b486368d800dc100325f56bb44401180368783f68bb4"
     },
     {
       "id": "ftp_browser",
@@ -308,13 +319,14 @@
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -332,18 +344,19 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "4096fbdd05af127ffd337e95cc649802d8f9d1582e098dfa1d44745219eac4a0"
+      "sha256": "e694c863619b9f5c28249229cd31a476f40ce9d70d255edc7561bf2a85a75530"
     },
     {
       "id": "ha_climate",
       "name": "Home Assistant Climate",
-      "version": "2.1.4",
+      "version": "2.1.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant thermostats and HVAC entities.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -360,18 +373,19 @@
         "climate"
       ],
       "entry": "verba/ha_climate.py",
-      "sha256": "609982fce1e769f00791bb220a744a932057f3860edfc6bfd0779f07bf7c1fef"
+      "sha256": "28fbbd6a11db7292b682ce361837ec348813d72549f276da1dae15c54f252065"
     },
     {
       "id": "ha_covers",
       "name": "Home Assistant Covers",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant covers and garage doors.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -388,18 +402,19 @@
         "cover"
       ],
       "entry": "verba/ha_covers.py",
-      "sha256": "8f210588df55026c8e5c5c9a4beb60511ded725d2d823f56b4e6a321267fb8ec"
+      "sha256": "e582b837170bb270d79f1e25be131aa41c21ef74c6f269bf84515fd2de76b6df"
     },
     {
       "id": "ha_fans",
       "name": "Home Assistant Fans",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant fans.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -416,18 +431,19 @@
         "fan"
       ],
       "entry": "verba/ha_fans.py",
-      "sha256": "f74049c665d3827b27f46688dd5af4f39cf6756642c9dcad7b34b019d15a0cb7"
+      "sha256": "709adc7910d72e7a17a4dd2c25c49e7aaa2ea191baf4e149ff84fae72d24aa83"
     },
     {
       "id": "ha_lights",
       "name": "Home Assistant Lights",
-      "version": "2.1.8",
+      "version": "2.1.9",
       "min_tater_version": "59",
       "description": "Control Home Assistant lights.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -444,18 +460,19 @@
         "light"
       ],
       "entry": "verba/ha_lights.py",
-      "sha256": "76e48bf32dcb4568c13f3ddcc601b1cc978afea2bc79aaa7ad5fe3301d58bee7"
+      "sha256": "8ef7908a7583d69a0452076265859ad2717fa28c5df16f3ec126dbdd57b33e41"
     },
     {
       "id": "ha_locks",
       "name": "Home Assistant Locks",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant lock entities.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -472,18 +489,19 @@
         "lock"
       ],
       "entry": "verba/ha_locks.py",
-      "sha256": "d1bec676292e78fbb1abb61ec368e211714003741845eaf80dc0d3ce4293d081"
+      "sha256": "1f2a6cddb202d13cd498466330626b913b7c94a777096121f4bbcd8dac782020"
     },
     {
       "id": "ha_media_players",
       "name": "Home Assistant Media Players",
-      "version": "2.0.8",
+      "version": "2.0.9",
       "min_tater_version": "59",
       "description": "Media-player control for Home Assistant.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -500,18 +518,19 @@
         "media_player"
       ],
       "entry": "verba/ha_media_players.py",
-      "sha256": "cc82de360e37320307b8640ef44fabbb3201355fd6ef18ac811d430cd770a17d"
+      "sha256": "4bb2ea3bae2866960c48b0c05712d4c423d26e388106ed24d67d80e2ac5cd915"
     },
     {
       "id": "ha_remotes",
       "name": "Home Assistant Remotes",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant remote entities.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -528,18 +547,19 @@
         "remote"
       ],
       "entry": "verba/ha_remotes.py",
-      "sha256": "179c70c02b3579a2c306bda342f9c1a3000d9f485933c1ac61fe012dfd69680c"
+      "sha256": "4f96eda7bdab2c0a1007e0ad44c6d74f74f214ad96e6480a06aff9316e4969d1"
     },
     {
       "id": "ha_scenes",
       "name": "Home Assistant Scenes",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant scenes.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -556,18 +576,19 @@
         "scene"
       ],
       "entry": "verba/ha_scenes.py",
-      "sha256": "568a4fe092fdca85a00e17f4e838ba99446afd04ec1b9994676b12d68efbc4a8"
+      "sha256": "57392282bb2f747de36617ef8d3243fe246e3fde90b7efb5f50d00be2f34e200"
     },
     {
       "id": "ha_scripts",
       "name": "Home Assistant Scripts",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Control Home Assistant scripts.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -584,18 +605,19 @@
         "script"
       ],
       "entry": "verba/ha_scripts.py",
-      "sha256": "b8d4689a818be0fef1bce30f146556c243fec2dcc2af6101609e6e6af1326bf3"
+      "sha256": "a7bca949332ff6b6cd33d86c05539a21edd7e09167cc87437c6e07d0780314de"
     },
     {
       "id": "ha_sensors",
       "name": "Home Assistant Sensors",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Read Home Assistant sensor and binary_sensor entities.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -612,18 +634,19 @@
         "sensor"
       ],
       "entry": "verba/ha_sensors.py",
-      "sha256": "51dc3d4d3537cf4b52b381e1c324dface8039725796bae8c6004f3e2f6f9e22e"
+      "sha256": "e1943df4766fcdd6c02b4ccb2726caab53dba2e4bf5b704c7b525664c821a501"
     },
     {
       "id": "ha_switches",
       "name": "Home Assistant Switches",
-      "version": "2.0.5",
+      "version": "2.0.6",
       "min_tater_version": "59",
       "description": "Control Home Assistant switches and plugs.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -640,18 +663,19 @@
         "switch"
       ],
       "entry": "verba/ha_switches.py",
-      "sha256": "df0b7a2a3935ce61708c29ba5bb9b704cefddc61f6d488d598fbe36346982398"
+      "sha256": "911262f773371e23aeabf4d57ad3e15c17d001506771158f4f79e9f4b866d7cc"
     },
     {
       "id": "ha_temperature",
       "name": "Home Assistant Temperature",
-      "version": "2.0.4",
+      "version": "2.0.5",
       "min_tater_version": "59",
       "description": "Read Home Assistant ambient temperatures.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -668,18 +692,19 @@
         "temperature"
       ],
       "entry": "verba/ha_temperature.py",
-      "sha256": "64c664dab9982c7517f809b082561ca533f0fb9bd0270289bb1f51528db2e8e5"
+      "sha256": "ffd59900fd0ce8fc1f03c3d6121022562df4d982b1dff10178e37840455ed448"
     },
     {
       "id": "hue_lights",
       "name": "Philips Hue Lights",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Control Philips Hue Bridge lights.",
       "portals": [
         "voice_core",
         "homeassistant",
         "webui",
+        "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -697,7 +722,7 @@
         "light"
       ],
       "entry": "verba/hue_lights.py",
-      "sha256": "9310b7f99f457fe24f96526936e53451dee842a51b4567b19c07a6f4da6dd96e"
+      "sha256": "da15586a64dc471d1df703b7e8ae63b1c64eed9a7711a60cf3aa09ab6a7dbe7e"
     },
     {
       "id": "irc_admin_op",
@@ -759,12 +784,13 @@
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -782,17 +808,18 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "d18c00d08859127eca48738df5acef3d201ee13efbce9e4005c31a4ee649084c"
+      "sha256": "670dc26e7f4f459f8207ab7a18f28d54b4fc22e6118b765aaf3ba771a63dfb42"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -810,16 +837,17 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "3d424293d9b90b7a0ca66931869423f4daf4449bdabd173ddeabca91503d1086"
+      "sha256": "5139f445337780d0a126d3143699294d96fd9403c86d031a73a14e7a42e1ceaa"
     },
     {
       "id": "joke_api",
       "name": "Joke API",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Fetch one joke from JokeAPI.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -835,28 +863,29 @@
       "settings_category": "Joke API",
       "tags": [],
       "entry": "verba/joke_api.py",
-      "sha256": "59c46e50e00f97b653238914571dffb23ad71f733d838e6eb74928c15972c085"
+      "sha256": "4c70038babe0ca9b956d96835cfb2bfa76005bbe6f62e6ff207a9b2cb479cc97"
     },
     {
       "id": "lowfi_video",
       "name": "ComfyUI Lofi Video",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "min_tater_version": "59",
       "description": "Create a cozy ComfyUI lofi video by generating music and looping a matching animation.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": null,
       "tags": [],
       "entry": "verba/lowfi_video.py",
-      "sha256": "57251757293f51bdfe70b2c20108ce323abe7ee5e9a20b032f84464e7288682f"
+      "sha256": "9acda1f1ec0211a6463ffa11637164c00eb92ec41a11688d93019a512687f245"
     },
     {
       "id": "microwakeword",
       "name": "microWakeWord",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite.",
       "portals": [
@@ -864,6 +893,7 @@
         "homekit",
         "xbmc",
         "webui",
+        "little_spud",
         "macos",
         "discord",
         "telegram",
@@ -879,17 +909,18 @@
         "wake-word"
       ],
       "entry": "verba/microwakeword.py",
-      "sha256": "c2106daabb980b44abbea5d1a3b7c96d2d092104c3efff0fab56677e2df53af3"
+      "sha256": "59b2c4f92dfd41787dfdf7163af67339375329c1eb150aca11832f6939687092"
     },
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.9",
+      "version": "1.1.10",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -903,16 +934,17 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "verba/mister_remote.py",
-      "sha256": "bd38cbf9595d6cb130049953dddf8c706015aef501e0ea8e3b60116141752ef8"
+      "sha256": "21232048a069caf1ebede6583a7c871b53f83155ade24b5f9d972720a801acbb"
     },
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Moltbook account/profile summary, profile URL, following/fellow agents, and target agent profiles.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -935,16 +967,17 @@
         "fellow_taters"
       ],
       "entry": "verba/moltbook_account_summary.py",
-      "sha256": "bc5910302b8108eabe7434410f25bc3ebf59200d2d3e94127f9af15bdb754f5c"
+      "sha256": "a647b7dfd11878ce7a5cd222bd304ded015cd1e7d7489e20ba02cb9952799ccf"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Moltbook dashboard overview plus latest posts, announcements, post activity, subscriptions, and monitored submolts.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -968,16 +1001,17 @@
         "monitoring_submolts"
       ],
       "entry": "verba/moltbook_home_overview.py",
-      "sha256": "a404bd61e291b78494f4ef5439cfda1a82f85bf1ca4770950e8b98ab7207365a"
+      "sha256": "016b8adc370aa835ce1bdd4b1c3457b51412139f27716b5bd82a37963c9524ed"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.31",
+      "version": "1.0.32",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -993,49 +1027,52 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "3d7b7f4d30c707981f1031be2e4bb309b37419eb283dcb3b5d9c4a22ca5b954c"
+      "sha256": "1ff57bc43a04d92af32e299682804e02da41c9d4cb0b80e8cbdaff6d6e06ea94"
     },
     {
       "id": "obsidian_note",
       "name": "Obsidian Note",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "min_tater_version": "59",
       "description": "Save markdown content to Obsidian with predictable note naming, append/overwrite controls, and tags.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "verba/obsidian_note.py",
-      "sha256": "2a0bdd0ae8fcd65883d989862179fd54e8a0b39ad8a53a7eafbc7670a4885cef"
+      "sha256": "ecaf2d0e6b58ea8931d847c63a7f84c781bd986318c48480305b2e34fd98ed00"
     },
     {
       "id": "obsidian_search",
       "name": "Obsidian Search",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "min_tater_version": "59",
       "description": "Search your Obsidian vault quickly and return relevant snippets with optional AI synthesis.",
       "portals": [
         "webui",
+        "little_spud",
         "macos"
       ],
       "notifier": false,
       "settings_category": "Obsidian",
       "tags": [],
       "entry": "verba/obsidian_search.py",
-      "sha256": "029e0ed9cbd9246ac9e438f82ccf2ba8b2d72ae82947abd9d2813d0aafaf050b"
+      "sha256": "ea391dca21fa6cf2bd9cf44dbd990b60d3e6e8fbeaad3a2b49e569f6e5271568"
     },
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "min_tater_version": "59",
       "description": "Fetch details for a specific movie or TV show from Overseerr.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1049,16 +1086,17 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_details.py",
-      "sha256": "3089e814d41436645b32c41a7a41b080e7bb812970294dcf2baa2eddac42efce"
+      "sha256": "d04f4f424dd2105db992e3b2b1aef57720755dbd8f0c2744e0013c67cfaea7aa"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Request a movie or TV show in Overseerr by title.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1073,17 +1111,18 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_request.py",
-      "sha256": "84b8963789c7638c640bd7b150bb911a92590ccc90d7bd58c546d037b1daabb1"
+      "sha256": "048037dad7d59dd989b611dc38f485808771f2b5d54531c2f28fe165e9d06b0e"
     },
     {
       "id": "overseerr_trending",
       "name": "Overseerr Trending",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "min_tater_version": "59",
       "description": "List trending or upcoming movies/TV from Overseerr.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1097,17 +1136,18 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_trending.py",
-      "sha256": "9e61c5cc7011134eaabb7ab770fee729550e08fe0e594b0263fd8307d8232e12"
+      "sha256": "13a970625cd616924e4c718f3eeb583cd3580f4a5c9179f6541ff4ed525f0a6f"
     },
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1121,17 +1161,18 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "df5587ad92f9edf481f3e51d18e31b7ed93e836ea14e65b64be19a53822694c1"
+      "sha256": "d255898f131b02ea0adba3145a964acc1d901b801c411dea35fca82819e6e205"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1145,17 +1186,18 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "12b9708e2c9fdbc0d849000e1f00179b8a10bb6669fce9d9c8a74d4681529a02"
+      "sha256": "c98403da029d1927bdaf40f2479f3356e8bfd178c3b4a6b0cf415cbe5d6be880"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1169,17 +1211,18 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "7be30add10a8f3aa5a44d02a133b5c79c13f91e891860081f883b213f84ae782"
+      "sha256": "bc54c9086cb6e122925cf90bb4c93eb9e4e4cefa6145c70db3a8fe6848f72ac8"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1193,17 +1236,18 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "44d41c4ce1d4f30e52807da58d737a9eede3e14187ce1de127dd725c29095ecd"
+      "sha256": "77a6020b4e57c17658364eb76841fdf126dbece8aaa075c7144e66e9be060285"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1217,17 +1261,18 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "36411c1a21a35d0c384eb9ed69c2612789cd96a4de3935df4a0dcbecadced790"
+      "sha256": "ccd34d37b8ccdc532a361cea2622f1e1f310fcf0eef5e7abcb0c8b53e1798625"
     },
     {
       "id": "sftpgo_account",
       "name": "SFTPGo Account",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Create an SFTPGo account for the user and return login details.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1238,17 +1283,18 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_account.py",
-      "sha256": "817594a02512eec4c2abd9b395af4292e7f647be3954962f91ec260f07657212"
+      "sha256": "2e0354acc5dcc2ceaad370c7214aeff498103ba435a406c5bfb9013f81372782"
     },
     {
       "id": "sftpgo_activity",
       "name": "SFTPGo Activity",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Show current connection activity on the SFTPGo server.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1259,16 +1305,17 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_activity.py",
-      "sha256": "7c43f08eeeedc55d056a9563fe0c1eb74048e2093cf84bd755630d7588886fc8"
+      "sha256": "a897de888195470593f228e1f1d1764e8d00e3493c3725c0dbe750835c4addb1"
     },
     {
       "id": "tater_gits_add_feed",
       "name": "Tater Gits Add Feed",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Add a GitHub releases feed to the tater-gits watcher with smart naming.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "discord",
         "irc",
@@ -1280,16 +1327,17 @@
       "settings_category": "Tater Gits",
       "tags": [],
       "entry": "verba/tater_gits_add_feed.py",
-      "sha256": "d54189080f39fe6aa669074e5b31ae50de8e3adb37241f075c97bcadb3c45a4f"
+      "sha256": "de8722439862f92b10d47bc098dfdcc1367beadc8439812b29d312ec9da33f04"
     },
     {
       "id": "unifi_network_clients",
       "name": "UniFi Network Clients",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "List UniFi clients with wired/wireless counts and client details.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1308,16 +1356,17 @@
         "clients"
       ],
       "entry": "verba/unifi_network_clients.py",
-      "sha256": "9c7720679d5ad358080121df60f41c5f19c40e90c00f38f458bc03be4fe138cb"
+      "sha256": "ea53fc1810ddfa1337420124565f4e7a2d38ebe61ee261acf56011d29a76ee58"
     },
     {
       "id": "unifi_network_devices",
       "name": "UniFi Network Devices",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "List UniFi devices with online/offline status and core details.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1336,16 +1385,17 @@
         "devices"
       ],
       "entry": "verba/unifi_network_devices.py",
-      "sha256": "cf6e91f140a3f30530e2fc0b2f29ba287aaf3db634fab85d863e397a8f11dccd"
+      "sha256": "9d13a993b804093f870c881dac3c5921f753cd50269d5e3025f22cd89b3ff9dd"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1364,16 +1414,17 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "e128acf8ea054134941b99ef687101de4b67fe7d89415cfb52d4e35ef4ddc32c"
+      "sha256": "91d203c0de2f47dc6081c326685d8ba6eed7ddc1fb3993bfbc9da3eb6c661fee"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1392,16 +1443,17 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "1aeeff24ebe2bb92a0bbc18ef3a4405656ae9c291c47944bc9303568590b5e3e"
+      "sha256": "6605bd04d2dd6b19574ebb7daa683d07f7870199ff8bff1c7738de37e0a2bf3d"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1420,16 +1472,17 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "0796fc05e710544eb437cb1c285f3ff92200361b8be66c0664315a105b662ac6"
+      "sha256": "0c7a2cd8dc3967a413e97fe876246dad91acb94443a1dfd62b60f1ef23fdeee8"
     },
     {
       "id": "unifi_protect_camera",
       "name": "UniFi Protect Camera",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Describe a single UniFi Protect camera snapshot.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1448,16 +1501,17 @@
         "camera_snapshot"
       ],
       "entry": "verba/unifi_protect_camera.py",
-      "sha256": "b98fbc2c9c6f4e7b55fe6c2a9c65ffbae6f1ec004b049c25168d6d085a16654c"
+      "sha256": "deb65b4a3b68b0552147e20c3df44be8a7bd63a1eeb88f9fe23b757322372419"
     },
     {
       "id": "unifi_protect_camera_info",
       "name": "UniFi Protect Camera Info",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "List UniFi Protect cameras.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1476,16 +1530,17 @@
         "cameras"
       ],
       "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "1b3d78ccd4b621f76721d8bba1ab305bad6c80f21b5c7e86dba94078da198e7f"
+      "sha256": "494eb2dda53f27d11bd62aaf3a16d46b68718814a07ece3c26f4f064bbb3539f"
     },
     {
       "id": "unifi_protect_sensors",
       "name": "UniFi Protect Sensors",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Check UniFi Protect sensor status and single-sensor detail.",
       "portals": [
         "webui",
+        "little_spud",
         "macos",
         "voice_core",
         "homeassistant",
@@ -1504,12 +1559,12 @@
         "sensors"
       ],
       "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "297fd547d99cbc0257bed0e6afad4f0139b6b287648843fec1a5282526417902"
+      "sha256": "18d6beb1f21e3fe2f568df7c6a865bae79ab7cc4605a7414f61f4084c38f63fe"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Voice PE Remote Timer",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "min_tater_version": "59",
       "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
       "portals": [
@@ -1518,6 +1573,7 @@
         "homekit",
         "xbmc",
         "webui",
+        "little_spud",
         "macos",
         "discord",
         "telegram",
@@ -1529,17 +1585,18 @@
       "settings_category": "Voice PE Remote Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "4b5041f3a2ad62ee19d81191eb4220d5908d9a25fffb4a4ed5f6e81ad6804c1d"
+      "sha256": "f2e4b1b582cb585a272dafb0d8ab57d37ee0631d31bde25e0787b62a569a0650"
     },
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.1.10",
+      "version": "1.1.11",
       "min_tater_version": "59",
       "description": "Fetch WeatherAPI.com weather through Tater integrations and answer only what the user asked (LLM-guided).",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1554,7 +1611,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "1290d2ffbc8ac3c0f122dad74c4e4985a9770cf649ed94fe141158e741302edc"
+      "sha256": "b9206579e4fa24214d73414e9c8216ce8235dc6b1fb07505ef7da62b1176db8f"
     },
     {
       "id": "webdav_browser",
@@ -1574,12 +1631,13 @@
     {
       "id": "youtube_summary",
       "name": "YouTube Summary",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Summarize a YouTube video using its transcript.",
       "portals": [
         "discord",
         "webui",
+        "little_spud",
         "macos",
         "irc",
         "meshtastic",
@@ -1590,7 +1648,7 @@
       "settings_category": "YouTube Summary",
       "tags": [],
       "entry": "verba/youtube_summary.py",
-      "sha256": "b10f8b5684e64a467f48c01fdb17c5cb1e8c91b06cfcd3a96d63623786f3c454"
+      "sha256": "1a0ff28acea73ef6b3abbd0f71a9e893d5d34775f31cff84be55b83a081bfcc9"
     }
   ]
 }

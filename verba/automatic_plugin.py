@@ -55,7 +55,7 @@ def _as_float(value: Any, default: float, minimum: float, maximum: float) -> flo
 class AutomaticPlugin(ToolVerba):
     name = "automatic_plugin"
     verba_name = "Automatic1111 Image"
-    version = "1.2.1"
+    version = "1.2.2"
     min_tater_version = "59"
     pretty_name = "Your Image"
     settings_category = "Automatic111"
@@ -138,7 +138,7 @@ class AutomaticPlugin(ToolVerba):
         "Write a fun, casual message telling {mention} you’re generating their image now. "
         "Only output that message."
     )
-    platforms = ["discord", "webui", "macos", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "telegram"]
     common_needs = []
     missing_info_prompts = []
 
@@ -347,6 +347,9 @@ class AutomaticPlugin(ToolVerba):
                 message=f"Failed to generate image: {exc}",
                 say_hint="Explain the generation error and suggest checking Automatic1111 settings.",
             )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

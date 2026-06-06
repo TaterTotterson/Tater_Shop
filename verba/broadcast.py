@@ -33,7 +33,7 @@ class BroadcastPlugin(ToolVerba):
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.14"
+    version = "1.1.15"
     min_tater_version = "59"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
     description = (
@@ -59,7 +59,7 @@ class BroadcastPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'little_spud', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -308,6 +308,9 @@ class BroadcastPlugin(ToolVerba):
     async def handle_webui(self, args, llm_client):
         args = args or {}
         return await self._broadcast(self._extract_announcement_arg(args), llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         try:

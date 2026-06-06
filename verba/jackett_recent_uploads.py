@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettRecentUploadsPlugin(ToolVerba):
     name = "jackett_recent_uploads"
     verba_name = "Jackett Recent Uploads"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "Jackett Recent Uploads"
     settings_category = "Jackett"
@@ -40,7 +40,7 @@ class JackettRecentUploadsPlugin(ToolVerba):
         "Tell {mention} you are querying Jackett now and will return ranked torrent results shortly. "
         "Only output that message."
     )
-    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'homekit', 'matrix', 'telegram', 'xbmc']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'homekit', 'matrix', 'telegram', 'xbmc']
     required_settings = {
         "JACKETT_BASE_URL": {
             "label": "Jackett Base URL",
@@ -1897,6 +1897,9 @@ Request: {query_text}
         except Exception as exc:
             logger.exception("[jackett] handle_webui error: %s", exc)
             return action_failure(code="jackett_exception", message=f"Jackett request failed: {exc}")
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         try:

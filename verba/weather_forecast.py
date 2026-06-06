@@ -65,7 +65,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.1.10"
+    version = "1.1.11"
     min_tater_version = "59"
     routing_keywords = [
         "weather",
@@ -100,7 +100,7 @@ class WeatherForecastPlugin(ToolVerba):
         "Do not use markdown. Only output the message."
     )
 
-    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'xbmc', 'telegram']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'xbmc', 'telegram']
 
     def _normalize_request_text(self, text: str) -> str:
         if not text:
@@ -877,6 +877,9 @@ class WeatherForecastPlugin(ToolVerba):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

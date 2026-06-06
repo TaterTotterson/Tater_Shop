@@ -12,7 +12,7 @@ DEFAULT_MAX_TOKENS = 2048
 class YouTubeSummaryPlugin(ToolVerba):
     name = "youtube_summary"
     verba_name = "YouTube Summary"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"youtube_summary","arguments":{"video_url":"<YouTube URL>"}}'
     description = "Summarizes a YouTube video using its transcript."
@@ -27,7 +27,7 @@ class YouTubeSummaryPlugin(ToolVerba):
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re watching the video and working on it now! Only output that message."
-    platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "irc", "meshtastic", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -217,6 +217,9 @@ class YouTubeSummaryPlugin(ToolVerba):
             sources=[{"title": "YouTube Video", "url": video_url, "publisher": "YouTube", "date": ""}],
             say_hint="Provide the summary and include the source URL.",
         )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     # ---------------------------------------------------------
     # IRC handler

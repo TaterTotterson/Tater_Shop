@@ -84,7 +84,7 @@ class UnifiNetworkHealthPlugin(ToolVerba):
 
     name = "unifi_network_health"
     verba_name = "UniFi Network Health"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = "UniFi Network Health"
     tags = ["unifi", "health"]
@@ -118,7 +118,7 @@ class UnifiNetworkHealthPlugin(ToolVerba):
         "online",
     ]
     settings_category = "UniFi Network"
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     usage = '{"function":"unifi_network_health","arguments":{"query":"how is the network right now"}}'
     argument_schema = {
@@ -863,6 +863,9 @@ class UnifiNetworkHealthPlugin(ToolVerba):
     # -------------------------
     async def handle_webui(self, args: Dict[str, Any], llm_client):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

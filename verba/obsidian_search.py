@@ -42,7 +42,7 @@ class ObsidianSearchPlugin(ToolVerba):
     name = "obsidian_search"
     verba_name = "Obsidian Search"
     pretty_name = "Search Obsidian"
-    version = "2.0.2"
+    version = "2.0.3"
     min_tater_version = "59"
 
     description = "Search markdown notes in Obsidian with bounded scan limits and ranked snippets."
@@ -126,7 +126,7 @@ class ObsidianSearchPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ["webui", "macos"]
+    platforms = ["webui", "little_spud", "macos"]
 
     _TOKEN_RE = re.compile(r"[a-z0-9_]+")
     _STOPWORDS = {
@@ -496,6 +496,9 @@ class ObsidianSearchPlugin(ToolVerba):
             summary_for_user=summary,
             say_hint="Answer using the ranked Obsidian hit snippets only.",
         )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

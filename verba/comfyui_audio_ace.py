@@ -48,14 +48,14 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.18"
+    version = "1.0.19"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = "Creates original songs and music tracks using ComfyUI Audio Ace."
     verba_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
-    platforms = ['discord', 'webui', 'macos', 'voice_core', 'homeassistant', 'matrix', 'telegram']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'matrix', 'telegram']
 
     required_settings = {
         "COMFYUI_AUDIO_ACE_URL": {
@@ -561,6 +561,9 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 message=f"Failed to create song: {e}",
                 say_hint="Explain the generation failure and suggest retrying.",
             )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

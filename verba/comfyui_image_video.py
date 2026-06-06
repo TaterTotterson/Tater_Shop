@@ -32,7 +32,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolVerba):
     name = "comfyui_image_video"
     verba_name = "ComfyUI Animate Image"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -68,7 +68,7 @@ class ComfyUIImageVideoPlugin(ToolVerba):
         }
     }
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
-    platforms = ["webui", "macos"]
+    platforms = ["webui", "little_spud", "macos"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -614,6 +614,9 @@ class ComfyUIImageVideoPlugin(ToolVerba):
     # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client):
         return await self._generate(args or {}, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

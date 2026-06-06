@@ -18,7 +18,7 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolVerba):
     name = "overseerr_trending"
     verba_name = "Overseerr Trending"
-    version = "1.2.3"
+    version = "1.2.4"
     min_tater_version = "59"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
@@ -34,7 +34,7 @@ class OverseerrTrendingPlugin(ToolVerba):
         "Give {mention} a short, cheerful note that you’re fetching the latest lists from Overseerr now. "
         "Only output that message."
     )
-    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -292,6 +292,9 @@ class OverseerrTrendingPlugin(ToolVerba):
         except Exception as exc:
             logger.exception("[OverseerrTrending handle_webui] %s", exc)
             return action_failure(code="overseerr_trending_exception", message=f"Error: {exc}")
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

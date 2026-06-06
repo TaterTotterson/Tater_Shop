@@ -43,7 +43,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Voice PE Remote Timer"
-    version = "1.2.3"
+    version = "1.2.4"
     min_tater_version = "59"
     pretty_name = "Voice PE Remote Timer"
     settings_category = "Voice PE Remote Timer"
@@ -113,7 +113,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'little_spud', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     when_to_use = "Use when the user wants to start a timer, cancel a timer, or ask how much time is left on a Voice PE timer."
     how_to_use = (
         "Pass one natural-language timer request in query. Include the duration naturally for start requests. "
@@ -1463,6 +1463,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
 
     async def handle_macos(self, args, llm_client, context=None):

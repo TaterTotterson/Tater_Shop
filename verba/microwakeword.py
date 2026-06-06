@@ -26,7 +26,7 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
@@ -34,7 +34,7 @@ class MicroWakeWordPlugin(ToolVerba):
         "voice_core",
         "homekit",
         "xbmc",
-        "webui",
+        "webui", "little_spud",
         "macos",
         "discord",
         "telegram",
@@ -785,6 +785,9 @@ class MicroWakeWordPlugin(ToolVerba):
 
     async def handle_webui(self, args=None, llm_client=None, context=None):
         return await self._handle(args or {}, llm_client, context=context)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
     async def handle_macos(self, args=None, llm_client=None, context=None):
         return await self.handle_webui(args=args, llm_client=llm_client, context=context)

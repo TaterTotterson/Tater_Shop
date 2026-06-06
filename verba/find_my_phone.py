@@ -44,7 +44,7 @@ class FindMyPhonePlugin(ToolVerba):
 
     name = "find_my_phone"
     verba_name = "Find My Phone"
-    version = "1.0.10"
+    version = "1.0.11"
     min_tater_version = "59"
     when_to_use = "Use when the user asks to find, ring, locate, or make their phone beep."
     usage = '{"function":"find_my_phone","arguments":{}}'
@@ -98,7 +98,7 @@ class FindMyPhonePlugin(ToolVerba):
         "Write a short, friendly message telling {mention} you're looking for their phone now. "
         "Only output that message."
     )
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     common_needs = []
     missing_info_prompts = []
 
@@ -624,6 +624,9 @@ class FindMyPhonePlugin(ToolVerba):
     # ---- platform handlers ----
     async def handle_webui(self, args, llm_client, context=None):
         return await self._run(args or {}, llm_client, mention="you", platform="webui", origin=self._origin_from_context("webui", context))
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
 
     async def handle_macos(self, args, llm_client, context=None):

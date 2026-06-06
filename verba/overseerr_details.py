@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolVerba):
     name = "overseerr_details"
     verba_name = "Overseerr Details"
-    version = "1.2.3"
+    version = "1.2.4"
     min_tater_version = "59"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -37,7 +37,7 @@ class OverseerrDetailsPlugin(ToolVerba):
         "Give {mention} a short, cheerful note that you’re fetching details from Overseerr now. "
         "Only output that message."
     )
-    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     required_settings = {
         "OVERSEERR_BASE_URL": {
@@ -356,6 +356,9 @@ class OverseerrDetailsPlugin(ToolVerba):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

@@ -26,7 +26,7 @@ class OverseerrRequestPlugin(ToolVerba):
     """
     name = "overseerr_request"
     verba_name = "Overseerr Request"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "59"
     usage = (
         '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
@@ -54,7 +54,7 @@ class OverseerrRequestPlugin(ToolVerba):
         "Tell {mention} you’re adding their title to Overseerr now. "
         "Keep it short and friendly. Only output that message."
     )
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     when_to_use = "Use when the user wants to request a specific movie or TV show in Overseerr."
     how_to_use = (
         "Pass one natural-language request in query. Include the title naturally. "
@@ -437,6 +437,9 @@ class OverseerrRequestPlugin(ToolVerba):
         title, kind = await self._resolve_request(args or {}, llm_client)
         raw = self._do_request_flow(title, kind)
         return [self._format_result_message(raw, tts=False)]
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

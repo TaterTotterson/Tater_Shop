@@ -186,13 +186,13 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
 
     name = 'unifi_protect_camera_info'
     verba_name = 'UniFi Protect Camera Info'
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Camera Info'
     settings_category = "UniFi Protect"
     tags = ['unifi', 'cameras']
 
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     routing_keywords = ['unifi protect', 'protect', 'camera', 'cameras', 'list cameras', 'show cameras']
 
     usage = '{"function":"unifi_protect_camera_info","arguments":{"query":"list my cameras"}}'
@@ -602,6 +602,9 @@ class UniFiProtectCameraInfoPlugin(ToolVerba):
     # ----------------------------
     async def handle_webui(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="webui", context=context)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
 
     async def handle_macos(self, args, llm_client, context=None):

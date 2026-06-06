@@ -20,7 +20,7 @@ ToolVerbaAlias = ToolVerba
 logger = logging.getLogger("premiumize_list_files")
 logger.setLevel(logging.INFO)
 
-PREMIUMIZE_PLATFORMS = ["discord", "webui", "macos", "irc", "matrix", "telegram"]
+PREMIUMIZE_PLATFORMS = ["discord", "webui", "little_spud", "macos", "irc", "matrix", "telegram"]
 PREMIUMIZE_REQUIRED_SETTINGS = {
     "PREMIUMIZE_API_KEY": {
         "label": "Premiumize API Key",
@@ -1946,6 +1946,9 @@ Request: {query}
             logger.exception("[premiumize handle_webui] %s", exc)
             return action_failure(code="premiumize_exception", message=f"Premiumize request failed: {exc}")
 
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
+
     async def handle_macos(self, args, llm_client, context=None):
         try:
             return await self._run(args or {}, llm_client, context=context or {})
@@ -2038,11 +2041,11 @@ Request: {query}
 class PremiumizeListFilesPlugin(PremiumizeBasePlugin):
     name = "premiumize_list_files"
     verba_name = "Premiumize List Files"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     pretty_name = "Premiumize List Files"
     settings_category = "Premiumize"
-    platforms = ["discord", "webui", "macos", "irc", "meshtastic", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "irc", "meshtastic", "matrix", "telegram"]
     tags = ["premiumize", "list_files"]
     usage = '{"function":"premiumize_list_files","arguments":{"query":"show my Premiumize files"}}'
     description = "Browse Premiumize cloud files/folders."

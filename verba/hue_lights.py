@@ -368,11 +368,11 @@ class HueClient:
 class HueLightsPlugin(ToolVerba):
     name = "hue_lights"
     verba_name = "Philips Hue Lights"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     pretty_name = "Philips Hue Lights"
     settings_category = "Philips Hue Control"
-    platforms = ["voice_core", "homeassistant", "webui", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc", "meshtastic"]
+    platforms = ["voice_core", "homeassistant", "webui", "little_spud", "macos", "xbmc", "homekit", "discord", "telegram", "matrix", "irc", "meshtastic"]
     tags = ["hue", "philips-hue", "light"]
     routing_keywords = ["hue", "philips hue", "hue bridge", "hue lights"]
     forced_route = "hue_light"
@@ -1256,6 +1256,9 @@ class HueLightsPlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         return await self._handle(args, llm_client)

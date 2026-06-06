@@ -64,11 +64,11 @@ class HAClient:
 class HATemperaturePlugin(ToolVerba):
     name = 'ha_temperature'
     verba_name = 'Home Assistant Temperature'
-    version = "2.0.4"
+    version = "2.0.5"
     min_tater_version = "59"
     pretty_name = 'Home Assistant Temperature'
     settings_category = "Home Assistant Control"
-    platforms = ['voice_core', 'homeassistant', 'webui', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['voice_core', 'homeassistant', 'webui', 'little_spud', 'macos', 'xbmc', 'homekit', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     tags = ['homeassistant', 'temperature']
 
     forced_route = 'temperature'
@@ -672,6 +672,9 @@ class HATemperaturePlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         return await self._handle(args, llm_client)

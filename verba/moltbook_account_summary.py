@@ -157,12 +157,12 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookAccountSummaryPlugin(ToolVerba):
     name = "moltbook_account_summary"
     verba_name = "Moltbook Account Summary"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     pretty_name = "Moltbook Account Summary"
     settings_category = "Moltbook Info"
     tags = ['moltbook', 'account_summary', 'profile_link', 'agent_profile', 'following', 'fellow_taters']
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     usage = (
         "{\"function\":\"moltbook_account_summary\",\"arguments\":{\"query\":\"give me your Moltbook account summary or profile link\"}}"
@@ -1143,6 +1143,9 @@ Request: {query}
     # ----------------------------
     async def handle_webui(self, args, llm_client):
         return await self._handle(args or {}, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
     async def handle_macos(self, args, llm_client, context=None):
         try:

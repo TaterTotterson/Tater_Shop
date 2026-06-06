@@ -528,7 +528,7 @@ class _ComfyUIImageVideoHelper:
 class LowfiVideoPlugin(ToolVerba):
     name = "lowfi_video"
     verba_name = "ComfyUI Lofi Video"
-    version = "1.1.6"
+    version = "1.1.7"
     min_tater_version = "59"
     usage = '{"function":"lowfi_video","arguments":{"prompt":"Scene or vibe description for the video."}}'
     description = "Generates a ComfyUI lofi audio track via AceStep and loops a cozy animation to full length (MP4)."
@@ -536,7 +536,7 @@ class LowfiVideoPlugin(ToolVerba):
     pretty_name = "Your ComfyUI Lofi Video"
     waiting_prompt_template = "Generate a fun, cozy message telling the user you're creating their lofi music video right now. Only output that message."
     settings_category = SETTINGS_CATEGORY
-    platforms = ["webui", "macos"]
+    platforms = ["webui", "little_spud", "macos"]
 
     required_settings = {
         "COMFYUI_URL": {
@@ -1214,6 +1214,9 @@ class LowfiVideoPlugin(ToolVerba):
             for path in (audio_path, loop_clip_path, final_path):
                 if path:
                     self._safe_unlink(path)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

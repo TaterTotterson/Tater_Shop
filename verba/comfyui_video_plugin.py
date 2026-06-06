@@ -540,13 +540,13 @@ class _ComfyUIImageVideoHelper:
 class ComfyUIVideoPlugin(ToolVerba):
     name = "comfyui_video_plugin"
     verba_name = "ComfyUI Video"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     usage = '{"function":"comfyui_video_plugin","arguments":{"prompt":"<Describe the video you want>"}}'
     description = "Generates a video from a text prompt by creating multiple animated clips using ComfyUI, then merging them into one MP4."
     verba_dec = "Create a short video from a text prompt by stitching ComfyUI-generated clips."
     pretty_name = "Your Video"
-    platforms = ["webui", "macos"]
+    platforms = ["webui", "little_spud", "macos"]
     settings_category = SETTINGS_CATEGORY
     required_settings = {
         "COMFYUI_URL": {
@@ -919,6 +919,9 @@ class ComfyUIVideoPlugin(ToolVerba):
                 message=f"Error generating video: {e}",
                 say_hint="Explain the generation failure and suggest retrying.",
             )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

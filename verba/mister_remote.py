@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolVerba):
     name = "mister_remote"
     verba_name = "MiSTer Remote"
-    version = "1.1.9"
+    version = "1.1.10"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
     routing_keywords = [
@@ -87,7 +87,7 @@ class MisterRemotePlugin(ToolVerba):
     )
     verba_dec = "Control your MiSTer FPGA setup\u2014launch games, check status, or take screenshots."
 
-    platforms = ['discord', 'webui', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
+    platforms = ['discord', 'webui', 'little_spud', 'macos', 'irc', 'meshtastic', 'voice_core', 'homeassistant', 'matrix', 'homekit', 'telegram']
 
     usage = (
         '{"function":"mister_remote","arguments":{"query":"ONE consolidated MiSTer request in natural language '
@@ -932,6 +932,9 @@ class MisterRemotePlugin(ToolVerba):
         if not self._extract_utterance(args):
             args["utterance"] = _strip(args.get("user_text",""))
         return await self._handle_structured(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

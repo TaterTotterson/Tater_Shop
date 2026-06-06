@@ -28,7 +28,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolVerba):
     name = "comfyui_image_plugin"
     verba_name = "ComfyUI Image"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>"}}'
     description = "Draws a picture from a text prompt using your ComfyUI workflow."
@@ -60,7 +60,7 @@ class ComfyUIImagePlugin(ToolVerba):
     waiting_prompt_template = (
         "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     )
-    platforms = ["discord", "webui", "macos", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -545,6 +545,9 @@ class ComfyUIImagePlugin(ToolVerba):
                 message=f"Failed to generate image: {type(e).__name__}: {e}",
                 say_hint="Explain the image generation failure and suggest retrying.",
             )
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

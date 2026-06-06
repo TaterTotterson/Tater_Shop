@@ -43,7 +43,7 @@ class ObsidianNotePlugin(ToolVerba):
     name = "obsidian_note"
     verba_name = "Obsidian Note"
     pretty_name = "Add to Obsidian"
-    version = "3.0.2"
+    version = "3.0.3"
     min_tater_version = "59"
 
     description = "Create, append, or overwrite markdown notes in your Obsidian vault with strict path safety."
@@ -132,7 +132,7 @@ class ObsidianNotePlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ["webui", "macos"]
+    platforms = ["webui", "little_spud", "macos"]
 
     _INVALID_PATH_CHARS_RE = re.compile(r'[\\:*?"<>|]')
     _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -560,6 +560,9 @@ class ObsidianNotePlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._save_note(args or {}, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

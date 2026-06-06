@@ -186,13 +186,13 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     name = 'unifi_protect_area'
     verba_name = 'UniFi Protect Area'
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Area'
     settings_category = "UniFi Protect"
     tags = ['unifi', 'area_snapshot']
 
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
     routing_keywords = ['unifi protect', 'protect', 'front yard', 'back yard', 'yard', 'driveway', 'porch', 'patio', 'garage area']
 
     usage = '{"function":"unifi_protect_area","arguments":{"query":"what is going on in the front yard"}}'
@@ -602,6 +602,9 @@ class UniFiProtectAreaPlugin(ToolVerba):
     # ----------------------------
     async def handle_webui(self, args, llm_client, context=None):
         return await self._handle(args, llm_client, platform="webui", context=context)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
 
     async def handle_macos(self, args, llm_client, context=None):

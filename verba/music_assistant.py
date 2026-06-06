@@ -55,7 +55,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.31"
+    version = "1.0.32"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -102,7 +102,7 @@ class MusicAssistantPlugin(ToolVerba):
         "Only output that message."
     )
 
-    platforms = ['webui', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
+    platforms = ['webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'homekit', 'xbmc', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
 
     def __init__(self):
         self._ma_entry_id_cache: Optional[str] = None
@@ -1661,6 +1661,9 @@ class MusicAssistantPlugin(ToolVerba):
             return await inner()
         except RuntimeError:
             return asyncio.run(inner())
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

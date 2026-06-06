@@ -17,14 +17,14 @@ logger.setLevel(logging.INFO)
 class TaterGitsAddFeedPlugin(ToolVerba):
     name = "tater_gits_add_feed"
     verba_name = "Tater Gits Add Feed"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     usage = '{"function":"tater_gits_add_feed","arguments":{"url":"https://github.com/OWNER/REPO/releases.atom"}}'
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
     verba_dec = "Add a GitHub releases feed to the tater-gits watcher with smart naming."
     pretty_name = "Add Git Feed"
     waiting_prompt_template = "Tell {mention} I’m analyzing that repo and adding the feed now. Output only that friendly message."
-    platforms = ["webui", "macos", "discord", "irc", "meshtastic", "matrix", "telegram"]
+    platforms = ["webui", "little_spud", "macos", "discord", "irc", "meshtastic", "matrix", "telegram"]
     settings_category = "Tater Gits"
 
     required_settings = {
@@ -220,6 +220,9 @@ class TaterGitsAddFeedPlugin(ToolVerba):
     # ───────────────────────── handlers ─────────────────────────
     async def handle_webui(self, args, llm_client):
         return await self._run(args.get("url"), llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

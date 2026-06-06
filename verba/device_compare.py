@@ -32,7 +32,7 @@ logger.setLevel(logging.INFO)
 class DeviceComparePlugin(ToolVerba):
     name = "device_compare"
     verba_name = "Device Compare"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "59"
     usage = (
         '{"function":"device_compare","arguments":{"query":"Natural-language request naming two devices to compare '
@@ -46,7 +46,7 @@ class DeviceComparePlugin(ToolVerba):
     pretty_name = "Comparing Devices"
     settings_category = "Device Compare"
     # Matrix supported (images only). IRC still not supported (images).
-    platforms = ["discord", "webui", "macos", "matrix", "telegram"]
+    platforms = ["discord", "webui", "little_spud", "macos", "matrix", "telegram"]
     when_to_use = "Use when the user asks to compare two specific devices."
     how_to_use = "Pass a single natural-language query that clearly names exactly two devices."
     common_needs = ["Two device names in the query text."]
@@ -897,6 +897,9 @@ class DeviceComparePlugin(ToolVerba):
 
     async def handle_webui(self, args, llm_client):
         return await self._handle_compare(args or {}, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client)
 
 
     async def handle_macos(self, args, llm_client, context=None):

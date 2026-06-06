@@ -37,14 +37,14 @@ def _coerce_text(value: Any) -> str:
 class EcobeeHomeKitThermostatPlugin(ToolVerba):
     name = "ecobee_homekit_thermostat"
     verba_name = "Ecobee HomeKit Thermostat"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     pretty_name = "Ecobee HomeKit Thermostat"
     settings_category = "Ecobee (HomeKit)"
     platforms = [
         "voice_core",
         "homeassistant",
-        "webui",
+        "webui", "little_spud",
         "macos",
         "xbmc",
         "homekit",
@@ -457,6 +457,9 @@ class EcobeeHomeKitThermostatPlugin(ToolVerba):
 
     async def handle_webui(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         return await self._handle(args, llm_client)
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
     async def handle_macos(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         return await self._handle(args, llm_client)
