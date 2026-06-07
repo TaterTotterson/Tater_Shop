@@ -69,7 +69,7 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "1790f595a51cc3d935032afb5a3f9274abeb65d61bf047cfe790121d6a0c0892"
+      "sha256": "ffdf698df7a52097ad43b4830964ee3baebf5d7b44fe1de45a3384578975a60e"
     },
     {
       "id": "meshtastic",
