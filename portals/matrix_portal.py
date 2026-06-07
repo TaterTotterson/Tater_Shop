@@ -356,7 +356,23 @@ def _get_bool_setting(key: str, fallback: bool) -> bool:
 
 
 def _app_root_dir() -> Path:
-    return Path(__file__).resolve().parent.parent
+    for env_key in ("TATER_APP_ROOT", "TATER_ROOT"):
+        raw = str(os.getenv(env_key, "") or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+
+    cwd = Path.cwd().resolve()
+    if (cwd / "tateros_app.py").exists() and (cwd / "agent_lab").exists():
+        return cwd
+
+    here = Path(__file__).resolve()
+    parts = here.parts
+    if "agent_lab" in parts:
+        idx = parts.index("agent_lab")
+        if idx > 0:
+            return Path(*parts[:idx]).resolve()
+
+    return here.parent.parent
 
 
 def _agent_lab_dir() -> Path:
