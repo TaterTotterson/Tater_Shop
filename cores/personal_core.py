@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.51"
+__version__ = "1.0.52"
 
 load_dotenv()
 
@@ -6882,6 +6882,7 @@ def _aggregate_profiles(*, profile_ids: Optional[List[str]] = None) -> Dict[str,
     deliveries: List[Dict[str, Any]] = []
     action_items: List[Dict[str, Any]] = []
     important_notes: List[Dict[str, Any]] = []
+    spending_habits: List[Dict[str, Any]] = []
     merchant_totals: Dict[str, float] = {}
     account_rows: List[Dict[str, Any]] = []
     open_deliveries = 0
@@ -6949,6 +6950,11 @@ def _aggregate_profiles(*, profile_ids: Optional[List[str]] = None) -> Dict[str,
         for spend in profile.get("spending_habits") if isinstance(profile.get("spending_habits"), list) else []:
             if not isinstance(spend, dict):
                 continue
+            spend_copy = dict(spend)
+            spend_copy["account_id"] = profile_id
+            spend_copy["person_id"] = person_id
+            spend_copy["person_name"] = person_name
+            spending_habits.append(spend_copy)
             merchant = _text(spend.get("merchant"))
             if not merchant:
                 continue
@@ -7026,6 +7032,7 @@ def _aggregate_profiles(*, profile_ids: Optional[List[str]] = None) -> Dict[str,
     deliveries.sort(key=lambda row: _as_float(row.get("eta_ts"), 0.0), reverse=True)
     action_items.sort(key=lambda row: _as_float(row.get("due_ts"), 0.0))
     important_notes.sort(key=lambda row: _as_float(row.get("date_ts"), 0.0), reverse=True)
+    spending_habits.sort(key=lambda row: _as_float(row.get("observed_ts"), 0.0), reverse=True)
 
     merchant_rows = [
         {"merchant": name, "amount": round(amount, 2)}
@@ -7046,6 +7053,7 @@ def _aggregate_profiles(*, profile_ids: Optional[List[str]] = None) -> Dict[str,
         "deliveries": deliveries,
         "action_items": action_items,
         "important_notes": important_notes,
+        "spending_habits": spending_habits,
         "open_deliveries": open_deliveries,
         "open_actions": open_actions,
         "merchant_rows": merchant_rows,
@@ -9312,6 +9320,7 @@ def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[st
 
 
 _PERSONAL_PROFILE_ITEM_FIELDS = {
+    "spending": "spending_habits",
     "event": "upcoming_events",
     "subscription": "subscriptions",
     "delivery": "deliveries",
@@ -9341,6 +9350,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
     def _append(
         *,
         item_type: str,
+        group: str,
         row: Dict[str, Any],
         title: str,
         subtitle: str,
@@ -9354,7 +9364,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
             {
                 "id": _profile_item_selector(profile_id=profile_id, item_type=item_type, item_id=item_id),
                 "title": title,
-                "group": "cleanup",
+                "group": group,
                 "subtitle": subtitle,
                 "summary_rows": summary_rows + [
                     {"label": "Profile", "value": profile_id},
@@ -9366,11 +9376,29 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
 
+    for row in list(aggregate.get("spending_habits") or [])[:120]:
+        if not isinstance(row, dict):
+            continue
+        currency = _text(row.get("currency")) or "USD"
+        amount = _as_float(row.get("amount"), 0.0, minimum=0.0)
+        _append(
+            item_type="spending",
+            group="cleanup_spending",
+            row=row,
+            title=_text(row.get("merchant")) or "Spending item",
+            subtitle=f"{currency} {amount:.2f} · {_text(row.get('observed_at')) or _iso_from_ts(row.get('observed_ts')) or 'n/a'}",
+            summary_rows=[
+                {"label": "Category", "value": _text(row.get("category")) or "purchase"},
+                {"label": "Confidence", "value": f"{_as_float(row.get('confidence'), 0.0, minimum=0.0, maximum=1.0):.2f}"},
+            ],
+        )
+
     for row in list(aggregate.get("upcoming_events") or [])[:80]:
         if not isinstance(row, dict):
             continue
         _append(
             item_type="event",
+            group="cleanup_plans",
             row=row,
             title=_text(row.get("title")) or "Upcoming event",
             subtitle=f"{_text(row.get('starts_at')) or _iso_from_ts(row.get('starts_ts'))} · {_text(row.get('kind')) or 'event'}",
@@ -9385,6 +9413,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         _append(
             item_type="subscription",
+            group="cleanup_subscriptions",
             row=row,
             title=_text(row.get("merchant")) or "Subscription",
             subtitle=f"{_text(row.get('cadence')) or 'unknown'} · next {_text(row.get('next_charge_at')) or 'n/a'}",
@@ -9402,6 +9431,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
         ref = tracking or (f"order {order_number}" if order_number else "no tracking")
         _append(
             item_type="delivery",
+            group="cleanup_deliveries",
             row=row,
             title=_text(row.get("item_description")) or _text(row.get("merchant")) or "Delivery",
             subtitle=f"{_text(row.get('carrier')) or 'carrier n/a'} · {ref}",
@@ -9416,6 +9446,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         _append(
             item_type="action",
+            group="cleanup_actions",
             row=row,
             title=_text(row.get("title")) or "Action item",
             subtitle=f"{_text(row.get('kind')) or 'task'} · {_text(row.get('status')) or 'open'}",
@@ -9430,6 +9461,7 @@ def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         _append(
             item_type="note",
+            group="cleanup_notes",
             row=row,
             title=_text(row.get("title")) or "Important note",
             subtitle=f"{_text(row.get('kind')) or 'important'} · {_text(row.get('date_iso')) or _iso_from_ts(row.get('date_ts')) or 'n/a'}",
@@ -10065,10 +10097,57 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             {
                 "key": "cleanup",
                 "label": "Cleanup",
-                "source": "items",
-                "item_group": "cleanup",
-                "page_size": 30,
-                "empty_message": "No stored Personal Core items available for cleanup.",
+                "source": "grouped_items",
+                "groups": [
+                    {
+                        "key": "spending",
+                        "label": "Spending",
+                        "item_group": "cleanup_spending",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No spending items available for cleanup.",
+                    },
+                    {
+                        "key": "plans",
+                        "label": "Upcoming Plans",
+                        "item_group": "cleanup_plans",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No upcoming plans available for cleanup.",
+                    },
+                    {
+                        "key": "subscriptions",
+                        "label": "Subscriptions",
+                        "item_group": "cleanup_subscriptions",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No subscriptions available for cleanup.",
+                    },
+                    {
+                        "key": "deliveries",
+                        "label": "Deliveries",
+                        "item_group": "cleanup_deliveries",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No deliveries available for cleanup.",
+                    },
+                    {
+                        "key": "actions",
+                        "label": "Actions",
+                        "item_group": "cleanup_actions",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No action items available for cleanup.",
+                    },
+                    {
+                        "key": "notes",
+                        "label": "Notes",
+                        "item_group": "cleanup_notes",
+                        "selector": False,
+                        "page_size": 30,
+                        "empty_message": "No notes available for cleanup.",
+                    },
+                ],
             },
             {
                 "key": "tools",
