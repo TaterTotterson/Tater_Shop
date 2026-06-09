@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.49"
+__version__ = "1.0.50"
 
 load_dotenv()
 
@@ -4480,6 +4480,13 @@ def _llm_extract_updates(
         "current_profile": profile_snapshot,
         "today": datetime.utcnow().strftime("%Y-%m-%d"),
     }
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    logger.debug(
+        "[personal_core] LLM extraction payload account=%s emails=%s chars=%s",
+        account_id,
+        len(messages_payload),
+        len(payload_text),
+    )
 
     system_prompt = (
         "Extract personal-insight updates from user email messages. Return strict JSON only with this shape:\n"
@@ -4518,7 +4525,7 @@ def _llm_extract_updates(
         return await llm_client.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                {"role": "user", "content": payload_text},
             ],
             temperature=0.1,
         )
@@ -5190,29 +5197,63 @@ def _extract_updates_for_rows(
     settings: Dict[str, Any],
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], str]:
     min_confidence = _as_float(settings.get("min_confidence"), 0.62, minimum=0.0, maximum=1.0)
+    combined: Dict[str, List[Dict[str, Any]]] = {
+        "spending_habits": [],
+        "favorite_places": [],
+        "important_notes": [],
+        "upcoming_events": [],
+        "subscriptions": [],
+        "deliveries": [],
+        "action_items": [],
+    }
+    llm_count = 0
+    heuristic_count = 0
 
-    llm_payload = _llm_extract_updates(
-        llm_client,
-        account_id=account_id,
-        rows=inserted_rows,
-        profile=profile,
-        settings=settings,
-    )
-    if llm_payload is not None:
-        normalized = _normalize_extracted_payload(
-            llm_payload,
-            min_confidence=min_confidence,
-            source_rows=inserted_rows,
+    if len(inserted_rows) > 1:
+        logger.info(
+            "[personal_core] extracting %s new emails one at a time for account=%s",
+            len(inserted_rows),
+            account_id,
         )
-        return normalized, "llm"
 
-    heuristic_payload = _heuristic_extract_updates(inserted_rows)
-    normalized = _normalize_extracted_payload(
-        heuristic_payload,
-        min_confidence=max(0.5, min_confidence - 0.15),
-        source_rows=inserted_rows,
-    )
-    return normalized, "heuristic"
+    for row in inserted_rows:
+        source_rows = [row]
+        llm_payload = _llm_extract_updates(
+            llm_client,
+            account_id=account_id,
+            rows=source_rows,
+            profile=profile,
+            settings=settings,
+        )
+        if llm_payload is not None:
+            normalized = _normalize_extracted_payload(
+                llm_payload,
+                min_confidence=min_confidence,
+                source_rows=source_rows,
+            )
+            llm_count += 1
+        else:
+            heuristic_payload = _heuristic_extract_updates(source_rows)
+            normalized = _normalize_extracted_payload(
+                heuristic_payload,
+                min_confidence=max(0.5, min_confidence - 0.15),
+                source_rows=source_rows,
+            )
+            heuristic_count += 1
+
+        for key in combined:
+            combined[key].extend([item for item in list(normalized.get(key) or []) if isinstance(item, dict)])
+
+    if heuristic_count > 0 and llm_count <= 0:
+        return combined, "heuristic"
+    if heuristic_count > 0:
+        logger.info(
+            "[personal_core] used heuristic fallback for %s/%s emails during extraction for account=%s",
+            heuristic_count,
+            heuristic_count + llm_count,
+            account_id,
+        )
+    return combined, "llm"
 
 
 def _notification_claim_key(account_id: str, kind: str, item_id: str) -> str:
