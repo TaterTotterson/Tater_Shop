@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.50"
+__version__ = "1.0.51"
 
 load_dotenv()
 
@@ -4465,19 +4465,22 @@ def _llm_extract_updates(
             }
         )
 
-    profile_snapshot = {
-        "favorite_places": list(profile.get("favorite_places") or []),
-        "upcoming_events": list(profile.get("upcoming_events") or []),
-        "important_notes": list(profile.get("important_notes") or []),
-        "subscriptions": list(profile.get("subscriptions") or []),
-        "deliveries": list(profile.get("deliveries") or []),
-        "action_items": list(profile.get("action_items") or []),
+    profile_counts = {
+        key: len(list(profile.get(key) or []))
+        for key in (
+            "favorite_places",
+            "upcoming_events",
+            "important_notes",
+            "subscriptions",
+            "deliveries",
+            "action_items",
+        )
     }
 
     payload = {
         "account_id": account_id,
         "emails": messages_payload,
-        "current_profile": profile_snapshot,
+        "current_profile_counts": profile_counts,
         "today": datetime.utcnow().strftime("%Y-%m-%d"),
     }
     payload_text = json.dumps(payload, ensure_ascii=False)
@@ -4707,7 +4710,7 @@ def _normalize_subscription_row(row: Dict[str, Any], *, min_conf: float) -> Opti
     stable = _text(row.get("id"))
     if not stable:
         stable = hashlib.sha1(
-            f"sub|{merchant}|{_text(row.get('plan'))}|{amount:.2f}|{next_charge_at}|{email_id}".encode("utf-8", errors="ignore")
+            f"sub|{_dedupe_token(merchant)}|{_dedupe_token(row.get('plan'))}|{cadence}".encode("utf-8", errors="ignore")
         ).hexdigest()[:24]
 
     return {
@@ -4763,9 +4766,16 @@ def _normalize_delivery_row(row: Dict[str, Any], *, min_conf: float) -> Optional
     email_id = _text(row.get("email_id"))
     stable = _text(row.get("id"))
     if not stable:
-        stable = hashlib.sha1(
-            f"delivery|{carrier}|{tracking_id}|{order_number}|{status}|{eta_at}|{email_id}".encode("utf-8", errors="ignore")
-        ).hexdigest()[:24]
+        dedupe_key = _delivery_dedupe_key(
+            {
+                "carrier": carrier,
+                "tracking_id": tracking_id,
+                "order_number": order_number,
+                "merchant": row.get("merchant"),
+            }
+        )
+        stable_source = dedupe_key or f"delivery|{carrier}|{tracking_id}|{order_number}|{eta_at}|{email_id}"
+        stable = hashlib.sha1(stable_source.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
     return {
         "id": stable,
@@ -4811,7 +4821,7 @@ def _normalize_action_item_row(row: Dict[str, Any], *, min_conf: float) -> Optio
     stable = _text(row.get("id"))
     if not stable:
         stable = hashlib.sha1(
-            f"action|{title}|{kind}|{due_at}|{email_id}".encode("utf-8", errors="ignore")
+            f"action|{_dedupe_token(title)}|{kind}|{due_at[:10]}".encode("utf-8", errors="ignore")
         ).hexdigest()[:24]
 
     return {
@@ -4911,6 +4921,202 @@ def _merge_rows_by_id(existing: List[Dict[str, Any]], incoming: List[Dict[str, A
     ordered = list(rows.values())
     ordered.sort(key=lambda item: _as_float(item.get(sort_key), 0.0), reverse=bool(reverse))
     return ordered[: max(1, int(max_items))]
+
+
+def _dedupe_token(value: Any) -> str:
+    return _slug(_clean_text_blob(value, max_chars=120), default="")
+
+
+def _row_merge_preserving_id(base: Dict[str, Any], update: Dict[str, Any], *, preserve_id: Any = "") -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in update.items():
+        if value not in ("", None, [], {}):
+            merged[key] = value
+    kept_id = _text(preserve_id) or _text(base.get("id"))
+    if kept_id:
+        merged["id"] = kept_id
+    return merged
+
+
+def _subscription_dedupe_key(row: Dict[str, Any]) -> str:
+    merchant = _dedupe_token(row.get("merchant"))
+    if not merchant:
+        return ""
+    plan = _dedupe_token(row.get("plan"))
+    cadence = _slug(row.get("cadence"), default="unknown")
+    return f"subscription|{merchant}|{plan}|{cadence}"
+
+
+def _dedupe_subscriptions(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        key = _subscription_dedupe_key(item)
+        if not key:
+            passthrough.append(item)
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+            continue
+        existing_ts = _as_float(existing.get("next_charge_ts"), 0.0, minimum=0.0)
+        item_ts = _as_float(item.get("next_charge_ts"), 0.0, minimum=0.0)
+        existing_conf = _as_float(existing.get("confidence"), 0.0, minimum=0.0)
+        item_conf = _as_float(item.get("confidence"), 0.0, minimum=0.0)
+        if item_ts > existing_ts or (item_ts == existing_ts and item_conf >= existing_conf):
+            by_key[key] = _row_merge_preserving_id(existing, item)
+        else:
+            by_key[key] = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+
+    out = list(by_key.values()) + passthrough
+    out.sort(key=lambda row: _as_float(row.get("next_charge_ts"), 0.0, minimum=0.0), reverse=True)
+    return out[: max(1, int(max_items))]
+
+
+def _delivery_dedupe_key(row: Dict[str, Any]) -> str:
+    tracking_id = _normalize_tracking_id(row.get("tracking_id"))
+    if tracking_id:
+        return f"delivery|tracking|{tracking_id}"
+    order_number = _normalize_order_number(row.get("order_number"))
+    if order_number:
+        merchant = _dedupe_token(row.get("merchant"))
+        carrier = _dedupe_token(row.get("carrier"))
+        return f"delivery|order|{merchant}|{carrier}|{order_number}"
+    return ""
+
+
+def _delivery_status_rank(value: Any) -> int:
+    status = _slug(value, default="update")
+    return {
+        "update": 0,
+        "label_created": 1,
+        "in_transit": 2,
+        "out_for_delivery": 3,
+        "delivered": 4,
+        "exception": 5,
+    }.get(status, 0)
+
+
+def _dedupe_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = _repair_delivery_row_fields(row)
+        key = _delivery_dedupe_key(item)
+        if not key:
+            passthrough.append(item)
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+            continue
+        existing_rank = _delivery_status_rank(existing.get("status"))
+        item_rank = _delivery_status_rank(item.get("status"))
+        existing_ts = _as_float(existing.get("eta_ts"), 0.0, minimum=0.0)
+        item_ts = _as_float(item.get("eta_ts"), 0.0, minimum=0.0)
+        existing_conf = _as_float(existing.get("confidence"), 0.0, minimum=0.0)
+        item_conf = _as_float(item.get("confidence"), 0.0, minimum=0.0)
+        if (item_rank, item_ts, item_conf) >= (existing_rank, existing_ts, existing_conf):
+            by_key[key] = _row_merge_preserving_id(existing, item)
+        else:
+            by_key[key] = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+
+    out = list(by_key.values()) + passthrough
+    out.sort(
+        key=lambda row: (
+            _as_float(row.get("eta_ts"), 0.0, minimum=0.0),
+            _text(row.get("order_number")),
+            _text(row.get("carrier")),
+            _text(row.get("tracking_id")),
+        ),
+        reverse=True,
+    )
+    return out[: max(1, int(max_items))]
+
+
+def _action_item_dedupe_key(row: Dict[str, Any]) -> str:
+    title = _dedupe_token(row.get("title"))
+    if not title:
+        return ""
+    kind = _slug(row.get("kind"), default="task")
+    due_day = _text(row.get("due_at"))[:10] or (_iso_from_ts(row.get("due_ts"))[:10] if _as_float(row.get("due_ts"), 0.0, minimum=0.0) > 0 else "")
+    return f"action|{title}|{kind}|{due_day}"
+
+
+def _dedupe_action_items(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        key = _action_item_dedupe_key(item)
+        if not key:
+            passthrough.append(item)
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+            continue
+        existing_done = _slug(existing.get("status"), default="open") == "done"
+        item_done = _slug(item.get("status"), default="open") == "done"
+        existing_conf = _as_float(existing.get("confidence"), 0.0, minimum=0.0)
+        item_conf = _as_float(item.get("confidence"), 0.0, minimum=0.0)
+        if item_done or item_conf >= existing_conf:
+            by_key[key] = _row_merge_preserving_id(existing, item)
+        else:
+            by_key[key] = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+
+    out = list(by_key.values()) + passthrough
+    out.sort(
+        key=lambda row: (
+            _as_float(row.get("due_ts"), 0.0, minimum=0.0),
+            _text(row.get("title")),
+        )
+    )
+    return out[: max(1, int(max_items))]
+
+
+def _note_dedupe_key(row: Dict[str, Any]) -> str:
+    title = _dedupe_token(row.get("title"))
+    summary = _dedupe_token(row.get("summary"))
+    if not title and not summary:
+        return ""
+    return f"note|{title}|{summary}"
+
+
+def _dedupe_notes(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        key = _note_dedupe_key(item)
+        if not key:
+            passthrough.append(item)
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+            continue
+        existing_ts = _as_float(existing.get("date_ts"), 0.0, minimum=0.0)
+        item_ts = _as_float(item.get("date_ts"), 0.0, minimum=0.0)
+        existing_conf = _as_float(existing.get("confidence"), 0.0, minimum=0.0)
+        item_conf = _as_float(item.get("confidence"), 0.0, minimum=0.0)
+        if item_ts > existing_ts or (item_ts == existing_ts and item_conf >= existing_conf):
+            by_key[key] = _row_merge_preserving_id(existing, item)
+        else:
+            by_key[key] = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+
+    out = list(by_key.values()) + passthrough
+    out.sort(key=lambda row: _as_float(row.get("date_ts"), 0.0, minimum=0.0), reverse=True)
+    return out[: max(1, int(max_items))]
 
 
 def _rebuild_favorite_places(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -5013,16 +5219,7 @@ def _cleanup_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[D
         if status == "delivered" and eta_ts > 0 and eta_ts < stale_cutoff:
             continue
         kept.append(fixed)
-    kept.sort(
-        key=lambda row: (
-            _as_float(row.get("eta_ts"), 0.0, minimum=0.0),
-            _text(row.get("order_number")),
-            _text(row.get("carrier")),
-            _text(row.get("tracking_id")),
-        ),
-        reverse=True,
-    )
-    return kept[: max(1, int(max_items))]
+    return _dedupe_deliveries(kept, max_items=max_items)
 
 
 def _cleanup_action_items(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
@@ -5036,13 +5233,7 @@ def _cleanup_action_items(rows: List[Dict[str, Any]], *, max_items: int) -> List
         if status == "done" and due_ts > 0 and due_ts < stale_cutoff:
             continue
         kept.append(dict(row))
-    kept.sort(
-        key=lambda row: (
-            _as_float(row.get("due_ts"), 0.0, minimum=0.0),
-            _text(row.get("title")),
-        )
-    )
-    return kept[: max(1, int(max_items))]
+    return _dedupe_action_items(kept, max_items=max_items)
 
 
 def _merge_profile_updates(
@@ -5071,12 +5262,16 @@ def _merge_profile_updates(
 
     notes_existing = list(merged.get("important_notes") or [])
     notes_incoming = list(updates.get("important_notes") or [])
-    merged["important_notes"] = _merge_rows_by_id(
-        notes_existing,
-        notes_incoming,
-        max_items=_as_int(settings.get("max_note_entries"), 300, minimum=20, maximum=3000),
-        sort_key="date_ts",
-        reverse=True,
+    max_note_entries = _as_int(settings.get("max_note_entries"), 300, minimum=20, maximum=3000)
+    merged["important_notes"] = _dedupe_notes(
+        _merge_rows_by_id(
+            notes_existing,
+            notes_incoming,
+            max_items=max_note_entries,
+            sort_key="date_ts",
+            reverse=True,
+        ),
+        max_items=max_note_entries,
     )
 
     events_existing = list(merged.get("upcoming_events") or [])
@@ -5085,7 +5280,7 @@ def _merge_profile_updates(
         events_existing,
         events_incoming,
         max_items=_as_int(settings.get("max_event_entries"), 260, minimum=20, maximum=2000),
-        llm_client=llm_client,
+        llm_client=None,
     )
     events_incoming = accepted_events_incoming
     updates["upcoming_events"] = events_incoming
@@ -5108,12 +5303,15 @@ def _merge_profile_updates(
 
     subscriptions_existing = list(merged.get("subscriptions") or [])
     subscriptions_incoming = list(updates.get("subscriptions") or [])
-    merged["subscriptions"] = _merge_rows_by_id(
-        subscriptions_existing,
-        subscriptions_incoming,
+    merged["subscriptions"] = _dedupe_subscriptions(
+        _merge_rows_by_id(
+            subscriptions_existing,
+            subscriptions_incoming,
+            max_items=300,
+            sort_key="next_charge_ts",
+            reverse=True,
+        ),
         max_items=300,
-        sort_key="next_charge_ts",
-        reverse=True,
     )
 
     deliveries_existing = list(merged.get("deliveries") or [])
@@ -9113,6 +9311,136 @@ def _personal_account_form(account: Dict[str, Any], people_options: List[Dict[st
     return form
 
 
+_PERSONAL_PROFILE_ITEM_FIELDS = {
+    "event": "upcoming_events",
+    "subscription": "subscriptions",
+    "delivery": "deliveries",
+    "action": "action_items",
+    "note": "important_notes",
+}
+
+
+def _profile_item_selector(*, profile_id: Any, item_type: str, item_id: Any) -> str:
+    return f"personal_item:{_text(profile_id)}:{_slug(item_type, default='item')}:{_text(item_id)}"
+
+
+def _parse_profile_item_selector(selector: Any) -> Tuple[str, str, str]:
+    raw = _text(selector)
+    parts = raw.split(":", 3)
+    if len(parts) != 4 or parts[0] != "personal_item":
+        return "", "", ""
+    profile_id = _text(parts[1])
+    item_type = _slug(parts[2], default="")
+    item_id = _text(parts[3])
+    return profile_id, item_type, item_id
+
+
+def _cleanup_item_forms(aggregate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    forms: List[Dict[str, Any]] = []
+
+    def _append(
+        *,
+        item_type: str,
+        row: Dict[str, Any],
+        title: str,
+        subtitle: str,
+        summary_rows: List[Dict[str, Any]],
+    ) -> None:
+        profile_id = _text(row.get("account_id"))
+        item_id = _text(row.get("id"))
+        if not profile_id or not item_id:
+            return
+        forms.append(
+            {
+                "id": _profile_item_selector(profile_id=profile_id, item_type=item_type, item_id=item_id),
+                "title": title,
+                "group": "cleanup",
+                "subtitle": subtitle,
+                "summary_rows": summary_rows + [
+                    {"label": "Profile", "value": profile_id},
+                    {"label": "Item ID", "value": item_id},
+                ],
+                "remove_action": "personal_remove_profile_item",
+                "remove_label": "Delete",
+                "remove_confirm": f"Delete this {item_type} from Personal Core?",
+            }
+        )
+
+    for row in list(aggregate.get("upcoming_events") or [])[:80]:
+        if not isinstance(row, dict):
+            continue
+        _append(
+            item_type="event",
+            row=row,
+            title=_text(row.get("title")) or "Upcoming event",
+            subtitle=f"{_text(row.get('starts_at')) or _iso_from_ts(row.get('starts_ts'))} · {_text(row.get('kind')) or 'event'}",
+            summary_rows=[
+                {"label": "Location", "value": _text(row.get("location")) or "n/a"},
+                {"label": "Person", "value": _text(row.get("person_name")) or "n/a"},
+            ],
+        )
+
+    for row in list(aggregate.get("subscriptions") or [])[:80]:
+        if not isinstance(row, dict):
+            continue
+        _append(
+            item_type="subscription",
+            row=row,
+            title=_text(row.get("merchant")) or "Subscription",
+            subtitle=f"{_text(row.get('cadence')) or 'unknown'} · next {_text(row.get('next_charge_at')) or 'n/a'}",
+            summary_rows=[
+                {"label": "Plan", "value": _text(row.get("plan")) or "n/a"},
+                {"label": "Amount", "value": f"{_text(row.get('currency')) or 'USD'} {_as_float(row.get('amount'), 0.0, minimum=0.0):.2f}"},
+            ],
+        )
+
+    for row in list(aggregate.get("deliveries") or [])[:100]:
+        if not isinstance(row, dict):
+            continue
+        tracking = _text(row.get("tracking_id"))
+        order_number = _text(row.get("order_number"))
+        ref = tracking or (f"order {order_number}" if order_number else "no tracking")
+        _append(
+            item_type="delivery",
+            row=row,
+            title=_text(row.get("item_description")) or _text(row.get("merchant")) or "Delivery",
+            subtitle=f"{_text(row.get('carrier')) or 'carrier n/a'} · {ref}",
+            summary_rows=[
+                {"label": "Status", "value": _text(row.get("status")) or "update"},
+                {"label": "ETA", "value": _text(row.get("eta_at")) or "n/a"},
+            ],
+        )
+
+    for row in list(aggregate.get("action_items") or [])[:80]:
+        if not isinstance(row, dict):
+            continue
+        _append(
+            item_type="action",
+            row=row,
+            title=_text(row.get("title")) or "Action item",
+            subtitle=f"{_text(row.get('kind')) or 'task'} · {_text(row.get('status')) or 'open'}",
+            summary_rows=[
+                {"label": "Due", "value": _text(row.get("due_at")) or "n/a"},
+                {"label": "Summary", "value": _clean_text_blob(row.get("summary"), max_chars=120) or "n/a"},
+            ],
+        )
+
+    for row in list(aggregate.get("important_notes") or [])[:120]:
+        if not isinstance(row, dict):
+            continue
+        _append(
+            item_type="note",
+            row=row,
+            title=_text(row.get("title")) or "Important note",
+            subtitle=f"{_text(row.get('kind')) or 'important'} · {_text(row.get('date_iso')) or _iso_from_ts(row.get('date_ts')) or 'n/a'}",
+            summary_rows=[
+                {"label": "Summary", "value": _clean_text_blob(row.get("summary"), max_chars=180) or "n/a"},
+            ],
+        )
+
+    return forms
+
+
 def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[str, Any]:
     profiles = list(aggregate.get("profiles") or [])
     account_rows = list(aggregate.get("account_rows") or [])
@@ -9670,6 +9998,7 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
             ],
         }
     )
+    forms.extend(_cleanup_item_forms(aggregate))
 
     return {
         "kind": "settings_manager",
@@ -9732,6 +10061,14 @@ def _ui_payload(aggregate: Dict[str, Any], cycle_stats: Dict[str, Any]) -> Dict[
                 "source": "items",
                 "item_group": "notifications",
                 "empty_message": "No notification controls available.",
+            },
+            {
+                "key": "cleanup",
+                "label": "Cleanup",
+                "source": "items",
+                "item_group": "cleanup",
+                "page_size": 30,
+                "empty_message": "No stored Personal Core items available for cleanup.",
             },
             {
                 "key": "tools",
@@ -9884,6 +10221,35 @@ def _remove_profile_event(account_id: str, event_id: str) -> Dict[str, Any]:
     profile["last_updated"] = time.time()
     _save_profile(aid, profile)
     return {"ok": True, "removed": 1}
+
+
+def _remove_profile_item(selector: Any) -> Dict[str, Any]:
+    profile_id, item_type, item_id = _parse_profile_item_selector(selector)
+    if not profile_id:
+        return {"ok": False, "error": "profile id is required."}
+    if not item_type or item_type not in _PERSONAL_PROFILE_ITEM_FIELDS:
+        return {"ok": False, "error": "valid item type is required."}
+    if not item_id:
+        return {"ok": False, "error": "item id is required."}
+
+    field = _PERSONAL_PROFILE_ITEM_FIELDS[item_type]
+    profile = _load_profile(profile_id)
+    rows = list(profile.get(field) or [])
+    next_rows = [row for row in rows if _text((row or {}).get("id")) != item_id]
+    if len(next_rows) == len(rows):
+        return {"ok": False, "error": f"{item_type.title()} item not found."}
+
+    profile[field] = next_rows
+    profile = _refresh_profile_stats(profile)
+    profile["last_updated"] = time.time()
+    _save_profile(profile_id, profile)
+    return {
+        "ok": True,
+        "removed": 1,
+        "profile_id": profile_id,
+        "item_type": item_type,
+        "item_id": item_id,
+    }
 
 
 def _run_ui_tool_action(
@@ -10351,6 +10717,16 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if not bool(result.get("ok")):
             raise ValueError(_text(result.get("error")) or "Could not remove event.")
         return {"ok": True, "message": "Event removed."}
+
+    if action_name == "personal_remove_profile_item":
+        result = _remove_profile_item(_value("id"))
+        if not bool(result.get("ok")):
+            raise ValueError(_text(result.get("error")) or "Could not remove item.")
+        return {
+            "ok": True,
+            "message": f"Deleted {_text(result.get('item_type')) or 'item'}.",
+            "data": result,
+        }
 
     if action_name == "personal_wipe_all":
         if _text(_value("confirm_text")).upper() != "WIPE":
