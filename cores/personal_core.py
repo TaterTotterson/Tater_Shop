@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.52"
+__version__ = "1.0.53"
 
 load_dotenv()
 
@@ -5251,10 +5251,29 @@ def _merge_profile_updates(
     merged = dict(profile)
 
     spending_existing = list(merged.get("spending_habits") or [])
-    spending_incoming = list(updates.get("spending_habits") or [])
+    spending_incoming_all = list(updates.get("spending_habits") or [])
+    spending_existing_ids = {_text(row.get("id")) for row in spending_existing if isinstance(row, dict) and _text(row.get("id"))}
+    spending_existing_claims = {
+        claim_id
+        for row in spending_existing
+        if isinstance(row, dict)
+        for claim_id in _notification_claim_ids_for_row("spending", row)
+    }
+    spending_incoming = []
+    for row in spending_incoming_all:
+        if not isinstance(row, dict):
+            continue
+        row_id = _text(row.get("id"))
+        row_claims = set(_notification_claim_ids_for_row("spending", row))
+        if row_id and row_id in spending_existing_ids:
+            continue
+        if row_claims and row_claims & spending_existing_claims:
+            continue
+        spending_incoming.append(row)
+    updates["spending_habits"] = spending_incoming
     merged["spending_habits"] = _merge_rows_by_id(
         spending_existing,
-        spending_incoming,
+        spending_incoming_all,
         max_items=_as_int(settings.get("max_spending_entries"), 600, minimum=20, maximum=5000),
         sort_key="observed_ts",
         reverse=True,
@@ -5315,10 +5334,38 @@ def _merge_profile_updates(
     )
 
     deliveries_existing = list(merged.get("deliveries") or [])
-    deliveries_incoming = list(updates.get("deliveries") or [])
+    deliveries_incoming_all = list(updates.get("deliveries") or [])
+    deliveries_existing_ids = {_text(row.get("id")) for row in deliveries_existing if isinstance(row, dict) and _text(row.get("id"))}
+    deliveries_existing_keys = {
+        _delivery_dedupe_key(_repair_delivery_row_fields(row))
+        for row in deliveries_existing
+        if isinstance(row, dict)
+    }
+    deliveries_existing_keys.discard("")
+    deliveries_existing_claims = {
+        claim_id
+        for row in deliveries_existing
+        if isinstance(row, dict)
+        for claim_id in _notification_claim_ids_for_row("deliveries", row)
+    }
+    deliveries_incoming = []
+    for row in deliveries_incoming_all:
+        if not isinstance(row, dict):
+            continue
+        row_id = _text(row.get("id"))
+        row_key = _delivery_dedupe_key(_repair_delivery_row_fields(row))
+        row_claims = set(_notification_claim_ids_for_row("deliveries", row))
+        if row_id and row_id in deliveries_existing_ids:
+            continue
+        if row_key and row_key in deliveries_existing_keys:
+            continue
+        if row_claims and row_claims & deliveries_existing_claims:
+            continue
+        deliveries_incoming.append(row)
+    updates["deliveries"] = deliveries_incoming
     merged_deliveries = _merge_rows_by_id(
         deliveries_existing,
-        deliveries_incoming,
+        deliveries_incoming_all,
         max_items=500,
         sort_key="eta_ts",
         reverse=True,
@@ -5463,24 +5510,110 @@ def _notification_claim_key(account_id: str, kind: str, item_id: str) -> str:
     )
 
 
-def _claim_notification_once(*, account_id: str, kind: str, item_id: str, ttl_seconds: int = 90 * 86400) -> Tuple[bool, str]:
-    key = _notification_claim_key(account_id, kind, item_id)
+def _notification_claim_ids_for_row(kind: str, row: Dict[str, Any]) -> List[str]:
+    kind_token = _slug(kind, default="update")
+    item = row if isinstance(row, dict) else {}
+    ids: List[str] = []
+
+    def _add(value: Any) -> None:
+        token = _text(value)
+        if token and token not in ids:
+            ids.append(token)
+
+    _add(item.get("id"))
+
+    if kind_token == "deliveries":
+        fixed = _repair_delivery_row_fields(item)
+        carrier = _text(fixed.get("carrier"))
+        tracking_id = _normalize_tracking_id(fixed.get("tracking_id"))
+        order_number = _normalize_order_number(fixed.get("order_number"))
+        status = _slug(fixed.get("status"), default="update")
+        eta_at = _text(fixed.get("eta_at"))
+        email_id = _text(fixed.get("email_id"))
+
+        legacy_source = f"delivery|{carrier}|{tracking_id}|{order_number}|{status}|{eta_at}|{email_id}"
+        _add(hashlib.sha1(legacy_source.encode("utf-8", errors="ignore")).hexdigest()[:24])
+
+        dedupe_key = _delivery_dedupe_key(fixed)
+        if dedupe_key:
+            _add(f"semantic:{hashlib.sha1(dedupe_key.encode('utf-8', errors='ignore')).hexdigest()[:24]}")
+        if tracking_id:
+            _add(f"tracking:{tracking_id}")
+        if order_number:
+            merchant = _dedupe_token(fixed.get("merchant"))
+            _add(f"order:{merchant}:{_dedupe_token(carrier)}:{order_number}")
+
+    elif kind_token == "spending":
+        merchant = _dedupe_token(item.get("merchant"))
+        amount = _as_float(item.get("amount"), 0.0, minimum=0.0)
+        observed_day = (_text(item.get("observed_at")) or _iso_from_ts(item.get("observed_ts")))[:10]
+        if merchant and amount > 0:
+            semantic = f"spending|{merchant}|{amount:.2f}|{observed_day}"
+            _add(f"semantic:{hashlib.sha1(semantic.encode('utf-8', errors='ignore')).hexdigest()[:24]}")
+
+    elif kind_token == "plans":
+        title = _dedupe_token(item.get("title"))
+        starts_at = _text(item.get("starts_at")) or _iso_from_ts(item.get("starts_ts"))
+        starts_key = starts_at[:16]
+        event_kind = _slug(item.get("kind"), default="event")
+        location = _dedupe_token(item.get("location"))
+        if title and starts_key:
+            semantic = f"plan|{title}|{starts_key}|{event_kind}|{location}"
+            _add(f"semantic:{hashlib.sha1(semantic.encode('utf-8', errors='ignore')).hexdigest()[:24]}")
+
+    return ids
+
+
+def _claim_notification_once(
+    *,
+    account_id: str,
+    kind: str,
+    item_id: str,
+    item_ids: Optional[List[str]] = None,
+    ttl_seconds: int = 0,
+) -> Tuple[bool, List[str]]:
+    ids: List[str] = []
+    for raw_id in [item_id] + list(item_ids or []):
+        token = _text(raw_id)
+        if token and token not in ids:
+            ids.append(token)
+    if not ids:
+        ids = ["unknown"]
+
+    keys = [_notification_claim_key(account_id, kind, token) for token in ids]
     try:
-        claimed = redis_client.set(key, "1", nx=True, ex=max(60, int(ttl_seconds)))
-        return bool(claimed), key
+        already_claimed = any(bool(redis_client.exists(key)) for key in keys)
+        if already_claimed:
+            for key in keys:
+                redis_client.set(key, "1")
+            return False, keys
+        primary_key = keys[0]
+        if ttl_seconds and ttl_seconds > 0:
+            claimed = redis_client.set(primary_key, "1", nx=True, ex=max(60, int(ttl_seconds)))
+        else:
+            claimed = redis_client.set(primary_key, "1", nx=True)
+        if not claimed:
+            for key in keys:
+                redis_client.set(key, "1")
+            return False, keys
+        for key in keys[1:]:
+            redis_client.set(key, "1")
+        return True, keys
     except Exception:
         # Fail open for notifier reliability if Redis writes fail unexpectedly.
-        return True, key
+        return True, keys
 
 
-def _release_notification_claim(claim_key: str) -> None:
-    key = _text(claim_key)
-    if not key:
-        return
-    try:
-        redis_client.delete(key)
-    except Exception:
-        pass
+def _release_notification_claim(claim_key: Any) -> None:
+    keys = claim_key if isinstance(claim_key, list) else [claim_key]
+    for raw_key in keys:
+        key = _text(raw_key)
+        if not key:
+            continue
+        try:
+            redis_client.delete(key)
+        except Exception:
+            pass
 
 
 def _delivery_status_text(status: Any) -> str:
@@ -5530,6 +5663,7 @@ def _notification_candidates_from_updates(
                 {
                     "kind": "deliveries",
                     "id": row_id,
+                    "claim_ids": _notification_claim_ids_for_row("deliveries", row),
                     "title": "Personal update: delivery",
                     "message": message,
                     "rewrite_context": {
@@ -5562,6 +5696,7 @@ def _notification_candidates_from_updates(
                 {
                     "kind": "spending",
                     "id": row_id,
+                    "claim_ids": _notification_claim_ids_for_row("spending", row),
                     "title": "Personal update: spending",
                     "message": message,
                     "rewrite_context": {
@@ -5591,6 +5726,7 @@ def _notification_candidates_from_updates(
                 {
                     "kind": "plans",
                     "id": row_id,
+                    "claim_ids": _notification_claim_ids_for_row("plans", row),
                     "title": "Personal update: upcoming plan",
                     "message": message,
                     "rewrite_context": {
@@ -5969,7 +6105,13 @@ def _send_new_update_notifications(
         row_id = _text(row.get("id"))
         if not row_id:
             continue
-        claimed, claim_key = _claim_notification_once(account_id=account_id, kind=kind, item_id=row_id)
+        claim_ids = list(row.get("claim_ids") or []) if isinstance(row.get("claim_ids"), list) else []
+        claimed, claim_key = _claim_notification_once(
+            account_id=account_id,
+            kind=kind,
+            item_id=row_id,
+            item_ids=claim_ids,
+        )
         if not claimed:
             continue
 
