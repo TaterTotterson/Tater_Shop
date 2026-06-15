@@ -33,14 +33,14 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
     _shared_normalize_hydra_llm_provider = None
     _shared_describe_image_with_local_llm = None
     _shared_resolve_hydra_base_servers = None
-from notify import dispatch_notification
+from notify import dispatch_notification, notifier_destination_catalog
 from speech_settings import get_speech_settings as get_shared_speech_settings
 from speech_tts import speak_announcement_targets
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.5"
+__version__ = "3.4.6"
 
 load_dotenv()
 
@@ -868,6 +868,11 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
         if not trigger_entities:
             trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
+        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
+        notification_targets = _normalize_notification_targets(
+            raw.get("notification_targets") or raw.get("notification_destinations"),
+            device_services=legacy_device_services,
+        )
         base.update(
             {
                 "camera_entity": _text(raw.get("camera_entity")),
@@ -887,7 +892,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 "priority": "high"
                 if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
                 else "normal",
-                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
+                "notification_targets": notification_targets,
                 "display_notifications": _bool(raw.get("display_notifications"), False),
                 "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
@@ -899,6 +905,11 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
         if not trigger_entities:
             trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
+        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
+        notification_targets = _normalize_notification_targets(
+            raw.get("notification_targets") or raw.get("notification_destinations"),
+            device_services=legacy_device_services,
+        )
         provider_token = _concrete_rule_provider({**raw, "provider": base.get("provider")})
         if provider_token == "unifi_protect" and camera_entity:
             camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
@@ -933,7 +944,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), True),
-                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
+                "notification_targets": notification_targets,
                 "display_notifications": _bool(raw.get("display_notifications"), False),
                 "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
@@ -951,6 +963,11 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         if sensor_type not in {"door", "window", "garage"}:
             sensor_type = "door"
         area_value = _text(raw.get("area"))
+        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
+        notification_targets = _normalize_notification_targets(
+            raw.get("notification_targets") or raw.get("notification_destinations"),
+            device_services=legacy_device_services,
+        )
         base.update(
             {
                 "sensor_entity": trigger_entities[0] if trigger_entities else sensor_entity,
@@ -966,7 +983,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
                 if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
                 else "normal",
                 "notifications": _bool(raw.get("notifications"), False),
-                "device_services": _normalize_device_services(raw.get("device_services") or raw.get("device_service")),
+                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
+                "notification_targets": notification_targets,
                 "display_notifications": _bool(raw.get("display_notifications"), False),
                 "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
             }
@@ -1783,6 +1801,120 @@ def _normalize_device_services(raw: Any) -> List[str]:
     return out
 
 
+def _notification_clean_targets_dict(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        token = _text(key)
+        if not token:
+            continue
+        if isinstance(value, bool):
+            out[token] = bool(value)
+            continue
+        text = _text(value)
+        if text:
+            out[token] = text
+    return out
+
+
+def _notification_target_entry(platform: Any, targets: Any = None) -> Dict[str, Any]:
+    platform_name = _text(platform).lower()
+    if not platform_name:
+        return {}
+    return {
+        "platform": platform_name,
+        "targets": _notification_clean_targets_dict(targets),
+    }
+
+
+def _notification_encode_destination(platform: Any, targets: Any = None) -> str:
+    entry = _notification_target_entry(platform, targets)
+    if not entry:
+        return ""
+    try:
+        return json.dumps(entry, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return ""
+
+
+def _notification_decode_destination(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        entry = _notification_target_entry(raw.get("platform"), raw.get("targets"))
+        if entry:
+            return entry
+        service = _normalize_device_service(raw.get("device_service"))
+        return _notification_target_entry("homeassistant", {"device_service": service}) if service else {}
+    value = _text(raw)
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        service = _normalize_device_service(value)
+        return _notification_target_entry("homeassistant", {"device_service": service}) if service else {}
+    if not isinstance(parsed, dict):
+        return {}
+    return _notification_target_entry(parsed.get("platform"), parsed.get("targets"))
+
+
+def _normalize_notification_targets(raw: Any, *, device_services: Any = None) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    raw_items: List[Any]
+    if isinstance(raw, (list, tuple, set)):
+        raw_items = list(raw)
+    elif isinstance(raw, dict):
+        raw_items = [raw]
+    elif raw in (None, ""):
+        raw_items = []
+    else:
+        raw_text = _text(raw)
+        raw_items = [raw_text] if raw_text.startswith("{") and raw_text.endswith("}") else _normalize_players(raw)
+
+    for item in raw_items:
+        entry = _notification_decode_destination(item)
+        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(entry)
+
+    if not out:
+        for service in _normalize_device_services(device_services):
+            entry = _notification_target_entry("homeassistant", {"device_service": service})
+            value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(entry)
+    return out
+
+
+def _notification_target_values(raw: Any, *, device_services: Any = None) -> List[str]:
+    out: List[str] = []
+    for entry in _normalize_notification_targets(raw, device_services=device_services):
+        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
+        if value:
+            out.append(value)
+    return out
+
+
+def _device_services_from_notification_targets(raw: Any) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for entry in _normalize_notification_targets(raw):
+        if _text(entry.get("platform")).lower() != "homeassistant":
+            continue
+        service = _normalize_device_service((entry.get("targets") or {}).get("device_service"))
+        if not service or service in seen:
+            continue
+        seen.add(service)
+        out.append(service)
+    return out
+
+
 def _normalize_display_target(raw: Any) -> str:
     token = _text(raw)
     if not token:
@@ -2152,18 +2284,37 @@ async def _notify_homeassistant(
     device_services: Any,
     origin: Dict[str, Any],
 ) -> Dict[str, Any]:
-    services = _normalize_device_services(device_services)
-    if not services:
+    return await _notify_destinations(
+        title=title,
+        message=message,
+        priority=priority,
+        notification_targets=[],
+        device_services=device_services,
+        origin=origin,
+    )
+
+
+async def _notify_destinations(
+    *,
+    title: str,
+    message: str,
+    priority: str,
+    notification_targets: Any,
+    device_services: Any = None,
+    origin: Dict[str, Any],
+) -> Dict[str, Any]:
+    targets_list = _normalize_notification_targets(notification_targets, device_services=device_services)
+    if not targets_list:
         return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     meta = {"priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal"}
     sent_count = 0
     errors: List[str] = []
 
-    async def _dispatch_once(targets: Dict[str, Any]) -> None:
+    async def _dispatch_once(platform: str, targets: Dict[str, Any]) -> None:
         nonlocal sent_count
         try:
             result = await dispatch_notification(
-                platform="homeassistant",
+                platform=platform,
                 title=title,
                 content=message,
                 targets=targets,
@@ -2177,24 +2328,25 @@ async def _notify_homeassistant(
         if result_text.lower().startswith("queued notification"):
             sent_count += 1
             return
-        errors.append(result_text or "homeassistant notifier returned empty result")
+        errors.append(result_text or f"{platform} notifier returned empty result")
 
     # Keep persistent notifications off in Awareness routing; this path only
-    # targets explicit notify services selected in the rule.
-    for service in services:
-        await _dispatch_once(
-            {
-                "persistent": False,
-                "device_service": service,
-            }
-        )
+    # targets explicit Home Assistant notify services selected in the rule.
+    for entry in targets_list:
+        platform = _text(entry.get("platform")).lower()
+        if not platform:
+            continue
+        targets = dict(entry.get("targets") or {})
+        if platform == "homeassistant":
+            targets.setdefault("persistent", False)
+        await _dispatch_once(platform, targets)
 
     if sent_count > 0:
         result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
         if errors:
             result["warnings"] = errors
         return result
-    return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "homeassistant notifier failed"}
+    return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "notification dispatch failed"}
 
 
 async def _notify_display(
@@ -3370,11 +3522,14 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
 
     notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
-    device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
+    notification_targets = _normalize_notification_targets(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
+    )
     display_enabled = _bool(rule.get("display_notifications"), False)
     display_targets = _normalize_display_targets(rule.get("display_targets") or rule.get("display_target"))
     notification_cooldown_seconds = _as_int(rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400)
-    if device_services or display_enabled:
+    if notification_targets or display_enabled:
         notify_key = _camera_notify_cooldown_key(camera)
         if notification_cooldown_seconds > 0 and not _acquire_cooldown(notify_key, notification_cooldown_seconds):
             notify_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
@@ -3389,12 +3544,12 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 "provider": provider,
                 "trigger_entity": trigger_entity,
             }
-            if device_services:
-                notify_result = await _notify_homeassistant(
+            if notification_targets:
+                notify_result = await _notify_destinations(
                     title=_text(rule.get("title") or "Camera Event"),
                     message=summary,
                     priority=_text(rule.get("priority") or "high"),
-                    device_services=device_services,
+                    notification_targets=notification_targets,
                     origin=origin,
                 )
             if display_enabled:
@@ -3410,7 +3565,7 @@ async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: st
                 )
             if notification_cooldown_seconds > 0:
                 attempted_results = []
-                if device_services:
+                if notification_targets:
                     attempted_results.append(notify_result)
                 if display_enabled:
                     attempted_results.append(display_result)
@@ -3530,12 +3685,15 @@ async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: 
     }
     notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
     if _bool(rule.get("notifications"), True):
-        device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-        notify_result = await _notify_homeassistant(
+        notification_targets = _normalize_notification_targets(
+            rule.get("notification_targets") or rule.get("notification_destinations"),
+            device_services=rule.get("device_services") or rule.get("device_service"),
+        )
+        notify_result = await _notify_destinations(
             title=_text(rule.get("title") or "Doorbell"),
             message=spoken_line,
             priority=_text(rule.get("priority") or "normal"),
-            device_services=device_services,
+            notification_targets=notification_targets,
             origin=origin,
         )
     display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
@@ -3680,12 +3838,15 @@ async def _execute_entry_sensor_rule(
         if not _bool(rule.get("notifications"), False):
             notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
         else:
-            device_services = _normalize_device_services(rule.get("device_services") or rule.get("device_service"))
-            notify_result = await _notify_homeassistant(
+            notification_targets = _normalize_notification_targets(
+                rule.get("notification_targets") or rule.get("notification_destinations"),
+                device_services=rule.get("device_services") or rule.get("device_service"),
+            )
+            notify_result = await _notify_destinations(
                 title=_text(rule.get("title") or "Entry Sensor"),
                 message=summary,
                 priority=_text(rule.get("priority") or "normal"),
-                device_services=device_services,
+                notification_targets=notification_targets,
                 origin=origin,
             )
         if _bool(rule.get("display_notifications"), False):
@@ -4214,6 +4375,121 @@ def _multiselect_choices_from_pairs(
     return out
 
 
+def _notification_destination_catalog(redis_obj: Any) -> Dict[str, Any]:
+    if redis_obj is None:
+        return {"platforms": []}
+    try:
+        payload = notifier_destination_catalog(redis_client=redis_obj, limit=250)
+    except Exception:
+        logger.debug("[awareness] notifier destination catalog failed", exc_info=True)
+        return {"platforms": []}
+    if not isinstance(payload, dict):
+        return {"platforms": []}
+    if not isinstance(payload.get("platforms"), list):
+        payload["platforms"] = []
+    return payload
+
+
+def _notification_catalog_platform_map(catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    rows = catalog.get("platforms") if isinstance(catalog, dict) else []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        platform = _text(row.get("platform")).lower()
+        if platform:
+            out[platform] = row
+    return out
+
+
+def _notification_destination_label(platform: Any, targets: Any) -> str:
+    platform_name = _text(platform).lower()
+    payload = _notification_clean_targets_dict(targets)
+    if platform_name == "discord":
+        channel = _text(payload.get("channel") or payload.get("channel_id"))
+        guild = _text(payload.get("guild") or payload.get("guild_name") or payload.get("guild_id"))
+        if channel and guild:
+            return f"{channel} • {guild}"
+        return channel or guild or "Discord target"
+    if platform_name == "irc":
+        return _text(payload.get("channel")) or "IRC channel"
+    if platform_name == "matrix":
+        return _text(payload.get("room_alias") or payload.get("room_id") or payload.get("channel")) or "Matrix room"
+    if platform_name == "telegram":
+        channel = _text(payload.get("channel"))
+        chat_id = _text(payload.get("chat_id"))
+        if channel and chat_id and channel != chat_id:
+            return f"{channel} • {chat_id}"
+        return channel or chat_id or "Telegram chat"
+    if platform_name == "homeassistant":
+        return _normalize_device_service(payload.get("device_service")) or "Home Assistant defaults"
+    if platform_name == "webui":
+        return "WebUI chat"
+    if platform_name == "macos":
+        scope = _text(payload.get("scope"))
+        device_id = _text(payload.get("device_id"))
+        if scope and device_id:
+            return f"{scope} • {device_id}"
+        return scope or device_id or "macOS target"
+    if platform_name == "little_spud":
+        user = _text(payload.get("user"))
+        device_name = _text(payload.get("device_name"))
+        device_id = _text(payload.get("device_id"))
+        node_id = _text(payload.get("node_id"))
+        if user and device_name:
+            return f"{user} on {device_name}"
+        if user and device_id:
+            return f"{user} on {device_id}"
+        return device_name or device_id or node_id or _text(payload.get("scope")) or "Little Spud"
+    return _text(payload.get("channel") or payload.get("room_id") or payload.get("chat_id") or payload.get("device_id")) or "Destination"
+
+
+def _notification_destination_options(
+    current_targets: Any = None,
+    *,
+    device_services: Any = None,
+    catalog: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    for platform_name, platform_row in _notification_catalog_platform_map(catalog).items():
+        platform_label = _text(platform_row.get("label")) or platform_name
+        requires_target = bool(platform_row.get("requires_target"))
+        if not requires_target:
+            value = _notification_encode_destination(platform_name, {})
+            if value and value not in seen:
+                out.append({"value": value, "label": f"{platform_label}: defaults"})
+                seen.add(value)
+        destinations = platform_row.get("destinations")
+        if not isinstance(destinations, list):
+            continue
+        for row in destinations:
+            if not isinstance(row, dict):
+                continue
+            targets = _notification_clean_targets_dict(row.get("targets"))
+            value = _notification_encode_destination(platform_name, targets)
+            if not value or value in seen:
+                continue
+            label = _text(row.get("label")) or _notification_destination_label(platform_name, targets)
+            out.append({"value": value, "label": f"{platform_label}: {label}"})
+            seen.add(value)
+
+    for entry in _normalize_notification_targets(current_targets, device_services=device_services):
+        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
+        if not value or value in seen:
+            continue
+        platform = _text(entry.get("platform")).lower()
+        platform_row = _notification_catalog_platform_map(catalog).get(platform, {})
+        platform_label = _text(platform_row.get("label")) or platform or "Notifier"
+        label = _notification_destination_label(platform, entry.get("targets"))
+        out.append({"value": value, "label": f"{platform_label}: {label} (current)"})
+        seen.add(value)
+    return out
+
+
 def _players_text(value: Any) -> str:
     return "\n".join(_normalize_players(value))
 
@@ -4504,6 +4780,7 @@ def _entry_sensor_dependency_options(
 def _camera_form(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
+    notification_catalog: Dict[str, Any],
     rules: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     camera_options = _choices_from_pairs(
@@ -4521,9 +4798,14 @@ def _camera_form(
         rules,
         current_value=_text(rule.get("area")),
     )
-    notify_service_options = _multiselect_choices_from_pairs(
-        catalog.get("notify_services") or [],
-        current_values=rule.get("device_services") or rule.get("device_service"),
+    notify_destination_options = _notification_destination_options(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
+        catalog=notification_catalog,
+    )
+    notify_destination_values = _notification_target_values(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
     )
     display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
@@ -4606,11 +4888,12 @@ def _camera_form(
                         "value": _text(rule.get("priority") or "high"),
                     },
                     {
-                        "key": "device_services",
-                        "label": "Phone Notify Services",
+                        "key": "notification_targets",
+                        "label": "Notification Destinations",
                         "type": "multiselect",
-                        "options": notify_service_options,
-                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
+                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
+                        "options": notify_destination_options,
+                        "value": notify_destination_values,
                     },
                     {
                         "key": "display_notifications",
@@ -4635,6 +4918,7 @@ def _camera_form(
 def _doorbell_form(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
+    notification_catalog: Dict[str, Any],
     rules: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     camera_options = _choices_from_pairs(
@@ -4652,9 +4936,14 @@ def _doorbell_form(
         rules,
         current_value=_text(rule.get("area")),
     )
-    notify_service_options = _multiselect_choices_from_pairs(
-        catalog.get("notify_services") or [],
-        current_values=rule.get("device_services") or rule.get("device_service"),
+    notify_destination_options = _notification_destination_options(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
+        catalog=notification_catalog,
+    )
+    notify_destination_values = _notification_target_values(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
     )
     display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
@@ -4726,11 +5015,12 @@ def _doorbell_form(
                         "value": _text(rule.get("priority") or "normal"),
                     },
                     {
-                        "key": "device_services",
-                        "label": "Phone Notify Services",
+                        "key": "notification_targets",
+                        "label": "Notification Destinations",
                         "type": "multiselect",
-                        "options": notify_service_options,
-                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
+                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
+                        "options": notify_destination_options,
+                        "value": notify_destination_values,
                     },
                     {
                         "key": "display_notifications",
@@ -4756,6 +5046,7 @@ def _doorbell_form(
 def _entry_sensor_form(
     rule: Dict[str, Any],
     catalog: Dict[str, List[Tuple[str, str]]],
+    notification_catalog: Dict[str, Any],
     rules: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     camera_options = _choices_from_pairs(
@@ -4775,9 +5066,14 @@ def _entry_sensor_form(
     sensor_type = _text(rule.get("sensor_type") or "door").lower()
     if sensor_type not in {"door", "window", "garage"}:
         sensor_type = "door"
-    notify_service_options = _multiselect_choices_from_pairs(
-        catalog.get("notify_services") or [],
-        current_values=rule.get("device_services") or rule.get("device_service"),
+    notify_destination_options = _notification_destination_options(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
+        catalog=notification_catalog,
+    )
+    notify_destination_values = _notification_target_values(
+        rule.get("notification_targets") or rule.get("notification_destinations"),
+        device_services=rule.get("device_services") or rule.get("device_service"),
     )
     display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
     return {
@@ -4859,11 +5155,12 @@ def _entry_sensor_form(
                         "value": _text(rule.get("priority") or "normal"),
                     },
                     {
-                        "key": "device_services",
-                        "label": "Phone Notify Services",
+                        "key": "notification_targets",
+                        "label": "Notification Destinations",
                         "type": "multiselect",
-                        "options": notify_service_options,
-                        "value": _normalize_device_services(rule.get("device_services") or rule.get("device_service")),
+                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
+                        "options": notify_destination_options,
+                        "value": notify_destination_values,
                     },
                     {
                         "key": "display_notifications",
@@ -4890,6 +5187,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     all_rules = _load_rules(client)
     rules: Dict[str, Dict[str, Any]] = dict(all_rules)
     catalog = _entity_catalog(provider="all")
+    notification_catalog = _notification_destination_catalog(client)
     event_page = _event_page_for_ui(client)
     event_forms = list(event_page.get("items") or [])
     forms: List[Dict[str, Any]] = []
@@ -4899,11 +5197,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     ):
         kind = _text(rule.get("kind")).lower()
         if kind == "camera":
-            forms.append(_camera_form(rule, catalog, rules))
+            forms.append(_camera_form(rule, catalog, notification_catalog, rules))
         elif kind == "doorbell":
-            forms.append(_doorbell_form(rule, catalog, rules))
+            forms.append(_doorbell_form(rule, catalog, notification_catalog, rules))
         elif kind == "entry_sensor":
-            forms.append(_entry_sensor_form(rule, catalog, rules))
+            forms.append(_entry_sensor_form(rule, catalog, notification_catalog, rules))
     all_forms = event_forms + forms
     camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
     area_options = _area_options(rules)
@@ -4924,9 +5222,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         current_type="door",
         current_entity="",
     )
-    notify_service_options = _multiselect_choices_from_pairs(
-        catalog.get("notify_services") or [],
-    )
+    notify_destination_options = _notification_destination_options(catalog=notification_catalog)
     display_target_options = _display_target_options()
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
@@ -5145,10 +5441,11 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": show_camera_or_doorbell_or_entry,
                 },
                 {
-                    "key": "device_services",
-                    "label": "Phone Notify Services",
+                    "key": "notification_targets",
+                    "label": "Notification Destinations",
                     "type": "multiselect",
-                    "options": notify_service_options,
+                    "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
+                    "options": notify_destination_options,
                     "value": [],
                     "show_when": show_camera_or_doorbell_or_entry,
                 },
@@ -5266,12 +5563,26 @@ def _build_rule_from_values(
     trigger_to_state_default = "on" if kind == "camera" else ""
     notifications_default = False if kind == "entry_sensor" else True
     priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
+    notification_targets_present = "notification_targets" in values or "notification_targets" in payload
+    notification_targets_value = _value(
+        values,
+        payload,
+        "notification_targets",
+        previous.get("notification_targets", previous.get("notification_destinations", "")),
+    )
     device_services_value = _value(
         values,
         payload,
         "device_services",
         previous.get("device_services", previous.get("device_service", "")),
     )
+    if notification_targets_present:
+        notification_targets = _normalize_notification_targets(notification_targets_value)
+    else:
+        notification_targets = _normalize_notification_targets(
+            notification_targets_value,
+            device_services=device_services_value,
+        )
     display_targets_value = _value(
         values,
         payload,
@@ -5322,7 +5633,8 @@ def _build_rule_from_values(
             ),
             "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
             "priority": "high" if priority_value in {"critical", "high"} else "normal",
-            "device_services": _normalize_device_services(device_services_value),
+            "device_services": _device_services_from_notification_targets(notification_targets),
+            "notification_targets": notification_targets,
             "display_notifications": _bool(
                 _value(values, payload, "display_notifications", previous.get("display_notifications", False)),
                 False,
