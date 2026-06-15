@@ -32,7 +32,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.38"
+__version__ = "1.0.39"
 
 load_dotenv()
 
@@ -791,10 +791,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
 
 
 # ---- Embedded AI Tasks UI (migrated from webui/webui_ai_tasks.py) ----
-
-_AI_TASKS_UI_DEFAULT_PORTALS = ["homeassistant", "discord", "irc", "matrix", "telegram", "macos"]
-
-
 
 def _ai_tasks_ui_ordinal_day(value: Any) -> str:
     try:
@@ -1584,6 +1580,16 @@ def _ai_tasks_ui_destination_label(platform: str, targets: Dict[str, Any]) -> st
         if scope and device_id:
             return f"{scope} • {device_id}"
         return scope or device_id or "macOS target"
+    if platform_name == "little_spud":
+        user = _ai_tasks_ui_clean_text(payload.get("user"))
+        device_name = _ai_tasks_ui_clean_text(payload.get("device_name"))
+        device_id = _ai_tasks_ui_clean_text(payload.get("device_id"))
+        node_id = _ai_tasks_ui_clean_text(payload.get("node_id"))
+        if user and device_name:
+            return f"{user} on {device_name}"
+        if user and device_id:
+            return f"{user} on {device_id}"
+        return device_name or device_id or node_id or _ai_tasks_ui_clean_text(payload.get("scope")) or "Little Spud"
     return _ai_tasks_ui_target_to_text(platform_name, payload) or "Destination"
 
 
@@ -1732,13 +1738,6 @@ def _ai_tasks_ui_platform_options(
 ) -> List[Dict[str, str]]:
     names: List[str] = []
     labels: Dict[str, str] = {}
-    for token in _AI_TASKS_UI_DEFAULT_PORTALS + ["webui"]:
-        name = _ai_tasks_ui_clean_text(token).lower()
-        if not name:
-            continue
-        if name not in names:
-            names.append(name)
-        labels.setdefault(name, name)
 
     catalog_payload = catalog if isinstance(catalog, dict) else _ai_tasks_ui_load_destination_catalog(redis_obj)
     for platform_name, row in _ai_tasks_ui_catalog_platform_map(catalog_payload).items():
@@ -1848,6 +1847,14 @@ def _ai_tasks_ui_target_to_text(platform: str, targets: Dict[str, Any]) -> str:
         candidates = [payload.get("chat_id")]
     elif platform_name == "homeassistant":
         candidates = [payload.get("device_service")]
+    elif platform_name == "little_spud":
+        candidates = [
+            payload.get("node_id"),
+            payload.get("scope"),
+            payload.get("device_id"),
+            payload.get("device_name"),
+            payload.get("user"),
+        ]
     else:
         candidates = [payload.get("channel"), payload.get("room_id"), payload.get("chat_id")]
 
@@ -1876,6 +1883,13 @@ def _ai_tasks_ui_target_from_text(platform: str, target_text: str) -> Dict[str, 
         return {"chat_id": target}
     if platform_name == "homeassistant":
         return {"device_service": target}
+    if platform_name == "little_spud":
+        if target.startswith("node:"):
+            node_id = target.split(":", 1)[1].strip()
+            return {"node_id": node_id} if node_id else {}
+        if target.startswith(("user:", "session:")):
+            return {"scope": target}
+        return {"node_id": target}
     return {"channel": target}
 
 
@@ -2368,6 +2382,9 @@ def _ai_tasks_kernel_normalize_targets(dest: str, targets: Dict[str, Any]) -> Di
         or out.get("room_id")
         or out.get("chat_id")
         or out.get("device_service")
+        or out.get("node_id")
+        or out.get("scope")
+        or out.get("device_id")
     )
     if channel_ref in (None, ""):
         return out
@@ -2410,6 +2427,15 @@ def _ai_tasks_kernel_normalize_targets(dest: str, targets: Dict[str, Any]) -> Di
         return normalized
     if dest == "irc":
         return {"channel": ref if ref.startswith("#") else f"#{ref}"}
+    if dest == "little_spud":
+        normalized = {}
+        for key in ("node_id", "scope", "device_id", "user", "device_name"):
+            value = str(out.get(key) or "").strip()
+            if value:
+                normalized[key] = value
+        if not (normalized.get("node_id") or normalized.get("scope") or normalized.get("device_id")):
+            normalized["node_id"] = ref
+        return normalized
     return {"channel": ref}
 
 
@@ -2460,6 +2486,17 @@ def _ai_tasks_kernel_origin_targets_for_dest(dest: str, origin: Dict[str, Any]) 
         scope = str(origin_payload.get("scope") or "").strip()
         if scope:
             return {"scope": scope}
+    if dest == "little_spud":
+        out = {}
+        for key in ("node_id", "scope", "device_id"):
+            value = str(origin_payload.get(key) or "").strip()
+            if value:
+                out[key] = value
+        if not out.get("scope"):
+            session_id = str(origin_payload.get("session_id") or "").strip()
+            if session_id:
+                out["scope"] = session_id
+        return out
     return {}
 
 
@@ -2512,6 +2549,14 @@ def _ai_tasks_kernel_catalog_targets_match(
         desired_service = str(desired.get("device_service") or "").strip().lower()
         row_service = str(row.get("device_service") or "").strip().lower()
         return bool(desired_service and row_service and desired_service == row_service)
+
+    if dest == "little_spud":
+        for key in ("node_id", "scope", "device_id"):
+            desired_value = str(desired.get(key) or origin_payload.get(key) or "").strip()
+            row_value = str(row.get(key) or "").strip()
+            if desired_value and row_value:
+                return desired_value == row_value
+        return False
 
     return False
 
@@ -2569,6 +2614,16 @@ def _ai_tasks_kernel_destination_reference(dest: str, targets: Dict[str, Any], o
         return str(payload.get("device_service") or origin_payload.get("device_service") or "").strip()
     if dest == "irc":
         return str(payload.get("channel") or origin_payload.get("channel") or "").strip()
+    if dest == "little_spud":
+        return str(
+            payload.get("node_id")
+            or payload.get("scope")
+            or payload.get("device_id")
+            or origin_payload.get("node_id")
+            or origin_payload.get("scope")
+            or origin_payload.get("device_id")
+            or ""
+        ).strip()
     return str(
         payload.get("channel")
         or payload.get("room_id")
@@ -2634,6 +2689,17 @@ def _ai_tasks_kernel_origin_from_scope(platform: str, scope: str) -> Dict[str, A
     if normalized_platform == "webui":
         if text.startswith(("session:", "user:")):
             out["scope"] = text
+        return out
+
+    if normalized_platform == "little_spud":
+        if text.startswith("node:"):
+            node_id = text.split(":", 1)[1].strip()
+            if node_id:
+                out["node_id"] = node_id
+        elif text.startswith(("session:", "user:")):
+            out["scope"] = text
+        else:
+            out["node_id"] = text
         return out
 
     return out
