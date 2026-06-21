@@ -66,7 +66,7 @@
         "security"
       ],
       "entry": "cores/guardian_core.py",
-      "sha256": "e9e78349d34d888375636e41aa8e9d086205aa3523ea9d49b6b5cf24e3e8c50c"
+      "sha256": "c264db0d43a206755e083999c9199ad00860243b3667ea66d2b39295a2a3c534"
     },
     {
       "id": "memory",
