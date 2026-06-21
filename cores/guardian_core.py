@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import shutil
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -22,13 +25,27 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.7"
+__version__ = "1.3.8"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
 
 logger = logging.getLogger("guardian_core")
 logger.setLevel(logging.INFO)
+
+
+def _subprocess_spawn_kwargs(args: Optional[List[str]] = None) -> Dict[str, Any]:
+    if sys.platform == "darwin":
+        kwargs: Dict[str, Any] = {"close_fds": False}
+        command = list(args or [])
+        if command:
+            executable = os.fspath(command[0])
+            if executable and not os.path.dirname(executable):
+                resolved = shutil.which(executable)
+                if resolved:
+                    kwargs["executable"] = resolved
+        return kwargs
+    return {}
 
 
 CORE_SETTINGS = {
@@ -638,7 +655,14 @@ def _discover_network_integration(settings: Dict[str, Any], now_ts: float) -> Di
 
 def _run_command(args: List[str], timeout: float = 5.0) -> str:
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            **_subprocess_spawn_kwargs(args),
+        )
     except Exception:
         return ""
     if proc.returncode != 0 and not proc.stdout:
