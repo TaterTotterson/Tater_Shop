@@ -1308,6 +1308,134 @@
       "sha256": "a897de888195470593f228e1f1d1764e8d00e3493c3725c0dbe750835c4addb1"
     },
     {
+      "id": "shelly_covers",
+      "name": "Shelly Covers",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control covers, rollers, shades, blinds, and curtains.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Shelly Control",
+      "tags": [
+        "shelly",
+        "cover",
+        "roller",
+        "shade",
+        "blind"
+      ],
+      "entry": "verba/shelly_covers.py",
+      "sha256": "f367e035f0df40e9f98365e5f976b4552387ad6b274402dca8e813da7a372bdb"
+    },
+    {
+      "id": "shelly_lights",
+      "name": "Shelly Lights",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control lights and dimmers.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Shelly Control",
+      "tags": [
+        "shelly",
+        "light"
+      ],
+      "entry": "verba/shelly_lights.py",
+      "sha256": "a22dbfaa7dde65c9f054f89d2f44c938533e9edf5f3267f266f791a4ead0e893"
+    },
+    {
+      "id": "shelly_sensors",
+      "name": "Shelly Sensors",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Read sensor and meter states.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Shelly Control",
+      "tags": [
+        "shelly",
+        "sensor",
+        "binary-sensor",
+        "temperature",
+        "humidity",
+        "power",
+        "energy"
+      ],
+      "entry": "verba/shelly_sensors.py",
+      "sha256": "e04c59456609181d3ae7e26c9d6610ff0d81da1c9da5e498d80d2c6785b8b07c"
+    },
+    {
+      "id": "shelly_switches",
+      "name": "Shelly Switches",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control switches, outlets, smart plugs, relays, and plugged-in devices by name.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Shelly Control",
+      "tags": [
+        "shelly",
+        "switch",
+        "plug",
+        "outlet",
+        "smart-plug",
+        "relay"
+      ],
+      "entry": "verba/shelly_switches.py",
+      "sha256": "4e2ec7200267bc23c6c627b18afdc85ddc586a44b5b9f2df6e4de16d4ea49bc6"
+    },
+    {
       "id": "tater_gits_add_feed",
       "name": "Tater Gits Add Feed",
       "version": "1.0.3",

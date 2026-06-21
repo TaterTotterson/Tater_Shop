@@ -1631,13 +1631,68 @@ def _unifi_sensor_entity(sensor_id: str) -> str:
     return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
 
 
+def _unifi_payload_rows(payload: Any, key: str = "") -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    keys = [token for token in (key, "data", "items", "results", "devices") if token]
+    for item_key in keys:
+        value = payload.get(item_key)
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+        if isinstance(value, dict):
+            return [row for row in value.values() if isinstance(row, dict)]
+    if key:
+        singular = key[:-1] if key.endswith("s") else key
+        value = payload.get(singular)
+        if isinstance(value, dict):
+            return [value]
+    return [payload] if _text(payload.get("id")) else []
+
+
+def _unifi_list_from_integration(resource: str, paths: List[str]) -> List[Dict[str, Any]]:
+    module = _integration_module("unifi_protect")
+    if module is None:
+        return []
+    public_func = getattr(module, f"list_unifi_{resource}", None)
+    if callable(public_func):
+        return _unifi_payload_rows(public_func(), resource)
+    helper = getattr(module, "_list_unifi_rows", None)
+    if callable(helper):
+        return _unifi_payload_rows(helper(resource, paths), resource)
+    return []
+
+
+def _unifi_list_resource(resource: str, paths: List[str]) -> List[Dict[str, Any]]:
+    try:
+        rows = _unifi_list_from_integration(resource, paths)
+        if rows:
+            return rows
+    except Exception:
+        logger.debug("[awareness] UniFi %s discovery via integration module failed", resource, exc_info=True)
+    for path in paths:
+        try:
+            rows = _unifi_payload_rows(_unifi_request("GET", path), resource)
+            if rows:
+                return rows
+        except Exception:
+            logger.debug("[awareness] UniFi %s discovery failed path=%s", resource, path, exc_info=True)
+    return []
+
+
 def _unifi_list_cameras() -> List[Dict[str, Any]]:
-    rows = _unifi_request("GET", "/proxy/protect/integration/v1/cameras")
-    return rows if isinstance(rows, list) else []
+    return _unifi_list_resource(
+        "cameras",
+        ["/proxy/protect/integration/v1/cameras", "/proxy/protect/api/cameras", "/proxy/protect/api/bootstrap"],
+    )
+
 
 def _unifi_list_sensors() -> List[Dict[str, Any]]:
-    rows = _unifi_request("GET", "/proxy/protect/integration/v1/sensors")
-    return rows if isinstance(rows, list) else []
+    return _unifi_list_resource(
+        "sensors",
+        ["/proxy/protect/integration/v1/sensors", "/proxy/protect/api/sensors", "/proxy/protect/api/bootstrap"],
+    )
 
 
 def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:
@@ -4096,15 +4151,22 @@ def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str,
 
 def _unifi_camera_is_doorbell(camera_row: Dict[str, Any]) -> bool:
     name = _text(camera_row.get("name")).lower()
-    model = _text(camera_row.get("modelKey")).lower()
+    model = _text(camera_row.get("modelKey") or camera_row.get("model_key") or camera_row.get("type")).lower()
     hint = f"{name} {model}"
     return "doorbell" in hint or "g4db" in hint or "g5db" in hint
 
 
 def _unifi_sensor_type(sensor_row: Dict[str, Any]) -> str:
     name = _text(sensor_row.get("name")).lower()
-    mount_type = _text(sensor_row.get("mountType")).lower()
-    hint = f"{name} {mount_type}"
+    mount_type = _text(sensor_row.get("mountType") or sensor_row.get("mount_type") or sensor_row.get("mount")).lower()
+    sensor_type = _text(
+        sensor_row.get("sensorType")
+        or sensor_row.get("sensor_type")
+        or sensor_row.get("modelKey")
+        or sensor_row.get("model_key")
+        or sensor_row.get("type")
+    ).lower()
+    hint = f"{name} {mount_type} {sensor_type}"
     if "garage" in hint:
         return "garage"
     if "window" in hint:
