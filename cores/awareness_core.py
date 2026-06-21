@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.7"
+__version__ = "3.4.8"
 
 load_dotenv()
 
@@ -4809,6 +4809,8 @@ def _entry_sensor_dependency_options(
     door_pairs = catalog.get("entry_sensors_door") or all_pairs
     window_pairs = catalog.get("entry_sensors_window") or all_pairs
     garage_pairs = catalog.get("entry_sensors_garage") or []
+    if not _text(current_entity):
+        door_pairs = all_pairs
     placeholder = "(Select door/window/garage sensor)"
     default_options = _choices_from_pairs(
         all_pairs,
