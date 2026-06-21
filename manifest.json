@@ -1281,6 +1281,27 @@
       "sha256": "ccd34d37b8ccdc532a361cea2622f1e1f310fcf0eef5e7abcb0c8b53e1798625"
     },
     {
+      "id": "roon_music",
+      "name": "Roon Music",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Play music on the requesting voice device: songs, artists, albums, genres, playlists, radio, shuffle/random playback, and playback controls.",
+      "portals": [
+        "voice_core"
+      ],
+      "notifier": false,
+      "settings_category": "Roon Control",
+      "tags": [
+        "music",
+        "audio",
+        "media-player",
+        "playback",
+        "roon"
+      ],
+      "entry": "verba/roon_music.py",
+      "sha256": "58b198b883e1d24799baab185112238902c5b00d496e88227c35c820c8ab6ed0"
+    },
+    {
       "id": "sftpgo_account",
       "name": "SFTPGo Account",
       "version": "1.0.3",
