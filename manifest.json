@@ -120,9 +120,26 @@
       "sha256": "c0ba675c8ba780b9add17b5ade82ed324fd815367c5cb20336a4caa75a86bb34"
     },
     {
+      "id": "comfyui_image_edit",
+      "name": "ComfyUI Image Edit",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Edit the most recent image in chat with ComfyUI image-to-image.",
+      "portals": [
+        "webui",
+        "little_spud",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": "ComfyUI Image Edit",
+      "tags": [],
+      "entry": "verba/comfyui_image_edit.py",
+      "sha256": "0faddc8302de2f9cb87dc3259efd49b39070c59270d106b6da4d772d978813ab"
+    },
+    {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "portals": [
@@ -134,7 +151,7 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "verba/comfyui_image_video.py",
-      "sha256": "0bba867d6c5d460dd21df19c006d5a4847876d35ed676e0b8a6af34f87a45445"
+      "sha256": "5ba90c999459de368a3b295cf4c82925b5d2d0ea3e22770a1e86d9bf14399798"
     },
     {
       "id": "comfyui_music_video",

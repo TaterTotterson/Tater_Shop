@@ -8,14 +8,26 @@ import copy
 import logging
 import time
 import uuid
+import base64
+import mimetypes
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from verba_base import ToolVerba
-from helpers import redis_client, get_latest_image_from_history, run_comfy_prompt
+from helpers import redis_client, run_comfy_prompt
+try:
+    from helpers import redis_blob_client
+except Exception:
+    redis_blob_client = redis_client
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("comfyui_image_video")
 logger.setLevel(logging.INFO)
+
+WEBUI_FILE_BLOB_PREFIX = "webui:file:"
+SOURCE_IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+SOURCE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -32,7 +44,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolVerba):
     name = "comfyui_image_video"
     verba_name = "ComfyUI Animate Image"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -73,6 +85,312 @@ class ComfyUIImageVideoPlugin(ToolVerba):
     common_needs = []
     missing_info_prompts = []
 
+
+    @staticmethod
+    def _text(value) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore").strip()
+        return str(value or "").strip()
+
+    @staticmethod
+    def _guess_image_mimetype(binary: bytes) -> str:
+        if binary.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if binary.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if binary.startswith(b"RIFF") and binary[8:12] == b"WEBP":
+            return "image/webp"
+        return ""
+
+    @staticmethod
+    def _image_mimetype_for_payload(payload: dict, filename: str = "") -> str:
+        mimetype = ComfyUIImageVideoPlugin._text(
+            payload.get("mimetype") or payload.get("mime_type") or payload.get("content_type")
+        ).lower()
+        if mimetype:
+            return mimetype
+        guessed = mimetypes.guess_type(filename or ComfyUIImageVideoPlugin._text(payload.get("name")))[0]
+        return ComfyUIImageVideoPlugin._text(guessed).lower()
+
+    @staticmethod
+    def _filename_from_payload(payload: dict, mimetype: str = "") -> str:
+        name = ComfyUIImageVideoPlugin._text(payload.get("name") or payload.get("filename"))
+        if not name:
+            for key in ("path", "file_path", "artifact_path", "url", "uri"):
+                value = ComfyUIImageVideoPlugin._text(payload.get(key))
+                if value:
+                    parsed = urlparse(value)
+                    tail = unquote((parsed.path or value).rstrip("/").rsplit("/", 1)[-1])
+                    if tail:
+                        name = tail
+                        break
+        if not name:
+            name = "input.png"
+
+        root, ext = os.path.splitext(name)
+        if not ext:
+            guessed_ext = mimetypes.guess_extension(mimetype or "") or ".png"
+            name = f"{root or 'input'}{guessed_ext}"
+        return name
+
+    @staticmethod
+    def _looks_like_animation_output(payload: dict, filename: str) -> bool:
+        name = ComfyUIImageVideoPlugin._text(filename or payload.get("name") or payload.get("filename")).lower()
+        mimetype = ComfyUIImageVideoPlugin._text(payload.get("mimetype") or payload.get("mime_type")).lower()
+        artifact_type = ComfyUIImageVideoPlugin._text(payload.get("type")).lower()
+        if artifact_type == "video" or mimetype.startswith("video/"):
+            return True
+        return name.startswith("animated.") or name.startswith("animation.")
+
+    @staticmethod
+    def _is_source_image_payload(payload: dict) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        filename = ComfyUIImageVideoPlugin._filename_from_payload(payload)
+        if ComfyUIImageVideoPlugin._looks_like_animation_output(payload, filename):
+            return False
+        mimetype = ComfyUIImageVideoPlugin._image_mimetype_for_payload(payload, filename)
+        artifact_type = ComfyUIImageVideoPlugin._text(payload.get("type")).lower()
+        ext = os.path.splitext(filename.lower())[1]
+        if mimetype in SOURCE_IMAGE_MIMETYPES:
+            return True
+        if artifact_type == "image" and mimetype.startswith("image/") and mimetype != "image/svg+xml":
+            return True
+        return ext in SOURCE_IMAGE_EXTS
+
+    @staticmethod
+    def _decode_data_url(value: str):
+        text = ComfyUIImageVideoPlugin._text(value)
+        if not text.lower().startswith("data:") or "," not in text:
+            return None, ""
+        header, encoded = text.split(",", 1)
+        if ";base64" not in header.lower():
+            return None, ""
+        mimetype = header[5:].split(";", 1)[0].strip().lower()
+        if mimetype and mimetype not in SOURCE_IMAGE_MIMETYPES:
+            return None, mimetype
+        try:
+            decoded = base64.b64decode("".join(encoded.split()), validate=False)
+        except Exception:
+            return None, mimetype
+        return (bytes(decoded) if decoded else None), mimetype
+
+    @staticmethod
+    def _blob_get(key: str):
+        token = ComfyUIImageVideoPlugin._text(key)
+        if not token:
+            return None
+        for candidate in (token, token.encode("utf-8", errors="ignore")):
+            try:
+                raw = redis_blob_client.get(candidate)
+            except Exception:
+                raw = None
+            if isinstance(raw, (bytes, bytearray)):
+                return bytes(raw)
+        return None
+
+    @staticmethod
+    def _file_id_from_url(value: str) -> str:
+        text = ComfyUIImageVideoPlugin._text(value)
+        if not text:
+            return ""
+        parsed = urlparse(text)
+        parts = [part for part in (parsed.path or "").split("/") if part]
+        for idx, part in enumerate(parts[:-1]):
+            if part == "files" and idx > 0 and parts[idx - 1] in {"chat", "v1"}:
+                return unquote(parts[idx + 1])
+        return ""
+
+    @staticmethod
+    def _read_file_id(file_id: str):
+        token = ComfyUIImageVideoPlugin._text(file_id)
+        if not token:
+            return None
+        if token.startswith(WEBUI_FILE_BLOB_PREFIX):
+            return ComfyUIImageVideoPlugin._blob_get(token)
+        return ComfyUIImageVideoPlugin._blob_get(f"{WEBUI_FILE_BLOB_PREFIX}{token}")
+
+    @staticmethod
+    def _materialize_image_payload(payload: dict):
+        if not isinstance(payload, dict) or not ComfyUIImageVideoPlugin._is_source_image_payload(payload):
+            return None
+
+        filename = ComfyUIImageVideoPlugin._filename_from_payload(payload)
+        mimetype = ComfyUIImageVideoPlugin._image_mimetype_for_payload(payload, filename)
+        binary = None
+
+        for key in ("data_url", "url", "uri", "data"):
+            raw_value = ComfyUIImageVideoPlugin._text(payload.get(key))
+            if raw_value.lower().startswith("data:"):
+                binary, data_mimetype = ComfyUIImageVideoPlugin._decode_data_url(raw_value)
+                if data_mimetype:
+                    mimetype = data_mimetype
+                if binary:
+                    break
+
+        if binary is None:
+            blob_key = ComfyUIImageVideoPlugin._text(payload.get("blob_key"))
+            if blob_key:
+                binary = ComfyUIImageVideoPlugin._blob_get(blob_key)
+
+        if binary is None:
+            file_id = ComfyUIImageVideoPlugin._text(payload.get("file_id") or payload.get("id"))
+            if not file_id:
+                file_id = ComfyUIImageVideoPlugin._file_id_from_url(
+                    payload.get("url") or payload.get("uri") or ""
+                )
+            if file_id:
+                binary = ComfyUIImageVideoPlugin._read_file_id(file_id)
+
+        if binary is None:
+            path_value = ComfyUIImageVideoPlugin._text(
+                payload.get("path") or payload.get("file_path") or payload.get("artifact_path")
+            )
+            if path_value:
+                try:
+                    path = Path(path_value).expanduser()
+                    if path.is_file():
+                        binary = path.read_bytes()
+                        filename = path.name or filename
+                except Exception:
+                    binary = None
+
+        if not binary:
+            return None
+
+        detected_mimetype = ComfyUIImageVideoPlugin._guess_image_mimetype(binary)
+        if detected_mimetype:
+            mimetype = detected_mimetype
+        if mimetype not in SOURCE_IMAGE_MIMETYPES:
+            return None
+        return binary, ComfyUIImageVideoPlugin._filename_from_payload(
+            {"name": filename, "mimetype": mimetype}, mimetype
+        )
+
+    @staticmethod
+    def _payloads_from_context(context, hinted_value: str = ""):
+        if not isinstance(context, dict):
+            return []
+
+        rows = []
+        containers = [context]
+        origin = context.get("origin") if isinstance(context.get("origin"), dict) else None
+        if origin:
+            containers.append(origin)
+
+        for container in containers:
+            for key in ("input_artifacts", "available_artifacts", "attachments"):
+                values = container.get(key)
+                if not isinstance(values, list):
+                    continue
+                for item in values:
+                    if isinstance(item, dict) and ComfyUIImageVideoPlugin._is_source_image_payload(item):
+                        rows.append(item)
+
+        hint = ComfyUIImageVideoPlugin._text(hinted_value).lower()
+        if hint:
+            matched = []
+            for item in rows:
+                tokens = [
+                    item.get("artifact_id"),
+                    item.get("id"),
+                    item.get("file_id"),
+                    item.get("blob_key"),
+                    item.get("name"),
+                    item.get("filename"),
+                    item.get("path"),
+                    item.get("url"),
+                ]
+                if any(ComfyUIImageVideoPlugin._text(token).lower() == hint for token in tokens):
+                    matched.append(item)
+            if matched:
+                return matched
+        return rows
+
+    @staticmethod
+    def _payloads_from_args(args):
+        if not isinstance(args, dict):
+            return []
+        rows = []
+        direct = {}
+        for key in (
+            "artifact_id",
+            "file_id",
+            "id",
+            "blob_key",
+            "url",
+            "uri",
+            "path",
+            "file_path",
+            "artifact_path",
+            "data_url",
+            "mimetype",
+            "mime_type",
+            "name",
+            "filename",
+            "type",
+        ):
+            if args.get(key) not in (None, ""):
+                direct[key] = args.get(key)
+        if direct:
+            rows.append(direct)
+
+        for key in ("image", "source_image", "input_image", "artifact"):
+            value = args.get(key)
+            if isinstance(value, dict):
+                rows.append(value)
+            elif isinstance(value, str) and value.strip():
+                rows.append({"artifact_id": value.strip(), "name": value.strip()})
+        return rows
+
+    @staticmethod
+    def _latest_image_from_chat_history(key: str = "webui:chat_history"):
+        try:
+            history = redis_client.lrange(key, -300, -1)
+        except Exception:
+            history = []
+
+        for entry in reversed(history or []):
+            try:
+                msg = json.loads(entry)
+            except Exception:
+                continue
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, dict) and content.get("marker") == "plugin_response":
+                content = content.get("content", {})
+
+            candidates = []
+            if isinstance(content, dict):
+                candidates.append(content)
+                artifacts = content.get("artifacts")
+                if isinstance(artifacts, list):
+                    candidates.extend([item for item in artifacts if isinstance(item, dict)])
+            elif isinstance(content, list):
+                candidates.extend([item for item in content if isinstance(item, dict)])
+
+            for payload in candidates:
+                resolved = ComfyUIImageVideoPlugin._materialize_image_payload(payload)
+                if resolved:
+                    return resolved
+        return None, None
+
+    @staticmethod
+    def _resolve_source_image(args, context=None):
+        args = args or {}
+        hinted = ComfyUIImageVideoPlugin._text(
+            args.get("artifact_id")
+            or args.get("image")
+            or args.get("source_image")
+            or args.get("input_image")
+        )
+        for payload in (
+            ComfyUIImageVideoPlugin._payloads_from_args(args)
+            + ComfyUIImageVideoPlugin._payloads_from_context(context, hinted_value=hinted)
+        ):
+            resolved = ComfyUIImageVideoPlugin._materialize_image_payload(payload)
+            if resolved:
+                return resolved
+        return ComfyUIImageVideoPlugin._latest_image_from_chat_history("webui:chat_history")
 
     # ---------------------------
     # URL helpers
@@ -506,19 +824,19 @@ class ComfyUIImageVideoPlugin(ToolVerba):
     # ---------------------------
     # Orchestration
     # ---------------------------
-    async def _generate(self, args, llm_client):
+    async def _generate(self, args, llm_client, context=None):
         args = args or {}
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             prompt = "subtle natural motion, smooth cinematic movement"
-        image_bytes, filename = get_latest_image_from_history("webui:chat_history")
+        image_bytes, filename = self._resolve_source_image(args, context=context)
 
         if not image_bytes:
             return action_failure(
                 code="missing_source_image",
-                message="No image found. Upload one or generate one first.",
+                message="No recent image file was found. Upload or generate an image first, then ask to animate it.",
                 needs=["Provide or generate an image before requesting animation."],
-                say_hint="Explain that no source image is available yet.",
+                say_hint="Explain that no source image is available yet, or the prior image file may have expired.",
             )
 
         try:
@@ -612,18 +930,15 @@ class ComfyUIImageVideoPlugin(ToolVerba):
         )
 
     # --- WebUI Handler ---
-    async def handle_webui(self, args, llm_client):
-        return await self._generate(args or {}, llm_client)
+    async def handle_webui(self, args, llm_client, context=None):
+        return await self._generate(args or {}, llm_client, context=context)
 
     async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        return await self.handle_webui(args or {}, llm_client)
+        return await self.handle_webui(args or {}, llm_client, context=context)
 
 
     async def handle_macos(self, args, llm_client, context=None):
-        try:
-            return await self.handle_webui(args, llm_client, context=context)
-        except TypeError:
-            return await self.handle_webui(args, llm_client)
+        return await self.handle_webui(args or {}, llm_client, context=context)
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return action_failure(
             code="unsupported_platform",
