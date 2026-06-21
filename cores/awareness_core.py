@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.8"
+__version__ = "3.4.9"
 
 load_dotenv()
 
@@ -136,6 +136,7 @@ _EXEC_QUEUE_KEY = "awareness:exec_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
 _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
+_ENTITY_CATALOG_CACHE_PREFIX = "awareness:entity_catalog_cache:"
 _DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 _FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 _S3BOX_FIRMWARE_PROFILE_KEY = "template:s3box_display"
@@ -3962,7 +3963,67 @@ def _empty_entity_catalog() -> Dict[str, List[Tuple[str, str]]]:
     }
 
 
-def _cached_catalog(provider: str, *, force_refresh: bool = False) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+def _entity_catalog_cache_key(provider: str) -> str:
+    return f"{_ENTITY_CATALOG_CACHE_PREFIX}{_normalize_event_provider(provider)}"
+
+
+def _coerce_cached_catalog_payload(payload: Any) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+    source = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    if not isinstance(source, dict):
+        return None
+    catalog = _empty_entity_catalog()
+    found = False
+    for key in catalog:
+        rows = source.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            value = ""
+            label = ""
+            if isinstance(row, dict):
+                value = _text(row.get("value") or row.get("id") or row.get("entity_id"))
+                label = _text(row.get("label") or row.get("name"))
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                value = _text(row[0])
+                label = _text(row[1])
+            if not value:
+                continue
+            catalog[key].append((value, label or value))
+            found = True
+    return catalog if found else None
+
+
+def _redis_cached_catalog(provider: str, *, ttl: int, allow_stale: bool = False) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+    redis_obj = redis_client
+    if redis_obj is None:
+        return None
+    try:
+        payload = _redis_json_object(redis_obj.get(_entity_catalog_cache_key(provider)))
+    except Exception:
+        return None
+    if not payload:
+        return None
+    ts = _as_float(payload.get("ts"), 0.0)
+    if not allow_stale and (ts + ttl) <= time.time():
+        return None
+    catalog = _coerce_cached_catalog_payload(payload)
+    if catalog is None:
+        return None
+    key = _normalize_event_provider(provider)
+    with _ENTITY_CACHE_LOCK:
+        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
+        bucket["ts"] = ts or time.time()
+        bucket["data"] = catalog
+        _ENTITY_CACHE[key] = bucket
+    return catalog
+
+
+def _cached_catalog(
+    provider: str,
+    *,
+    force_refresh: bool = False,
+    allow_stale: bool = False,
+) -> Optional[Dict[str, List[Tuple[str, str]]]]:
     cache_ttl = _setting_int(redis_client, "entity_catalog_ttl_sec", 30, minimum=5, maximum=600)
     now_ts = time.time()
     key = _normalize_event_provider(provider)
@@ -3971,11 +4032,15 @@ def _cached_catalog(provider: str, *, force_refresh: bool = False) -> Optional[D
         _ENTITY_CACHE[key] = bucket
         if force_refresh:
             return None
-        if (_as_float(bucket.get("ts"), 0.0) + cache_ttl) <= now_ts:
-            return None
         data = bucket.get("data")
-        if isinstance(data, dict) and data:
+        expired = (_as_float(bucket.get("ts"), 0.0) + cache_ttl) <= now_ts
+        if expired:
+            if allow_stale and isinstance(data, dict) and data:
+                return data
+        elif isinstance(data, dict) and data:
             return data
+    if not force_refresh:
+        return _redis_cached_catalog(key, ttl=cache_ttl, allow_stale=allow_stale)
     return None
 
 
@@ -3986,6 +4051,15 @@ def _set_cached_catalog(provider: str, catalog: Dict[str, List[Tuple[str, str]]]
         bucket["ts"] = time.time()
         bucket["data"] = catalog
         _ENTITY_CACHE[key] = bucket
+    redis_obj = redis_client
+    if redis_obj is not None:
+        try:
+            redis_obj.set(
+                _entity_catalog_cache_key(key),
+                json.dumps({"ts": time.time(), "data": catalog}, default=str),
+            )
+        except Exception:
+            logger.debug("[awareness] failed to persist entity catalog cache for %s", key, exc_info=True)
 
 
 def _stale_cached_catalog(provider: str) -> Optional[Dict[str, List[Tuple[str, str]]]]:
@@ -4364,7 +4438,7 @@ def _integration_devices_catalog(provider_filter: Optional[str] = None) -> Dict[
 
 
 def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
-    cached = _cached_catalog("all", force_refresh=force_refresh)
+    cached = _cached_catalog("all", force_refresh=force_refresh, allow_stale=not force_refresh)
     if cached is not None:
         return cached
     catalog = _empty_entity_catalog()
