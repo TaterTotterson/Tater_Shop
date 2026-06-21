@@ -46,11 +46,11 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageEditPlugin(ToolVerba):
     name = "comfyui_image_edit"
     verba_name = "ComfyUI Image Edit"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
-    usage = '{"function":"comfyui_image_edit","arguments":{"prompt":"<Describe the edit to apply to the latest image>"}}'
-    description = "Edits the most recent image in chat using a ComfyUI image-to-image workflow."
-    verba_dec = "Edit the most recent image in chat with ComfyUI image-to-image."
+    usage = '{"function":"comfyui_image_edit","arguments":{"prompt":"<Specific edit instruction for the existing/latest image, e.g. make the woman have red hair>","artifact_id":"<Optional exact artifact_id/image reference if the user points to a specific image>"}}'
+    description = "Use this when the user wants to edit or transform an existing image from the chat, not create a new image from scratch. It changes the latest or referenced image with instructions like change hair color, replace an object, add or remove details, restyle the image, or keep the scene but alter part of it."
+    verba_dec = "Edit or transform the latest/referenced image in chat with ComfyUI image-to-image."
     pretty_name = "Editing Your Image"
     settings_category = "ComfyUI Image Edit"
     required_settings = {
@@ -70,8 +70,8 @@ class ComfyUIImageEditPlugin(ToolVerba):
     }
     waiting_prompt_template = "Write a short, friendly message saying you’re editing their image now. Only output that message."
     platforms = ["webui", "little_spud", "macos"]
-    when_to_use = ""
-    common_needs = []
+    when_to_use = "Use for requests that refer to an existing image and ask to change it, such as edit this image, make her hair red, replace the cat with a dog, remove the background, add sunglasses, or restyle that picture."
+    common_needs = ["edit image", "change image", "image to image", "modify photo", "replace object", "change hair color", "restyle image"]
     missing_info_prompts = []
 
     @staticmethod

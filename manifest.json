@@ -102,9 +102,9 @@
     {
       "id": "comfyui_image_edit",
       "name": "ComfyUI Image Edit",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
-      "description": "Edit the most recent image in chat with ComfyUI image-to-image.",
+      "description": "Edit or transform the latest/referenced image in chat with ComfyUI image-to-image.",
       "portals": [
         "webui",
         "little_spud",
@@ -114,7 +114,7 @@
       "settings_category": "ComfyUI Image Edit",
       "tags": [],
       "entry": "verba/comfyui_image_edit.py",
-      "sha256": "0faddc8302de2f9cb87dc3259efd49b39070c59270d106b6da4d772d978813ab"
+      "sha256": "84a7d1e3bd850d704b90817f67e5319df02a2770daf8a1d3bd2251336c12c080"
     },
     {
       "id": "comfyui_image_plugin",
