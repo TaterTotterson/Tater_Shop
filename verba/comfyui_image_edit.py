@@ -46,7 +46,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageEditPlugin(ToolVerba):
     name = "comfyui_image_edit"
     verba_name = "ComfyUI Image Edit"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_edit","arguments":{"prompt":"<Specific edit instruction for the existing/latest image, e.g. make the woman have red hair>","artifact_id":"<Optional exact artifact_id/image reference if the user points to a specific image>"}}'
     description = "Use this when the user wants to edit or transform an existing image from the chat, not create a new image from scratch. It changes the latest or referenced image with instructions like change hair color, replace an object, add or remove details, restyle the image, or keep the scene but alter part of it."
@@ -69,7 +69,7 @@ class ComfyUIImageEditPlugin(ToolVerba):
         },
     }
     waiting_prompt_template = "Write a short, friendly message saying you’re editing their image now. Only output that message."
-    platforms = ["webui", "little_spud", "macos"]
+    platforms = ["discord", "webui", "little_spud", "macos", "matrix", "telegram"]
     when_to_use = "Use for requests that refer to an existing image and ask to change it, such as edit this image, make her hair red, replace the cat with a dog, remove the background, add sunglasses, or restyle that picture."
     common_needs = ["edit image", "change image", "image to image", "modify photo", "replace object", "change hair color", "restyle image"]
     missing_info_prompts = []
@@ -361,6 +361,42 @@ class ComfyUIImageEditPlugin(ToolVerba):
         return None, None
 
     @staticmethod
+    def _history_keys_from_context(context):
+        keys = []
+
+        def add(key: str):
+            token = ComfyUIImageEditPlugin._text(key)
+            if token and token not in keys:
+                keys.append(token)
+
+        origin = context.get("origin") if isinstance(context, dict) and isinstance(context.get("origin"), dict) else {}
+        platform = ComfyUIImageEditPlugin._text(origin.get("platform")).lower()
+
+        if platform == "discord":
+            channel_id = ComfyUIImageEditPlugin._text(origin.get("channel_id"))
+            if channel_id:
+                add(f"tater:channel:{channel_id}:history")
+        elif platform == "telegram":
+            chat_id = ComfyUIImageEditPlugin._text(origin.get("chat_id"))
+            if chat_id:
+                add(f"tater:telegram:{chat_id}:history")
+        elif platform == "matrix":
+            room_id = ComfyUIImageEditPlugin._text(origin.get("room_id"))
+            if room_id:
+                add(f"tater:matrix:{room_id}:history")
+
+        add("webui:chat_history")
+        return keys
+
+    @staticmethod
+    def _latest_image_from_context_history(context):
+        for key in ComfyUIImageEditPlugin._history_keys_from_context(context):
+            resolved = ComfyUIImageEditPlugin._latest_image_from_chat_history(key)
+            if resolved and resolved[0]:
+                return resolved
+        return None, None
+
+    @staticmethod
     def _resolve_source_image(args, context=None):
         args = args or {}
         hinted = ComfyUIImageEditPlugin._text(
@@ -376,7 +412,7 @@ class ComfyUIImageEditPlugin(ToolVerba):
             resolved = ComfyUIImageEditPlugin._materialize_image_payload(payload)
             if resolved:
                 return resolved
-        return ComfyUIImageEditPlugin._latest_image_from_chat_history("webui:chat_history")
+        return ComfyUIImageEditPlugin._latest_image_from_context_history(context)
 
     @staticmethod
     def _resolve_prompt(args: dict | None) -> str:
@@ -650,13 +686,36 @@ class ComfyUIImageEditPlugin(ToolVerba):
     async def handle_macos(self, args, llm_client, context=None):
         return await self._generate(args or {}, llm_client, context=context)
 
-    async def handle_discord(self, message, args, llm_client):
-        return action_failure(
-            code="unsupported_platform",
-            message="`comfyui_image_edit` is only available in WebUI, Little Spud, and macOS.",
-            say_hint="Explain this plugin is unavailable on this platform and list supported platforms.",
-            available_on=self.platforms,
-        )
+    @staticmethod
+    def _with_platform_context(context=None, **values):
+        ctx = dict(context) if isinstance(context, dict) else {}
+        for key, value in values.items():
+            if value is not None and key not in ctx:
+                ctx[key] = value
+        return ctx
+
+    async def handle_discord(self, message=None, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        ctx = self._with_platform_context(context, message=message)
+        return await self._generate(args or {}, llm_client, context=ctx)
+
+    async def handle_telegram(self, update=None, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        ctx = self._with_platform_context(context, update=update)
+        return await self._generate(args or {}, llm_client, context=ctx)
+
+    async def handle_matrix(
+        self,
+        client=None,
+        room=None,
+        sender=None,
+        body=None,
+        args=None,
+        llm_client=None,
+        context=None,
+        *unused_args,
+        **unused_kwargs,
+    ):
+        ctx = self._with_platform_context(context, client=client, room=room, sender=sender, body=body)
+        return await self._generate(args or {}, llm_client, context=ctx)
 
 
 verba = ComfyUIImageEditPlugin()

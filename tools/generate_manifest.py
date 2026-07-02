@@ -81,7 +81,7 @@ def extract_verba_meta(py_file: Path) -> dict:
             elif isinstance(b, ast.Attribute):
                 base_names.append(b.attr)
 
-        looks_like_verba = ("ToolVerba" in base_names)
+        looks_like_verba = bool({"ToolVerba", "CategoryDeviceControlBase"} & set(base_names))
 
         assigns = {}
         for stmt in n.body:
@@ -124,7 +124,6 @@ def main():
 
     verbas = []
     errors = []
-
     for py_file in sorted(VERBA_DIR.glob("*.py")):
         if py_file.name.startswith("_"):
             continue

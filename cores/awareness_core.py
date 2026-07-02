@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.9"
+__version__ = "3.4.10"
 
 load_dotenv()
 
@@ -4345,96 +4345,114 @@ def _device_label(provider_name: str, device: Dict[str, Any], device_id: str) ->
     return f"{suffix} ({device_id})"
 
 
+def _category_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", _text(value).lower()).strip("_")
+
+
 def _integration_devices_catalog(provider_filter: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
     catalog = _empty_entity_catalog()
-    from integration_registry import get_integration_catalog, get_integration_device_group
     filter_provider = _normalize_event_provider(provider_filter or "all")
+    try:
+        from integration_registry import get_integration_device_registry
 
-    for integration in get_integration_catalog():
-        if not isinstance(integration, dict):
+        registry = get_integration_device_registry(redis_client)
+    except Exception:
+        logger.debug("[awareness] integration device registry catalog unavailable", exc_info=True)
+        return catalog
+
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
             continue
-        integration_id = _text(integration.get("id"))
-        provider = _normalize_event_provider(integration_id)
+        provider = _normalize_event_provider(device.get("integration_id"))
         if provider == "all":
             continue
         if filter_provider != "all" and provider != filter_provider:
             continue
-        payload = get_integration_device_group(integration_id)
-        group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
-        provider_name = _text(group.get("name") or integration.get("name")) or _provider_label(provider)
-        devices = group.get("devices") if isinstance(group.get("devices"), list) else []
-        for device in devices:
-            if not isinstance(device, dict):
+        provider_name = _text(device.get("integration_name")) or _provider_label(provider)
+        device_id = _text(device.get("id") or device.get("ref"))
+        if not device_id:
+            continue
+        device_type = _category_token(device.get("type"))
+        details = device.get("details") if isinstance(device.get("details"), dict) else {}
+        capabilities = {
+            _category_token(item)
+            for item in [*(device.get("category_ids") or []), *(device.get("capabilities") or [])]
+            if _category_token(item)
+        }
+        if device_type:
+            capabilities.add(device_type)
+        entity = _text(device.get("ref")) or f"{device_type or 'device'}:{device_id}"
+        ref = _provider_ref(provider, entity)
+        label = _device_label(provider_name, device, entity)
+
+        if "camera" in capabilities or device_type == "camera":
+            catalog["cameras"].append((ref, label))
+        if "media_player" in capabilities:
+            catalog["media_players"].append((ref, label))
+        if "doorbell" in capabilities:
+            catalog["doorbell_triggers"].append((ref, label))
+        if {"motion", "presence", "network_device"} & capabilities or device_type in {"motion", "client"}:
+            catalog["triggers"].append((ref, label))
+        if {"entry_sensor", "garage_door"} & capabilities or device_type in {"contact", "entry_sensor", "garage_door"}:
+            catalog["entry_sensors"].append((ref, label))
+            name_hint = " ".join(
+                _text(value).lower()
+                for value in (
+                    device.get("name"),
+                    device.get("room"),
+                    details.get("resource_type"),
+                    details.get("device_class"),
+                    details.get("sensor_type"),
+                    details.get("mountType"),
+                    details.get("mount_type"),
+                )
+                if _text(value)
+            )
+            if "window" in capabilities or "window" in name_hint:
+                catalog["entry_sensors_window"].append((ref, label))
+            elif "garage_door" in capabilities or "garage" in capabilities or "garage" in name_hint:
+                catalog["entry_sensors_garage"].append((ref, label))
+            else:
+                catalog["entry_sensors_door"].append((ref, label))
+            catalog["triggers"].append((ref, label))
+        if "temperature" in capabilities or device_type in {"temperature", "thermostat"}:
+            catalog["weather_sensors"].append((ref, label))
+            catalog["weather_temp"].append((ref, label))
+        if "humidity" in capabilities:
+            catalog["weather_sensors"].append((ref, label))
+        if "illuminance" in capabilities:
+            catalog["weather_sensors"].append((ref, label))
+
+        for event_source in device.get("event_sources") or []:
+            if not isinstance(event_source, dict):
                 continue
-            device_id = _text(device.get("id"))
-            if not device_id:
+            source_ref = _text(event_source.get("ref"))
+            if not source_ref:
                 continue
-            device_type = _text(device.get("type")).lower()
-            details = device.get("details") if isinstance(device.get("details"), dict) else {}
-            capabilities = {str(item).strip().lower() for item in (device.get("capabilities") or []) if str(item).strip()}
-            entity = _text(device.get("ref"))
-            if not entity:
-                if provider == "hue" and device_type in {"motion", "contact", "light", "temperature"}:
-                    entity = f"{device_type}:{device_id}"
-                elif provider == "unifi_network":
-                    entity = f"{'client' if device_type == 'client' else 'device'}:{device_id}"
-                elif provider == "aladdin" and device_type in {"garage", "garage_door"}:
-                    entity = f"garage_door:{device_id}"
-                elif provider == "ecobee_homekit" and device_type == "thermostat":
-                    entity = device_id
+            source_type = _category_token(event_source.get("type"))
+            full_ref = _provider_ref(provider, source_ref)
+            source_label = f"{provider_name}: {_text(device.get('name')) or device_id} {source_type.replace('_', ' ') or 'event'} ({source_ref})"
+            if source_type == "doorbell":
+                catalog["doorbell_triggers"].append((full_ref, source_label))
+            elif source_type in {"door", "window", "garage", "contact", "entry_sensor"}:
+                catalog["entry_sensors"].append((full_ref, source_label))
+                if source_type == "window":
+                    catalog["entry_sensors_window"].append((full_ref, source_label))
+                elif source_type == "garage":
+                    catalog["entry_sensors_garage"].append((full_ref, source_label))
                 else:
-                    entity = f"{device_type or 'device'}:{device_id}"
-            ref = _provider_ref(provider, entity)
-            label = _device_label(provider_name, device, entity)
+                    catalog["entry_sensors_door"].append((full_ref, source_label))
+                catalog["triggers"].append((full_ref, source_label))
+            else:
+                catalog["triggers"].append((full_ref, source_label))
 
-            if "camera" in capabilities or device_type == "camera":
-                catalog["cameras"].append((ref, label))
-            if "doorbell" in capabilities:
-                catalog["doorbell_triggers"].append((ref, label))
-            if "motion" in capabilities or device_type == "motion":
-                catalog["triggers"].append((ref, label))
-            if "entry_sensor" in capabilities or device_type in {"contact", "entry_sensor", "garage_door"}:
-                catalog["entry_sensors"].append((ref, label))
-                name_hint = f"{_text(device.get('name')).lower()} {_text(details.get('resource_type')).lower()}"
-                if "window" in capabilities or "window" in name_hint:
-                    catalog["entry_sensors_window"].append((ref, label))
-                elif "garage" in capabilities or "garage" in name_hint:
-                    catalog["entry_sensors_garage"].append((ref, label))
-                else:
-                    catalog["entry_sensors_door"].append((ref, label))
-                catalog["triggers"].append((ref, label))
-            if "temperature" in capabilities or device_type in {"temperature", "thermostat"}:
-                catalog["weather_sensors"].append((ref, label))
-                catalog["weather_temp"].append((ref, label))
-            if "humidity" in capabilities:
-                catalog["weather_sensors"].append((ref, label))
-
-            for event_source in device.get("event_sources") or []:
-                if not isinstance(event_source, dict):
-                    continue
-                source_ref = _text(event_source.get("ref"))
-                if not source_ref:
-                    continue
-                source_type = _text(event_source.get("type")).lower()
-                full_ref = _provider_ref(provider, source_ref)
-                source_label = f"{provider_name}: {_text(device.get('name')) or device_id} {source_type or 'event'} ({source_ref})"
-                if source_type == "doorbell":
-                    catalog["doorbell_triggers"].append((full_ref, source_label))
-                elif source_type in {"door", "window", "garage", "contact", "entry_sensor"}:
-                    catalog["entry_sensors"].append((full_ref, source_label))
-                    if source_type == "window":
-                        catalog["entry_sensors_window"].append((full_ref, source_label))
-                    elif source_type == "garage":
-                        catalog["entry_sensors_garage"].append((full_ref, source_label))
-                    else:
-                        catalog["entry_sensors_door"].append((full_ref, source_label))
-                    catalog["triggers"].append((full_ref, source_label))
-                else:
-                    catalog["triggers"].append((full_ref, source_label))
-
-            if provider == "unifi_network" or device_type in {"light", "switch", "client", "network_device"}:
-                catalog["triggers"].append((ref, label))
+        if provider == "unifi_network" or {"light", "switch", "plug", "network_device"} & capabilities:
+            catalog["triggers"].append((ref, label))
     return catalog
+
+
+def _catalog_has_device_options(catalog: Dict[str, List[Tuple[str, str]]]) -> bool:
+    return any(catalog.get(key) for key in ("cameras", "triggers", "entry_sensors", "weather_sensors", "media_players"))
 
 
 def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
@@ -4442,8 +4460,6 @@ def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, L
     if cached is not None:
         return cached
     catalog = _empty_entity_catalog()
-    _catalog_extend(catalog, _prefixed_event_catalog(_ha_entity_catalog(force_refresh=force_refresh), "homeassistant"))
-    _catalog_extend(catalog, _prefixed_event_catalog(_unifi_entity_catalog(force_refresh=force_refresh), "unifi_protect"))
     _catalog_extend(catalog, _integration_devices_catalog())
     catalog = _finalize_catalog(catalog)
     catalog = _catalog_with_announcement_targets(catalog)
@@ -4456,7 +4472,16 @@ def _entity_catalog(force_refresh: bool = False, *, provider: Optional[str] = No
     if active_provider == "all":
         return _all_integrations_entity_catalog(force_refresh=force_refresh)
     if active_provider == "unifi_protect":
-        return _unifi_entity_catalog(force_refresh=force_refresh)
+        cached = _cached_catalog(active_provider, force_refresh=force_refresh)
+        if cached is not None:
+            return cached
+        catalog = _integration_devices_catalog(provider_filter=active_provider)
+        if not _catalog_has_device_options(catalog):
+            return _unifi_entity_catalog(force_refresh=force_refresh)
+        catalog = _finalize_catalog(catalog)
+        catalog = _catalog_with_announcement_targets(catalog)
+        _set_cached_catalog(active_provider, catalog)
+        return catalog
     if active_provider == "homeassistant":
         return _ha_entity_catalog(force_refresh=force_refresh)
     cached = _cached_catalog(active_provider, force_refresh=force_refresh)

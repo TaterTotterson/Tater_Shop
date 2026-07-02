@@ -1,8 +1,6 @@
 # verba/comfyui_audio_ace.py
 import json
 import asyncio
-import base64
-import os
 import re
 import yaml
 import random
@@ -11,7 +9,7 @@ import logging
 import time
 import requests
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from verba_base import ToolVerba
 from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
 try:
@@ -48,10 +46,13 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.19"
+    version = "1.0.27"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
-    description = "Creates original songs and music tracks using ComfyUI Audio Ace."
+    description = (
+        "Creates original songs and music tracks using ComfyUI Audio Ace. "
+        "On voice satellites, playback automatically uses the current room's preferred media player when configured; otherwise it falls back to the speaking satellite."
+    )
     verba_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
@@ -73,15 +74,6 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 "Upload your ComfyUI Audio Ace workflow .json file. "
                 "If empty, Tater uses the bundled Ace Step workflow."
             ),
-        },
-        "HA_DEFAULT_MEDIA_PLAYER": {
-            "label": "Default media_player entity",
-            "type": "string",
-            "default": "",
-            "description": (
-                "Optional for Home Assistant. If unset, Tater will try to play on the Voice PE device "
-                "that spoke (based on device_name/device_id context). Example: media_player.living_room_speaker"
-            )
         }
     }
 
@@ -89,8 +81,10 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         "Write a fun, upbeat message saying you’re writing lyrics and calling in a virtual band now! "
         "Only output that message."
     )
-    when_to_use = ""
-    common_needs = []
+    when_to_use = (
+        "Use when the user asks Tater to create, compose, generate, or make an original song, music track, jingle, or instrumental."
+    )
+    common_needs = ["prompt"]
     missing_info_prompts = []
 
     @staticmethod
@@ -611,7 +605,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             using the HA room/device context passed from the conversation agent.
         """
         args = args or {}
-        prompt = (args.get("prompt") or "").strip()
+        prompt, requested_room = self._song_prompt_and_requested_room(args)
         if not prompt:
             return action_failure(
                 code="missing_prompt",
@@ -620,7 +614,43 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 say_hint="Ask the user for a music prompt.",
             )
 
-        target_player = await self._pick_target_player(context=context)
+        playback_context = self._playback_context(context, requested_room)
+        preferred = self._preferred_room_media_player_target(playback_context)
+        preferred_target = str(preferred.get("target") or "").strip()
+        if preferred_target:
+            try:
+                asyncio.create_task(
+                    self._bg_generate_and_play_target(
+                        prompt,
+                        llm_client,
+                        preferred_target,
+                        respect_reply_playback=False,
+                    )
+                )
+            except Exception as e:
+                logger.exception("Failed to schedule preferred room playback background job: %s", e)
+                return action_failure(
+                    code="background_job_failed",
+                    message=f"Failed to schedule song generation: {e}",
+                    say_hint="Explain that background scheduling failed and suggest retrying.",
+                )
+
+            return action_success(
+                facts={
+                    "prompt": prompt,
+                    "preferred_media_player": preferred_target,
+                    "preferred_room_id": str(preferred.get("room_id") or ""),
+                    "room_resolution": str(preferred.get("source") or ""),
+                    "resolved_room_names": preferred.get("source_room_names") or [],
+                    "playback_target": preferred_target,
+                    "playback_mode": "room_preferred",
+                    "background_started": True,
+                },
+                summary_for_user=f"Started generating a song and queued playback on {preferred_target}.",
+                say_hint="Confirm that generation started and playback will happen in the preferred room speaker.",
+            )
+
+        target_player = await self._pick_target_player(context=playback_context)
         if not target_player:
             # Give a helpful hint including what we saw from context
             dev = ((context or {}).get("device_name") or (context or {}).get("device_id") or "").strip()
@@ -636,16 +666,22 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                 code="missing_media_player",
                 message=(
                     "I can create your song, but I couldn't find a media player to play it on."
-                    f"{hint} Set a default media_player entity in ComfyUI Audio Ace settings, "
-                    "or ensure the Voice PE device exposes a media_player entity in Home Assistant."
+                    f"{hint} Use Voice Core playback or set a preferred player for the room in Integrations > Rooms."
                 ),
-                needs=["Set `HA_DEFAULT_MEDIA_PLAYER` in ComfyUI Audio Ace settings."],
+                needs=["Set a preferred player for the room or retry from a Voice Core satellite."],
                 say_hint="Explain the missing media player configuration and ask the user to set it.",
             )
 
         # Fire-and-forget the heavy work
         try:
-            asyncio.create_task(self._bg_generate_and_play(prompt, llm_client, target_player))
+            asyncio.create_task(
+                self._bg_generate_and_play_target(
+                    prompt,
+                    llm_client,
+                    f"ha:{target_player}",
+                    respect_reply_playback=False,
+                )
+            )
         except Exception as e:
             logger.exception("Failed to schedule background job: %s", e)
             return action_failure(
@@ -665,7 +701,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         )
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         args = args or {}
-        prompt = (args.get("prompt") or "").strip()
+        prompt, requested_room = self._song_prompt_and_requested_room(args)
         if not prompt:
             return action_failure(
                 code="missing_prompt",
@@ -675,15 +711,29 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             )
 
         selector = self._voice_core_selector(context)
-        if not selector:
+        playback_context = self._playback_context(context, requested_room)
+        preferred = self._preferred_room_media_player_target(playback_context)
+        preferred_target = str(preferred.get("target") or "").strip()
+        playback_target = preferred_target or (f"voice_core:{selector}" if selector else "")
+
+        if not playback_target:
             return action_failure(
                 code="missing_voice_core_satellite",
                 message="I can create your song, but I couldn't determine which Voice Core satellite to play it on.",
                 say_hint="Explain that Voice Core playback needs the speaking satellite selector and ask the user to retry from a satellite.",
             )
 
+        playback_mode = ""
         try:
-            asyncio.create_task(self._bg_generate_and_play_voice_core(prompt, llm_client, selector))
+            playback_mode = "room_preferred" if preferred_target else "satellite"
+            asyncio.create_task(
+                self._bg_generate_and_play_target(
+                    prompt,
+                    llm_client,
+                    playback_target,
+                    respect_reply_playback=False,
+                )
+            )
         except Exception as e:
             logger.exception("Failed to schedule Voice Core background job: %s", e)
             return action_failure(
@@ -696,49 +746,63 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             facts={
                 "prompt": prompt,
                 "selector": selector,
+                "preferred_media_player": preferred_target,
+                "playback_target": playback_target,
+                "preferred_room_id": str(preferred.get("room_id") or ""),
+                "room_resolution": str(preferred.get("source") or ""),
+                "resolved_room_names": preferred.get("source_room_names") or [],
+                "playback_mode": playback_mode,
                 "background_started": True,
             },
-            summary_for_user=f"Started generating a song and will play it on {selector}.",
-            say_hint="Confirm that generation started and playback will happen on the current Voice Core satellite.",
+            summary_for_user=(
+                f"Started generating a song and queued playback on {playback_target}."
+                if preferred_target
+                else f"Started generating a song and will play it on {playback_target}."
+            ),
+            say_hint="Confirm that generation started and playback will happen in the current room or on the current satellite.",
         )
 
 
-    async def _bg_generate_and_play(self, prompt: str, llm_client, target_player: str):
-        """
-        Off the critical path:
-         - generate song
-         - build ComfyUI /view URL
-         - play on media_player
-        """
+    async def _bg_generate_and_play_target(
+        self,
+        prompt: str,
+        llm_client,
+        target: str,
+        *,
+        respect_reply_playback: bool = False,
+    ):
         try:
             async with self._background_llm_client(llm_client) as bg_llm_client:
                 tags, lyrics = await self.generate_tags_and_lyrics(prompt, bg_llm_client)
-            media_url, _audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+            media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
         except Exception as e:
-            logger.exception("ComfyUI generation failed: %s", e)
+            logger.exception("ComfyUI target playback generation failed: %s", e)
             return
 
         if not media_url:
-            logger.error("No media URL returned from ComfyUI.")
+            logger.error("No media URL returned from ComfyUI for target playback.")
             return
 
         try:
-            ha = self._HA()
-            ha.play_media(target_player, media_url, mimetype="music")
+            from media_playback import play_media_url_targets
+
+            result = await asyncio.to_thread(
+                play_media_url_targets,
+                target,
+                media_url,
+                audio_bytes=audio_bytes,
+                media_type="audio/mpeg",
+                media_content_type="music",
+                filename="ace_song.mp3",
+                text="Playing your new song.",
+                timeout_s=360.0,
+                respect_reply_playback=respect_reply_playback,
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                logger.warning("Media playback failed for %s: %s", target, result.get("error"))
         except Exception as e:
-            logger.exception("Failed to play media on %s: %s", target_player, e)
+            logger.exception("Failed to play generated media on %s: %s", target, e)
             return
-
-    @staticmethod
-    def _voice_core_base_url() -> str:
-        raw_port = str(os.getenv("HTMLUI_PORT") or "8501").strip()
-        try:
-            port = int(raw_port)
-        except Exception:
-            port = 8501
-        if port < 1 or port > 65535:
-            port = 8501
-        return f"http://127.0.0.1:{port}"
 
     def _voice_core_selector(self, context: dict | None) -> str:
         ctx = context if isinstance(context, dict) else {}
@@ -749,63 +813,6 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         if self._looks_like_transport_selector(device_id):
             return device_id
         return ""
-
-    def _request_voice_core_playback(
-        self,
-        selector: str,
-        source_url: str,
-        *,
-        audio_bytes: bytes | None = None,
-        text: str = "Playing your new song.",
-        timeout_s: float = 360.0,
-    ) -> dict:
-        base_url = self._voice_core_base_url()
-        payload = {
-            "selector": str(selector or "").strip(),
-            "source_url": str(source_url or "").strip(),
-            "media_type": "audio/mpeg",
-            "filename": "ace_song.mp3",
-            "text": str(text or "").strip(),
-            "timeout_s": float(timeout_s),
-        }
-        if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
-            payload["audio_b64"] = base64.b64encode(bytes(audio_bytes)).decode("ascii")
-        resp = requests.post(
-            f"{base_url}/tater-ha/v1/voice/esphome/play",
-            json=payload,
-            timeout=90,
-        )
-        resp.raise_for_status()
-        try:
-            return resp.json() if (resp.text or "").strip() else {"ok": True}
-        except Exception:
-            return {"ok": True, "raw": resp.text}
-
-    async def _bg_generate_and_play_voice_core(self, prompt: str, llm_client, selector: str):
-        try:
-            async with self._background_llm_client(llm_client) as bg_llm_client:
-                tags, lyrics = await self.generate_tags_and_lyrics(prompt, bg_llm_client)
-            media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
-        except Exception as e:
-            logger.exception("ComfyUI Voice Core generation failed: %s", e)
-            return
-
-        if not media_url:
-            logger.error("No media URL returned from ComfyUI for Voice Core playback.")
-            return
-
-        try:
-            await asyncio.to_thread(
-                self._request_voice_core_playback,
-                selector,
-                media_url,
-                audio_bytes=audio_bytes,
-                text="Playing your new song.",
-                timeout_s=360.0,
-            )
-        except Exception as e:
-            logger.exception("Failed to queue Voice Core playback on %s: %s", selector, e)
-            return
 
     # ---------------------------------------
     # Helpers for HA
@@ -843,6 +850,109 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             out.append(key)
         return out
 
+    @staticmethod
+    def _normalize_room_token(value: Any) -> str:
+        txt = str(value or "").strip().lower()
+        if not txt:
+            return ""
+        return re.sub(r"[^a-z0-9]+", " ", txt).strip()
+
+    def _context_room_names(self, context: dict | None) -> list[str]:
+        ctx = context if isinstance(context, dict) else {}
+        room_names = self._dedupe_preserve(
+            [
+                self._ctx_text(ctx, "area_name"),
+                self._ctx_text(ctx, "room_name"),
+                self._ctx_text(ctx, "room"),
+                self._ctx_text(ctx, "area"),
+                self._ctx_text(ctx, "area_id"),
+                self._ctx_text(ctx, "room_id"),
+            ]
+        )
+        if room_names:
+            return room_names
+        selector = self._voice_core_selector(ctx)
+        return self._room_names_for_satellite_selector(selector)
+
+    def _room_names_for_satellite_selector(self, selector: Any) -> list[str]:
+        raw_selector = str(selector or "").strip()
+        if not raw_selector:
+            return []
+        wanted = {self._lookup_token(raw_selector)}
+        if raw_selector.casefold().startswith("voice_core:"):
+            wanted.add(self._lookup_token(raw_selector[len("voice_core:") :]))
+        else:
+            wanted.add(self._lookup_token(f"voice_core:{raw_selector}"))
+        wanted.discard("")
+        if not wanted:
+            return []
+
+        try:
+            raw_registry = redis_client.get("tater:voice:satellites:registry:v1")
+            registry = json.loads(raw_registry) if raw_registry else []
+        except Exception as e:
+            logger.warning("Audio Ace could not read Voice Core satellite registry for room lookup: %s", e)
+            return []
+
+        rows = registry if isinstance(registry, list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            row_tokens = {
+                self._lookup_token(row.get("selector")),
+                self._lookup_token(row.get("device_id")),
+                self._lookup_token(row.get("host")),
+                self._lookup_token(f"host:{row.get('host')}") if row.get("host") else "",
+                self._lookup_token(f"voice_core:{row.get('selector')}") if row.get("selector") else "",
+            }
+            row_tokens.discard("")
+            if not wanted.intersection(row_tokens):
+                continue
+            return self._dedupe_preserve(
+                [
+                    metadata.get("area_name"),
+                    metadata.get("room_name"),
+                    metadata.get("room"),
+                    metadata.get("area"),
+                    metadata.get("area_id"),
+                    metadata.get("room_id"),
+                    row.get("area_name"),
+                    row.get("room_name"),
+                    row.get("room"),
+                    row.get("area"),
+                    row.get("area_id"),
+                    row.get("room_id"),
+                ]
+            )
+        return []
+
+    @staticmethod
+    def _explicit_room_from_args(args: dict | None) -> str:
+        payload = args if isinstance(args, dict) else {}
+        for key in ("room", "playback_room", "area", "area_name", "room_name", "play_in_room"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _song_prompt_and_requested_room(self, args: dict | None) -> tuple[str, str]:
+        payload = args if isinstance(args, dict) else {}
+        raw_prompt = str(payload.get("prompt") or "").strip()
+        requested_room = self._explicit_room_from_args(payload)
+        return raw_prompt, requested_room
+
+    def _playback_context(self, context: dict | None, requested_room: str = "") -> dict | None:
+        if not requested_room:
+            return context
+        ctx = dict(context or {})
+        ctx["requested_playback_room"] = requested_room
+        ctx["room_name"] = requested_room
+        ctx["area_name"] = requested_room
+        ctx["room"] = requested_room
+        ctx["area"] = requested_room
+        return ctx
+
     def _strip_assist_suffixes(self, object_id_slug: str) -> str:
         base = (object_id_slug or "").strip("_")
         for suffix in (
@@ -870,6 +980,228 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         if txt.startswith(("host:", "selector:", "mac:")):
             return True
         return bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", txt))
+
+    @staticmethod
+    def _looks_like_satellite_media_player(entity_id: str, friendly_name: str = "") -> bool:
+        low = f"{entity_id or ''} {friendly_name or ''}".lower()
+        return any(token in low for token in ("assist_satellite", "voice_pe", "voice pe", "satellite"))
+
+    @staticmethod
+    def _lookup_token(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            text = unquote(text)
+        except Exception:
+            pass
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
+    def _target_lookup_tokens(self, value: Any) -> set[str]:
+        raw = str(value or "").strip()
+        if not raw or raw.casefold() in {"device", "silent"}:
+            return set()
+
+        rows: set[str] = set()
+
+        def add(item: Any) -> None:
+            token = self._lookup_token(item)
+            if token:
+                rows.add(token)
+
+        add(raw)
+        try:
+            from announcement_targets import normalize_announcement_targets, parse_integration_target
+
+            targets = normalize_announcement_targets([raw])
+        except Exception:
+            parse_integration_target = None
+            targets = [raw]
+
+        for target in targets:
+            token = str(target or "").strip()
+            lower = token.casefold()
+            add(token)
+
+            if lower.startswith("ha:"):
+                entity_id = token[3:].strip()
+                add(entity_id)
+                add(f"ha:{entity_id}")
+                continue
+
+            if lower.startswith("media_player."):
+                add(f"ha:{token}")
+                continue
+
+            if lower.startswith("sonos:"):
+                sonos_id = token[6:].strip()
+                if sonos_id.casefold().startswith("uuid:"):
+                    sonos_id = sonos_id[5:].strip()
+                add(sonos_id)
+                add(f"speaker:{sonos_id}")
+                add(f"sonos:{sonos_id}")
+                add(f"uuid:{sonos_id}")
+                continue
+
+            if lower.startswith("integration:"):
+                parsed = {}
+                try:
+                    parsed = parse_integration_target(token) if parse_integration_target else {}
+                except Exception:
+                    parsed = {}
+                if not parsed:
+                    body = token[len("integration:") :]
+                    integration_id, sep, encoded_device = body.partition(":")
+                    if sep:
+                        parsed = {
+                            "integration_id": integration_id.strip().casefold(),
+                            "device_id": unquote(encoded_device).strip(),
+                        }
+                integration_id = str(parsed.get("integration_id") or "").strip().casefold()
+                device_id = str(parsed.get("device_id") or "").strip()
+                if integration_id and device_id:
+                    add(device_id)
+                    add(f"{integration_id}:{device_id}")
+                    add(f"integration:{integration_id}:{device_id}")
+                    add(f"integration:{integration_id}:{quote(device_id, safe='')}")
+                    if integration_id == "sonos":
+                        sonos_id = device_id
+                        if sonos_id.casefold().startswith("speaker:"):
+                            sonos_id = sonos_id.split(":", 1)[1].strip()
+                        if sonos_id.casefold().startswith("uuid:"):
+                            sonos_id = sonos_id[5:].strip()
+                        add(sonos_id)
+                        add(f"speaker:{sonos_id}")
+                        add(f"sonos:{sonos_id}")
+                        add(f"uuid:{sonos_id}")
+                continue
+
+            if lower.startswith("voice_core:"):
+                add(token[len("voice_core:") :])
+
+        return rows
+
+    def _device_lookup_tokens(self, device: dict) -> set[str]:
+        row = device if isinstance(device, dict) else {}
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        integration_id = str(row.get("integration_id") or "").strip().casefold()
+        rows: set[str] = set()
+
+        def add(item: Any) -> None:
+            token = self._lookup_token(item)
+            if token:
+                rows.add(token)
+
+        for key in (
+            "id",
+            "ref",
+            "device_id",
+            "entity_id",
+            "resource_ref",
+            "resource_id",
+            "device_ref",
+            "target",
+            "target_id",
+            "uid",
+            "uuid",
+            "mac",
+            "mac_address",
+        ):
+            add(row.get(key))
+            add(details.get(key))
+
+        for token in list(rows):
+            if integration_id:
+                add(f"{integration_id}:{token}")
+                add(f"integration:{integration_id}:{token}")
+                add(f"integration:{integration_id}:{quote(token, safe='')}")
+            if token.startswith("media_player."):
+                add(f"ha:{token}")
+            if integration_id == "sonos":
+                sonos_id = token
+                if sonos_id.startswith("speaker:"):
+                    sonos_id = sonos_id.split(":", 1)[1].strip()
+                if sonos_id.startswith("uuid:"):
+                    sonos_id = sonos_id[5:].strip()
+                add(sonos_id)
+                add(f"speaker:{sonos_id}")
+                add(f"sonos:{sonos_id}")
+                add(f"uuid:{sonos_id}")
+
+        return rows
+
+    def _room_names_from_device(self, device: dict) -> list[str]:
+        row = device if isinstance(device, dict) else {}
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        return self._dedupe_preserve(
+            [
+                row.get("room_id"),
+                row.get("room"),
+                row.get("area"),
+                row.get("room_override_id"),
+                row.get("reported_room_id"),
+                row.get("reported_room"),
+                details.get("room_id"),
+                details.get("room"),
+                details.get("area"),
+                details.get("area_id"),
+                details.get("room_name"),
+                details.get("area_name"),
+            ]
+        )
+
+    def _room_names_for_playback_target(self, target: Any) -> list[str]:
+        target_tokens = self._target_lookup_tokens(target)
+        if not target_tokens:
+            return []
+        try:
+            from integration_registry import get_integration_device_registry
+
+            registry = get_integration_device_registry(redis_client, refresh=False, use_cache=True)
+        except Exception as e:
+            logger.warning("Audio Ace could not read integration registry for playback target room lookup: %s", e)
+            return []
+
+        devices = registry.get("devices") if isinstance(registry, dict) else []
+        for device in devices or []:
+            if not isinstance(device, dict):
+                continue
+            if target_tokens.intersection(self._device_lookup_tokens(device)):
+                room_names = self._room_names_from_device(device)
+                if room_names:
+                    return room_names
+        return []
+
+    def _preferred_room_media_player_for_room_names(self, room_names: list[str]) -> dict:
+        if not room_names:
+            return {}
+        try:
+            from integration_registry import get_integration_room_preferred_media_player
+
+            preference = get_integration_room_preferred_media_player(room_names, redis_client)
+            return dict(preference) if isinstance(preference, dict) else {}
+        except Exception as e:
+            logger.warning("Room preferred media player lookup failed for Audio Ace: %s", e)
+            return {}
+
+    def _preferred_room_media_player_target(self, context: dict | None) -> dict:
+        ctx = context if isinstance(context, dict) else {}
+        room_names = self._context_room_names(ctx)
+        preference = self._preferred_room_media_player_for_room_names(room_names)
+        if preference:
+            preference["source"] = "context_room"
+            preference["source_room_names"] = room_names
+            return preference
+
+        reply_target = self._ctx_text(ctx, "reply_playback_target")
+        reply_room_names = self._room_names_for_playback_target(reply_target)
+        preference = self._preferred_room_media_player_for_room_names(reply_room_names)
+        if preference:
+            preference["source"] = "reply_playback_target_room"
+            preference["source_target"] = reply_target
+            preference["source_room_names"] = reply_room_names
+            return preference
+        return {}
 
     def _candidate_device_names(self, context: dict | None) -> list[str]:
         ctx = context if isinstance(context, dict) else {}
@@ -1111,20 +1443,150 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                     return device_id
         return None
 
-    async def _pick_target_player(self, context: dict | None = None) -> str | None:
+    async def _media_player_for_context_room(
+        self,
+        ha,
+        *,
+        context: dict | None,
+        device_name: str = "",
+        satellite_entity_id: str = "",
+    ) -> str | None:
+        room_names = self._context_room_names(context)
+        wanted = {self._normalize_room_token(item) for item in room_names}
+        wanted.discard("")
+        if not wanted:
+            return None
+
+        def matches_room(value: Any) -> bool:
+            token = self._normalize_room_token(value)
+            return bool(token and token in wanted)
+
+        area_names_by_id: dict[str, list[str]] = {}
+        target_area_ids: set[str] = set()
+        try:
+            for area in await ha.area_registry_list():
+                if not isinstance(area, dict):
+                    continue
+                area_id = str(area.get("area_id") or area.get("id") or "").strip()
+                names = self._dedupe_preserve([area_id, area.get("name")])
+                if area_id:
+                    area_names_by_id[area_id] = names
+                if area_id and any(matches_room(name) for name in names):
+                    target_area_ids.add(area_id)
+        except Exception as e:
+            logger.warning("HA area registry lookup failed for Audio Ace room playback: %s", e)
+
+        device_area_tokens: dict[str, list[str]] = {}
+        try:
+            for device in await ha.device_registry_list():
+                if not isinstance(device, dict):
+                    continue
+                device_id = str(device.get("id") or "").strip()
+                if not device_id:
+                    continue
+                area_id = str(device.get("area_id") or "").strip()
+                tokens = self._dedupe_preserve(
+                    [
+                        area_id,
+                        *(area_names_by_id.get(area_id) or []),
+                        device.get("suggested_area"),
+                    ]
+                )
+                device_area_tokens[device_id] = tokens
+        except Exception as e:
+            logger.warning("HA device registry lookup failed for Audio Ace room playback: %s", e)
+
+        candidates: dict[str, int] = {}
+
+        def add_candidate(entity_id: Any, score: int, *, friendly_name: Any = "", platform: Any = "") -> None:
+            eid = str(entity_id or "").strip()
+            if not eid.startswith("media_player."):
+                return
+            if self._looks_like_satellite_media_player(eid, str(friendly_name or "")):
+                return
+            adjusted = int(score)
+            if str(platform or "").strip().lower() == "sonos":
+                adjusted += 8
+            adjusted += self._rank_media_player_entity_id(
+                eid,
+                device_name=device_name,
+                satellite_entity_id=satellite_entity_id,
+            )
+            candidates[eid] = max(candidates.get(eid, -1000), adjusted)
+
+        try:
+            for row in await ha.entity_registry_list():
+                if not isinstance(row, dict):
+                    continue
+                if row.get("disabled_by") not in (None, ""):
+                    continue
+                entity_id = str(row.get("entity_id") or "").strip()
+                if not entity_id.startswith("media_player."):
+                    continue
+                entity_area_id = str(row.get("area_id") or "").strip()
+                device_id = str(row.get("device_id") or "").strip()
+                area_tokens = self._dedupe_preserve(
+                    [
+                        entity_area_id,
+                        *(area_names_by_id.get(entity_area_id) or []),
+                        *(device_area_tokens.get(device_id) or []),
+                    ]
+                )
+                if entity_area_id and entity_area_id in target_area_ids:
+                    matched = True
+                else:
+                    matched = any(matches_room(token) for token in area_tokens)
+                if not matched:
+                    continue
+                add_candidate(
+                    entity_id,
+                    80,
+                    friendly_name=row.get("name") or row.get("original_name"),
+                    platform=row.get("platform"),
+                )
+        except Exception as e:
+            logger.warning("HA entity registry lookup failed for Audio Ace room playback: %s", e)
+
+        try:
+            for state in ha.list_states():
+                if not isinstance(state, dict):
+                    continue
+                entity_id = str(state.get("entity_id") or "").strip()
+                if not entity_id.startswith("media_player."):
+                    continue
+                attrs = state.get("attributes") if isinstance(state.get("attributes"), dict) else {}
+                friendly_name = str(attrs.get("friendly_name") or "").strip()
+                haystack = self._normalize_room_token(f"{entity_id} {friendly_name}")
+                if not haystack:
+                    continue
+                if any(room and room in haystack for room in wanted):
+                    add_candidate(entity_id, 35, friendly_name=friendly_name)
+        except Exception as e:
+            logger.warning("HA state scan failed for Audio Ace room playback: %s", e)
+
+        if not candidates:
+            return None
+
+        ranked = sorted(candidates, key=lambda eid: (-candidates[eid], eid))
+        for entity_id in ranked:
+            if self._entity_exists(ha, entity_id):
+                return entity_id
+        return ranked[0]
+
+    async def _pick_target_player(
+        self,
+        context: dict | None = None,
+        *,
+        room_only: bool = False,
+    ) -> str | None:
         """
         Pick a media_player in this order:
-          1) Explicit plugin setting HA_DEFAULT_MEDIA_PLAYER
+          1) Room/area media_player lookup from context
           2) Deterministic registry lookup by HA device_id from context
           3) Deterministic registry lookup by MAC address from Voice Core context
           4) Deterministic entity-id patterns from assist_satellite/device_name
           5) Fuzzy fallback scan by friendly_name/entity_id
         """
-        sett = self._settings()
-        default_mp = (sett.get("HA_DEFAULT_MEDIA_PLAYER") or "").strip()
-        if default_mp:
-            return default_mp
-
         ctx = context or {}
         device_names = self._candidate_device_names(ctx)
         device_name = device_names[0] if device_names else ""
@@ -1137,6 +1599,17 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             ha = self._HA()
         except Exception as e:
             logger.warning("Cannot initialize Home Assistant client for media_player resolution: %s", e)
+            return None
+
+        room_player = await self._media_player_for_context_room(
+            ha,
+            context=ctx,
+            device_name=device_name,
+            satellite_entity_id=satellite_entity_id,
+        )
+        if room_player:
+            return room_player
+        if room_only:
             return None
 
         resolved_device_id = ""
@@ -1321,6 +1794,10 @@ class ComfyUIAudioAcePlugin(ToolVerba):
 
         async def device_registry_list(self) -> list[dict]:
             res = await self.ws_call("config/device_registry/list", timeout_s=30.0)
+            return res if isinstance(res, list) else []
+
+        async def area_registry_list(self) -> list[dict]:
+            res = await self.ws_call("config/area_registry/list", timeout_s=30.0)
             return res if isinstance(res, list) else []
 
 

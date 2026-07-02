@@ -2,37 +2,6 @@
   "schema": 1,
   "verbas": [
     {
-      "id": "aladdin_connect",
-      "name": "Aladdin Connect",
-      "version": "1.0.5",
-      "min_tater_version": "59",
-      "description": "Control Aladdin Connect garage doors.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Aladdin Connect",
-      "tags": [
-        "aladdin",
-        "genie",
-        "garage",
-        "garage-door"
-      ],
-      "entry": "verba/aladdin_connect.py",
-      "sha256": "976430c0b0b327bae6eed7debf290532771336281c13f901c96df3eac490e7ac"
-    },
-    {
       "id": "automatic_plugin",
       "name": "Automatic1111 Image",
       "version": "1.2.2",
@@ -50,6 +19,23 @@
       "tags": [],
       "entry": "verba/automatic_plugin.py",
       "sha256": "27314a4c88eef653c9642a793748e397d84e6d76d59b88756dd498a13ed2b50d"
+    },
+    {
+      "id": "battery_status",
+      "name": "Battery Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read battery status from Hue, Ecobee/HomeKit, Aladdin, UniFi Protect, Home Assistant, and other integrations.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "battery",
+        "sensor",
+        "integration"
+      ],
+      "entry": "verba/battery_status.py",
+      "sha256": "5cfa66d842efb6b33870df04dc7bca50473d6ee623964e118ba02cee8711b40d"
     },
     {
       "id": "broadcast",
@@ -78,9 +64,47 @@
       "sha256": "164ffacf6171e5411e2550353dbfd2ee50cb5c51bc3b5a7f3fe9d22e0d3cd23d"
     },
     {
+      "id": "camera_control",
+      "name": "Camera Control",
+      "version": "1.0.1",
+      "min_tater_version": "59",
+      "description": "Use cameras from Home Assistant, UniFi Protect, and any integration that exposes camera devices. Snapshot results are returned as image artifacts so Tater can describe them with vision.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": "Device Control",
+      "tags": [
+        "camera",
+        "snapshot",
+        "vision",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/camera_control.py",
+      "sha256": "e7a319729b8245dafea6619b2c800587fa7f79834a25849cf84dbbafde521f7c"
+    },
+    {
+      "id": "climate_control",
+      "name": "Climate Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control Ecobee/HomeKit, Home Assistant climate entities, and any integration that exposes climate devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "climate",
+        "thermostat",
+        "temperature",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/climate_control.py",
+      "sha256": "4366c852de309bb3bcef00a22fa5079c2030d97f393aec5a42b705ba5265dc39"
+    },
+    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.19",
+      "version": "1.0.27",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
@@ -97,24 +121,27 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "1f5a5cb1f2480dd5cee45eda01051e77d8cbd6f62f4e48545fff7cb4a8a82c74"
+      "sha256": "81bb3478b4342e6c420698453702128673218ab89ad8df669c3781a686cb79e5"
     },
     {
       "id": "comfyui_image_edit",
       "name": "ComfyUI Image Edit",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Edit or transform the latest/referenced image in chat with ComfyUI image-to-image.",
       "portals": [
+        "discord",
         "webui",
         "little_spud",
-        "macos"
+        "macos",
+        "matrix",
+        "telegram"
       ],
       "notifier": false,
       "settings_category": "ComfyUI Image Edit",
       "tags": [],
       "entry": "verba/comfyui_image_edit.py",
-      "sha256": "84a7d1e3bd850d704b90817f67e5319df02a2770daf8a1d3bd2251336c12c080"
+      "sha256": "81e7b40a45ad02ab4e0873bb51b9aa06eaef4dccedba441113c4e7198876d890"
     },
     {
       "id": "comfyui_image_plugin",
@@ -186,6 +213,26 @@
       "tags": [],
       "entry": "verba/comfyui_video_plugin.py",
       "sha256": "2319d089cedbe54bdfb23053a4968486d839fb8cdfe73367422a2cde293b08f7"
+    },
+    {
+      "id": "cover_control",
+      "name": "Cover Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control covers from Home Assistant, Shelly, and any integration that exposes cover devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "cover",
+        "shade",
+        "blind",
+        "curtain",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/cover_control.py",
+      "sha256": "8b6caede17f1189d74dff53fc82a9b427b28529cbba257c2ee35c9db9144dd73"
     },
     {
       "id": "device_compare",
@@ -262,35 +309,59 @@
       "sha256": "e69b4e0f296dfc719b45f0ce63a2f9672e3735ae5e6298d2c6019be1d0cd38d1"
     },
     {
-      "id": "ecobee_homekit_thermostat",
-      "name": "Ecobee HomeKit Thermostat",
-      "version": "1.0.3",
-      "min_tater_version": "59",
-      "description": "Control Ecobee thermostats through HomeKit pairing.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
+      "id": "energy_status",
+      "name": "Energy Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read energy and power data from Shelly, Home Assistant, and other integrations.",
+      "portals": [],
       "notifier": false,
-      "settings_category": "Ecobee (HomeKit)",
+      "settings_category": null,
       "tags": [
-        "ecobee",
-        "homekit",
-        "thermostat",
-        "climate"
+        "energy",
+        "power",
+        "meter",
+        "sensor",
+        "integration"
       ],
-      "entry": "verba/ecobee_homekit_thermostat.py",
-      "sha256": "5007e962f7483b61574001494a9c2831ad835e8f1a4c30f33a537a0a3b4ca699"
+      "entry": "verba/energy_status.py",
+      "sha256": "2581745699b7ed44a2d6d4a133688f3f157f720d602592e8a81cf453f2206057"
+    },
+    {
+      "id": "entry_sensor_status",
+      "name": "Door & Window Sensor Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read entry sensor status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "entry-sensor",
+        "door",
+        "window",
+        "sensor",
+        "integration"
+      ],
+      "entry": "verba/entry_sensor_status.py",
+      "sha256": "1059726365c7223fb914769a046a1b0a3596c599e34ad0e9c37bf90ec474b8b6"
+    },
+    {
+      "id": "fan_control",
+      "name": "Fan Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control fans and fan speed from Home Assistant and any integration that exposes fan devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "fan",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/fan_control.py",
+      "sha256": "49c03f24b26e6be96f2b79d07d4acc0fbd9d019241cbeb15918f35dcfb21b10d"
     },
     {
       "id": "find_my_phone",
@@ -334,6 +405,24 @@
       "sha256": "ef1a4f3db6acee4316313a34f69db0e7622ca0b318f50ad915353205190a63a0"
     },
     {
+      "id": "garage_door_control",
+      "name": "Garage Door Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control garage doors from Aladdin, Home Assistant, UniFi Protect, and any garage-capable integration.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "garage",
+        "garage-door",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/garage_door_control.py",
+      "sha256": "d36b09d590ed3639fbdf040dbf4c5137c003abf4f72a27c0672ca95b080121f0"
+    },
+    {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
       "version": "1.0.8",
@@ -364,382 +453,40 @@
       "sha256": "e694c863619b9f5c28249229cd31a476f40ce9d70d255edc7561bf2a85a75530"
     },
     {
-      "id": "ha_climate",
-      "name": "Home Assistant Climate",
-      "version": "2.1.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant thermostats and HVAC entities.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
+      "id": "humidity_status",
+      "name": "Humidity Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read humidity from Ecobee/HomeKit, Home Assistant, Hue, Shelly, UniFi Protect, and other integrations.",
+      "portals": [],
       "notifier": false,
-      "settings_category": "Home Assistant Control",
+      "settings_category": null,
       "tags": [
-        "homeassistant",
-        "climate"
+        "humidity",
+        "sensor",
+        "integration"
       ],
-      "entry": "verba/ha_climate.py",
-      "sha256": "28fbbd6a11db7292b682ce361837ec348813d72549f276da1dae15c54f252065"
+      "entry": "verba/humidity_status.py",
+      "sha256": "085806453320f916fb35685e62baeb3b8498e74c4d288cb957b338aa608fc95e"
     },
     {
-      "id": "ha_covers",
-      "name": "Home Assistant Covers",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant covers and garage doors.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
+      "id": "illuminance_status",
+      "name": "Light Sensor Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read lux and light-level sensors from Hue, Shelly, Home Assistant, UniFi Protect, and other integrations.",
+      "portals": [],
       "notifier": false,
-      "settings_category": "Home Assistant Control",
+      "settings_category": null,
       "tags": [
-        "homeassistant",
-        "cover"
+        "illuminance",
+        "lux",
+        "light-sensor",
+        "sensor",
+        "integration"
       ],
-      "entry": "verba/ha_covers.py",
-      "sha256": "e582b837170bb270d79f1e25be131aa41c21ef74c6f269bf84515fd2de76b6df"
-    },
-    {
-      "id": "ha_fans",
-      "name": "Home Assistant Fans",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant fans.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "fan"
-      ],
-      "entry": "verba/ha_fans.py",
-      "sha256": "709adc7910d72e7a17a4dd2c25c49e7aaa2ea191baf4e149ff84fae72d24aa83"
-    },
-    {
-      "id": "ha_lights",
-      "name": "Home Assistant Lights",
-      "version": "2.1.9",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant lights.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "light"
-      ],
-      "entry": "verba/ha_lights.py",
-      "sha256": "8ef7908a7583d69a0452076265859ad2717fa28c5df16f3ec126dbdd57b33e41"
-    },
-    {
-      "id": "ha_locks",
-      "name": "Home Assistant Locks",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant lock entities.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "lock"
-      ],
-      "entry": "verba/ha_locks.py",
-      "sha256": "1f2a6cddb202d13cd498466330626b913b7c94a777096121f4bbcd8dac782020"
-    },
-    {
-      "id": "ha_media_players",
-      "name": "Home Assistant Media Players",
-      "version": "2.0.9",
-      "min_tater_version": "59",
-      "description": "Media-player control for Home Assistant.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "media_player"
-      ],
-      "entry": "verba/ha_media_players.py",
-      "sha256": "4bb2ea3bae2866960c48b0c05712d4c423d26e388106ed24d67d80e2ac5cd915"
-    },
-    {
-      "id": "ha_remotes",
-      "name": "Home Assistant Remotes",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant remote entities.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "remote"
-      ],
-      "entry": "verba/ha_remotes.py",
-      "sha256": "4f96eda7bdab2c0a1007e0ad44c6d74f74f214ad96e6480a06aff9316e4969d1"
-    },
-    {
-      "id": "ha_scenes",
-      "name": "Home Assistant Scenes",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant scenes.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "scene"
-      ],
-      "entry": "verba/ha_scenes.py",
-      "sha256": "57392282bb2f747de36617ef8d3243fe246e3fde90b7efb5f50d00be2f34e200"
-    },
-    {
-      "id": "ha_scripts",
-      "name": "Home Assistant Scripts",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant scripts.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "script"
-      ],
-      "entry": "verba/ha_scripts.py",
-      "sha256": "a7bca949332ff6b6cd33d86c05539a21edd7e09167cc87437c6e07d0780314de"
-    },
-    {
-      "id": "ha_sensors",
-      "name": "Home Assistant Sensors",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Read Home Assistant sensor and binary_sensor entities.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "sensor"
-      ],
-      "entry": "verba/ha_sensors.py",
-      "sha256": "e1943df4766fcdd6c02b4ccb2726caab53dba2e4bf5b704c7b525664c821a501"
-    },
-    {
-      "id": "ha_switches",
-      "name": "Home Assistant Switches",
-      "version": "2.0.6",
-      "min_tater_version": "59",
-      "description": "Control Home Assistant switches and plugs.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "switch"
-      ],
-      "entry": "verba/ha_switches.py",
-      "sha256": "911262f773371e23aeabf4d57ad3e15c17d001506771158f4f79e9f4b866d7cc"
-    },
-    {
-      "id": "ha_temperature",
-      "name": "Home Assistant Temperature",
-      "version": "2.0.5",
-      "min_tater_version": "59",
-      "description": "Read Home Assistant ambient temperatures.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Home Assistant Control",
-      "tags": [
-        "homeassistant",
-        "temperature"
-      ],
-      "entry": "verba/ha_temperature.py",
-      "sha256": "ffd59900fd0ce8fc1f03c3d6121022562df4d982b1dff10178e37840455ed448"
-    },
-    {
-      "id": "hue_lights",
-      "name": "Philips Hue Lights",
-      "version": "1.0.4",
-      "min_tater_version": "59",
-      "description": "Control Philips Hue Bridge lights.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Philips Hue Control",
-      "tags": [
-        "hue",
-        "philips-hue",
-        "light"
-      ],
-      "entry": "verba/hue_lights.py",
-      "sha256": "da15586a64dc471d1df703b7e8ae63b1c64eed9a7711a60cf3aa09ab6a7dbe7e"
+      "entry": "verba/illuminance_status.py",
+      "sha256": "da14806c4f558839d7e48e6905c62a01d27b5a9a3f44856d5056db1c742afea1"
     },
     {
       "id": "irc_admin_op",
@@ -883,6 +630,73 @@
       "sha256": "4c70038babe0ca9b956d96835cfb2bfa76005bbe6f62e6ff207a9b2cb479cc97"
     },
     {
+      "id": "leak_status",
+      "name": "Leak Sensor Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read leak sensor status from UniFi Protect, Home Assistant, and other integrations.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "leak",
+        "water",
+        "flood",
+        "sensor",
+        "integration"
+      ],
+      "entry": "verba/leak_status.py",
+      "sha256": "8537fd409c6648068a878aae67757419e35d7b665cc4d7d985012aa3043b7aeb"
+    },
+    {
+      "id": "light_control",
+      "name": "Light Control",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Control lights from Home Assistant, Philips Hue, Shelly, and any integration that exposes light devices.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Device Control",
+      "tags": [
+        "light",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/light_control.py",
+      "sha256": "34226918b06a5aecf39dc836126dc2171c988346be39766a03fecb33b1643056"
+    },
+    {
+      "id": "lock_control",
+      "name": "Lock Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Lock, unlock, and check smart locks from Home Assistant and any integration that exposes lock devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "lock",
+        "door",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/lock_control.py",
+      "sha256": "fd9b353e06ca250b3aaf6c179b0223a4cb16163ab4b68246f3dba67ff0d678f0"
+    },
+    {
       "id": "lowfi_video",
       "name": "ComfyUI Lofi Video",
       "version": "1.1.7",
@@ -1021,6 +835,24 @@
       "sha256": "016b8adc370aa835ce1bdd4b1c3457b51412139f27716b5bd82a37963c9524ed"
     },
     {
+      "id": "motion_status",
+      "name": "Motion Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read motion status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "motion",
+        "occupancy",
+        "sensor",
+        "integration"
+      ],
+      "entry": "verba/motion_status.py",
+      "sha256": "a92d2065983fd01dfa002b7bdb7b7b3770198f82178c6e28ff5d6d647406ecb5"
+    },
+    {
       "id": "music_assistant",
       "name": "Music Assistant",
       "version": "1.0.32",
@@ -1045,6 +877,24 @@
       "tags": [],
       "entry": "verba/music_assistant.py",
       "sha256": "1ff57bc43a04d92af32e299682804e02da41c9d4cb0b80e8cbdaff6d6e06ea94"
+    },
+    {
+      "id": "network_device_status",
+      "name": "Network Device Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read network device status from UniFi Network and any integration that exposes network devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "network",
+        "client",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/network_device_status.py",
+      "sha256": "cd232d9a4659a118e313b981ff9254f2e5fe7a77ff384fe31b662a2a3b105a72"
     },
     {
       "id": "obsidian_note",
@@ -1154,6 +1004,24 @@
       "tags": [],
       "entry": "verba/overseerr_trending.py",
       "sha256": "13a970625cd616924e4c718f3eeb583cd3580f4a5c9179f6541ff4ed525f0a6f"
+    },
+    {
+      "id": "plug_control",
+      "name": "Plug Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control plugs, outlets, and plug-style switch devices from any integration.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "plug",
+        "outlet",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/plug_control.py",
+      "sha256": "6fac2084ab4d34ff2339f821d7c41527ed3ab8a4fcf4f4c6066fd910146b12a3"
     },
     {
       "id": "premiumize_add_transfer",
@@ -1281,13 +1149,61 @@
       "sha256": "ccd34d37b8ccdc532a361cea2622f1e1f310fcf0eef5e7abcb0c8b53e1798625"
     },
     {
+      "id": "presence_status",
+      "name": "Presence Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read presence from UniFi Network clients, Ecobee/HomeKit occupancy sensors, and other integrations.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "presence",
+        "occupancy",
+        "network",
+        "sensor",
+        "integration"
+      ],
+      "entry": "verba/presence_status.py",
+      "sha256": "9dcf58adf5d968e47550dd262b76baa25eb09acab53d52f5e84ad3289aee8fbd"
+    },
+    {
+      "id": "remote_control",
+      "name": "Remote Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Send button commands to remotes from Home Assistant and any integration that exposes remote devices.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "remote",
+        "button",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/remote_control.py",
+      "sha256": "1cf0ef1d53429b698afff38db7fa51c6d746965c9531388a22398ada62bddf4c"
+    },
+    {
       "id": "roon_music",
       "name": "Roon Music",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
-      "description": "Play music on the requesting voice device: songs, artists, albums, genres, playlists, radio, shuffle/random playback, and playback controls.",
+      "description": "Play existing music through Roon in a room or zone: songs, artists, albums, genres, playlists, radio, shuffle/random playback, and playback controls. Do not use for generating new songs or audio.",
       "portals": [
-        "voice_core"
+        "voice_core",
+        "webui",
+        "little_spud",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Roon Control",
@@ -1299,7 +1215,60 @@
         "roon"
       ],
       "entry": "verba/roon_music.py",
-      "sha256": "58b198b883e1d24799baab185112238902c5b00d496e88227c35c820c8ab6ed0"
+      "sha256": "c051fa1da2127fa9401ff01d8ab08a690e1b553503d1081110c187ac12dd1a3a"
+    },
+    {
+      "id": "scene_control",
+      "name": "Scene Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "List, check, and activate scenes from Home Assistant and any integration that exposes scenes.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "scene",
+        "automation",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/scene_control.py",
+      "sha256": "5a5345d41e520a7972edcb699fd981f9902826308717b1086403e87b8fcb00a3"
+    },
+    {
+      "id": "script_control",
+      "name": "Script Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "List, check, and run scripts from Home Assistant and any integration that exposes scripts.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "script",
+        "automation",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/script_control.py",
+      "sha256": "4db549210a733f373621a467671b494e9ca92ce54cadf0a923878391617fca8d"
+    },
+    {
+      "id": "sensor_status",
+      "name": "Sensor Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read other sensor status from all enabled integrations through the shared device registry.",
+      "portals": [],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "sensor",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/sensor_status.py",
+      "sha256": "2f4498e951b5b5781bf8e93c387359f78bcfb4d312c251661e7569e89a06561d"
     },
     {
       "id": "sftpgo_account",
@@ -1346,132 +1315,21 @@
       "sha256": "a897de888195470593f228e1f1d1764e8d00e3493c3725c0dbe750835c4addb1"
     },
     {
-      "id": "shelly_covers",
-      "name": "Shelly Covers",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Control covers, rollers, shades, blinds, and curtains.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
+      "id": "switch_control",
+      "name": "Switch Control",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Control switches from Home Assistant, Shelly, and any integration that exposes switch devices.",
+      "portals": [],
       "notifier": false,
-      "settings_category": "Shelly Control",
+      "settings_category": null,
       "tags": [
-        "shelly",
-        "cover",
-        "roller",
-        "shade",
-        "blind"
-      ],
-      "entry": "verba/shelly_covers.py",
-      "sha256": "f367e035f0df40e9f98365e5f976b4552387ad6b274402dca8e813da7a372bdb"
-    },
-    {
-      "id": "shelly_lights",
-      "name": "Shelly Lights",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Control lights and dimmers.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Shelly Control",
-      "tags": [
-        "shelly",
-        "light"
-      ],
-      "entry": "verba/shelly_lights.py",
-      "sha256": "a22dbfaa7dde65c9f054f89d2f44c938533e9edf5f3267f266f791a4ead0e893"
-    },
-    {
-      "id": "shelly_sensors",
-      "name": "Shelly Sensors",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Read sensor and meter states.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Shelly Control",
-      "tags": [
-        "shelly",
-        "sensor",
-        "binary-sensor",
-        "temperature",
-        "humidity",
-        "power",
-        "energy"
-      ],
-      "entry": "verba/shelly_sensors.py",
-      "sha256": "e04c59456609181d3ae7e26c9d6610ff0d81da1c9da5e498d80d2c6785b8b07c"
-    },
-    {
-      "id": "shelly_switches",
-      "name": "Shelly Switches",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Control switches, outlets, smart plugs, relays, and plugged-in devices by name.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Shelly Control",
-      "tags": [
-        "shelly",
         "switch",
-        "plug",
-        "outlet",
-        "smart-plug",
-        "relay"
+        "device",
+        "integration"
       ],
-      "entry": "verba/shelly_switches.py",
-      "sha256": "4e2ec7200267bc23c6c627b18afdc85ddc586a44b5b9f2df6e4de16d4ea49bc6"
+      "entry": "verba/switch_control.py",
+      "sha256": "44848672da69899d8d54369c8534af967534efda0272bf6bfad7171c46e2f136"
     },
     {
       "id": "tater_gits_add_feed",
@@ -1496,62 +1354,21 @@
       "sha256": "de8722439862f92b10d47bc098dfdcc1367beadc8439812b29d312ec9da33f04"
     },
     {
-      "id": "unifi_network_clients",
-      "name": "UniFi Network Clients",
-      "version": "1.0.6",
-      "min_tater_version": "59",
-      "description": "List UniFi clients with wired/wireless counts and client details.",
-      "portals": [
-        "webui",
-        "little_spud",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
+      "id": "temperature_status",
+      "name": "Temperature Status",
+      "version": "0.0.0",
+      "min_tater_version": "0.0.0",
+      "description": "Read temperature from Ecobee/HomeKit, Home Assistant, Hue, Shelly, UniFi Protect, and other integrations.",
+      "portals": [],
       "notifier": false,
-      "settings_category": "UniFi Network",
+      "settings_category": null,
       "tags": [
-        "unifi",
-        "clients"
+        "temperature",
+        "sensor",
+        "integration"
       ],
-      "entry": "verba/unifi_network_clients.py",
-      "sha256": "ea53fc1810ddfa1337420124565f4e7a2d38ebe61ee261acf56011d29a76ee58"
-    },
-    {
-      "id": "unifi_network_devices",
-      "name": "UniFi Network Devices",
-      "version": "1.0.6",
-      "min_tater_version": "59",
-      "description": "List UniFi devices with online/offline status and core details.",
-      "portals": [
-        "webui",
-        "little_spud",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "UniFi Network",
-      "tags": [
-        "unifi",
-        "devices"
-      ],
-      "entry": "verba/unifi_network_devices.py",
-      "sha256": "9d13a993b804093f870c881dac3c5921f753cd50269d5e3025f22cd89b3ff9dd"
+      "entry": "verba/temperature_status.py",
+      "sha256": "f52dc0efcfc43b7892e22853caea164b12529370af4999a877136c1438205ee5"
     },
     {
       "id": "unifi_network_health",
@@ -1639,93 +1456,6 @@
       ],
       "entry": "verba/unifi_protect_area.py",
       "sha256": "0c7a2cd8dc3967a413e97fe876246dad91acb94443a1dfd62b60f1ef23fdeee8"
-    },
-    {
-      "id": "unifi_protect_camera",
-      "name": "UniFi Protect Camera",
-      "version": "1.0.6",
-      "min_tater_version": "59",
-      "description": "Describe a single UniFi Protect camera snapshot.",
-      "portals": [
-        "webui",
-        "little_spud",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "UniFi Protect",
-      "tags": [
-        "unifi",
-        "camera_snapshot"
-      ],
-      "entry": "verba/unifi_protect_camera.py",
-      "sha256": "deb65b4a3b68b0552147e20c3df44be8a7bd63a1eeb88f9fe23b757322372419"
-    },
-    {
-      "id": "unifi_protect_camera_info",
-      "name": "UniFi Protect Camera Info",
-      "version": "1.0.6",
-      "min_tater_version": "59",
-      "description": "List UniFi Protect cameras.",
-      "portals": [
-        "webui",
-        "little_spud",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "UniFi Protect",
-      "tags": [
-        "unifi",
-        "cameras"
-      ],
-      "entry": "verba/unifi_protect_camera_info.py",
-      "sha256": "494eb2dda53f27d11bd62aaf3a16d46b68718814a07ece3c26f4f064bbb3539f"
-    },
-    {
-      "id": "unifi_protect_sensors",
-      "name": "UniFi Protect Sensors",
-      "version": "1.0.6",
-      "min_tater_version": "59",
-      "description": "Check UniFi Protect sensor status and single-sensor detail.",
-      "portals": [
-        "webui",
-        "little_spud",
-        "macos",
-        "voice_core",
-        "homeassistant",
-        "homekit",
-        "xbmc",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "UniFi Protect",
-      "tags": [
-        "unifi",
-        "sensors"
-      ],
-      "entry": "verba/unifi_protect_sensors.py",
-      "sha256": "18d6beb1f21e3fe2f568df7c6a865bae79ab7cc4605a7414f61f4084c38f63fe"
     },
     {
       "id": "voicepe_remote_timer",

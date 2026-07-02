@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, quote
 from helpers import extract_json, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.4.18"
+__version__ = "1.4.19"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Local environment telemetry receiver for weather stations and configured sensor integrations."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -90,6 +90,7 @@ ENVIRONMENT_CAPABILITY_CATEGORIES = {
     "battery": "battery",
     "battery_level": "battery",
     "illuminance": "solar",
+    "light_sensor": "solar",
     "lux": "solar",
     "light_level": "solar",
     "uv": "solar",
@@ -100,6 +101,15 @@ ENVIRONMENT_CAPABILITY_CATEGORIES = {
     "co2": "air",
     "condition": "condition",
     "weather": "condition",
+    "entry_sensor": "condition",
+    "contact": "condition",
+    "open_close": "condition",
+    "motion": "condition",
+    "occupancy": "condition",
+    "presence": "condition",
+    "leak": "leak",
+    "water": "leak",
+    "flood": "leak",
 }
 
 PROVIDER_LABELS = {
@@ -1728,6 +1738,10 @@ def _integration_device_ref(device: Dict[str, Any]) -> str:
 def _integration_device_caps(device: Dict[str, Any]) -> set[str]:
     details = device.get("details") if isinstance(device.get("details"), dict) else {}
     tokens: set[str] = set()
+    for value in device.get("category_ids") or []:
+        token = _clean_key(value)
+        if token:
+            tokens.add(token)
     for value in device.get("capabilities") or []:
         token = _clean_key(value)
         if token:
@@ -1745,6 +1759,26 @@ def _integration_device_caps(device: Dict[str, Any]) -> set[str]:
     return tokens
 
 
+def _registry_devices_for_provider(provider: Any = "", client: Any = None) -> List[Dict[str, Any]]:
+    provider_key = _clean_key(provider)
+    try:
+        from integration_registry import get_integration_device_registry
+
+        registry = get_integration_device_registry(client)
+    except Exception as exc:
+        logger.warning("[Environment] integration device registry unavailable: %s", exc)
+        return []
+    devices: List[Dict[str, Any]] = []
+    for row in registry.get("devices") or []:
+        if not isinstance(row, dict):
+            continue
+        integration_id = _clean_key(row.get("integration_id"))
+        if provider_key and integration_id != provider_key:
+            continue
+        devices.append(dict(row))
+    return devices
+
+
 def _generic_environment_categories(device: Dict[str, Any]) -> List[str]:
     details = device.get("details") if isinstance(device.get("details"), dict) else {}
     caps = _integration_device_caps(device)
@@ -1759,6 +1793,7 @@ def _generic_environment_categories(device: Dict[str, Any]) -> List[str]:
             details.get("sensor_type"),
             details.get("unit_of_measurement"),
             details.get("unit"),
+            " ".join(_text(item) for item in device.get("category_ids") or []),
         )
         if _text(part)
     )
@@ -1888,15 +1923,16 @@ def _generic_integration_device_readings(provider: str, device: Dict[str, Any]) 
     key_base = f"{provider_key}_{_clean_key(source_ref)}"
     rows: List[Dict[str, Any]] = []
     for category in _generic_environment_categories(device):
-        if category == "condition":
+        if category in {"condition", "leak"}:
             condition, condition_path = _generic_condition_value(device)
             if not condition:
                 continue
+            label_suffix = CATEGORY_LABELS.get(category, _humanize_key(category))
             rows.append(
                 _reading_row(
-                    key=f"{key_base}_condition",
-                    label=f"{source_name} Condition",
-                    category="condition",
+                    key=f"{key_base}_{category}",
+                    label=f"{source_name} {label_suffix}",
+                    category=category,
                     unit="",
                     value=condition,
                     display=condition,
@@ -1933,48 +1969,32 @@ def _generic_integration_device_readings(provider: str, device: Dict[str, Any]) 
 
 
 def _discover_generic_integration_candidates(client: Any = None) -> List[Dict[str, Any]]:
-    try:
-        from integration_registry import get_integration_catalog, get_integration_device_group
-    except Exception as exc:
-        logger.warning("[Environment] generic integration discovery unavailable: %s", exc)
-        return []
-
     rows: List[Dict[str, Any]] = []
-    for integration in get_integration_catalog():
-        if not isinstance(integration, dict):
+    for device in _registry_devices_for_provider(client=client):
+        if not isinstance(device, dict):
             continue
-        provider = _clean_key(integration.get("id"))
+        provider = _clean_key(device.get("integration_id"))
         if not provider or provider in DEDICATED_ENVIRONMENT_PROVIDERS:
             continue
-        try:
-            payload = get_integration_device_group(provider)
-        except Exception as exc:
-            logger.warning("[Environment] %s generic sensor discovery failed: %s", provider, exc)
+        readings = _generic_integration_device_readings(provider, device)
+        if not readings:
             continue
-        group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
-        devices = group.get("devices") if isinstance(group.get("devices"), list) else []
-        for device in devices:
-            if not isinstance(device, dict):
-                continue
-            readings = _generic_integration_device_readings(provider, device)
-            if not readings:
-                continue
-            source_ref = _integration_device_ref(device)
-            categories = [_clean_key(row.get("category")) for row in readings if _clean_key(row.get("category"))]
-            primary_category = next((item for item in categories if item != "battery"), categories[0] if categories else "other")
-            rows.append(
-                _candidate_row(
-                    provider=provider,
-                    sensor_id=source_ref,
-                    label=_text(device.get("name")) or source_ref,
-                    category=primary_category,
-                    unit=_text(readings[0].get("unit")),
-                    measurement="sensor",
-                    area=_text(device.get("area")),
-                    current_display=", ".join(_text(row.get("display")) for row in readings if _text(row.get("display")))[:90],
-                    capabilities=[CATEGORY_LABELS.get(item, _humanize_key(item)) for item in dict.fromkeys(categories)],
-                )
+        source_ref = _integration_device_ref(device)
+        categories = [_clean_key(row.get("category")) for row in readings if _clean_key(row.get("category"))]
+        primary_category = next((item for item in categories if item != "battery"), categories[0] if categories else "other")
+        rows.append(
+            _candidate_row(
+                provider=provider,
+                sensor_id=source_ref,
+                label=_text(device.get("name")) or source_ref,
+                category=primary_category,
+                unit=_text(readings[0].get("unit")),
+                measurement="sensor",
+                area=_text(device.get("area")),
+                current_display=", ".join(_text(row.get("display")) for row in readings if _text(row.get("display")))[:90],
+                capabilities=[CATEGORY_LABELS.get(item, _humanize_key(item)) for item in dict.fromkeys(categories)],
             )
+        )
     return rows
 
 
@@ -2573,15 +2593,7 @@ def _poll_generic_integration(provider: str, client: Any = None) -> Dict[str, An
             "source_count": 0,
             "message": f"No {_provider_label(provider_key)} sensors are selected.",
         }
-    try:
-        from integration_registry import get_integration_device_group
-
-        payload = get_integration_device_group(provider_key)
-    except Exception as exc:
-        logger.warning("[Environment] %s generic integration poll failed: %s", provider_key, exc)
-        return {"ok": False, "provider": provider_key, "message": str(exc)}
-    group = payload.get("group") if isinstance(payload, dict) and isinstance(payload.get("group"), dict) else {}
-    devices = group.get("devices") if isinstance(group.get("devices"), list) else []
+    devices = _registry_devices_for_provider(provider_key, client)
     readings = [
         _apply_selection_to_reading(row, selection)
         for device in devices

@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.8"
+__version__ = "1.3.9"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -591,7 +591,87 @@ def _normalize_unifi_device(row: Dict[str, Any], *, site_id: str, site_name: str
     }
 
 
-def _discover_unifi_network(settings: Dict[str, Any], now_ts: float) -> Dict[str, Any]:
+def _registry_device_capabilities(row: Dict[str, Any]) -> set[str]:
+    caps: set[str] = set()
+    for value in [*(row.get("category_ids") or []), *(row.get("capabilities") or [])]:
+        token = _clean_key(value)
+        if token:
+            caps.add(token)
+    if _clean_key(row.get("type")):
+        caps.add(_clean_key(row.get("type")))
+    return caps
+
+
+def _registry_device_detail(row: Dict[str, Any], *keys: str) -> str:
+    details = row.get("details") if isinstance(row.get("details"), dict) else {}
+    return _text(_first(row, *keys) or _first(details, *keys))
+
+
+def _normalize_registry_network_device(row: Dict[str, Any], *, now_ts: float) -> Dict[str, Any]:
+    details = row.get("details") if isinstance(row.get("details"), dict) else {}
+    caps = _registry_device_capabilities(row)
+    device_type = _clean_key(row.get("type"))
+    category = "client" if "presence" in caps or device_type == "client" else "infrastructure"
+    name = _text(row.get("name") or row.get("label") or row.get("id"))
+    mac = _normalize_mac(_registry_device_detail(row, "macAddress", "mac", "mac_address", "hwaddr"))
+    ip = _registry_device_detail(row, "ipAddress", "ip", "ip_address")
+    status_row = {
+        **details,
+        "state": row.get("state"),
+        "status": row.get("status"),
+        "online": row.get("online"),
+        "connected": row.get("connected"),
+    }
+    return {
+        "id": _base_device_id(source="unifi_network", category=category, row={"id": row.get("id") or row.get("ref"), "mac": mac, "ip": ip}),
+        "source": "unifi_network",
+        "provider": "unifi_network",
+        "category": category,
+        "name": name,
+        "label": name,
+        "hostname": _registry_device_detail(row, "hostname", "hostName", "name"),
+        "mac": mac,
+        "ip": ip,
+        "vendor": _registry_device_detail(row, "manufacturer", "vendor", "oui", "vendorName") or ("Ubiquiti" if category == "infrastructure" else ""),
+        "model": _registry_device_detail(row, "model", "type", "deviceModel", "marketName", "market_name"),
+        "network": _registry_device_detail(row, "networkName", "network", "vlanName", "vlan"),
+        "site_id": _registry_device_detail(row, "site_id", "siteId"),
+        "site_name": _registry_device_detail(row, "site_name", "siteName"),
+        "connection_type": _registry_device_detail(row, "connectionType", "connection_type", "linkType") or device_type,
+        "status": _status_from_row(status_row, default_online=category == "client"),
+        "last_seen": _timestamp(_registry_device_detail(row, "lastSeen", "last_seen", "connectedAt", "connected_at", "lastHeartbeatAt", "updatedAt"), now_ts),
+        "signal": _registry_device_detail(row, "signalStrength", "signal", "rssi"),
+        "firmware": _registry_device_detail(row, "version", "firmwareVersion", "firmware"),
+        "uplink_ref": _registry_device_detail(row, "uplinkDeviceId", "uplink", "uplinkName", "apName", "ap"),
+        "switch_port": _registry_device_detail(row, "switchPort", "port", "portNumber", "swPort"),
+        "first_seen": now_ts,
+        "updated_at": now_ts,
+        "trusted": category == "infrastructure",
+        "critical": category == "infrastructure",
+        "notes": "",
+    }
+
+
+def _cached_unifi_network_devices(now_ts: float, client: Any = None) -> List[Dict[str, Any]]:
+    try:
+        from integration_registry import get_cached_integration_device_registry
+
+        registry = get_cached_integration_device_registry(client)
+    except Exception:
+        return []
+    devices: List[Dict[str, Any]] = []
+    for row in registry.get("devices") or []:
+        if not isinstance(row, dict) or _clean_key(row.get("integration_id")) != "unifi_network":
+            continue
+        caps = _registry_device_capabilities(row)
+        if not ({"network_device", "presence"} & caps or _clean_key(row.get("type")) in {"client", "network_switch", "gateway", "access_point"}):
+            continue
+        devices.append(_normalize_registry_network_device(row, now_ts=now_ts))
+    devices.sort(key=lambda item: (_text(item.get("category")), _text(item.get("name")).casefold(), _text(item.get("id"))))
+    return devices
+
+
+def _discover_unifi_network(settings: Dict[str, Any], now_ts: float, client: Any = None) -> Dict[str, Any]:
     if _network_integration_provider(settings) != "unifi_network":
         return {"source": "unifi_network", "provider": "unifi_network", "ok": True, "enabled": False, "devices": [], "message": "disabled"}
     module = _integration_module("unifi_network")
@@ -599,6 +679,16 @@ def _discover_unifi_network(settings: Dict[str, Any], now_ts: float) -> Dict[str
         return {"source": "unifi_network", "provider": "unifi_network", "ok": False, "devices": [], "error": "UniFi Network integration is not enabled."}
 
     devices: List[Dict[str, Any]] = []
+    cached_devices = _cached_unifi_network_devices(now_ts, client)
+    if cached_devices:
+        return {
+            "source": "unifi_network",
+            "provider": "unifi_network",
+            "ok": True,
+            "enabled": True,
+            "devices": cached_devices,
+            "message": f"Loaded {len(cached_devices)} UniFi Network device row{'s' if len(cached_devices) != 1 else ''} from the integration runtime cache.",
+        }
     try:
         unifi_settings = module.read_unifi_network_settings()
         base = module.unifi_network_base(unifi_settings)
@@ -630,7 +720,7 @@ def _discover_unifi_network(settings: Dict[str, Any], now_ts: float) -> Dict[str
         return {"source": "unifi_network", "provider": "unifi_network", "ok": False, "enabled": True, "devices": devices, "error": str(exc)}
 
 
-def _discover_network_integration(settings: Dict[str, Any], now_ts: float) -> Dict[str, Any]:
+def _discover_network_integration(settings: Dict[str, Any], now_ts: float, client: Any = None) -> Dict[str, Any]:
     provider = _network_integration_provider(settings)
     if provider == "none":
         return {
@@ -642,7 +732,7 @@ def _discover_network_integration(settings: Dict[str, Any], now_ts: float) -> Di
             "message": "Network integration discovery is disabled.",
         }
     if provider == "unifi_network":
-        return _discover_unifi_network(settings, now_ts)
+        return _discover_unifi_network(settings, now_ts, client)
     return {
         "source": provider,
         "provider": provider,
@@ -929,7 +1019,7 @@ def _poll_once(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
     previous_inventory = _load_inventory(store)
     first_inventory_load = not bool(previous_inventory)
     source_results = [
-        _discover_network_integration(settings, now_ts),
+        _discover_network_integration(settings, now_ts, store),
         _discover_arp_cache(settings, now_ts),
     ]
     discovered = _dedupe_devices(row for result in source_results for row in result.get("devices") or [])

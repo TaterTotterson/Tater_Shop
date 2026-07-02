@@ -75,33 +75,47 @@ class RoonMusicPlugin(ToolVerba):
     name = "roon_music"
     verba_name = "Roon Music"
     pretty_name = "Roon Music"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
     settings_category = "Roon Control"
-    platforms = ["voice_core"]
+    platforms = [
+        "voice_core",
+        "webui",
+        "little_spud",
+        "macos",
+        "homeassistant",
+        "homekit",
+        "xbmc",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic",
+    ]
     tags = ["music", "audio", "media-player", "playback", "roon"]
 
-    usage = '{"function":"roon_music","arguments":{"query":"play some jazz"}}'
+    usage = '{"function":"roon_music","arguments":{"query":"play some jazz in the kitchen"}}'
     description = (
-        "Play music on the voice device that made the request. Handles natural-language requests for songs, "
-        "artists, albums, genres, playlists, radio, shuffle/random playback, and playback controls."
-    )
-    verba_dec = (
-        "Play music on the requesting voice device: songs, artists, albums, genres, playlists, radio, "
+        "Play music through Roon on the requested room/zone or the voice device that made the request. "
+        "Handles natural-language requests for songs, artists, albums, genres, playlists, radio, "
         "shuffle/random playback, and playback controls."
     )
+    verba_dec = (
+        "Play existing music through Roon in a room or zone: songs, artists, albums, genres, playlists, radio, "
+        "shuffle/random playback, and playback controls. Do not use for generating new songs or audio."
+    )
     when_to_use = (
-        "Use for voice requests to play or control music: songs, artists, albums, genres, playlists, radio, "
-        "shuffle/random playback, pause, resume, stop, next, and previous."
+        "Use for Roon requests to play or control existing music: songs, artists, albums, genres, playlists, "
+        "radio, shuffle/random playback, pause, resume, stop, next, and previous."
     )
     how_to_use = (
-        "Pass the user's natural-language music request in query. The target playback device is resolved from "
-        "the voice request context."
+        "Pass the user's natural-language music request in query. Include room or target when the user names one. "
+        "If no room is named, the target playback device is resolved from the voice request context."
     )
     common_needs = ["A song, artist, album, genre, playlist, radio station, random music request, or playback control."]
     missing_info_prompts = ["What should I play or control?"]
     example_calls = [
-        '{"function":"roon_music","arguments":{"query":"play some jazz"}}',
+        '{"function":"roon_music","arguments":{"query":"play some jazz in the kitchen"}}',
         '{"function":"roon_music","arguments":{"query":"play songs by David Bowie"}}',
         '{"function":"roon_music","arguments":{"query":"play Bohemian Rhapsody by Queen"}}',
     ]
@@ -261,6 +275,21 @@ class RoonMusicPlugin(ToolVerba):
             return "genre"
         return "any"
 
+    def _extract_query_target(self, query: str) -> Tuple[str, str]:
+        text = _text(query)
+        if not text:
+            return "", ""
+        match = re.search(
+            r"\b(?:in|inside|to|on|through|via)\s+(?:the\s+)?"
+            r"(?P<target>[a-z0-9][a-z0-9 '._-]*?)"
+            r"(?:\s+(?:room|zone|speaker|speakers|stereo|system|audio))?\s*$",
+            text,
+            flags=re.I,
+        )
+        if not match:
+            return text, ""
+        return text[: match.start()].strip(" ,."), _text(match.group("target"))
+
     def _clean_media_query(self, query: str, *, action: str, media_kind: str) -> str:
         text = _text(query)
         if action in self.control_actions:
@@ -330,9 +359,13 @@ class RoonMusicPlugin(ToolVerba):
         weighted_keys = {
             "roon_zone_id": 500,
             "roon_zone": 500,
+            "zone_or_output_id": 500,
             "zone_id": 480,
             "zone": 460,
             "zone_name": 460,
+            "target": 340,
+            "room": 320,
+            "area": 320,
             "room_name": 260,
             "area_name": 260,
             "device_name": 240,
@@ -441,9 +474,48 @@ class RoonMusicPlugin(ToolVerba):
         devices = result.get("devices") if isinstance(result.get("devices"), list) else []
         return [device for device in devices if isinstance(device, dict)], _text(result.get("message"))
 
+    def _integration_result_ok(self, result: Any) -> bool:
+        return not (isinstance(result, dict) and result.get("ok") is False)
+
+    def _selected_media_label(self, result: Any, fallback: str = "") -> str:
+        row = result if isinstance(result, dict) else {}
+        selected = row.get("selected") if isinstance(row.get("selected"), dict) else {}
+        browse_result = row.get("browse_result") if isinstance(row.get("browse_result"), dict) else {}
+        source_browse = row.get("source_browse") if isinstance(row.get("source_browse"), dict) else {}
+        for item in (selected, browse_result, source_browse, row):
+            title = _text(
+                item.get("title")
+                or item.get("name")
+                or item.get("display_name")
+                or item.get("label")
+                or item.get("query")
+            )
+            subtitle = _text(item.get("subtitle") or item.get("artist") or item.get("description"))
+            if title and subtitle and subtitle.lower() not in title.lower():
+                return f"{title} - {subtitle}"
+            if title:
+                return title
+        return _text(fallback)
+
+    def _success_result_data(self, result: Any, *, playback_started: bool) -> Any:
+        if not isinstance(result, dict):
+            return result
+        clean = dict(result)
+        clean["playback_started"] = bool(playback_started)
+        if playback_started:
+            message = _text(clean.get("message"))
+            if message and re.search(r"\b(could not|couldn't|failed|not found|no results|error)\b", message, flags=re.I):
+                clean.pop("message", None)
+        return clean
+
     async def _handle(self, args: Any, llm_client=None, context: Optional[Dict[str, Any]] = None):
         payload = self._normalize_handler_args(args)
         query = _text(payload.get("query") or payload.get("request") or payload.get("text") or payload.get("prompt"))
+        query_without_target, query_target = self._extract_query_target(query)
+        if query_target and not any(_text(payload.get(key)) for key in ("target", "zone", "zone_name", "room", "room_name", "area", "area_name")):
+            payload["target"] = query_target
+        if query_without_target:
+            query = query_without_target
         action = self._normalize_action(payload.get("action"), query)
         media_kind = self._normalize_media_kind(payload.get("media_kind") or payload.get("media_type"), query)
         randomize = _truthy(payload.get("random") if "random" in payload else payload.get("shuffle"))
@@ -517,6 +589,8 @@ class RoonMusicPlugin(ToolVerba):
             if action in self.control_actions:
                 integration_action = "play" if action == "play" else action
                 result = action_fn(integration_action, device_id, {})
+                if not self._integration_result_ok(result):
+                    raise RuntimeError(_text(result.get("message")) or f"Roon did not complete {action}.")
                 summary = f"Done ({'resume' if action == 'play' else action}) on {_text(zone.get('name')) or 'this device'}."
             else:
                 result = action_fn(
@@ -528,7 +602,12 @@ class RoonMusicPlugin(ToolVerba):
                         "random": randomize,
                     },
                 )
-                label = _text(result.get("query")) or ("random music" if randomize else "music")
+                if not self._integration_result_ok(result):
+                    raise RuntimeError(_text(result.get("message")) or "Roon did not start playback.")
+                label = self._selected_media_label(
+                    result,
+                    fallback=_text(result.get("query")) or ("random music" if randomize else "music"),
+                )
                 verb = "Queued" if action == "queue_media" else "Playing"
                 summary = f"{verb} {label} on {_text(zone.get('name')) or 'this device'}."
         except Exception as exc:
@@ -548,10 +627,12 @@ class RoonMusicPlugin(ToolVerba):
                 "random": randomize,
                 "zone_id": zone.get("id"),
                 "zone_name": zone.get("name"),
+                "selected_media": self._selected_media_label(result, fallback=query),
+                "playback_started": True,
             },
-            data={"zone": zone, "result": result},
+            data={"zone": zone, "result": self._success_result_data(result, playback_started=True)},
             summary_for_user=summary,
-            say_hint="Confirm the music playback action briefly.",
+            say_hint="Confirm the music playback action briefly. If playback_started is true, do not say the song could not be played.",
         )
 
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
