@@ -29,34 +29,35 @@ _VOICE_CORE = VoiceCoreEntityClient()
 
 class VoicePERemoteTimerPlugin(ToolVerba):
     """
-    Voice PE Remote Timer (device-local, ESPHome-driven)
+    Tater native satellite timer
 
     Features:
-      - Start a timer (device-local countdown + LEDs)
-      - Ask how much time is left (reads remaining seconds sensor)
-      - Cancel a running timer (press cancel button)
+      - Start a timer on the speaking satellite
+      - Ask how much time is left
+      - Cancel or snooze a running/ringing timer
 
     Behavior:
-      - If a timer is already running, starting a new one is BLOCKED.
-        The user must cancel first.
+      - Tater owns timer state and syncs it to native satellites.
+      - The satellite keeps a local armed fallback so it can still ring
+        if it disconnects shortly before the deadline.
     """
 
     name = "voicepe_remote_timer"
-    verba_name = "Voice PE Remote Timer"
-    version = "1.2.4"
+    verba_name = "Tater Satellite Timer"
+    version = "1.3.0"
     min_tater_version = "59"
-    pretty_name = "Voice PE Remote Timer"
-    settings_category = "Voice PE Remote Timer"
+    pretty_name = "Tater Satellite Timer"
+    settings_category = "Tater Satellite Timer"
 
     usage = (
-        '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language Voice PE timer request '
-        '(for example: set a timer for 5 minutes, how much time is left, cancel the timer)."}}'
+        '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language Tater satellite timer request '
+        '(for example: set a timer for 5 minutes, how much time is left, cancel the timer, snooze the timer)."}}'
     )
 
     description = (
-        "Start, cancel, or check the remaining time for a device-local Voice PE timer from one natural-language request."
+        "Start, cancel, snooze, or check the remaining time for a Tater native satellite timer from one natural-language request."
     )
-    verba_dec = "Start, cancel, or check a Voice PE (ESPHome) timer device."
+    verba_dec = "Start, cancel, snooze, or check a Tater native satellite timer."
 
     required_settings = {
         "MAX_SECONDS": {
@@ -65,59 +66,18 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             "default": 7200,
             "description": "Clamp very large durations (default 2 hours).",
         },
-        "TIMER_SECONDS_ENTITY": {
-            "label": "Timer Seconds Entity (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Explicit number entity for timer seconds, e.g. number.voicepe_office_remote_timer_seconds.",
-        },
-        "START_BUTTON_ENTITY": {
-            "label": "Start Button Entity (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Explicit button entity to start timer, e.g. button.voicepe_office_remote_timer_start.",
-        },
-        "CANCEL_BUTTON_ENTITY": {
-            "label": "Cancel Button Entity (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Explicit button entity to cancel timer, e.g. button.voicepe_office_remote_timer_cancel.",
-        },
-        "REMAINING_SENSOR_ENTITY": {
-            "label": "Remaining Sensor Entity (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Explicit sensor entity for remaining seconds, e.g. sensor.voicepe_office_remote_timer_remaining_seconds.",
-        },
-        "RUNNING_SENSOR_ENTITY": {
-            "label": "Running Sensor Entity (optional)",
-            "type": "string",
-            "default": "",
-            "description": "Explicit binary_sensor entity for running state, e.g. binary_sensor.voicepe_office_remote_timer_running.",
-        },
-        # (optional): if your entity ids follow a predictable pattern, you can override this.
-        "VOICEPE_ENTITY_PREFIX": {
-            "label": "Voice PE entity prefix (optional)",
-            "type": "string",
-            "default": "",
-            "description": (
-                "Optional prefix used when inferring entities from the speaking device. "
-                "Example: 'voicepe_office' would produce number.voicepe_office_remote_timer_seconds, etc. "
-                "If blank, we will slugify context.device_name."
-            ),
-        },
     }
 
     waiting_prompt_template = (
-        "Write a short friendly message telling {mention} you’re working on the Voice PE timer now. "
+        "Write a short friendly message telling {mention} you’re working on the Tater satellite timer now. "
         "Only output that message."
     )
 
     platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'little_spud', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
-    when_to_use = "Use when the user wants to start a timer, cancel a timer, or ask how much time is left on a Voice PE timer."
+    when_to_use = "Use when the user wants to start, cancel, snooze, stop, silence, or check a timer on a Tater satellite."
     how_to_use = (
         "Pass one natural-language timer request in query. Include the duration naturally for start requests. "
-        "For status checks or cancel requests, no duration is needed."
+        "For status checks or cancel requests, no duration is needed. Snooze defaults to 5 minutes if no duration is given."
     )
     common_needs = ["A natural-language timer request."]
     missing_info_prompts = []
@@ -126,6 +86,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         '{"function":"voicepe_remote_timer","arguments":{"query":"how much time is left on the timer"}}',
         '{"function":"voicepe_remote_timer","arguments":{"query":"cancel the timer"}}',
         '{"function":"voicepe_remote_timer","arguments":{"query":"start a 90 second timer"}}',
+        '{"function":"voicepe_remote_timer","arguments":{"query":"snooze the timer for 10 minutes"}}',
     ]
 
 
@@ -892,7 +853,9 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             return action, ""
 
         if not action:
-            if re.search(r"\b(cancel|stop|clear|end)\b", merged):
+            if re.search(r"\b(snooze|pause)\b", merged):
+                action = "snooze"
+            elif re.search(r"\b(cancel|stop|clear|end|silence)\b", merged):
                 action = "cancel"
             elif re.search(r"\b(status|remaining|left|how much time|time left|check timer)\b", merged):
                 action = "status"
@@ -1044,6 +1007,158 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         except Exception as e:
             logger.debug(f"[voicepe_remote_timer] LLM duration parse failed: {e}")
             return None
+
+    def _native_selector(self, context: dict | None) -> str:
+        selector = self._voice_core_selector(context)
+        if selector:
+            return selector
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        for key in ("satellite_selector", "device_id", "selector"):
+            token = str(ctx.get(key) or origin.get(key) or "").strip()
+            if token:
+                return token
+        return ""
+
+    def _native_room(self, context: dict | None) -> str:
+        return self._ctx_text(context, "area_name", "room_name", "room", "area")
+
+    async def _native_timer_module(self):
+        try:
+            from tater_voice import native_timers
+
+            return native_timers
+        except Exception as e:
+            logger.debug(f"[voicepe_remote_timer] native timer backend unavailable: {e}")
+            return None
+
+    async def _native_start_timer(self, duration_text: str, llm_client, context: dict | None = None) -> str | None:
+        native_timers = await self._native_timer_module()
+        if native_timers is None:
+            return None
+
+        selector = self._native_selector(context)
+        if not selector:
+            return "I couldn't determine which Tater satellite you spoke from."
+
+        try:
+            max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+        except Exception:
+            max_seconds = 7200
+        new_seconds = self._parse_duration_to_seconds(duration_text, max_seconds)
+        if new_seconds <= 0:
+            llm_seconds = await self._llm_infer_duration_seconds(duration_text, llm_client, max_seconds)
+            if llm_seconds:
+                new_seconds = llm_seconds
+        if new_seconds <= 0:
+            return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
+
+        result = await native_timers.create_timer(
+            selector,
+            new_seconds,
+            room=self._native_room(context),
+            source="verba",
+        )
+        if not bool(result.get("ok")) and str(result.get("code") or "") == "already_running":
+            remaining = result.get("remaining_s")
+            try:
+                remaining_seconds = int(remaining)
+            except Exception:
+                remaining_seconds = None
+            return (await self._llm_block_new_timer_message(remaining_seconds, llm_client)).strip()
+        if not bool(result.get("ok")):
+            return str(result.get("message") or "I couldn't start the timer.").strip()
+        return (await self._llm_started_message(new_seconds, llm_client)).strip()
+
+    async def _native_status(self, llm_client, context: dict | None = None) -> str | None:
+        native_timers = await self._native_timer_module()
+        if native_timers is None:
+            return None
+
+        result = await native_timers.status(
+            selector=self._native_selector(context),
+            room=self._native_room(context),
+        )
+        timers = result.get("timers") if isinstance(result, dict) else []
+        if not timers:
+            return (await self._llm_no_timer_message(llm_client)).strip()
+        first = timers[0] if isinstance(timers[0], dict) else {}
+        if str(first.get("state") or "") == "ringing":
+            return "The timer is going off now."
+        remaining = first.get("remaining_s")
+        try:
+            remaining_seconds = int(remaining)
+        except Exception:
+            return "A timer is running, but I couldn't read the remaining time."
+        return (await self._llm_time_left_message(remaining_seconds, llm_client)).strip()
+
+    async def _native_cancel(self, llm_client, context: dict | None = None) -> str | None:
+        native_timers = await self._native_timer_module()
+        if native_timers is None:
+            return None
+
+        result = await native_timers.cancel_timer(
+            selector=self._native_selector(context),
+            room=self._native_room(context),
+            source="verba",
+        )
+        if int((result or {}).get("cancelled") or 0) <= 0:
+            return (await self._llm_cancel_nothing_message(llm_client)).strip()
+        return (await self._llm_cancelled_message(llm_client)).strip()
+
+    async def _native_snooze(self, duration_text: str, llm_client, context: dict | None = None) -> str | None:
+        native_timers = await self._native_timer_module()
+        if native_timers is None:
+            return None
+
+        try:
+            max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+        except Exception:
+            max_seconds = 7200
+        seconds = self._parse_duration_to_seconds(duration_text or "5 minutes", max_seconds)
+        if seconds <= 0:
+            seconds = 300
+        result = await native_timers.snooze_timer(
+            selector=self._native_selector(context),
+            duration_s=seconds,
+            source="verba",
+        )
+        if int((result or {}).get("snoozed") or 0) <= 0:
+            return (await self._llm_no_timer_message(llm_client)).strip()
+        dur = self._format_remaining(seconds)
+        return f"Timer snoozed for {dur}."
+
+    async def _handle_native(self, args, llm_client, context: dict | None = None) -> str | None:
+        args = args or {}
+        action, duration = self._resolve_action_duration(args)
+        merged_request = self._merged_request_text(args)
+
+        if action in ("cancel", "stop", "clear"):
+            return await self._native_cancel(llm_client, context=context)
+
+        if action in ("status", "check", "remaining", "time_left"):
+            return await self._native_status(llm_client, context=context)
+
+        if action in ("snooze", "pause"):
+            if not duration:
+                duration = self._extract_duration_from_text(merged_request) or "5 minutes"
+            return await self._native_snooze(duration, llm_client, context=context)
+
+        if action in ("start", "set") and not duration:
+            try:
+                max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+            except Exception:
+                max_seconds = 7200
+            llm_seconds = await self._llm_infer_duration_seconds(merged_request, llm_client, max_seconds)
+            if llm_seconds:
+                duration = str(llm_seconds)
+            else:
+                return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
+
+        if duration:
+            return await self._native_start_timer(duration, llm_client, context=context)
+
+        return await self._native_status(llm_client, context=context)
 
     # ─────────────────────────────────────────────────────────────
     # Read timer state (running + remaining)
@@ -1381,6 +1496,10 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     async def _handle(self, args, llm_client, context: dict | None = None) -> str:
         args = args or {}
+        native_result = await self._handle_native(args, llm_client, context=context)
+        if native_result is not None:
+            return native_result
+
         action, duration = self._resolve_action_duration(args)
         merged_request = self._merged_request_text(args)
 
@@ -1409,6 +1528,10 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     async def _handle_voice_core(self, args, llm_client, context: dict | None = None) -> str:
         args = args or {}
+        native_result = await self._handle_native(args, llm_client, context=context)
+        if native_result is not None:
+            return native_result
+
         action, duration = self._resolve_action_duration(args)
         merged_request = self._merged_request_text(args)
 

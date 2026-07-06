@@ -1459,10 +1459,10 @@
     },
     {
       "id": "voicepe_remote_timer",
-      "name": "Voice PE Remote Timer",
-      "version": "1.2.4",
+      "name": "Tater Satellite Timer",
+      "version": "1.3.0",
       "min_tater_version": "59",
-      "description": "Start, cancel, or check a Voice PE (ESPHome) timer device.",
+      "description": "Start, cancel, snooze, or check a Tater native satellite timer.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -1478,10 +1478,10 @@
         "meshtastic"
       ],
       "notifier": false,
-      "settings_category": "Voice PE Remote Timer",
+      "settings_category": "Tater Satellite Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "f2e4b1b582cb585a272dafb0d8ab57d37ee0631d31bde25e0787b62a569a0650"
+      "sha256": "b869ccd785647e24ec9dc9a4672be3298ffa22fd174bf98df5ccd1712128d353"
     },
     {
       "id": "weather_forecast",
