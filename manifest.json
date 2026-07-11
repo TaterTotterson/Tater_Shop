@@ -40,9 +40,9 @@
     {
       "id": "broadcast",
       "name": "Broadcast",
-      "version": "1.1.15",
+      "version": "1.2.0",
       "min_tater_version": "59",
-      "description": "Send a one-time spoken announcement to your configured broadcast targets.",
+      "description": "Send a one-time spoken announcement to all satellites or one specified room.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -61,7 +61,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "164ffacf6171e5411e2550353dbfd2ee50cb5c51bc3b5a7f3fe9d22e0d3cd23d"
+      "sha256": "c3cf382a766261f54c74ff473b83175afffa54fa727ab5c88d14675ee4703547"
     },
     {
       "id": "camera_control",
@@ -1459,10 +1459,10 @@
     },
     {
       "id": "voicepe_remote_timer",
-      "name": "Tater Satellite Timer",
-      "version": "1.3.0",
+      "name": "Timer",
+      "version": "1.3.1",
       "min_tater_version": "59",
-      "description": "Start, cancel, snooze, or check a Tater native satellite timer.",
+      "description": "Set, cancel, snooze, silence, or check a timer.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -1478,10 +1478,10 @@
         "meshtastic"
       ],
       "notifier": false,
-      "settings_category": "Tater Satellite Timer",
+      "settings_category": "Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "b869ccd785647e24ec9dc9a4672be3298ffa22fd174bf98df5ccd1712128d353"
+      "sha256": "01dfb6827aa95bf9ad802103a0bf872ac230889ef1264ab6dd6808c241a47d40"
     },
     {
       "id": "weather_forecast",

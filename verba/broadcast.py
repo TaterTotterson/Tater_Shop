@@ -2,11 +2,16 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from dotenv import load_dotenv
 
 from announcement_targets import build_announcement_target_options, normalize_announcement_targets
+try:
+    from announcement_targets import VOICE_CORE_TARGET_PREFIX, get_voice_core_satellite_target_options
+except Exception:
+    VOICE_CORE_TARGET_PREFIX = "voice_core:"
+    get_voice_core_satellite_target_options = None
 from tateros import integration_store as integration_store_module
 from helpers import get_tater_name, redis_client
 from speech_settings import get_speech_settings
@@ -29,27 +34,28 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 
 
 class BroadcastPlugin(ToolVerba):
-    """Broadcast a spoken announcement to configured Voice Core, Sonos, or Home Assistant media-player targets."""
+    """Broadcast a spoken announcement to Tater satellites, Sonos, or Home Assistant media-player targets."""
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.1.15"
+    version = "1.2.0"
     min_tater_version = "59"
-    usage = '{"function":"broadcast","arguments":{"text":"<what to announce>"}}'
+    usage = '{"function":"broadcast","arguments":{"text":"<what to announce>","room":"<optional room or satellite>"}}'
     description = (
-        "Send a one-time whole-house spoken announcement using the global announcement TTS settings on the configured targets. "
+        "Send a one-time spoken announcement. If the user specifies a room, area, or satellite, send it only there. "
+        "If no room is specified, send it everywhere using connected Tater satellites plus configured extra announcement targets. "
         "Use ONLY when the user explicitly asks to broadcast/announce/page an audio message and provides what to say."
     )
-    verba_dec = "Send a one-time spoken announcement to your configured broadcast targets."
+    verba_dec = "Send a one-time spoken announcement to all satellites or one specified room."
     pretty_name = "Broadcast Announcement"
     settings_category = "Broadcast"
 
     required_settings = {
         "TARGETS": {
-            "label": "Broadcast Targets",
+            "label": "Extra Broadcast Targets",
             "type": "multiselect",
             "default": [],
-            "description": "Choose one or more Voice Core satellites, Sonos speakers, or Home Assistant media players.",
+            "description": "Optional extra Sonos or Home Assistant targets for whole-house broadcasts. Connected Tater satellites are included automatically.",
             "options": [],
         },
     }
@@ -84,9 +90,6 @@ class BroadcastPlugin(ToolVerba):
     def _targets(self, settings: dict | None) -> list[str]:
         values = settings if isinstance(settings, dict) else {}
         configured = normalize_announcement_targets(values.get("TARGETS"))
-        if configured:
-            return configured
-
         legacy = [
             (values.get("DEVICE_1") or "").strip(),
             (values.get("DEVICE_2") or "").strip(),
@@ -94,7 +97,129 @@ class BroadcastPlugin(ToolVerba):
             (values.get("DEVICE_4") or "").strip(),
             (values.get("DEVICE_5") or "").strip(),
         ]
-        return normalize_announcement_targets([item for item in legacy if item])
+        return self._unique_targets([*configured, *normalize_announcement_targets([item for item in legacy if item])])
+
+    @staticmethod
+    def _unique_targets(values: List[str]) -> list[str]:
+        rows: list[str] = []
+        seen = set()
+        for value in values:
+            target = str(value or "").strip()
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            rows.append(target)
+        return rows
+
+    @staticmethod
+    def _norm(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    @staticmethod
+    def _is_everywhere(value: Any) -> bool:
+        return BroadcastPlugin._norm(value) in {
+            "",
+            "all",
+            "all rooms",
+            "all satellites",
+            "every room",
+            "everywhere",
+            "house",
+            "the house",
+            "whole house",
+        }
+
+    def _satellite_target_options(self, current_values: Any = None) -> list[dict[str, str]]:
+        if not callable(get_voice_core_satellite_target_options):
+            return []
+        try:
+            rows = get_voice_core_satellite_target_options(current_values=current_values)
+        except Exception as exc:
+            logger.warning("[broadcast] failed to load Tater satellite targets: %s", exc)
+            return []
+        return [dict(row) for row in list(rows or []) if isinstance(row, dict)]
+
+    def _satellite_targets(self) -> list[str]:
+        values = [
+            str(row.get("value") or "").strip()
+            for row in self._satellite_target_options(current_values=[])
+            if str(row.get("value") or "").strip().startswith(VOICE_CORE_TARGET_PREFIX)
+        ]
+        return self._unique_targets(values)
+
+    def _satellite_aliases(self, option: dict[str, str]) -> list[str]:
+        value = str(option.get("value") or "").strip()
+        label = str(option.get("label") or "").strip()
+        aliases = [label]
+
+        body = label
+        if ":" in body:
+            body = body.split(":", 1)[1].strip()
+        title, _, detail = body.partition("(")
+        if title.strip():
+            aliases.append(title.strip())
+        if detail:
+            for part in detail.rstrip(")").split("•"):
+                token = part.strip()
+                lower = token.lower()
+                if token and not lower.startswith(("voice_core:", "native:", "host:")):
+                    aliases.append(token)
+
+        if value.startswith(VOICE_CORE_TARGET_PREFIX):
+            selector = value[len(VOICE_CORE_TARGET_PREFIX):].strip()
+            if selector:
+                aliases.append(selector)
+                if selector.startswith("native:"):
+                    aliases.append(selector.split(":", 1)[1])
+                if selector.startswith("host:"):
+                    aliases.append(selector.split(":", 1)[1])
+
+        normalized: list[str] = []
+        seen = set()
+        for alias in aliases:
+            token = self._norm(alias)
+            if not token or token in seen or token in {"tater", "satellite", "tater satellite"}:
+                continue
+            seen.add(token)
+            normalized.append(token)
+        return normalized
+
+    def _room_targets(self, room: Any) -> list[str]:
+        query = str(room or "").strip()
+        if self._is_everywhere(query):
+            return self._satellite_targets()
+
+        lower = query.lower()
+        if lower.startswith(VOICE_CORE_TARGET_PREFIX):
+            return normalize_announcement_targets([query])
+        if lower.startswith(("native:", "host:")):
+            return normalize_announcement_targets([f"{VOICE_CORE_TARGET_PREFIX}{query}"])
+
+        query_norm = self._norm(query)
+        if not query_norm:
+            return []
+
+        matches: list[str] = []
+        for option in self._satellite_target_options(current_values=[]):
+            value = str(option.get("value") or "").strip()
+            if not value.startswith(VOICE_CORE_TARGET_PREFIX):
+                continue
+            aliases = self._satellite_aliases(option)
+            if any(query_norm == alias or query_norm in alias or alias in query_norm for alias in aliases):
+                matches.append(value)
+        return self._unique_targets(matches)
+
+    def _select_targets(self, settings: dict | None, room: str = "") -> Tuple[list[str], str]:
+        configured = self._targets(settings)
+        extra_targets = [target for target in configured if not target.startswith(VOICE_CORE_TARGET_PREFIX)]
+
+        if room and not self._is_everywhere(room):
+            return self._room_targets(room), "room"
+
+        satellite_targets = self._satellite_targets()
+        if satellite_targets:
+            return self._unique_targets([*satellite_targets, *extra_targets]), "everywhere"
+        return configured, "configured"
 
     def webui_settings_fields(self, fields, current_settings=None, redis_client=None, notifier_destination_catalog=None):
         rows = [dict(field) if isinstance(field, dict) else field for field in list(fields or [])]
@@ -107,6 +232,7 @@ class BroadcastPlugin(ToolVerba):
             homeassistant_token=ha.get("token", ""),
             include_homeassistant=True,
             include_sonos=True,
+            include_voice_core=False,
             current_values=current_targets,
         )
 
@@ -147,6 +273,58 @@ class BroadcastPlugin(ToolVerba):
                 return value.strip()
         return ""
 
+    @staticmethod
+    def _extract_room_arg(args: Dict[str, Any]) -> str:
+        args = args or {}
+        for key in ("room", "area", "target_room", "target", "location", "device", "satellite", "where"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _split_room_from_text(self, raw_text: str) -> Tuple[str, str]:
+        text = str(raw_text or "").strip()
+        if not text:
+            return "", ""
+
+        body = re.sub(r"^\s*(?:broadcast|announce|page)\b\s*", "", text, flags=re.I).strip()
+        options = self._satellite_target_options(current_values=[])
+        alias_rows: list[tuple[str, str]] = []
+        for option in options:
+            for alias in self._satellite_aliases(option):
+                if len(alias) >= 3:
+                    alias_rows.append((alias, str(option.get("label") or alias).strip()))
+        alias_rows.sort(key=lambda item: len(item[0]), reverse=True)
+
+        body_norm = self._norm(body)
+        for alias_norm, label in alias_rows:
+            phrase = re.escape(alias_norm).replace("\\ ", r"\s+")
+            match = re.search(rf"\b(?:to|in|into|for)\s+(?:the\s+)?{phrase}\b", body_norm)
+            if not match:
+                continue
+            start, end = match.span()
+            cleaned = f"{body_norm[:start].strip()} {body_norm[end:].strip()}".strip()
+            cleaned = re.sub(r"^\s*(?:that|say|saying|tell|announce|broadcast|page)\b\s*", "", cleaned, flags=re.I).strip(" :,-")
+            return cleaned or text, label
+
+        match = re.match(
+            r"^(?:to|in|into|for)\s+(?:the\s+)?(?P<room>[a-zA-Z0-9 _-]{2,40}?)(?:\s*[:,]\s*|\s+(?:that|say|saying|tell)\s+)(?P<message>.+)$",
+            body,
+            flags=re.I,
+        )
+        if match:
+            return match.group("message").strip(), match.group("room").strip()
+
+        return body or text, ""
+
+    def _request_from_args(self, args: Dict[str, Any]) -> Tuple[str, str]:
+        args = args or {}
+        text = self._extract_announcement_arg(args)
+        room = self._extract_room_arg(args)
+        if not room:
+            text, room = self._split_room_from_text(text)
+        return text, room
+
     async def _make_announcement_text(self, raw_text: str, llm_client) -> str:
         raw_text = (raw_text or "").strip()
         if not raw_text:
@@ -184,15 +362,22 @@ class BroadcastPlugin(ToolVerba):
 
         return raw_text[:max_chars]
 
-    async def _broadcast(self, raw_text: str, llm_client) -> dict:
+    async def _broadcast(self, raw_text: str, llm_client, room: str = "") -> dict:
         settings = self._get_settings()
-        targets = self._targets(settings)
+        targets, target_scope = self._select_targets(settings, room)
         if not targets:
+            if room and not self._is_everywhere(room):
+                return action_failure(
+                    code="broadcast_room_not_found",
+                    message=f"No connected Tater satellite matched {room!r}.",
+                    needs=["Try another room name or check that the satellite is connected."],
+                    say_hint="Explain that no connected satellite matched that room.",
+                )
             return action_failure(
                 code="no_broadcast_targets",
                 message="No broadcast targets are configured.",
-                needs=["Please configure one or more broadcast targets."],
-                say_hint="Explain there are no configured broadcast targets.",
+                needs=["Connect a Tater satellite or configure one or more extra broadcast targets."],
+                say_hint="Explain there are no connected broadcast targets.",
             )
 
         announcement = (
@@ -271,7 +456,10 @@ class BroadcastPlugin(ToolVerba):
             "homeassistant_sent_count": int(tts_result.get("homeassistant_sent_count") or 0),
             "voice_core_sent_count": int(tts_result.get("voice_core_sent_count") or 0),
             "targets": list(targets),
+            "target_scope": target_scope,
         }
+        if room:
+            facts["requested_room"] = room
         if tts_result.get("media_url"):
             facts["media_url"] = str(tts_result.get("media_url"))
 
@@ -279,7 +467,7 @@ class BroadcastPlugin(ToolVerba):
             return action_success(
                 facts=facts,
                 summary_for_user=(
-                    f"Broadcast sent to {sent_count} of {target_count} targets using {backend_used}. "
+                    f"Broadcast sent to {sent_count} of {target_count} target{'s' if target_count != 1 else ''} using {backend_used}. "
                     f"{len(warnings)} targets failed."
                 ),
                 say_hint="Confirm partial broadcast success and mention failed targets if useful.",
@@ -287,14 +475,16 @@ class BroadcastPlugin(ToolVerba):
 
         return action_success(
             facts=facts,
-            summary_for_user=f"Broadcast sent to all {target_count} configured targets using {backend_used}.",
+            summary_for_user=f"Broadcast sent to {target_count} target{'s' if target_count != 1 else ''} using {backend_used}.",
             say_hint="Confirm the broadcast was sent successfully.",
         )
 
+    async def _broadcast_from_args(self, args: Dict[str, Any], llm_client) -> dict:
+        text, room = self._request_from_args(args or {})
+        return await self._broadcast(text, llm_client, room=room)
+
     async def handle_homeassistant(self, args, llm_client):
-        args = args or {}
-        text = self._extract_announcement_arg(args)
-        return await self._broadcast(text, llm_client)
+        return await self._broadcast_from_args(args or {}, llm_client)
 
     async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         try:
@@ -306,8 +496,7 @@ class BroadcastPlugin(ToolVerba):
                 return await self.handle_homeassistant(args, llm_client)
 
     async def handle_webui(self, args, llm_client):
-        args = args or {}
-        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
+        return await self._broadcast_from_args(args or {}, llm_client)
 
     async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         return await self.handle_webui(args or {}, llm_client)
@@ -319,12 +508,10 @@ class BroadcastPlugin(ToolVerba):
             return await self.handle_webui(args, llm_client)
 
     async def handle_homekit(self, args, llm_client):
-        args = args or {}
-        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
+        return await self._broadcast_from_args(args or {}, llm_client)
 
     async def handle_xbmc(self, args, llm_client):
-        args = args or {}
-        return await self._broadcast(self._extract_announcement_arg(args), llm_client)
+        return await self._broadcast_from_args(args or {}, llm_client)
 
     async def handle_discord(self, message, args, llm_client):
         return await self.handle_webui(args or {}, llm_client)

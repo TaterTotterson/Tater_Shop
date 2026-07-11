@@ -29,7 +29,7 @@ _VOICE_CORE = VoiceCoreEntityClient()
 
 class VoicePERemoteTimerPlugin(ToolVerba):
     """
-    Tater native satellite timer
+    Timer
 
     Features:
       - Start a timer on the speaking satellite
@@ -43,21 +43,22 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     """
 
     name = "voicepe_remote_timer"
-    verba_name = "Tater Satellite Timer"
-    version = "1.3.0"
+    verba_name = "Timer"
+    version = "1.3.1"
     min_tater_version = "59"
-    pretty_name = "Tater Satellite Timer"
-    settings_category = "Tater Satellite Timer"
+    pretty_name = "Timer"
+    settings_category = "Timer"
 
     usage = (
-        '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language Tater satellite timer request '
-        '(for example: set a timer for 5 minutes, how much time is left, cancel the timer, snooze the timer)."}}'
+        '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language timer request '
+        '(for example: set a timer for 5 minutes, start a 90 second timer, how much time is left, cancel the timer, snooze the timer)."}}'
     )
 
     description = (
-        "Start, cancel, snooze, or check the remaining time for a Tater native satellite timer from one natural-language request."
+        "Use this for normal timer requests. Set, start, create, cancel, stop, silence, snooze, or check timers from one natural-language request. "
+        "Examples: set a timer for 5 minutes; start a 90 second timer; how much time is left; cancel the timer; stop the timer alarm."
     )
-    verba_dec = "Start, cancel, snooze, or check a Tater native satellite timer."
+    verba_dec = "Set, cancel, snooze, silence, or check a timer."
 
     required_settings = {
         "MAX_SECONDS": {
@@ -69,17 +70,20 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     }
 
     waiting_prompt_template = (
-        "Write a short friendly message telling {mention} you’re working on the Tater satellite timer now. "
+        "Write a short friendly message telling {mention} you’re setting or checking the timer now. "
         "Only output that message."
     )
 
     platforms = ['voice_core', 'homeassistant', 'homekit', 'xbmc', 'webui', 'little_spud', 'macos', 'discord', 'telegram', 'matrix', 'irc', 'meshtastic']
-    when_to_use = "Use when the user wants to start, cancel, snooze, stop, silence, or check a timer on a Tater satellite."
+    when_to_use = (
+        "Use when the user asks to set, start, create, cancel, stop, silence, snooze, or check a timer. "
+        "The user does not need to say Tater, satellite, or device."
+    )
     how_to_use = (
         "Pass one natural-language timer request in query. Include the duration naturally for start requests. "
         "For status checks or cancel requests, no duration is needed. Snooze defaults to 5 minutes if no duration is given."
     )
-    common_needs = ["A natural-language timer request."]
+    common_needs = ["Set a timer", "Start a timer", "Cancel the timer", "Stop the timer", "Snooze the timer", "How much time is left"]
     missing_info_prompts = []
     example_calls = [
         '{"function":"voicepe_remote_timer","arguments":{"query":"set a timer for 5 minutes"}}',
@@ -98,6 +102,8 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         return (
             redis_client.hgetall(f"verba_settings:{self.settings_category}")
             or redis_client.hgetall(f"verba_settings: {self.settings_category}")
+            or redis_client.hgetall("verba_settings:Tater Satellite Timer")
+            or redis_client.hgetall("verba_settings: Tater Satellite Timer")
             or {}
         )
 
