@@ -76,7 +76,7 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 MATRIX_STREAM_EDIT_INTERVAL_SEC = 1.75
 MATRIX_STREAM_MAX_UPDATES = 20
@@ -756,7 +756,10 @@ class _MatrixReplyStream:
         snapshot = ""
         try:
             if self._start_task is not None:
-                await self._start_task
+                # Finalization may cancel this flush while the first Matrix
+                # send is still in flight. Shield the shared start task so
+                # that cancellation cannot discard the reply entirely.
+                await asyncio.shield(self._start_task)
             if not self.event_id or self.closed:
                 return
             delay = self.interval_sec - (time.monotonic() - self.last_update_at)
@@ -798,8 +801,13 @@ class _MatrixReplyStream:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         if self._start_task is not None:
-            with contextlib.suppress(Exception):
-                await self._start_task
+            try:
+                await asyncio.shield(self._start_task)
+            except asyncio.CancelledError:
+                if not self._start_task.cancelled():
+                    raise
+            except Exception:
+                pass
 
     async def finish(self, final_text: str) -> bool:
         self.closed = True

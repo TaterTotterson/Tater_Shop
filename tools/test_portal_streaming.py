@@ -143,6 +143,34 @@ class DiscordStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(channel.messages[0].edits)
         self.assertEqual(channel.messages[0].content, "hello")
 
+    async def test_finalization_does_not_cancel_inflight_preview_send(self):
+        channel = _DiscordChannel()
+        stream = discord_portal._DiscordReplyStream(channel, max_length=2000)
+        stream.text = "Spud Lord"
+        stream.chunk_count = 3
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+            stream.message = _DiscordMessage("Spud Lord ▌")
+            stream.last_sent_text = stream.text
+            stream.update_count = 1
+
+        stream._start_task = asyncio.create_task(slow_start())
+        stream._flush_task = asyncio.create_task(stream._flush_after_delay())
+        await started.wait()
+        finish_task = asyncio.create_task(stream.finish("Spud Lord, I’m here!"))
+        await asyncio.sleep(0)
+        release.set()
+
+        delivered = await asyncio.wait_for(finish_task, timeout=1)
+
+        self.assertTrue(delivered)
+        self.assertFalse(stream._start_task.cancelled())
+        self.assertEqual(stream.message.content, "Spud Lord, I’m here!")
+
     async def test_missing_final_payload_uses_accumulated_stream(self):
         channel = _DiscordChannel()
         stream = discord_portal._DiscordReplyStream(channel, max_length=2000)
@@ -258,6 +286,39 @@ class TelegramStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(api.calls[-1][1]["text"], "hello")
 
+    async def test_finalization_does_not_cancel_inflight_preview_send(self):
+        api = _TelegramApi()
+        stream = telegram_portal._TelegramReplyStream(
+            api,
+            chat_id="123",
+            private_chat=True,
+            draft_id=7,
+        )
+        stream.text = "Spud Lord"
+        stream.chunk_count = 3
+        stream.mode = "draft"
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+            stream.last_sent_text = stream.text
+            stream.update_count = 1
+
+        stream._start_task = asyncio.create_task(slow_start())
+        stream._flush_task = asyncio.create_task(stream._flush_after_delay())
+        await started.wait()
+        finish_task = asyncio.create_task(stream.finish("Spud Lord, I’m here!"))
+        await asyncio.sleep(0)
+        release.set()
+
+        delivered = await asyncio.wait_for(finish_task, timeout=1)
+
+        self.assertTrue(delivered)
+        self.assertFalse(stream._start_task.cancelled())
+        self.assertEqual(api.calls[-1][0], "sendMessage")
+
 
 class MatrixStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_shot_reply_keeps_normal_send_path(self):
@@ -291,6 +352,38 @@ class MatrixStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(platform.events[1]["replacement_event_id"], "$preview")
         self.assertTrue(platform.events[1]["formatted"])
         self.assertEqual(platform.events[1]["text"], "hello")
+
+    async def test_finalization_does_not_cancel_inflight_preview_send(self):
+        platform = _MatrixPlatform()
+        stream = matrix_portal._MatrixReplyStream(
+            platform,
+            room_id="!room:example.test",
+            max_length=4000,
+        )
+        stream.text = "Spud Lord"
+        stream.chunk_count = 3
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+            stream.event_id = "$preview"
+            stream.last_sent_text = stream.text
+            stream.update_count = 1
+
+        stream._start_task = asyncio.create_task(slow_start())
+        stream._flush_task = asyncio.create_task(stream._flush_after_delay())
+        await started.wait()
+        finish_task = asyncio.create_task(stream.finish("Spud Lord, I’m here!"))
+        await asyncio.sleep(0)
+        release.set()
+
+        delivered = await asyncio.wait_for(finish_task, timeout=1)
+
+        self.assertTrue(delivered)
+        self.assertFalse(stream._start_task.cancelled())
+        self.assertEqual(platform.events[-1]["text"], "Spud Lord, I’m here!")
 
     async def test_missing_final_payload_uses_buffered_stream_text(self):
         platform = _MatrixPlatform()

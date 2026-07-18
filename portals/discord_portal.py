@@ -40,7 +40,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 
 load_dotenv()
@@ -731,7 +731,10 @@ class _DiscordReplyStream:
         snapshot = ""
         try:
             if self._start_task is not None:
-                await self._start_task
+                # Finalization may cancel this flush while the first Discord
+                # send is still in flight. Shield the shared start task so
+                # that cancellation cannot strand a cursor-only preview.
+                await asyncio.shield(self._start_task)
             if self.message is None or self.closed:
                 return
             delay = self.interval_sec - (time.monotonic() - self.last_update_at)
@@ -771,8 +774,13 @@ class _DiscordReplyStream:
             with suppress(asyncio.CancelledError):
                 await task
         if self._start_task is not None:
-            with suppress(Exception):
-                await self._start_task
+            try:
+                await asyncio.shield(self._start_task)
+            except asyncio.CancelledError:
+                if not self._start_task.cancelled():
+                    raise
+            except Exception:
+                pass
 
     async def _edit_final_preview(self, content: str, *, attempts: int = 3) -> bool:
         last_error: Optional[Exception] = None

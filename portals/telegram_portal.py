@@ -38,7 +38,7 @@ from admin_gate import (
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 
 load_dotenv()
@@ -735,7 +735,10 @@ class _TelegramReplyStream:
         snapshot = ""
         try:
             if self._start_task is not None:
-                await self._start_task
+                # Finalization may cancel this flush while the first Telegram
+                # send is still in flight. Shield the shared start task so
+                # that cancellation cannot strand or discard the reply.
+                await asyncio.shield(self._start_task)
             if not self.mode or self.closed:
                 return
             delay = self.interval_sec - (time.monotonic() - self.last_update_at)
@@ -773,8 +776,13 @@ class _TelegramReplyStream:
             with suppress(asyncio.CancelledError):
                 await task
         if self._start_task is not None:
-            with suppress(Exception):
-                await self._start_task
+            try:
+                await asyncio.shield(self._start_task)
+            except asyncio.CancelledError:
+                if not self._start_task.cancelled():
+                    raise
+            except Exception:
+                pass
 
     async def _edit_final_part(self, part: str) -> None:
         html_part = _telegram_html_text(part)
