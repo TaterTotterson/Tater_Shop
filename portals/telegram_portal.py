@@ -38,7 +38,7 @@ from admin_gate import (
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 
 load_dotenv()
@@ -811,7 +811,13 @@ class _TelegramReplyStream:
     async def finish(self, final_text: str) -> bool:
         self.closed = True
         await self._stop_pending_flush()
-        text = str(final_text or "").strip()
+        completed_text = str(final_text or "").strip()
+        if not completed_text and self.text.strip():
+            logger.warning(
+                "[Telegram] completed reply payload was empty; finalizing %d buffered stream characters",
+                len(self.text.strip()),
+            )
+        text = completed_text or self.text.strip()
         if self.chunk_count < 2 or not self.mode or not text:
             if self.mode == "edit" and self.message_id > 0 and not text:
                 with suppress(Exception):
@@ -1511,7 +1517,10 @@ class TelegramPlatform:
                     hydra_kwargs["response_callback"] = reply_stream.on_chunk
                 result = await run_hydra_turn(**hydra_kwargs)
 
-                final_text = str(result.get("text") or "").strip()
+                final_text = (
+                    str(result.get("text") or "").strip()
+                    or reply_stream.text.strip()
+                )
                 delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
                     if not delivered_stream:

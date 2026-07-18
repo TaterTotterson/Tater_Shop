@@ -5,7 +5,7 @@
       "id": "discord",
       "name": "Discord",
       "module_key": "discord_portal",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Discord integration portal for Tater.",
       "settings_category": "Discord Settings",
@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "7672c9dde3594aeb64feff3b999e0d8a7f73165d2102e1715e981436aa52b78d"
+      "sha256": "7e53f8eaac4c85aaa7b9a173954227b01dbd99055f69b209f59060c9e2d51580"
     },
     {
       "id": "homekit",
@@ -47,7 +47,7 @@
       "id": "matrix",
       "name": "Matrix",
       "module_key": "matrix_portal",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Matrix integration portal for Tater.",
       "settings_category": "Matrix Settings",
@@ -55,7 +55,7 @@
       "autostart_key": "matrix_portal_running",
       "tags": [],
       "entry": "portals/matrix_portal.py",
-      "sha256": "454e28bb5102f996ca501ddf011ebf3feb44d16884f41934fa7060062b6955f5"
+      "sha256": "89df553d02032557248fd827b17403e64eacdaff780a925de6a00b19fb249085"
     },
     {
       "id": "meshtastic",
@@ -97,7 +97,7 @@
       "id": "telegram",
       "name": "Telegram",
       "module_key": "telegram_portal",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "59",
       "description": "Telegram integration portal for Tater.",
       "settings_category": "Telegram Settings",
@@ -105,7 +105,7 @@
       "autostart_key": "telegram_portal_running",
       "tags": [],
       "entry": "portals/telegram_portal.py",
-      "sha256": "78a754f7e510e76f4f104987022a7b9c5c3d70b404bd8878902eee4827d9992a"
+      "sha256": "6130b4fd73d8f8094a80b0329309c35ad4ac41fdd1e0eb663d0138d5dcf0f08d"
     },
     {
       "id": "xbmc",

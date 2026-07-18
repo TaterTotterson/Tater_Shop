@@ -76,7 +76,7 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 MATRIX_STREAM_EDIT_INTERVAL_SEC = 1.75
 MATRIX_STREAM_MAX_UPDATES = 20
@@ -804,10 +804,17 @@ class _MatrixReplyStream:
     async def finish(self, final_text: str) -> bool:
         self.closed = True
         await self._stop_pending_flush()
-        text = str(final_text or "").strip()
+        completed_text = str(final_text or "").strip()
+        if not completed_text and self.text.strip():
+            logger.warning(
+                "[Matrix] completed reply payload was empty; finalizing %d buffered stream characters",
+                len(self.text.strip()),
+            )
+        text = completed_text or self.text.strip()
         if self.chunk_count < 2 or not self.event_id or not text:
             if self.event_id and not text:
-                await self.platform._redact_stream_event(self.room_id, self.event_id)
+                with contextlib.suppress(Exception):
+                    await self.platform._redact_stream_event(self.room_id, self.event_id)
                 self.event_id = ""
             return False
         parts = _matrix_response_parts(text, self.max_length)
@@ -825,9 +832,19 @@ class _MatrixReplyStream:
             return True
         except Exception as exc:
             logger.warning("[Matrix] final streamed reply edit failed: %s", exc)
-            await self.platform._redact_stream_event(self.room_id, self.event_id)
+            try:
+                for part in parts:
+                    await self.platform._send_with_trust(self.room_id, part)
+            except Exception as fallback_exc:
+                logger.warning("[Matrix] streamed reply fallback send failed: %s", fallback_exc)
+                with contextlib.suppress(Exception):
+                    await self.platform._redact_stream_event(self.room_id, self.event_id)
+                self.event_id = ""
+                return False
+            with contextlib.suppress(Exception):
+                await self.platform._redact_stream_event(self.room_id, self.event_id)
             self.event_id = ""
-            return False
+            return True
 
     async def abort(self) -> None:
         self.closed = True
@@ -1800,7 +1817,10 @@ class MatrixPlatform:
                     hydra_kwargs["response_callback"] = reply_stream.on_chunk
                 result = await run_hydra_turn(**hydra_kwargs)
 
-                final_text = str(result.get("text") or "").strip()
+                final_text = (
+                    str(result.get("text") or "").strip()
+                    or reply_stream.text.strip()
+                )
                 delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
                     if not delivered_stream:

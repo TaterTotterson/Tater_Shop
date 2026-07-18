@@ -40,7 +40,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 
 load_dotenv()
@@ -774,10 +774,39 @@ class _DiscordReplyStream:
             with suppress(Exception):
                 await self._start_task
 
+    async def _edit_final_preview(self, content: str, *, attempts: int = 3) -> bool:
+        last_error: Optional[Exception] = None
+        attempt_count = max(1, int(attempts or 1))
+        for attempt in range(attempt_count):
+            try:
+                edited_message = await self.message.edit(content=content)
+                if edited_message is not None:
+                    self.message = edited_message
+                return True
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < attempt_count:
+                    try:
+                        retry_after = float(getattr(exc, "retry_after", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    await asyncio.sleep(max(0.25, min(2.0, retry_after or 0.35 * (attempt + 1))))
+        logger.warning("[discord] final streamed reply edit failed after retries: %s", last_error)
+        return False
+
     async def finish(self, final_text: str) -> bool:
         self.closed = True
         await self._stop_pending_flush()
-        text = str(final_text or "").strip()
+        # The completed Hydra payload should be authoritative. If a provider
+        # finishes its stream without returning that field, preserve the
+        # accumulated chunks instead of leaving Discord's cursor placeholder.
+        completed_text = str(final_text or "").strip()
+        if not completed_text and self.text.strip():
+            logger.warning(
+                "[discord] completed reply payload was empty; finalizing %d buffered stream characters",
+                len(self.text.strip()),
+            )
+        text = completed_text or self.text.strip()
         if self.chunk_count < 2 or self.message is None or not text:
             if self.message is not None and not text:
                 with suppress(Exception):
@@ -787,17 +816,34 @@ class _DiscordReplyStream:
         parts = _discord_response_chunks(text, self.max_length)
         if not parts:
             return False
+        if await self._edit_final_preview(parts[0]):
+            try:
+                for part in parts[1:]:
+                    await self.channel.send(part)
+                return True
+            except Exception as exc:
+                # The first part is already final and must not be duplicated by
+                # the caller. Keep it visible and report the continuation error.
+                logger.warning("[discord] streamed reply continuation send failed: %s", exc)
+                return True
+
+        # Editing can fail transiently or because Discord invalidated the
+        # message object. Send the complete answer normally before attempting
+        # to remove the stale preview, so the reply is never reduced to a
+        # cursor-only message.
         try:
-            await self.message.edit(content=parts[0])
-            for part in parts[1:]:
+            for part in parts:
                 await self.channel.send(part)
-            return True
         except Exception as exc:
-            logger.warning("[discord] final streamed reply edit failed: %s", exc)
-            with suppress(Exception):
-                await self.message.delete()
-            self.message = None
+            logger.warning("[discord] streamed reply fallback send failed: %s", exc)
             return False
+        try:
+            await self.message.delete()
+        except Exception as exc:
+            logger.warning("[discord] stale streamed preview cleanup failed: %s", exc)
+        finally:
+            self.message = None
+        return True
 
     async def abort(self) -> None:
         self.closed = True
@@ -1366,7 +1412,10 @@ class discord_portal(commands.Bot):
                 if _HYDRA_RESPONSE_STREAMING_SUPPORTED:
                     hydra_kwargs["response_callback"] = reply_stream.on_chunk
                 result = await run_hydra_turn(**hydra_kwargs)
-                final_text = str(result.get("text") or "").strip()
+                final_text = (
+                    str(result.get("text") or "").strip()
+                    or reply_stream.text.strip()
+                )
                 delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
                     if not delivered_stream:
