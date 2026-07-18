@@ -2,6 +2,7 @@
 import os
 import json
 import asyncio
+import inspect
 import logging
 import re
 from contextlib import asynccontextmanager, suppress
@@ -39,7 +40,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 
 load_dotenv()
@@ -55,6 +56,15 @@ ROOM_META_PREFIX = "tater:room_meta"
 DISCORD_SETTINGS_KEY = "discord_portal_settings"
 RESPONSE_CHANNEL_MAP_FIELD = "response_channel_ids_by_guild"
 RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC = 2.0
+DISCORD_STREAM_EDIT_INTERVAL_SEC = 1.1
+DISCORD_STREAM_MAX_UPDATES = 24
+
+try:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = (
+        "response_callback" in inspect.signature(run_hydra_turn).parameters
+    )
+except Exception:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = False
 
 PORTAL_SETTINGS = {
     "category": "Discord Settings",
@@ -628,6 +638,176 @@ async def safe_send(channel, content, max_length=2000):
         await channel.send(content[i : i + max_length])
 
 
+def _discord_response_chunks(content: Any, max_length: int) -> List[str]:
+    text = str(content or "")
+    limit = max(80, min(2000, int(max_length or 2000)))
+    return [text[index : index + limit] for index in range(0, len(text), limit)]
+
+
+def _discord_stream_preview(content: Any, max_length: int) -> str:
+    text = str(content or "")
+    try:
+        text = discord.utils.escape_mentions(discord.utils.escape_markdown(text))
+    except Exception:
+        pass
+    suffix = " ▌"
+    limit = max(80, min(2000, int(max_length or 2000)))
+    return f"{text[: max(1, limit - len(suffix))].rstrip()}{suffix}"
+
+
+class _DiscordReplyStream:
+    """Coalesce LLM chunks into rate-conscious Discord message edits."""
+
+    def __init__(
+        self,
+        channel: Any,
+        *,
+        max_length: int,
+        interval_sec: float = DISCORD_STREAM_EDIT_INTERVAL_SEC,
+        max_updates: int = DISCORD_STREAM_MAX_UPDATES,
+    ):
+        self.channel = channel
+        self.max_length = max(80, min(2000, int(max_length or 2000)))
+        self.interval_sec = max(0.25, float(interval_sec or 1.1))
+        self.max_updates = max(2, int(max_updates or 24))
+        self.loop = asyncio.get_running_loop()
+        self.text = ""
+        self.chunk_count = 0
+        self.message = None
+        self.last_sent_text = ""
+        self.last_update_at = 0.0
+        self.update_count = 0
+        self.closed = False
+        self._start_task: Optional[asyncio.Task] = None
+        self._flush_task: Optional[asyncio.Task] = None
+
+    def on_chunk(self, chunk: str) -> None:
+        text = str(chunk or "")
+        if self.closed or not text:
+            return
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not self.loop:
+            with suppress(RuntimeError):
+                self.loop.call_soon_threadsafe(self.on_chunk, text)
+            return
+        self.text += text
+        self.chunk_count += 1
+        if self.chunk_count == 2:
+            self._start_task = asyncio.create_task(self._start())
+        elif self.chunk_count > 2:
+            self._schedule_flush()
+
+    async def _start(self) -> None:
+        snapshot = self.text
+        try:
+            self.message = await self.channel.send(
+                _discord_stream_preview(snapshot, self.max_length)
+            )
+            self.last_sent_text = snapshot
+            self.last_update_at = time.monotonic()
+            self.update_count = 1
+        except Exception as exc:
+            logger.debug("[discord] streamed reply preview failed: %s", exc)
+            self.message = None
+        finally:
+            if (
+                not self.closed
+                and self.message is not None
+                and self.text != snapshot
+            ):
+                asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    def _schedule_flush(self) -> None:
+        if self.closed or self.chunk_count < 2 or self.update_count >= self.max_updates:
+            return
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        self._flush_task = asyncio.create_task(self._flush_after_delay())
+
+    async def _flush_after_delay(self) -> None:
+        snapshot = ""
+        try:
+            if self._start_task is not None:
+                await self._start_task
+            if self.message is None or self.closed:
+                return
+            delay = self.interval_sec - (time.monotonic() - self.last_update_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.closed or self.update_count >= self.max_updates:
+                return
+            snapshot = self.text
+            if not snapshot or snapshot == self.last_sent_text:
+                return
+            await self.message.edit(
+                content=_discord_stream_preview(snapshot, self.max_length)
+            )
+            self.last_sent_text = snapshot
+            self.last_update_at = time.monotonic()
+            self.update_count += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[discord] streamed reply edit failed: %s", exc)
+            self.update_count = self.max_updates
+        finally:
+            self._flush_task = None
+            if (
+                not self.closed
+                and self.message is not None
+                and self.update_count < self.max_updates
+                and self.text != (snapshot or self.last_sent_text)
+            ):
+                asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    async def _stop_pending_flush(self) -> None:
+        task = self._flush_task
+        self._flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if self._start_task is not None:
+            with suppress(Exception):
+                await self._start_task
+
+    async def finish(self, final_text: str) -> bool:
+        self.closed = True
+        await self._stop_pending_flush()
+        text = str(final_text or "").strip()
+        if self.chunk_count < 2 or self.message is None or not text:
+            if self.message is not None and not text:
+                with suppress(Exception):
+                    await self.message.delete()
+                self.message = None
+            return False
+        parts = _discord_response_chunks(text, self.max_length)
+        if not parts:
+            return False
+        try:
+            await self.message.edit(content=parts[0])
+            for part in parts[1:]:
+                await self.channel.send(part)
+            return True
+        except Exception as exc:
+            logger.warning("[discord] final streamed reply edit failed: %s", exc)
+            with suppress(Exception):
+                await self.message.delete()
+            self.message = None
+            return False
+
+    async def abort(self) -> None:
+        self.closed = True
+        await self._stop_pending_flush()
+        if self.message is not None:
+            with suppress(Exception):
+                await self.message.delete()
+            self.message = None
+
+
 TYPING_PULSE_INTERVAL_SEC = 4.0
 TYPING_ERROR_LOG_COOLDOWN_SEC = 30.0
 
@@ -1125,9 +1305,14 @@ class discord_portal(commands.Bot):
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = get_plugin_enabled
 
+        reply_stream: Optional[_DiscordReplyStream] = None
         async with safe_typing(message.channel):
             try:
                 scope_value = f"dm:{message.author.id}" if is_dm else f"channel:{message.channel.id}"
+                reply_stream = _DiscordReplyStream(
+                    message.channel,
+                    max_length=self.max_response_length,
+                )
 
                 async def _wait_callback(func_name, plugin_obj, wait_text="", wait_payload=None):
                     del plugin_obj
@@ -1161,7 +1346,7 @@ class discord_portal(commands.Bot):
                     return None
 
                 agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-                result = await run_hydra_turn(
+                hydra_kwargs = dict(
                     llm_client=self.llm,
                     platform="discord",
                     history_messages=messages_list,
@@ -1178,9 +1363,14 @@ class discord_portal(commands.Bot):
                     max_tool_calls=agent_max_tool_calls,
                     platform_preamble=platform_preamble,
                 )
+                if _HYDRA_RESPONSE_STREAMING_SUPPORTED:
+                    hydra_kwargs["response_callback"] = reply_stream.on_chunk
+                result = await run_hydra_turn(**hydra_kwargs)
                 final_text = str(result.get("text") or "").strip()
+                delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
-                    await safe_send(message.channel, final_text, self.max_response_length)
+                    if not delivered_stream:
+                        await safe_send(message.channel, final_text, self.max_response_length)
                     await self.save_message(
                         message.channel.id,
                         "assistant",
@@ -1238,6 +1428,8 @@ class discord_portal(commands.Bot):
                 return
 
             except Exception as e:
+                if reply_stream is not None:
+                    await reply_stream.abort()
                 logger.exception(f"Exception in message handler: {e}")
                 fallback = "An error occurred while processing your request."
                 error_prompt = (

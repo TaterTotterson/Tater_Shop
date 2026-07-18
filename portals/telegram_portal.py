@@ -1,6 +1,7 @@
 # telegram_portal.py
 import asyncio
 import html
+import inspect
 import json
 import logging
 import os
@@ -37,7 +38,7 @@ from admin_gate import (
 from verba_result import action_failure
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 load_dotenv()
@@ -52,12 +53,28 @@ NOTIFY_QUEUE_KEY = "notifyq:telegram"
 NOTIFY_POLL_INTERVAL = 0.5
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_TYPING_PULSE_SECONDS = 4.0
+TELEGRAM_DRAFT_EDIT_INTERVAL_SEC = 1.1
+TELEGRAM_MESSAGE_EDIT_INTERVAL_SEC = 1.25
+TELEGRAM_STREAM_MAX_UPDATES = 24
 TELEGRAM_CHAT_LOOKUP_HASH = "tater:telegram:chat_lookup"
 TELEGRAM_BLOB_PREFIX = "tater:blob:telegram"
 ROOM_LABEL_PREFIX = "tater:room_label"
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _MD_FENCED_CODE_RE = re.compile(r"```(?:[A-Za-z0-9_+\-]+)?\n?([\s\S]*?)```")
 _MD_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+try:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = (
+        "response_callback" in inspect.signature(run_hydra_turn).parameters
+    )
+except Exception:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = False
+
+
+class _TelegramRateLimitError(RuntimeError):
+    def __init__(self, message: str, retry_after: float = 1.0):
+        super().__init__(message)
+        self.retry_after = max(0.1, float(retry_after or 1.0))
 
 PORTAL_SETTINGS = {
     "category": "Telegram Settings",
@@ -550,6 +567,308 @@ class _TelegramMessageAdapter:
         return out
 
 
+def _telegram_chat_id_value(chat_id: Any) -> Any:
+    token = str(chat_id or "").strip()
+    if token and token.lstrip("-").isdigit():
+        try:
+            return int(token)
+        except Exception:
+            pass
+    return token
+
+
+def _telegram_response_parts(content: Any) -> List[str]:
+    text = str(content or "")
+    return [
+        text[index : index + TELEGRAM_TEXT_LIMIT]
+        for index in range(0, len(text), TELEGRAM_TEXT_LIMIT)
+    ]
+
+
+def _telegram_stream_preview(content: Any) -> str:
+    text = _telegram_plain_text(str(content or ""))
+    suffix = " ▌"
+    return f"{text[: TELEGRAM_TEXT_LIMIT - len(suffix)].rstrip()}{suffix}"
+
+
+class _TelegramReplyStream:
+    """Use native Telegram drafts in DMs and throttled edits elsewhere."""
+
+    def __init__(
+        self,
+        api_json: Any,
+        *,
+        chat_id: str,
+        private_chat: bool,
+        draft_id: int,
+        max_updates: int = TELEGRAM_STREAM_MAX_UPDATES,
+    ):
+        self.api_json = api_json
+        self.chat_id = str(chat_id or "").strip()
+        self.chat_id_value = _telegram_chat_id_value(chat_id)
+        self.private_chat = bool(private_chat)
+        self.draft_id = max(1, int(draft_id or 1))
+        self.interval_sec = (
+            TELEGRAM_DRAFT_EDIT_INTERVAL_SEC
+            if self.private_chat
+            else TELEGRAM_MESSAGE_EDIT_INTERVAL_SEC
+        )
+        self.max_updates = max(2, int(max_updates or TELEGRAM_STREAM_MAX_UPDATES))
+        self.loop = asyncio.get_running_loop()
+        self.text = ""
+        self.chunk_count = 0
+        self.mode = ""
+        self.message_id = 0
+        self.last_sent_text = ""
+        self.last_update_at = 0.0
+        self.update_count = 0
+        self.closed = False
+        self._start_task = None
+        self._flush_task = None
+
+    async def _call(self, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        for attempt in range(2):
+            try:
+                return await asyncio.to_thread(
+                    self.api_json,
+                    method,
+                    payload,
+                    20,
+                )
+            except _TelegramRateLimitError as exc:
+                if attempt >= 1:
+                    raise
+                await asyncio.sleep(min(60.0, max(0.1, exc.retry_after)))
+        return {}
+
+    def on_chunk(self, chunk: str) -> None:
+        text = str(chunk or "")
+        if self.closed or not text:
+            return
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not self.loop:
+            with suppress(RuntimeError):
+                self.loop.call_soon_threadsafe(self.on_chunk, text)
+            return
+        self.text += text
+        self.chunk_count += 1
+        if self.chunk_count == 2:
+            self._start_task = asyncio.create_task(self._start())
+        elif self.chunk_count > 2:
+            self._schedule_flush()
+
+    async def _start(self) -> None:
+        snapshot = self.text
+        preview = _telegram_stream_preview(snapshot)
+        if self.private_chat:
+            try:
+                await self._call(
+                    "sendMessageDraft",
+                    {
+                        "chat_id": self.chat_id_value,
+                        "draft_id": self.draft_id,
+                        "text": preview,
+                    },
+                )
+                self.mode = "draft"
+            except Exception as exc:
+                logger.debug("[Telegram] native streamed draft failed: %s", exc)
+
+        if not self.mode:
+            try:
+                response = await self._call(
+                    "sendMessage",
+                    {
+                        "chat_id": self.chat_id_value,
+                        "text": preview,
+                        "disable_web_page_preview": True,
+                    },
+                )
+                result = response.get("result") if isinstance(response, dict) else {}
+                self.message_id = int(
+                    (result.get("message_id") if isinstance(result, dict) else 0) or 0
+                )
+                if self.message_id > 0:
+                    self.mode = "edit"
+            except Exception as exc:
+                logger.debug("[Telegram] streamed reply placeholder failed: %s", exc)
+
+        if self.mode:
+            self.last_sent_text = snapshot
+            self.last_update_at = time.monotonic()
+            self.update_count = 1
+        if not self.closed and self.mode and self.text != snapshot:
+            asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    def _schedule_flush(self) -> None:
+        if self.closed or self.chunk_count < 2 or self.update_count >= self.max_updates:
+            return
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        self._flush_task = asyncio.create_task(self._flush_after_delay())
+
+    async def _update_preview(self, snapshot: str) -> None:
+        preview = _telegram_stream_preview(snapshot)
+        if self.mode == "draft":
+            await self._call(
+                "sendMessageDraft",
+                {
+                    "chat_id": self.chat_id_value,
+                    "draft_id": self.draft_id,
+                    "text": preview,
+                },
+            )
+        elif self.mode == "edit" and self.message_id > 0:
+            await self._call(
+                "editMessageText",
+                {
+                    "chat_id": self.chat_id_value,
+                    "message_id": self.message_id,
+                    "text": preview,
+                },
+            )
+
+    async def _flush_after_delay(self) -> None:
+        snapshot = ""
+        try:
+            if self._start_task is not None:
+                await self._start_task
+            if not self.mode or self.closed:
+                return
+            delay = self.interval_sec - (time.monotonic() - self.last_update_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.closed or self.update_count >= self.max_updates:
+                return
+            snapshot = self.text
+            if not snapshot or snapshot == self.last_sent_text:
+                return
+            await self._update_preview(snapshot)
+            self.last_sent_text = snapshot
+            self.last_update_at = time.monotonic()
+            self.update_count += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[Telegram] streamed reply update failed: %s", exc)
+            self.update_count = self.max_updates
+        finally:
+            self._flush_task = None
+            if (
+                not self.closed
+                and bool(self.mode)
+                and self.update_count < self.max_updates
+                and self.text != (snapshot or self.last_sent_text)
+            ):
+                asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    async def _stop_pending_flush(self) -> None:
+        task = self._flush_task
+        self._flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if self._start_task is not None:
+            with suppress(Exception):
+                await self._start_task
+
+    async def _edit_final_part(self, part: str) -> None:
+        html_part = _telegram_html_text(part)
+        payload: Dict[str, Any] = {
+            "chat_id": self.chat_id_value,
+            "message_id": self.message_id,
+            "text": html_part or _telegram_plain_text(part),
+        }
+        if html_part:
+            payload["parse_mode"] = "HTML"
+        try:
+            await self._call("editMessageText", payload)
+        except Exception:
+            payload.pop("parse_mode", None)
+            payload["text"] = _telegram_plain_text(part)
+            await self._call("editMessageText", payload)
+
+    async def _send_final_part(self, part: str) -> None:
+        html_part = _telegram_html_text(part)
+        payload: Dict[str, Any] = {
+            "chat_id": self.chat_id_value,
+            "text": html_part or _telegram_plain_text(part),
+            "disable_web_page_preview": False,
+        }
+        if html_part:
+            payload["parse_mode"] = "HTML"
+        try:
+            await self._call("sendMessage", payload)
+        except Exception:
+            payload.pop("parse_mode", None)
+            payload["text"] = _telegram_plain_text(part)
+            await self._call("sendMessage", payload)
+
+    async def finish(self, final_text: str) -> bool:
+        self.closed = True
+        await self._stop_pending_flush()
+        text = str(final_text or "").strip()
+        if self.chunk_count < 2 or not self.mode or not text:
+            if self.mode == "edit" and self.message_id > 0 and not text:
+                with suppress(Exception):
+                    await self._call(
+                        "deleteMessage",
+                        {
+                            "chat_id": self.chat_id_value,
+                            "message_id": self.message_id,
+                        },
+                    )
+            return False
+        parts = _telegram_response_parts(text)
+        if not parts:
+            return False
+        if self.mode == "draft":
+            try:
+                # Sending a normal message is Telegram's documented way to
+                # persist and finalize a native streaming draft.
+                for part in parts:
+                    await self._send_final_part(part)
+                return True
+            except Exception as exc:
+                logger.warning("[Telegram] final streamed draft send failed: %s", exc)
+                return False
+        if self.message_id <= 0:
+            return False
+        try:
+            await self._edit_final_part(parts[0])
+            for part in parts[1:]:
+                await self._send_final_part(part)
+            return True
+        except Exception as exc:
+            logger.warning("[Telegram] final streamed reply edit failed: %s", exc)
+            with suppress(Exception):
+                await self._call(
+                    "deleteMessage",
+                    {
+                        "chat_id": self.chat_id_value,
+                        "message_id": self.message_id,
+                    },
+                )
+            return False
+
+    async def abort(self) -> None:
+        self.closed = True
+        await self._stop_pending_flush()
+        if self.mode == "edit" and self.message_id > 0:
+            with suppress(Exception):
+                await self._call(
+                    "deleteMessage",
+                    {
+                        "chat_id": self.chat_id_value,
+                        "message_id": self.message_id,
+                    },
+                )
+
+
 class TelegramPlatform:
     def __init__(
         self,
@@ -580,9 +899,29 @@ class TelegramPlatform:
 
     def _api_json(self, method: str, payload: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
         resp = requests.post(self._api_url(method), json=payload, timeout=timeout)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if resp.status_code == 429:
+            parameters = data.get("parameters") if isinstance(data, dict) else {}
+            retry_after = (
+                parameters.get("retry_after")
+                if isinstance(parameters, dict)
+                else None
+            )
+            if retry_after is None:
+                retry_after = resp.headers.get("Retry-After") or 1
+            try:
+                retry_after_seconds = float(retry_after or 1)
+            except (TypeError, ValueError):
+                retry_after_seconds = 1.0
+            raise _TelegramRateLimitError(
+                str(data.get("description") or "Telegram API rate limit exceeded"),
+                retry_after=retry_after_seconds,
+            )
         if resp.status_code >= 300:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
         if not data.get("ok"):
             raise RuntimeError(str(data.get("description") or "Unknown Telegram API error"))
         return data
@@ -1091,6 +1430,17 @@ class TelegramPlatform:
         messages = history
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = _get_plugin_enabled
+        incoming_message_id = int(message.get("message_id") or 0)
+        draft_id = incoming_message_id or max(
+            1,
+            int(time.time() * 1000) % 2_147_483_647,
+        )
+        reply_stream = _TelegramReplyStream(
+            self._api_json,
+            chat_id=chat_id,
+            private_chat=(chat_type == "private"),
+            draft_id=draft_id,
+        )
 
         try:
             origin = {
@@ -1140,7 +1490,7 @@ class TelegramPlatform:
             artifacts = []
             async with self._safe_typing(chat_id):
                 agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-                result = await run_hydra_turn(
+                hydra_kwargs = dict(
                     llm_client=self.llm,
                     platform="telegram",
                     history_messages=messages,
@@ -1157,10 +1507,15 @@ class TelegramPlatform:
                     max_tool_calls=agent_max_tool_calls,
                     platform_preamble=system_prompt,
                 )
+                if _HYDRA_RESPONSE_STREAMING_SUPPORTED:
+                    hydra_kwargs["response_callback"] = reply_stream.on_chunk
+                result = await run_hydra_turn(**hydra_kwargs)
 
                 final_text = str(result.get("text") or "").strip()
+                delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
-                    await self._send_text(chat_id, final_text)
+                    if not delivered_stream:
+                        await self._send_text(chat_id, final_text)
                     self._save_message(
                         chat_id,
                         "assistant",
@@ -1183,6 +1538,7 @@ class TelegramPlatform:
             return
 
         except Exception as e:
+            await reply_stream.abort()
             logger.error(f"[Telegram] Error processing message: {e}")
             await self._send_text(chat_id, "An error occurred while processing your request.")
 

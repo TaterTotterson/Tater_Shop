@@ -3,6 +3,7 @@ import os
 import json
 import time
 import asyncio
+import inspect
 import logging
 import threading
 import re
@@ -75,7 +76,17 @@ except Exception:
 
 # --- Markdown rendering (required) ---
 from markdown_it import MarkdownIt
-__version__ = "1.0.4"
+__version__ = "1.0.5"
+
+MATRIX_STREAM_EDIT_INTERVAL_SEC = 1.75
+MATRIX_STREAM_MAX_UPDATES = 20
+
+try:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = (
+        "response_callback" in inspect.signature(run_hydra_turn).parameters
+    )
+except Exception:
+    _HYDRA_RESPONSE_STREAMING_SUPPORTED = False
 
 
 # Tables plugin: handle both modern and legacy module names, else no-op
@@ -644,6 +655,188 @@ def _should_respond(policy: str, body: str, my_user_id: str, my_display: Optiona
 
     return False
 
+
+def _matrix_response_parts(content: Any, max_length: int) -> List[str]:
+    text = str(content or "")
+    limit = max(80, int(max_length or 4000))
+    parts: List[str] = []
+    index = 0
+    while index < len(text):
+        end = min(index + limit, len(text))
+        split_at = text.rfind("\n", index, end)
+        if split_at <= index:
+            split_at = end
+        part = text[index:split_at].rstrip("\n")
+        index = split_at
+        if part:
+            parts.append(part)
+    return parts
+
+
+def _matrix_stream_preview(content: Any, max_length: int) -> str:
+    text = str(content or "")
+    suffix = " ▌"
+    limit = max(80, int(max_length or 4000))
+    return f"{text[: max(1, limit - len(suffix))].rstrip()}{suffix}"
+
+
+class _MatrixReplyStream:
+    """Coalesce LLM chunks into Matrix m.replace events."""
+
+    def __init__(
+        self,
+        platform: Any,
+        *,
+        room_id: str,
+        max_length: int,
+        interval_sec: float = MATRIX_STREAM_EDIT_INTERVAL_SEC,
+        max_updates: int = MATRIX_STREAM_MAX_UPDATES,
+    ):
+        self.platform = platform
+        self.room_id = room_id
+        self.max_length = max(80, int(max_length or 4000))
+        self.interval_sec = max(0.5, float(interval_sec or 1.75))
+        self.max_updates = max(2, int(max_updates or MATRIX_STREAM_MAX_UPDATES))
+        self.loop = asyncio.get_running_loop()
+        self.text = ""
+        self.chunk_count = 0
+        self.event_id = ""
+        self.last_sent_text = ""
+        self.last_update_at = 0.0
+        self.update_count = 0
+        self.closed = False
+        self._start_task: Optional[asyncio.Task] = None
+        self._flush_task: Optional[asyncio.Task] = None
+
+    def on_chunk(self, chunk: str) -> None:
+        text = str(chunk or "")
+        if self.closed or not text:
+            return
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not self.loop:
+            with contextlib.suppress(RuntimeError):
+                self.loop.call_soon_threadsafe(self.on_chunk, text)
+            return
+        self.text += text
+        self.chunk_count += 1
+        if self.chunk_count == 2:
+            self._start_task = asyncio.create_task(self._start())
+        elif self.chunk_count > 2:
+            self._schedule_flush()
+
+    async def _start(self) -> None:
+        snapshot = self.text
+        try:
+            self.event_id = await self.platform._send_stream_text_event(
+                self.room_id,
+                _matrix_stream_preview(snapshot, self.max_length),
+            )
+            if self.event_id:
+                self.last_sent_text = snapshot
+                self.last_update_at = time.monotonic()
+                self.update_count = 1
+        except Exception as exc:
+            logger.debug("[Matrix] streamed reply preview failed: %s", exc)
+            self.event_id = ""
+        finally:
+            if not self.closed and self.event_id and self.text != snapshot:
+                asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    def _schedule_flush(self) -> None:
+        if self.closed or self.chunk_count < 2 or self.update_count >= self.max_updates:
+            return
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        self._flush_task = asyncio.create_task(self._flush_after_delay())
+
+    async def _flush_after_delay(self) -> None:
+        snapshot = ""
+        try:
+            if self._start_task is not None:
+                await self._start_task
+            if not self.event_id or self.closed:
+                return
+            delay = self.interval_sec - (time.monotonic() - self.last_update_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.closed or self.update_count >= self.max_updates:
+                return
+            snapshot = self.text
+            if not snapshot or snapshot == self.last_sent_text:
+                return
+            await self.platform._send_stream_text_event(
+                self.room_id,
+                _matrix_stream_preview(snapshot, self.max_length),
+                replacement_event_id=self.event_id,
+            )
+            self.last_sent_text = snapshot
+            self.last_update_at = time.monotonic()
+            self.update_count += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[Matrix] streamed reply edit failed: %s", exc)
+            self.update_count = self.max_updates
+        finally:
+            self._flush_task = None
+            if (
+                not self.closed
+                and bool(self.event_id)
+                and self.update_count < self.max_updates
+                and self.text != (snapshot or self.last_sent_text)
+            ):
+                asyncio.get_running_loop().call_soon(self._schedule_flush)
+
+    async def _stop_pending_flush(self) -> None:
+        task = self._flush_task
+        self._flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._start_task is not None:
+            with contextlib.suppress(Exception):
+                await self._start_task
+
+    async def finish(self, final_text: str) -> bool:
+        self.closed = True
+        await self._stop_pending_flush()
+        text = str(final_text or "").strip()
+        if self.chunk_count < 2 or not self.event_id or not text:
+            if self.event_id and not text:
+                await self.platform._redact_stream_event(self.room_id, self.event_id)
+                self.event_id = ""
+            return False
+        parts = _matrix_response_parts(text, self.max_length)
+        if not parts:
+            return False
+        try:
+            await self.platform._send_stream_text_event(
+                self.room_id,
+                parts[0],
+                replacement_event_id=self.event_id,
+                formatted=True,
+            )
+            for part in parts[1:]:
+                await self.platform._send_with_trust(self.room_id, part)
+            return True
+        except Exception as exc:
+            logger.warning("[Matrix] final streamed reply edit failed: %s", exc)
+            await self.platform._redact_stream_event(self.room_id, self.event_id)
+            self.event_id = ""
+            return False
+
+    async def abort(self) -> None:
+        self.closed = True
+        await self._stop_pending_flush()
+        if self.event_id:
+            await self.platform._redact_stream_event(self.room_id, self.event_id)
+            self.event_id = ""
+
+
 # ---------------- Matrix Bot ----------------
 class MatrixPlatform:
     def __init__(self):
@@ -913,6 +1106,102 @@ class MatrixPlatform:
                     logger.error("[Matrix] Could not resolve room for trust retry.")
             else:
                 logger.error(f"[Matrix] Send failed: {e}")
+
+    @staticmethod
+    def _stream_message_content(
+        text: str,
+        *,
+        replacement_event_id: str = "",
+        formatted: bool = False,
+    ) -> Dict[str, Any]:
+        content: Dict[str, Any] = {"msgtype": "m.text", "body": str(text or "")}
+        if formatted:
+            html_text = _md_to_html(str(text or ""))
+            if html_text and html_text.strip():
+                content["format"] = "org.matrix.custom.html"
+                content["formatted_body"] = html_text
+        if not replacement_event_id:
+            return content
+
+        replacement = dict(content)
+        outer: Dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": f"* {content['body']}",
+            "m.new_content": replacement,
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": replacement_event_id,
+            },
+        }
+        if "formatted_body" in content:
+            outer["format"] = "org.matrix.custom.html"
+            outer["formatted_body"] = f"* {content['formatted_body']}"
+        return outer
+
+    async def _send_stream_text_event(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        replacement_event_id: str = "",
+        formatted: bool = False,
+    ) -> str:
+        room = self.client.rooms.get(room_id)
+        if room and self.trust_unverified_devices:
+            await self._auto_trust_room_devices(room)
+
+        content = self._stream_message_content(
+            text,
+            replacement_event_id=replacement_event_id,
+            formatted=formatted,
+        )
+        kwargs = {}
+        if self.trust_unverified_devices:
+            kwargs["ignore_unverified_devices"] = True
+
+        async def _send_once():
+            try:
+                return await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.room.message",
+                    content=content,
+                    **kwargs,
+                )
+            except TypeError:
+                return await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.room.message",
+                    content=content,
+                )
+
+        try:
+            response = await _send_once()
+        except Exception as exc:
+            message = (str(exc) or "").lower()
+            trust_error = (
+                "not verified" in message
+                or "blacklisted" in message
+                or "unknown devices" in message
+            )
+            if not trust_error or not room:
+                raise
+            await self._auto_trust_room_devices(room)
+            response = await _send_once()
+
+        event_id = str(getattr(response, "event_id", "") or "")
+        if not event_id:
+            raise RuntimeError(f"Matrix message send failed: {response!r}")
+        return event_id
+
+    async def _redact_stream_event(self, room_id: str, event_id: str) -> None:
+        if not event_id:
+            return
+        with contextlib.suppress(Exception):
+            await self.client.room_redact(
+                room_id=room_id,
+                event_id=event_id,
+                reason="Tater streaming preview cleanup",
+            )
 
     async def _send_reaction(self, room_id: str, event_id: str, emoji: str) -> bool:
         clean_emoji = str(emoji or "").strip()
@@ -1443,6 +1732,11 @@ class MatrixPlatform:
         messages = history
         merged_registry = dict(pr.get_verba_registry_snapshot() or {})
         merged_enabled = get_plugin_enabled
+        reply_stream = _MatrixReplyStream(
+            self,
+            room_id=room.room_id,
+            max_length=self.max_chunk,
+        )
 
         async with self.typing(room.room_id):
             try:
@@ -1485,7 +1779,7 @@ class MatrixPlatform:
                     return None
 
                 agent_max_rounds, agent_max_tool_calls = resolve_agent_limits(redis_client)
-                result = await run_hydra_turn(
+                hydra_kwargs = dict(
                     llm_client=llm_client,
                     platform="matrix",
                     history_messages=messages,
@@ -1502,10 +1796,15 @@ class MatrixPlatform:
                     max_tool_calls=agent_max_tool_calls,
                     platform_preamble=system_prompt,
                 )
+                if _HYDRA_RESPONSE_STREAMING_SUPPORTED:
+                    hydra_kwargs["response_callback"] = reply_stream.on_chunk
+                result = await run_hydra_turn(**hydra_kwargs)
 
                 final_text = str(result.get("text") or "").strip()
+                delivered_stream = await reply_stream.finish(final_text)
                 if final_text:
-                    await self._send_with_trust(room.room_id, final_text)
+                    if not delivered_stream:
+                        await self._send_with_trust(room.room_id, final_text)
                     save_matrix_message(
                         room.room_id, "assistant", "assistant",
                         {"marker": "plugin_response", "phase": "final", "content": final_text}
@@ -1527,6 +1826,7 @@ class MatrixPlatform:
                 return
 
             except Exception as e:
+                await reply_stream.abort()
                 logger.error(f"[Matrix] Exception handling message: {e}", exc_info=True)
                 await self._send_with_trust(room.room_id, "Sorry, I ran into an error while thinking.")
 

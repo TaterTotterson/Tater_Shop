@@ -750,7 +750,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.26"
+__version__ = "1.0.27"
 
 
 load_dotenv()
@@ -1899,11 +1899,29 @@ def _existing_user_profile_snapshot(
             doc = load_doc(redis_client, doc_key, now=now_ts)
         except Exception:
             doc = {}
+        legacy_key = _as_text(target.get("legacy_key")).strip()
+        if legacy_key and legacy_key != doc_key:
+            try:
+                legacy_doc = load_doc(redis_client, legacy_key, now=now_ts)
+            except Exception:
+                legacy_doc = {}
+            # Include not-yet-migrated alias facts in the extraction snapshot so
+            # corrections can retire them before they are copied forward.
+            merge_doc_facts(doc, legacy_doc, min_confidence=0.0, now=now_ts)
         facts = doc.get("facts")
         if not isinstance(facts, dict):
             continue
         profile: Dict[str, Dict[str, Any]] = {}
-        for fact_key in _USER_ALLOWED_FACT_KEYS:
+        fact_keys = list(_USER_ALLOWED_FACT_KEYS)
+        fact_keys.extend(
+            sorted(
+                fact_key
+                for fact_key in facts
+                if fact_key not in _USER_ALLOWED_FACT_KEY_SET
+                and bool(_canonical_user_fact_key(fact_key))
+            )
+        )
+        for fact_key in fact_keys:
             fact = facts.get(fact_key)
             if not isinstance(fact, dict) or "value" not in fact:
                 continue
@@ -1932,7 +1950,16 @@ def _existing_room_profile_snapshot(
         return {}
 
     profile: Dict[str, Dict[str, Any]] = {}
-    for fact_key in _ROOM_ALLOWED_FACT_KEYS:
+    fact_keys = list(_ROOM_ALLOWED_FACT_KEYS)
+    fact_keys.extend(
+        sorted(
+            fact_key
+            for fact_key in facts
+            if fact_key not in _ROOM_ALLOWED_FACT_KEY_SET
+            and bool(_canonical_room_fact_key(fact_key))
+        )
+    )
+    for fact_key in fact_keys:
         fact = facts.get(fact_key)
         if not isinstance(fact, dict) or "value" not in fact:
             continue
@@ -1998,16 +2025,62 @@ def _normalize_observation(
     }
 
 
+def _normalize_removal(
+    row: Dict[str, Any],
+    *,
+    scope: str,
+    known_message_ids: set[str],
+    fallback_evidence_id: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    raw_fact_key = row.get("candidate_key") or row.get("key")
+    scope_name = str(scope or "").strip().lower()
+    if scope_name == "user":
+        fact_key = _canonical_user_fact_key(raw_fact_key)
+    elif scope_name == "room":
+        fact_key = _canonical_room_fact_key(raw_fact_key)
+    else:
+        fact_key = normalize_fact_key(raw_fact_key)
+    if not fact_key or _is_transient_fact_key(fact_key):
+        return None
+
+    confidence = _as_float(row.get("confidence"), 0.0, min_value=0.0, max_value=1.0)
+    evidence_raw = row.get("evidence") or row.get("evidence_message_ids") or []
+    evidence: List[str] = []
+    if isinstance(evidence_raw, (list, tuple)):
+        for item in evidence_raw:
+            msg_id = _as_text(item).strip()
+            if msg_id and msg_id in known_message_ids and msg_id not in evidence:
+                evidence.append(msg_id)
+    elif isinstance(evidence_raw, str):
+        msg_id = evidence_raw.strip()
+        if msg_id in known_message_ids:
+            evidence.append(msg_id)
+    if not evidence and fallback_evidence_id:
+        evidence = [fallback_evidence_id]
+
+    return {
+        "candidate_key": fact_key,
+        "confidence": confidence,
+        "evidence": evidence[:8],
+    }
+
+
 def _normalize_observation_payload(
     parsed: Any,
     *,
     known_user_ids: List[str],
     known_message_ids: set[str],
     fallback_evidence_id: str,
+    current_user_profiles: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+    current_room_profile: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     user_ids_lookup = {normalize_segment(user_id): user_id for user_id in known_user_ids}
     room_rows: List[Dict[str, Any]] = []
     user_rows: List[Dict[str, Any]] = []
+    room_removals: List[Dict[str, Any]] = []
+    user_removals: List[Dict[str, Any]] = []
 
     def _coerce_user_id(raw_value: Any) -> str:
         text = _as_text(raw_value).strip()
@@ -2043,9 +2116,46 @@ def _normalize_observation_payload(
         obs["user_id"] = user_id
         user_rows.append(obs)
 
+    def _append_room_removal(row: Dict[str, Any]) -> None:
+        removal = _normalize_removal(
+            row,
+            scope="room",
+            known_message_ids=known_message_ids,
+            fallback_evidence_id=fallback_evidence_id,
+        )
+        if not removal:
+            return
+        fact_key = _as_text(removal.get("candidate_key")).strip()
+        if fact_key not in (current_room_profile or {}):
+            return
+        room_removals.append(removal)
+
+    def _append_user_removal(row: Dict[str, Any]) -> None:
+        removal = _normalize_removal(
+            row,
+            scope="user",
+            known_message_ids=known_message_ids,
+            fallback_evidence_id=fallback_evidence_id,
+        )
+        if not removal:
+            return
+        user_id = _coerce_user_id(row.get("user_id"))
+        if not user_id and len(known_user_ids) == 1:
+            user_id = known_user_ids[0]
+        if not user_id or user_id.lower() in {"assistant", "unknown_user"}:
+            return
+        fact_key = _as_text(removal.get("candidate_key")).strip()
+        existing_profile = (current_user_profiles or {}).get(user_id) or {}
+        if fact_key not in existing_profile:
+            return
+        removal["user_id"] = user_id
+        user_removals.append(removal)
+
     if isinstance(parsed, dict):
         user_list = parsed.get("user_observations") or parsed.get("user_updates") or []
         room_list = parsed.get("room_observations") or parsed.get("room_updates") or []
+        user_removal_list = parsed.get("user_removals") or []
+        room_removal_list = parsed.get("room_removals") or []
         if isinstance(user_list, list):
             for item in user_list:
                 if isinstance(item, dict):
@@ -2054,6 +2164,14 @@ def _normalize_observation_payload(
             for item in room_list:
                 if isinstance(item, dict):
                     _append_room(item)
+        if isinstance(user_removal_list, list):
+            for item in user_removal_list:
+                if isinstance(item, dict):
+                    _append_user_removal(item)
+        if isinstance(room_removal_list, list):
+            for item in room_removal_list:
+                if isinstance(item, dict):
+                    _append_room_removal(item)
 
         generic_list = parsed.get("observations")
         if isinstance(generic_list, list):
@@ -2075,7 +2193,12 @@ def _normalize_observation_payload(
             else:
                 _append_room(item)
 
-    return {"user": user_rows, "room": room_rows}
+    return {
+        "user": user_rows,
+        "room": room_rows,
+        "user_removals": user_removals,
+        "room_removals": room_removals,
+    }
 
 
 def _llm_extract_observations(
@@ -2112,7 +2235,9 @@ def _llm_extract_observations(
         "Output strict JSON only with this shape:\n"
         "{"
         "\"user_observations\":[{\"user_id\":\"...\",\"candidate_key\":\"snake_case\",\"value\":...,\"confidence\":0-1,\"evidence\":[\"message_id\"]}],"
-        "\"room_observations\":[{\"candidate_key\":\"snake_case\",\"value\":...,\"confidence\":0-1,\"evidence\":[\"message_id\"]}]"
+        "\"room_observations\":[{\"candidate_key\":\"snake_case\",\"value\":...,\"confidence\":0-1,\"evidence\":[\"message_id\"]}],"
+        "\"user_removals\":[{\"user_id\":\"...\",\"candidate_key\":\"exact_existing_key\",\"confidence\":0-1,\"evidence\":[\"message_id\"]}],"
+        "\"room_removals\":[{\"candidate_key\":\"exact_existing_key\",\"confidence\":0-1,\"evidence\":[\"message_id\"]}]"
         "}\n"
         "User profile schema and allowed candidate_key values (exact):\n"
         f"{_USER_SCHEMA_PROMPT_TEXT}\n"
@@ -2134,9 +2259,15 @@ def _llm_extract_observations(
         "- User observations must target one known_user_id.\n"
         "- Compare messages with current_user_profiles and emit only meaningful updates/additions.\n"
         "- For existing facts: if new evidence refines value or increases confidence, emit an update for the same key.\n"
+        "- If a user explicitly says an existing fact is no longer true, has ended, was corrected away, or a condition is gone/recovered, emit a user_removals item using that exact existing key.\n"
+        "- Example: when current_user_profiles contains a cough fact and the user says 'my cough is gone now', remove the existing cough key; do not store a new 'cough is gone' fact.\n"
+        "- Never infer removals from silence, lack of recent mention, or ambiguous language.\n"
+        "- Removal candidate_key values must exactly match keys currently present in the corresponding current profile.\n"
+        "- If one stored value mixes resolved and still-valid details, emit an observation for the same key containing only the still-valid details instead of removing the whole key.\n"
         "- If no meaningful change for a user key, omit it.\n"
         "- Room observations are shared room context.\n"
         "- Compare messages with current_room_profile and emit only meaningful room updates/additions.\n"
+        "- Use room_removals only when messages explicitly revoke or resolve an existing room fact.\n"
         "- If no meaningful change for a room key, omit it.\n"
         "- Do not include ttl/expiry fields.\n"
         "- If no valid observations exist, return empty arrays.\n"
@@ -2160,20 +2291,22 @@ def _llm_extract_observations(
 
     text = _as_text((response.get("message", {}) or {}).get("content")).strip()
     if not text:
-        return {"user": [], "room": []}
+        return {"user": [], "room": [], "user_removals": [], "room_removals": []}
 
     blob = extract_json(text) or text
     try:
         parsed = json.loads(blob)
     except Exception:
         logger.warning("[memory_core] Non-JSON extraction response for %s/%s; skipping write.", platform, scope_id)
-        return {"user": [], "room": []}
+        return {"user": [], "room": [], "user_removals": [], "room_removals": []}
 
     return _normalize_observation_payload(
         parsed,
         known_user_ids=known_user_ids,
         known_message_ids=known_message_ids,
         fallback_evidence_id=fallback_evidence_id,
+        current_user_profiles=current_user_profiles,
+        current_room_profile=current_room_profile,
     )
 
 
@@ -2284,6 +2417,15 @@ def _process_scope(
             ):
                 updated_facts += 1
                 room_changed = True
+        room_removal_keys = [
+            _as_text(row.get("candidate_key")).strip()
+            for row in observations.get("room_removals", [])
+            if _as_float(row.get("confidence"), 0.0, min_value=0.0, max_value=1.0) >= min_confidence
+        ]
+        removed_room_facts = forget_fact_keys(room_doc, room_removal_keys)
+        if removed_room_facts > 0:
+            updated_facts += removed_room_facts
+            room_changed = True
         if room_changed:
             save_doc(redis_client, r_key, room_doc, now=ts_now)
             updated_docs += 1
@@ -2295,8 +2437,19 @@ def _process_scope(
             if not user_id:
                 continue
             by_user.setdefault(user_id, []).append(obs)
+        removals_by_user: Dict[str, List[Dict[str, Any]]] = {}
+        for removal in observations.get("user_removals", []):
+            user_id = _as_text(removal.get("user_id")).strip()
+            if not user_id:
+                continue
+            removals_by_user.setdefault(user_id, []).append(removal)
 
-        for user_id, rows in by_user.items():
+        user_ids_to_update = list(by_user)
+        user_ids_to_update.extend(
+            user_id for user_id in removals_by_user if user_id not in by_user
+        )
+        for user_id in user_ids_to_update:
+            rows = by_user.get(user_id, [])
             display_name = _as_text(user_display_names.get(user_id)).strip() or user_id
             target = _memory_user_doc_target(
                 redis_obj=redis_client,
@@ -2313,6 +2466,8 @@ def _process_scope(
                 _save_user_label("identity", identity_id, identity_name)
             user_doc = load_doc(redis_client, u_key, now=ts_now)
             user_changed = False
+            legacy_doc: Optional[Dict[str, Any]] = None
+            legacy_changed = False
             if u_key != legacy_key:
                 legacy_doc = load_doc(redis_client, legacy_key, now=ts_now)
                 if merge_doc_facts(user_doc, legacy_doc, min_confidence=0.0, now=ts_now) > 0:
@@ -2332,8 +2487,24 @@ def _process_scope(
                 ):
                     updated_facts += 1
                     user_changed = True
+            user_removal_keys = [
+                _as_text(row.get("candidate_key")).strip()
+                for row in removals_by_user.get(user_id, [])
+                if _as_float(row.get("confidence"), 0.0, min_value=0.0, max_value=1.0) >= min_confidence
+            ]
+            removed_user_facts = forget_fact_keys(user_doc, user_removal_keys)
+            if removed_user_facts > 0:
+                updated_facts += removed_user_facts
+                user_changed = True
+            if legacy_doc is not None and forget_fact_keys(legacy_doc, user_removal_keys) > 0:
+                # Clear the alias copy too, otherwise the next migration pass
+                # could resurrect a fact the user just resolved.
+                legacy_changed = True
             if user_changed:
                 save_doc(redis_client, u_key, user_doc, now=ts_now)
+                updated_docs += 1
+            if legacy_doc is not None and legacy_changed:
+                save_doc(redis_client, legacy_key, legacy_doc, now=ts_now)
                 updated_docs += 1
 
     redis_client.set(cursor_redis_key, str(end_idx_exclusive))
