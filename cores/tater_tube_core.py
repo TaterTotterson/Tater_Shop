@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -20,13 +21,14 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
-    "and publish AI-selected movie and series recommendations."
+    "publish AI-selected movie and series recommendations, and voice Tater's Picks "
+    "with the user's TTS settings."
 )
-TAGS = ["tater-tube", "media", "recommendations", "context"]
+TAGS = ["tater-tube", "media", "recommendations", "context", "tts"]
 
 logger = logging.getLogger("tater_tube_core")
 logger.setLevel(logging.INFO)
@@ -83,6 +85,12 @@ CORE_SETTINGS = {
             "default": 2400,
             "description": "Maximum viewing-context text added to Hydra prompts.",
         },
+        "tts_enabled": {
+            "label": "Tater's Picks Voice",
+            "type": "checkbox",
+            "default": True,
+            "description": "Read highlighted recommendation summaries using Tater's configured TTS voice.",
+        },
     },
     "tags": TAGS,
 }
@@ -99,6 +107,7 @@ CONTEXT_KEY = "tater_tube_core_context"
 RECOMMENDATIONS_KEY = "tater_tube_core_recommendations"
 DEFAULT_PROFILE_ID = "household"
 REQUEST_TIMEOUT_SECONDS = 25
+TTS_MAX_TEXT_CHARS = 800
 
 
 def _text(value: Any) -> str:
@@ -249,6 +258,94 @@ def _api_request(
     if isinstance(body, dict) and "data" in body:
         return body.get("data")
     return body
+
+
+async def _synthesize_tts_wav(text: str) -> bytes:
+    from speech_settings import get_speech_settings
+    from speech_tts import synthesize_preview_wav
+
+    settings = get_speech_settings() or {}
+    return await synthesize_preview_wav(
+        text=_text(text)[:TTS_MAX_TEXT_CHARS],
+        backend=_text(settings.get("tts_backend")),
+        model=_text(settings.get("tts_model")),
+        voice=_text(settings.get("tts_voice")),
+        kokoro_output_gain=settings.get("kokoro_output_gain"),
+        pocket_tts_output_gain=settings.get("pocket_tts_output_gain"),
+        acceleration=_text(settings.get("acceleration")),
+        wyoming_host=_text(settings.get("wyoming_tts_host")),
+        wyoming_port=settings.get("wyoming_tts_port"),
+        wyoming_voice=_text(settings.get("wyoming_tts_voice")),
+        openai_base_url=_text(settings.get("openai_tts_base_url")),
+        openai_api_key=_text(settings.get("openai_tts_api_key")),
+        chatterbox_base_url=_text(settings.get("chatterbox_tts_base_url")),
+        chatterbox_voice_mode=_text(settings.get("chatterbox_tts_voice_mode")),
+        chatterbox_chunk_size=settings.get("chatterbox_tts_chunk_size"),
+        chatterbox_temperature=settings.get("chatterbox_tts_temperature"),
+        chatterbox_exaggeration=settings.get("chatterbox_tts_exaggeration"),
+        chatterbox_cfg_weight=settings.get("chatterbox_tts_cfg_weight"),
+        chatterbox_seed=settings.get("chatterbox_tts_seed"),
+        chatterbox_speed_factor=settings.get("chatterbox_tts_speed_factor"),
+        chatterbox_language=_text(settings.get("chatterbox_tts_language")),
+    )
+
+
+def _process_tts_request(loop: asyncio.AbstractEventLoop, client: Any = None) -> int:
+    redis_obj = client or globals().get("redis_client")
+    cfg = _settings(redis_obj)
+    if not _as_bool(cfg.get("tts_enabled"), True):
+        return 0
+    claimed = _api_request(
+        "GET",
+        "tater/core/tts/requests?limit=1",
+        settings=cfg,
+        timeout=10,
+    )
+    rows = claimed.get("requests") if isinstance(claimed, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return 0
+
+    processed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        request_id = _text(row.get("id"))
+        text = _text(row.get("text"))
+        if not request_id:
+            continue
+        payload: Dict[str, Any]
+        try:
+            if not text:
+                raise ValueError("TTS request text is empty.")
+            wav_bytes = loop.run_until_complete(_synthesize_tts_wav(text))
+            if not wav_bytes:
+                raise RuntimeError("Tater TTS produced no audio.")
+            payload = {
+                "audio_base64": base64.b64encode(bytes(wav_bytes)).decode("ascii"),
+                "content_type": "audio/wav",
+            }
+        except Exception as exc:
+            logger.warning("[Tater Tube] TTS request %s failed: %s", request_id, exc)
+            payload = {"error": _text(exc)[:500] or "Tater TTS failed."}
+
+        _api_request(
+            "POST",
+            f"tater/core/tts/requests/{request_id}/complete",
+            settings=cfg,
+            payload=payload,
+            timeout=60,
+        )
+        processed += 1
+        _save_hash(
+            redis_obj,
+            RUNTIME_KEY,
+            {
+                "last_tts_at": time.time(),
+                "last_tts_request_id": request_id,
+                "last_tts_error": _text(payload.get("error")),
+            },
+        )
+    return processed
 
 
 def _profile_id(settings: Dict[str, str]) -> str:
@@ -586,6 +683,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 {"label": "CONNECTED" if connected else "PAIRING NEEDED", "tone": "good" if connected else "warn"},
                 {"label": f"{len(events)} watch events", "tone": "muted"},
                 {"label": f"{len(picks)} current picks", "tone": "muted"},
+                {"label": "PICKS VOICE ON" if _as_bool(cfg.get("tts_enabled"), True) else "PICKS VOICE OFF", "tone": "good" if _as_bool(cfg.get("tts_enabled"), True) else "muted"},
             ],
             "run_action": "tater_tube_sync_now",
             "run_label": "Sync Now",
@@ -647,6 +745,12 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "label": "Prompt Context Max Characters",
                     "type": "number",
                     "value": _as_int(cfg.get("prompt_context_max_chars"), 2400, 512, 12000),
+                },
+                {
+                    "key": "tts_enabled",
+                    "label": "Tater's Picks Voice",
+                    "type": "checkbox",
+                    "value": _as_bool(cfg.get("tts_enabled"), True),
                 },
             ],
             "save_action": "tater_tube_save_settings",
@@ -788,6 +892,7 @@ def handle_htmlui_tab_action(
             "candidate_limit",
             "prompt_context_enabled",
             "prompt_context_max_chars",
+            "tts_enabled",
         }
         updates = {key: values.get(key) for key in allowed if key in values}
         _save_hash(client, SETTINGS_KEY, updates)
@@ -833,6 +938,17 @@ def run(stop_event: Optional[object] = None) -> None:
                 _as_int(cfg.get("recommendation_interval_hours"), 6, 1, 168) * 3600
             )
             try:
+                try:
+                    _process_tts_request(loop)
+                except PermissionError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[Tater Tube] TTS cycle failed: %s", exc)
+                    _save_hash(
+                        redis_client,
+                        RUNTIME_KEY,
+                        {"last_tts_error": _text(exc)[:500], "last_tts_error_at": now},
+                    )
                 if now - _as_float(runtime.get("last_sync_at")) >= poll_interval:
                     _sync_context()
                     runtime = _runtime()
@@ -856,7 +972,7 @@ def run(stop_event: Optional[object] = None) -> None:
                     RUNTIME_KEY,
                     {"status": "error", "last_error": _text(exc)[:500], "last_error_at": now},
                 )
-            time.sleep(5)
+            time.sleep(0.5)
     finally:
         try:
             loop.close()
