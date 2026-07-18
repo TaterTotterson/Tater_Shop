@@ -109,6 +109,25 @@
       "tags": [],
       "entry": "cores/rss_core.py",
       "sha256": "dfdff74157da826113e0ff13341da1d393e010de4d3cee8732473d4d4b07bed4"
+    },
+    {
+      "id": "tater_tube",
+      "name": "Tater Tube Core",
+      "module_key": "tater_tube_core",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, and publish AI-selected movie and series recommendations.",
+      "settings_category": "Tater Tube Core Settings",
+      "required_settings_count": 8,
+      "autostart_key": "tater_tube_core_running",
+      "tags": [
+        "tater-tube",
+        "media",
+        "recommendations",
+        "context"
+      ],
+      "entry": "cores/tater_tube_core.py",
+      "sha256": "ddf30130405a3754734bc338d9bed28e4f93cc8264220578ce07d308422fc435"
     }
   ]
 }
