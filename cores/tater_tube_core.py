@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
@@ -86,10 +86,10 @@ CORE_SETTINGS = {
             "description": "Maximum viewing-context text added to Hydra prompts.",
         },
         "tts_enabled": {
-            "label": "Tater's Picks Voice",
+            "label": "Tater's Picks Welcome",
             "type": "checkbox",
             "default": True,
-            "description": "Read highlighted recommendation summaries using Tater's configured TTS voice.",
+            "description": "Play one personalized spoken briefing when Tater's Picks opens.",
         },
     },
     "tags": TAGS,
@@ -434,7 +434,7 @@ def _generate_recommendations(
     candidate_limit = _as_int(cfg.get("candidate_limit"), 200, 20, 500)
     candidate_data = _api_request(
         "GET",
-        f"tater/core/candidates?limit={candidate_limit}",
+        f"tater/core/candidates?limit={candidate_limit}&profile_id={_profile_id(cfg)}",
         settings=cfg,
     )
     candidates = candidate_data.get("candidates") if isinstance(candidate_data, dict) else []
@@ -444,15 +444,21 @@ def _generate_recommendations(
 
     count = _as_int(cfg.get("recommendation_count"), 8, 1, 12)
     compact_events = []
+    source_counts: Dict[str, int] = {}
+    media_type_counts: Dict[str, int] = {}
     for event in events[:40]:
         if not isinstance(event, dict):
             continue
+        source = _text(event.get("source")) or "unknown"
+        media_type = _text(event.get("media_type")) or "video"
+        source_counts[source] = source_counts.get(source, 0) + 1
+        media_type_counts[media_type] = media_type_counts.get(media_type, 0) + 1
         compact_events.append(
             {
                 "title": _text(event.get("title")),
                 "series_title": _text(event.get("series_title")),
-                "media_type": _text(event.get("media_type")),
-                "source": _text(event.get("source")),
+                "media_type": media_type,
+                "source": source,
                 "state": _text(event.get("state")),
                 "progress": (
                     round(
@@ -472,6 +478,7 @@ def _generate_recommendations(
                 "id": _text(candidate.get("id")),
                 "title": _text(candidate.get("title")),
                 "media_type": _text(candidate.get("media_type")),
+                "source": _text(candidate.get("source")),
                 "year": _text(candidate.get("year")),
                 "description": _text(candidate.get("description"))[:300],
             }
@@ -481,15 +488,25 @@ def _generate_recommendations(
         loop,
         llm_client,
         (
-            "You are Tater, a warm movie-night curator inside a retro VCR media player. "
+            "You are Tater, a warm personal media curator inside a retro VCR media player. "
+            "Viewing history can span local movies and series, live over-the-air channels, "
+            "public-access video, music, and other player modules. Use all of it as taste context. "
             "Choose only from the supplied catalog candidates. Base choices on viewing history without "
-            "overstating what the household likes. Prefer useful variety, avoid recently completed titles, "
-            "and keep each reason to one friendly sentence. Return JSON only in this exact shape: "
-            '{"summary":"short overall note","items":[{"candidate_id":"exact id","reason":"one sentence"}]}. '
+            "overstating what the household likes. Prefer a useful mix of sources and media types when "
+            "the candidates support it, avoid recently completed titles, and keep each reason to one "
+            "friendly sentence. The summary is spoken once when the recommendations page opens. Write it "
+            "as a natural two-sentence welcome that mentions a viewing pattern and briefly describes the "
+            "mix you selected without reading every title. Do not include a time-of-day greeting because "
+            "the player adds the correct greeting. Return JSON only in this exact shape: "
+            '{"summary":"two short spoken sentences","items":[{"candidate_id":"exact id","reason":"one sentence"}]}. '
             f"Return up to {count} unique items."
         ),
         {
             "profile_id": _profile_id(cfg),
+            "viewing_patterns": {
+                "events_by_source": source_counts,
+                "events_by_media_type": media_type_counts,
+            },
             "recent_viewing": compact_events,
             "catalog_candidates": compact_candidates,
         },
@@ -517,6 +534,12 @@ def _generate_recommendations(
     if not selections:
         raise RuntimeError("The recommendation model did not select any valid catalog items.")
 
+    briefing = _text(result.get("summary"))[:500]
+    if not briefing:
+        briefing = (
+            "I've looked across what has been playing lately and put together a fresh mix. "
+            "There should be a little something here for whatever kind of screen time you want next."
+        )
     expires = _as_int(cfg.get("recommendation_expiry_hours"), 24, 1, 168)
     published = _api_request(
         "POST",
@@ -524,7 +547,7 @@ def _generate_recommendations(
         settings=cfg,
         payload={
             "profile_id": _profile_id(cfg),
-            "summary": _text(result.get("summary"))[:500],
+            "summary": briefing,
             "expires_in_hours": expires,
             "items": selections,
         },
@@ -532,7 +555,7 @@ def _generate_recommendations(
     now = time.time()
     cache = {
         "generated_at": now,
-        "summary": _text(result.get("summary")),
+        "summary": briefing,
         "items": selections,
         "server_response": published if isinstance(published, dict) else {},
     }
@@ -748,7 +771,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 },
                 {
                     "key": "tts_enabled",
-                    "label": "Tater's Picks Voice",
+                    "label": "Tater's Picks Welcome",
                     "type": "checkbox",
                     "value": _as_bool(cfg.get("tts_enabled"), True),
                 },
