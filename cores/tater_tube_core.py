@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
@@ -116,6 +116,16 @@ def _text(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace").strip()
     return str(value).strip()
+
+
+def _assistant_first_name(client: Any = None) -> str:
+    redis_obj = client or globals().get("redis_client")
+    try:
+        value = _text(redis_obj.get("tater:first_name")) if redis_obj is not None else ""
+    except Exception:
+        value = ""
+    first_name = value.split()[0] if value else ""
+    return first_name[:48] or "Tater"
 
 
 def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -222,13 +232,17 @@ def _api_request(
     token: str = "",
     payload: Optional[Dict[str, Any]] = None,
     timeout: int = REQUEST_TIMEOUT_SECONDS,
+    redis_obj: Any = None,
 ) -> Any:
     cfg = settings if isinstance(settings, dict) else {}
     base = _normalize_server_url(server_url or cfg.get("server_url"))
     auth_token = _text(token or cfg.get("token"))
     if not base:
         raise ValueError("Tater Tube Server URL is not configured.")
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "X-Tater-Assistant-Name": quote(_assistant_first_name(redis_obj), safe=""),
+    }
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if auth_token:
@@ -300,6 +314,7 @@ def _process_tts_request(loop: asyncio.AbstractEventLoop, client: Any = None) ->
         "tater/core/tts/requests?limit=1",
         settings=cfg,
         timeout=10,
+        redis_obj=redis_obj,
     )
     rows = claimed.get("requests") if isinstance(claimed, dict) else []
     if not isinstance(rows, list) or not rows:
@@ -334,6 +349,7 @@ def _process_tts_request(loop: asyncio.AbstractEventLoop, client: Any = None) ->
             settings=cfg,
             payload=payload,
             timeout=60,
+            redis_obj=redis_obj,
         )
         processed += 1
         _save_hash(
@@ -373,6 +389,7 @@ def _sync_context(client: Any = None) -> Dict[str, Any]:
         "GET",
         f"tater/core/context?profile_id={profile}&limit=50",
         settings=cfg,
+        redis_obj=redis_obj,
     )
     context = data if isinstance(data, dict) else {}
     now = time.time()
@@ -436,6 +453,7 @@ def _generate_recommendations(
         "GET",
         f"tater/core/candidates?limit={candidate_limit}&profile_id={_profile_id(cfg)}",
         settings=cfg,
+        redis_obj=redis_obj,
     )
     candidates = candidate_data.get("candidates") if isinstance(candidate_data, dict) else []
     candidates = [row for row in candidates if isinstance(row, dict) and _text(row.get("id"))]
@@ -484,11 +502,12 @@ def _generate_recommendations(
             }
         )
 
+    assistant_name = _assistant_first_name(redis_obj)
     result = _llm_json(
         loop,
         llm_client,
         (
-            "You are Tater, a warm personal media curator inside a retro VCR media player. "
+            f"You are {assistant_name}, a warm personal media curator inside a retro VCR media player. "
             "Viewing history can span local movies and series, live over-the-air channels, "
             "public-access video, music, and other player modules. Use all of it as taste context. "
             "Choose only from the supplied catalog candidates. Base choices on viewing history without "
@@ -547,14 +566,17 @@ def _generate_recommendations(
         settings=cfg,
         payload={
             "profile_id": _profile_id(cfg),
+            "assistant_name": assistant_name,
             "summary": briefing,
             "expires_in_hours": expires,
             "items": selections,
         },
+        redis_obj=redis_obj,
     )
     now = time.time()
     cache = {
         "generated_at": now,
+        "assistant_name": assistant_name,
         "summary": briefing,
         "items": selections,
         "server_response": published if isinstance(published, dict) else {},
@@ -877,7 +899,12 @@ def handle_htmlui_tab_action(
             "POST",
             "tater/core/pair",
             server_url=server_url,
-            payload={"pin": pin, "name": name},
+            payload={
+                "pin": pin,
+                "name": name,
+                "assistant_name": _assistant_first_name(client),
+            },
+            redis_obj=client,
         )
         if not isinstance(paired, dict) or not _text(paired.get("token")):
             raise RuntimeError("The server did not return a Tater Core token.")

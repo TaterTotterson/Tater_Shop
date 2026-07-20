@@ -114,7 +114,7 @@
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "min_tater_version": "59",
       "description": "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, publish AI-selected movie and series recommendations, and voice Tater's Picks with the user's TTS settings.",
       "settings_category": "Tater Tube Core Settings",
@@ -128,7 +128,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "ab64cf5a20b5e6b7d41d0df5a949e6e94217f60a11bfa60d16c4616ac4caad81"
+      "sha256": "91073c6faa3c635c85eb097e4025d5a0ba0275751782878e6c9b1c383d1b95ea"
     }
   ]
 }
