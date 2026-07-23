@@ -19,7 +19,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.4.10",
+      "version": "3.4.11",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +27,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "b1b661320065149cfbd066839ef4d672827570ab4cd9b1e3a9cc54e0e435c78f"
+      "sha256": "796f12ce0eb4b579de9b1c9735125f2ac8a24b602f5faa623fc1aeb36d5059df"
     },
     {
       "id": "environment",
@@ -52,7 +52,7 @@
       "id": "guardian",
       "name": "Guardian Core",
       "module_key": "guardian_core",
-      "version": "1.3.10",
+      "version": "1.3.11",
       "min_tater_version": "59",
       "description": "Network guardian core for device inventory, change detection, security analysis, and health monitoring.",
       "settings_category": "Guardian Core Settings",
@@ -66,27 +66,27 @@
         "security"
       ],
       "entry": "cores/guardian_core.py",
-      "sha256": "03a4c56ed7f5ee13855a7f156b91d1f5ff4ebd0486b9acd0b491ac075a99fdbd"
+      "sha256": "b67f6291502c338ad71aeb4fbdae2cea33a02e030edc42db28ace75a81736115"
     },
     {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.27",
+      "version": "1.0.28",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
-      "required_settings_count": 10,
+      "required_settings_count": 9,
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "3c288ea66be928da37e0489b84d03f5f0c624dd72a3c4147d6ae5aecd8846796"
+      "sha256": "da60e87328e4ffbc4ce85d905f96416a733be48670b6045a9b070a969b5da062"
     },
     {
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.53",
+      "version": "1.0.54",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -94,13 +94,13 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "9c1870d494cb435ba2440582b5763e0862c444e22322cc28c3850084543dab6b"
+      "sha256": "69d8713d125940154f550ea88ff69e32726f29ca26da3820de5fbe7a4b6509d9"
     },
     {
       "id": "rss",
       "name": "RSS Core",
       "module_key": "rss_core",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "min_tater_version": "59",
       "description": "RSS Core integration core for Tater.",
       "settings_category": "RSS Core Settings",
@@ -108,13 +108,13 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "dfdff74157da826113e0ff13341da1d393e010de4d3cee8732473d4d4b07bed4"
+      "sha256": "20826c4d757e2fd77672d17b2f57c5cb1c1cefd5df0669442b175ea71066e60b"
     },
     {
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, publish AI-selected movie and series recommendations, and voice Tater's Picks with the user's TTS settings.",
       "settings_category": "Tater Tube Core Settings",
@@ -128,7 +128,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "91073c6faa3c635c85eb097e4025d5a0ba0275751782878e6c9b1c383d1b95ea"
+      "sha256": "0d184b7e4dabc16bc6638e4dbf6e9f14ae3f142f5d13c4a16e628065b09fc759"
     }
   ]
 }

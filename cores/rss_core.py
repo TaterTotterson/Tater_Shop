@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.9"
+__version__ = "1.0.10"
 
 
 logger = logging.getLogger("rss")
@@ -1012,6 +1012,7 @@ class RSSManager:
                     summarization_response = await self.llm_client.chat(
                         messages=messages,
                         stream=False,
+                        max_tokens=None,
                     )
                     summary_text = (
                         summarization_response["message"].get("content", "").strip()

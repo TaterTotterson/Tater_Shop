@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.10"
+__version__ = "3.4.11"
 
 load_dotenv()
 
@@ -2652,7 +2652,7 @@ async def _events_query_llm_json_object(
     llm_client: Any,
     system_prompt: str,
     user_payload: Dict[str, Any],
-    max_tokens: int = 700,
+    max_tokens: Optional[int] = None,
     temperature: float = 0.0,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     if llm_client is None:
@@ -2664,7 +2664,7 @@ async def _events_query_llm_json_object(
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             temperature=temperature,
-            max_tokens=max(80, int(max_tokens or 700)),
+            max_tokens=None if max_tokens is None else max(80, int(max_tokens)),
             timeout_ms=45_000,
         )
     except Exception as exc:
@@ -2716,7 +2716,7 @@ async def _events_query_interpret_query(
         llm_client=llm_client,
         system_prompt=system_prompt,
         user_payload=payload,
-        max_tokens=800,
+        max_tokens=None,
         temperature=0.0,
     )
 
@@ -2822,7 +2822,7 @@ async def _events_query_select_relevant_event_ids(
         llm_client=llm_client,
         system_prompt=system_prompt,
         user_payload=payload,
-        max_tokens=1600,
+        max_tokens=None,
         temperature=0.0,
     )
     if obj is None:
@@ -2875,7 +2875,7 @@ async def _events_query_compose_final_answer(
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             temperature=0.15,
-            max_tokens=420,
+            max_tokens=None,
             timeout_ms=45_000,
         )
     except Exception as exc:

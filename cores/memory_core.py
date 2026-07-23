@@ -750,7 +750,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.27"
+__version__ = "1.0.28"
 
 
 load_dotenv()
@@ -790,12 +790,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 0.65,
             "description": "Minimum confidence required before storing facts.",
-        },
-        "extraction_max_tokens": {
-            "label": "Extraction Max Tokens",
-            "type": "number",
-            "default": 2700,
-            "description": "Max completion tokens for memory extraction.",
         },
         "hydra_max_items": {
             "label": "Hydra Memory Items",
@@ -1552,11 +1546,15 @@ def _load_settings() -> Dict[str, Any]:
             redis_client.hdel("memory_core_settings", "auto_link_identities")
         except Exception:
             pass
+    if "extraction_max_tokens" in settings:
+        try:
+            redis_client.hdel("memory_core_settings", "extraction_max_tokens")
+        except Exception:
+            pass
     return {
         "interval_seconds": _as_int(settings.get("interval_seconds"), 180, min_value=30, max_value=3600),
         "lookback_limit": _as_int(settings.get("lookback_limit"), 80, min_value=10, max_value=500),
         "min_confidence": _as_float(settings.get("min_confidence"), 0.65, min_value=0.0, max_value=1.0),
-        "extraction_max_tokens": _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000),
         "write_user_memory": _as_bool(settings.get("write_user_memory"), True),
         "write_room_memory": _as_bool(settings.get("write_room_memory"), True),
         "use_people_identities": _as_bool(settings.get("use_people_identities"), True),
@@ -2209,7 +2207,6 @@ def _llm_extract_observations(
     messages: List[Dict[str, Any]],
     current_user_profiles: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
     current_room_profile: Optional[Dict[str, Dict[str, Any]]] = None,
-    extraction_max_tokens: int = 2700,
 ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
     if llm_client is None:
         return None
@@ -2279,7 +2276,7 @@ def _llm_extract_observations(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            max_tokens=max(200, int(extraction_max_tokens)),
+            max_tokens=None,
             temperature=0.1,
         )
 
@@ -2320,7 +2317,6 @@ def _process_scope(
 ) -> Dict[str, int]:
     lookback_limit = _as_int(settings.get("lookback_limit"), 80, min_value=10, max_value=500)
     min_confidence = _as_float(settings.get("min_confidence"), 0.65, min_value=0.0, max_value=1.0)
-    extraction_max_tokens = _as_int(settings.get("extraction_max_tokens"), 2700, min_value=200, max_value=4000)
     write_user_memory = _as_bool(settings.get("write_user_memory"), True)
     write_room_memory = _as_bool(settings.get("write_room_memory"), True)
     use_people_identities = _as_bool(settings.get("use_people_identities"), True)
@@ -2390,7 +2386,6 @@ def _process_scope(
         messages=normalized_messages,
         current_user_profiles=current_user_profiles,
         current_room_profile=current_room_profile,
-        extraction_max_tokens=extraction_max_tokens,
     )
     if observations is None:
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}

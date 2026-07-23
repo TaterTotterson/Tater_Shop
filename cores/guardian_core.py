@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.10"
+__version__ = "1.3.11"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -168,7 +168,6 @@ MAX_AI_EVENTS = 16
 MAX_AI_WATCH_CHECKS = 24
 MAX_AI_CONFIRMATIONS = 6
 MAX_AI_SNAPSHOT_CHARS = 16000
-MAX_AI_OUTPUT_TOKENS = 1200
 MAX_AI_REPAIR_INPUT_CHARS = 6000
 MAX_TCP_CHECK_WORKERS = 16
 MAX_PROMPT_DEVICES = 4
@@ -1814,7 +1813,7 @@ async def _guardian_ai_repair_json(llm_client: Any, raw_text: str, parse_error: 
                 ),
             },
         ],
-        max_tokens=MAX_AI_OUTPUT_TOKENS,
+        max_tokens=None,
         temperature=0,
         _timeout_seconds=15,
     )
@@ -1894,7 +1893,7 @@ async def _guardian_ai_analyze_async(llm_client: Any, snapshot: Dict[str, Any]) 
                 {"role": "system", "content": _guardian_ai_prompt()},
                 {"role": "user", "content": _json_dumps(snapshot)},
             ],
-            max_tokens=MAX_AI_OUTPUT_TOKENS,
+            max_tokens=None,
             temperature=0.1,
         )
     except Exception as exc:

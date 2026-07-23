@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
@@ -417,7 +417,7 @@ def _llm_json(loop: asyncio.AbstractEventLoop, llm_client: Any, system_prompt: s
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            max_tokens=1800,
+            max_tokens=None,
             temperature=0.35,
         )
     )

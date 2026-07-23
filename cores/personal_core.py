@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.53"
+__version__ = "1.0.54"
 
 load_dotenv()
 
@@ -4531,6 +4531,7 @@ def _llm_extract_updates(
                 {"role": "user", "content": payload_text},
             ],
             temperature=0.1,
+            max_tokens=None,
         )
 
     try:
@@ -7964,6 +7965,7 @@ async def _tool_personal_email_summarize_async(args: Dict[str, Any], llm_client:
                 {"role": "user", "content": json.dumps(summary_payload, ensure_ascii=False)},
             ],
             temperature=0.2,
+            max_tokens=None,
         )
         summary_text = _text(((response or {}).get("message") or {}).get("content"))
     except Exception as exc:
