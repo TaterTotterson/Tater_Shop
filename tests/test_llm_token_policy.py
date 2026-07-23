@@ -1,7 +1,9 @@
 import ast
 import json
+import types
 import unittest
 from pathlib import Path
+from typing import Any, Dict
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +135,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
 
     def test_edited_core_versions_and_manifest_match(self):
         expected_versions = {
+            "ai_task": "1.0.40",
             "awareness": "3.4.11",
             "guardian": "1.3.11",
             "memory": "1.0.28",
@@ -155,6 +158,48 @@ class CoreTokenPolicyTests(unittest.TestCase):
             self.assertEqual(entries[core_id]["version"], expected_version)
 
         self.assertEqual(entries["memory"]["required_settings_count"], 9)
+
+
+class AITaskRetryPolicyTests(unittest.TestCase):
+    def test_retry_state_uses_bounded_exponential_backoff(self):
+        tree = _parse("cores/ai_task_core.py")
+        retry_function = _function(tree, "_retry_due")
+        saved = {}
+
+        class FakeRedis:
+            def __init__(self):
+                self.due = {}
+
+            def zadd(self, _key, values):
+                self.due.update(values)
+
+        redis = FakeRedis()
+        namespace = {
+            "Any": Any,
+            "Dict": Dict,
+            "REMINDER_DUE_ZSET": "reminders:due",
+            "REMINDER_RETRY_BASE_SECONDS": 60.0,
+            "REMINDER_RETRY_MAX_SECONDS": 900.0,
+            "_save_reminder": lambda reminder_id, reminder: saved.update(
+                {"id": reminder_id, "reminder": reminder}
+            ),
+            "redis_client": redis,
+            "time": types.SimpleNamespace(time=lambda: 1_000.0),
+        }
+        function_module = ast.Module(body=[retry_function], type_ignores=[])
+        ast.fix_missing_locations(function_module)
+        exec(compile(function_module, "ai_task_retry_test", "exec"), namespace)
+
+        reminder = {"schedule": {"kind": "once"}, "meta": {}}
+        retry_due = namespace["_retry_due"]
+        self.assertEqual(retry_due("task-1", reminder, RuntimeError("stalled")), 1_060.0)
+        self.assertEqual(redis.due["task-1"], 1_060.0)
+        self.assertEqual(saved["reminder"]["meta"]["retry_count"], 1)
+        self.assertEqual(saved["reminder"]["meta"]["last_error"], "stalled")
+
+        reminder["meta"]["retry_count"] = 5
+        self.assertEqual(retry_due("task-1", reminder, RuntimeError("again")), 1_900.0)
+        self.assertEqual(redis.due["task-1"], 1_900.0)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.39"
+__version__ = "1.0.40"
 
 load_dotenv()
 
@@ -52,6 +52,8 @@ CORE_WEBUI_TAB = {
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
+REMINDER_RETRY_BASE_SECONDS = 60.0
+REMINDER_RETRY_MAX_SECONDS = 900.0
 SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks", "send_message", "attach_file"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
 class _StubObject:
@@ -241,6 +243,29 @@ def _peek_next_due() -> Optional[Tuple[str, float]]:
 
 def _pop_due(reminder_id: str) -> None:
     redis_client.zrem(REMINDER_DUE_ZSET, reminder_id)
+
+
+def _retry_due(reminder_id: str, reminder: Dict[str, Any], error: BaseException) -> float:
+    meta = dict(reminder.get("meta") or {}) if isinstance(reminder.get("meta"), dict) else {}
+    try:
+        retry_count = max(1, int(meta.get("retry_count") or 0) + 1)
+    except Exception:
+        retry_count = 1
+    retry_delay = min(
+        REMINDER_RETRY_MAX_SECONDS,
+        REMINDER_RETRY_BASE_SECONDS * (2 ** min(4, retry_count - 1)),
+    )
+    retry_ts = float(time.time() + retry_delay)
+    schedule = dict(reminder.get("schedule") or {}) if isinstance(reminder.get("schedule"), dict) else {}
+    schedule["next_run_ts"] = retry_ts
+    meta["retry_count"] = retry_count
+    meta["last_error"] = str(error or error.__class__.__name__)[:1000]
+    meta["last_error_ts"] = float(time.time())
+    reminder["schedule"] = schedule
+    reminder["meta"] = meta
+    _save_reminder(reminder_id, reminder)
+    redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: retry_ts})
+    return retry_ts
 
 
 def _format_due_sleep(now: float, due_ts: float) -> float:
@@ -3398,12 +3423,13 @@ def run(stop_event: Optional[object] = None):
                 time.sleep(sleep_for)
                 continue
 
-            _pop_due(reminder_id)
             reminder = _load_reminder(reminder_id)
             if not reminder:
+                _pop_due(reminder_id)
                 continue
 
             if not _is_enabled(reminder.get("enabled"), True):
+                _pop_due(reminder_id)
                 continue
 
             dest = str(reminder.get("platform") or "").strip().lower()
@@ -3417,6 +3443,7 @@ def run(stop_event: Optional[object] = None):
 
             if not dest or (not message and not task_prompt):
                 logger.warning(f"[AI Tasks] Invalid reminder {reminder_id}; dropping.")
+                _pop_due(reminder_id)
                 _delete_reminder(reminder_id)
                 continue
 
@@ -3455,12 +3482,24 @@ def run(stop_event: Optional[object] = None):
                     )
                 )
                 if isinstance(result, str) and result.startswith("Cannot queue"):
-                    logger.warning(f"[AI Tasks] {result} (reminder {reminder_id})")
-                else:
-                    logger.info("[AI Tasks] Reminder %s queued to %s.", reminder_id, dest)
+                    raise RuntimeError(result)
+                logger.info("[AI Tasks] Reminder %s queued to %s.", reminder_id, dest)
             except Exception as e:
-                logger.error(f"[AI Tasks] Failed to enqueue reminder {reminder_id}: {e}")
+                retry_ts = _retry_due(reminder_id, reminder, e)
+                logger.error(
+                    "[AI Tasks] Failed to enqueue reminder %s: %s; retrying at %.3f.",
+                    reminder_id,
+                    e,
+                    retry_ts,
+                )
+                continue
 
+            _pop_due(reminder_id)
+            meta = dict(reminder.get("meta") or {}) if isinstance(reminder.get("meta"), dict) else {}
+            meta.pop("retry_count", None)
+            meta.pop("last_error", None)
+            meta.pop("last_error_ts", None)
+            reminder["meta"] = meta
             next_run = _next_run_for_schedule(schedule, time.time())
             if next_run > 0:
                 schedule["next_run_ts"] = float(next_run)
