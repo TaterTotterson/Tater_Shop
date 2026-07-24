@@ -32,7 +32,7 @@ from notify.queue import (
 )
 
 from dotenv import load_dotenv
-__version__ = "1.0.40"
+__version__ = "1.0.41"
 
 load_dotenv()
 
@@ -479,6 +479,76 @@ def _next_run_for_schedule(schedule: Dict[str, Any], now_ts: float) -> float:
             monthdays=monthdays if isinstance(monthdays, list) else None,
         )
     return 0.0
+
+
+def _reconcile_recurring_due_queue(now_ts: Optional[float] = None) -> Dict[str, int]:
+    """Restore enabled recurring reminders that are missing from the due queue."""
+    now = float(now_ts if now_ts is not None else time.time())
+    stats = {"scanned": 0, "recovered": 0, "advanced": 0}
+    try:
+        queued_ids = {
+            str(reminder_id)
+            for reminder_id in (redis_client.zrange(REMINDER_DUE_ZSET, 0, -1) or [])
+        }
+    except Exception:
+        logger.exception("[AI Tasks] Failed to inspect the due queue during reconciliation.")
+        return stats
+
+    try:
+        reminder_keys = list(redis_client.scan_iter(match=f"{REMINDER_KEY_PREFIX}*", count=500))
+    except Exception:
+        logger.exception("[AI Tasks] Failed to scan reminders during reconciliation.")
+        return stats
+
+    for raw_key in reminder_keys:
+        key = str(raw_key or "")
+        if key == REMINDER_DUE_ZSET or not key.startswith(REMINDER_KEY_PREFIX):
+            continue
+        reminder_id = key[len(REMINDER_KEY_PREFIX) :].strip()
+        if not reminder_id or reminder_id in queued_ids:
+            continue
+
+        stats["scanned"] += 1
+        reminder = _load_reminder(reminder_id)
+        if not reminder or not _is_enabled(reminder.get("enabled"), True):
+            continue
+        schedule = reminder.get("schedule") if isinstance(reminder.get("schedule"), dict) else {}
+        recurrence = schedule.get("recurrence") if isinstance(schedule.get("recurrence"), dict) else {}
+        recurrence_kind = str(recurrence.get("kind") or "").strip().lower()
+        if not recurrence_kind or recurrence_kind in {
+            "one_time",
+            "one_time_local_datetime",
+            "oneshot",
+            "one_shot",
+        }:
+            continue
+
+        try:
+            next_run = float(schedule.get("next_run_ts") or 0.0)
+        except Exception:
+            next_run = 0.0
+        if next_run <= now:
+            try:
+                next_run = float(_next_run_for_schedule(schedule, now) or 0.0)
+            except Exception:
+                logger.exception(
+                    "[AI Tasks] Failed to advance orphaned reminder %s.",
+                    reminder_id,
+                )
+                continue
+            if next_run > 0:
+                schedule["next_run_ts"] = next_run
+                reminder["schedule"] = schedule
+                _save_reminder(reminder_id, reminder)
+                stats["advanced"] += 1
+        if next_run <= 0:
+            continue
+
+        redis_client.zadd(REMINDER_DUE_ZSET, {reminder_id: next_run})
+        queued_ids.add(reminder_id)
+        stats["recovered"] += 1
+
+    return stats
 
 
 def _is_media_dict(item: Any) -> bool:
@@ -3395,11 +3465,19 @@ async def run_hydra_kernel_tool(
 
 
 def run(stop_event: Optional[object] = None):
+    reconciliation = _reconcile_recurring_due_queue()
     queued = 0
     try:
         queued = int(redis_client.zcard(REMINDER_DUE_ZSET) or 0)
     except Exception:
         queued = 0
+    if reconciliation.get("recovered"):
+        logger.warning(
+            "[AI Tasks] Recovered %d recurring reminder(s) into the due queue "
+            "(advanced=%d).",
+            int(reconciliation.get("recovered") or 0),
+            int(reconciliation.get("advanced") or 0),
+        )
     logger.info("[AI Tasks] Scheduler service started (queued=%d).", queued)
     llm_client = _get_primary_llm_client_from_env()
 

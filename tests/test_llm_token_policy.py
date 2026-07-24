@@ -3,7 +3,7 @@ import json
 import types
 import unittest
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,7 +135,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
 
     def test_edited_core_versions_and_manifest_match(self):
         expected_versions = {
-            "ai_task": "1.0.40",
+            "ai_task": "1.0.41",
             "awareness": "3.4.11",
             "guardian": "1.3.11",
             "memory": "1.0.28",
@@ -200,6 +200,81 @@ class AITaskRetryPolicyTests(unittest.TestCase):
         reminder["meta"]["retry_count"] = 5
         self.assertEqual(retry_due("task-1", reminder, RuntimeError("again")), 1_900.0)
         self.assertEqual(redis.due["task-1"], 1_900.0)
+
+    def test_startup_reconciles_orphaned_recurring_tasks(self):
+        tree = _parse("cores/ai_task_core.py")
+        reconcile_function = _function(tree, "_reconcile_recurring_due_queue")
+        saved = {}
+        reminders = {
+            "orphaned": {
+                "enabled": True,
+                "schedule": {
+                    "next_run_ts": 900.0,
+                    "recurrence": {"kind": "weekly_local_time"},
+                },
+            },
+            "future": {
+                "enabled": True,
+                "schedule": {
+                    "next_run_ts": 2_500.0,
+                    "recurrence": {"kind": "daily_local_time"},
+                },
+            },
+            "disabled": {
+                "enabled": False,
+                "schedule": {
+                    "next_run_ts": 900.0,
+                    "recurrence": {"kind": "weekly_local_time"},
+                },
+            },
+            "one-time": {
+                "enabled": True,
+                "schedule": {
+                    "next_run_ts": 900.0,
+                    "recurrence": {"kind": "one_time"},
+                },
+            },
+        }
+
+        class FakeRedis:
+            def __init__(self):
+                self.due = {}
+
+            def zrange(self, _key, _start, _stop):
+                return []
+
+            def scan_iter(self, **_kwargs):
+                return [f"reminders:{key}" for key in reminders]
+
+            def zadd(self, _key, values):
+                self.due.update(values)
+
+        redis = FakeRedis()
+        namespace = {
+            "Any": Any,
+            "Dict": Dict,
+            "Optional": Optional,
+            "REMINDER_DUE_ZSET": "reminders:due",
+            "REMINDER_KEY_PREFIX": "reminders:",
+            "_is_enabled": lambda value, default=True: bool(value if value is not None else default),
+            "_load_reminder": lambda reminder_id: reminders.get(reminder_id),
+            "_next_run_for_schedule": lambda _schedule, _now: 2_000.0,
+            "_save_reminder": lambda reminder_id, reminder: saved.update(
+                {reminder_id: reminder}
+            ),
+            "logger": types.SimpleNamespace(exception=lambda *_args, **_kwargs: None),
+            "redis_client": redis,
+            "time": types.SimpleNamespace(time=lambda: 1_000.0),
+        }
+        function_module = ast.Module(body=[reconcile_function], type_ignores=[])
+        ast.fix_missing_locations(function_module)
+        exec(compile(function_module, "ai_task_reconcile_test", "exec"), namespace)
+
+        stats = namespace["_reconcile_recurring_due_queue"]()
+
+        self.assertEqual(stats, {"scanned": 4, "recovered": 2, "advanced": 1})
+        self.assertEqual(redis.due, {"orphaned": 2_000.0, "future": 2_500.0})
+        self.assertEqual(saved["orphaned"]["schedule"]["next_run_ts"], 2_000.0)
 
 
 if __name__ == "__main__":
