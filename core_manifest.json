@@ -16,10 +16,30 @@
       "sha256": "b0994b9d6ad22281f62e473189eb5cfa106f37da3d62749891e5f57aa13474b7"
     },
     {
+      "id": "automation",
+      "name": "Automation Core",
+      "module_key": "automation_core",
+      "version": "1.0.0",
+      "min_tater_version": "59",
+      "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, and announcement targets.",
+      "settings_category": "Automation Core Settings",
+      "required_settings_count": 0,
+      "autostart_key": "automation_core_running",
+      "tags": [
+        "automation",
+        "integrations",
+        "smart-home",
+        "tts",
+        "rules"
+      ],
+      "entry": "cores/automation_core.py",
+      "sha256": "54885db46c41e02dd394bf6b39ea7df9bd7565674a342ea376397ac19e4f9d79"
+    },
+    {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.4.11",
+      "version": "3.4.12",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -27,7 +47,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "796f12ce0eb4b579de9b1c9735125f2ac8a24b602f5faa623fc1aeb36d5059df"
+      "sha256": "2baa791af4b803b8b58f7419cd0bafede244e03df31072aacc39739acae71104"
     },
     {
       "id": "environment",
@@ -100,7 +120,7 @@
       "id": "rss",
       "name": "RSS Core",
       "module_key": "rss_core",
-      "version": "1.0.10",
+      "version": "1.0.11",
       "min_tater_version": "59",
       "description": "RSS Core integration core for Tater.",
       "settings_category": "RSS Core Settings",
@@ -108,7 +128,7 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "20826c4d757e2fd77672d17b2f57c5cb1c1cefd5df0669442b175ea71066e60b"
+      "sha256": "b2b12463d4d83d8ef69e60af945b6f88f07dcb3c3626cc4214a3c036fa3ee750"
     },
     {
       "id": "tater_tube",

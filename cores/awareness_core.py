@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.11"
+__version__ = "3.4.12"
 
 load_dotenv()
 
@@ -707,22 +707,29 @@ def _trim_events_for_source(client: Any, source: str) -> None:
     except Exception:
         return
 
-    keep: List[str] = []
-    for row in raw:
+    keep_through = -1
+    for index, row in enumerate(raw):
         try:
             payload = json.loads(row)
             ts = _parse_iso(payload.get("ha_time"))
             if ts and ts >= cutoff:
-                keep.append(row)
+                keep_through = index
         except Exception:
-            continue
+            # Preserve malformed rows rather than deleting potentially useful
+            # event data during a retention pass.
+            keep_through = index
+
+    if keep_through >= len(raw) - 1:
+        return
 
     try:
-        pipe = redis_obj.pipeline()
-        pipe.delete(key)
-        if keep:
-            pipe.rpush(key, *keep)
-        pipe.execute()
+        if keep_through < 0:
+            redis_obj.delete(key)
+        else:
+            # Events are LPUSHed newest-first, so expired rows accumulate at
+            # the tail. LTRIM removes that tail without rewriting every
+            # retained event into Redis's append-only log.
+            redis_obj.ltrim(key, 0, keep_through)
     except Exception:
         logger.debug("[awareness] failed to trim events for %s", key, exc_info=True)
 

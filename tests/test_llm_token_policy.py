@@ -136,11 +136,11 @@ class CoreTokenPolicyTests(unittest.TestCase):
     def test_edited_core_versions_and_manifest_match(self):
         expected_versions = {
             "ai_task": "1.0.41",
-            "awareness": "3.4.11",
+            "awareness": "3.4.12",
             "guardian": "1.3.11",
             "memory": "1.0.28",
             "personal": "1.0.54",
-            "rss": "1.0.10",
+            "rss": "1.0.11",
             "tater_tube": "1.2.2",
         }
         manifest = json.loads((ROOT / "core_manifest.json").read_text(encoding="utf-8"))

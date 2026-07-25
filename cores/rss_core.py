@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 
 
 logger = logging.getLogger("rss")
@@ -829,6 +829,15 @@ def _get_poll_interval() -> int:
         return env_default
 
 
+async def _interruptible_poll_sleep(stop_event, seconds: float) -> None:
+    deadline = asyncio.get_running_loop().time() + max(0.0, float(seconds or 0.0))
+    while not (stop_event and stop_event.is_set()):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(0.5, remaining))
+
+
 def _coerce_targets(payload) -> dict:
     if isinstance(payload, dict):
         return dict(payload)
@@ -1093,7 +1102,7 @@ class RSSManager:
                     if not no_notifier_logged:
                         no_notifier_logged = True
                         logger.info("[RSS] No notifier routes are enabled. Polling is idle.")
-                    await asyncio.sleep(_get_poll_interval())
+                    await _interruptible_poll_sleep(stop_event, _get_poll_interval())
                     continue
                 no_notifier_logged = False
 
@@ -1153,7 +1162,7 @@ class RSSManager:
 
                 if stop_event and stop_event.is_set():
                     break
-                await asyncio.sleep(_get_poll_interval())
+                await _interruptible_poll_sleep(stop_event, _get_poll_interval())
         except asyncio.CancelledError:
             logger.info("RSS polling task cancelled; exiting cleanly.")
             return
@@ -1374,7 +1383,10 @@ def run(stop_event=None):
                 break
 
             logger.warning("poll_feeds() returned; restarting shortly…")
-            time.sleep(1.0)
+            if stop_event:
+                stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
             backoff = 1.0
 
         except asyncio.CancelledError:
@@ -1385,7 +1397,10 @@ def run(stop_event=None):
             break
         except Exception as e:
             logger.error(f"RSS crashed: {e}", exc_info=True)
-            time.sleep(backoff)
+            if stop_event:
+                stop_event.wait(backoff)
+            else:
+                time.sleep(backoff)
             backoff = min(max_backoff, backoff * 2)
 
     try:
