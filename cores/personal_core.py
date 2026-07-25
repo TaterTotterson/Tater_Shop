@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.54"
+__version__ = "1.0.55"
 
 load_dotenv()
 
@@ -122,6 +122,10 @@ _PERSONAL_HISTORY_PREFIX = "personal:email_history"
 _PERSONAL_CURSOR_PREFIX = "personal:cursor_uid"
 _PERSONAL_PROCESSED_PREFIX = "personal:processed_msg"
 _PERSONAL_NOTIFY_SENT_PREFIX = "personal:notify_sent"
+
+_DELIVERY_DELIVERED_RETENTION_SECONDS = 7 * 86400
+_DELIVERY_OPEN_RETENTION_SECONDS = 45 * 86400
+_DELIVERY_PAST_ETA_GRACE_SECONDS = 3 * 86400
 
 _AMOUNT_RE = re.compile(r"(?:USD|US\$|\$)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.IGNORECASE)
 _PROMO_SPENDING_RE = re.compile(
@@ -4892,6 +4896,12 @@ def _normalize_extracted_payload(
     for row in payload.get("deliveries") or []:
         normalized = _normalize_delivery_row(row, min_conf=min_confidence)
         if normalized:
+            source_email = email_by_id.get(_text(normalized.get("email_id")))
+            if source_email is None and len(email_by_id) == 1:
+                source_email = next(iter(email_by_id.values()))
+            source_ts = _as_float((source_email or {}).get("date_ts"), time.time(), minimum=0.0)
+            normalized["first_seen_ts"] = source_ts
+            normalized["last_seen_ts"] = source_ts
             out["deliveries"].append(normalized)
 
     for row in payload.get("action_items") or []:
@@ -4996,9 +5006,29 @@ def _delivery_status_rank(value: Any) -> int:
         "label_created": 1,
         "in_transit": 2,
         "out_for_delivery": 3,
-        "delivered": 4,
-        "exception": 5,
+        "exception": 4,
+        "delivered": 5,
     }.get(status, 0)
+
+
+def _merge_delivery_timestamps(base: Dict[str, Any], update: Dict[str, Any], merged: Dict[str, Any]) -> Dict[str, Any]:
+    first_seen = [
+        _as_float(row.get("first_seen_ts"), 0.0, minimum=0.0)
+        for row in (base, update)
+        if isinstance(row, dict)
+    ]
+    last_seen = [
+        _as_float(row.get("last_seen_ts"), 0.0, minimum=0.0)
+        for row in (base, update)
+        if isinstance(row, dict)
+    ]
+    first_seen = [value for value in first_seen if value > 0]
+    last_seen = [value for value in last_seen if value > 0]
+    if first_seen:
+        merged["first_seen_ts"] = min(first_seen)
+    if last_seen:
+        merged["last_seen_ts"] = max(last_seen)
+    return merged
 
 
 def _dedupe_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
@@ -5023,9 +5053,10 @@ def _dedupe_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[Di
         existing_conf = _as_float(existing.get("confidence"), 0.0, minimum=0.0)
         item_conf = _as_float(item.get("confidence"), 0.0, minimum=0.0)
         if (item_rank, item_ts, item_conf) >= (existing_rank, existing_ts, existing_conf):
-            by_key[key] = _row_merge_preserving_id(existing, item)
+            merged = _row_merge_preserving_id(existing, item)
         else:
-            by_key[key] = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+            merged = _row_merge_preserving_id(item, existing, preserve_id=existing.get("id"))
+        by_key[key] = _merge_delivery_timestamps(existing, item, merged)
 
     out = list(by_key.values()) + passthrough
     out.sort(
@@ -5173,7 +5204,7 @@ def _compute_spending_totals(rows: List[Dict[str, Any]]) -> Tuple[float, float]:
     return round(total, 2), round(total_30d, 2)
 
 
-def _repair_delivery_row_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+def _repair_delivery_row_fields(row: Dict[str, Any], *, now_ts: Optional[float] = None) -> Dict[str, Any]:
     fixed = dict(row) if isinstance(row, dict) else {}
     tracking_id = _normalize_tracking_id(fixed.get("tracking_id"))
     order_number = _normalize_order_number(fixed.get("order_number") or fixed.get("order_id") or fixed.get("order"))
@@ -5191,6 +5222,18 @@ def _repair_delivery_row_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     fixed["tracking_id"] = tracking_id
     fixed["order_number"] = order_number
     fixed["item_description"] = item_description
+
+    current_ts = _as_float(now_ts, time.time(), minimum=0.0)
+    source_ts = _as_float(fixed.get("observed_ts") or fixed.get("date_ts"), 0.0, minimum=0.0)
+    eta_ts = _as_float(fixed.get("eta_ts"), 0.0, minimum=0.0)
+    first_seen_ts = _as_float(fixed.get("first_seen_ts"), 0.0, minimum=0.0)
+    last_seen_ts = _as_float(fixed.get("last_seen_ts"), 0.0, minimum=0.0)
+    if first_seen_ts <= 0:
+        first_seen_ts = source_ts or last_seen_ts or eta_ts or current_ts
+    if last_seen_ts <= 0:
+        last_seen_ts = source_ts or first_seen_ts
+    fixed["first_seen_ts"] = min(first_seen_ts, last_seen_ts)
+    fixed["last_seen_ts"] = max(first_seen_ts, last_seen_ts)
     return fixed
 
 
@@ -5208,16 +5251,37 @@ def _cleanup_events(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[
     return kept[: max(1, int(max_items))]
 
 
-def _cleanup_deliveries(rows: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+def _delivery_is_stale(row: Dict[str, Any], *, now_ts: float) -> bool:
+    status = _slug(row.get("status"), default="update")
+    first_seen_ts = _as_float(row.get("first_seen_ts"), 0.0, minimum=0.0)
+    last_seen_ts = _as_float(row.get("last_seen_ts"), first_seen_ts, minimum=0.0)
+    activity_ts = max(first_seen_ts, last_seen_ts)
+    if status == "delivered":
+        return activity_ts > 0 and activity_ts < now_ts - _DELIVERY_DELIVERED_RETENTION_SECONDS
+    if activity_ts > 0 and activity_ts < now_ts - _DELIVERY_OPEN_RETENTION_SECONDS:
+        return True
+
+    eta_ts = _as_float(row.get("eta_ts"), 0.0, minimum=0.0)
+    return (
+        eta_ts > 0
+        and eta_ts < now_ts - _DELIVERY_PAST_ETA_GRACE_SECONDS
+        and activity_ts <= eta_ts
+    )
+
+
+def _cleanup_deliveries(
+    rows: List[Dict[str, Any]],
+    *,
+    max_items: int,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     kept: List[Dict[str, Any]] = []
-    stale_cutoff = time.time() - (21 * 86400)
+    current_ts = _as_float(now_ts, time.time(), minimum=0.0)
     for row in rows:
         if not isinstance(row, dict):
             continue
-        fixed = _repair_delivery_row_fields(row)
-        status = _slug(fixed.get("status"), default="update")
-        eta_ts = _as_float(fixed.get("eta_ts"), 0.0, minimum=0.0)
-        if status == "delivered" and eta_ts > 0 and eta_ts < stale_cutoff:
+        fixed = _repair_delivery_row_fields(row, now_ts=current_ts)
+        if _delivery_is_stale(fixed, now_ts=current_ts):
             continue
         kept.append(fixed)
     return _dedupe_deliveries(kept, max_items=max_items)

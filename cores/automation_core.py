@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -93,6 +93,56 @@ _EVENT_OPTIONS = [
     {"value": "above", "label": "Numeric value rises above…"},
     {"value": "below", "label": "Numeric value falls below…"},
 ]
+
+_EVENT_ICONS = {
+    "changed": "↻",
+    "turns_on": "●",
+    "turns_off": "○",
+    "opens": "↗",
+    "closes": "↘",
+    "motion": "⌁",
+    "person": "♟",
+    "vehicle": "◆",
+    "animal": "♣",
+    "package": "▣",
+    "face": "◎",
+    "license_plate": "▤",
+    "doorbell": "◉",
+    "connects": "⌁",
+    "disconnects": "×",
+    "equals": "=",
+    "contains": "≋",
+    "above": "↑",
+    "below": "↓",
+}
+
+_CATEGORY_ICONS = {
+    "light": "☀",
+    "switch": "⏻",
+    "plug": "⌁",
+    "fan": "✣",
+    "garage_door": "▥",
+    "cover": "▤",
+    "entry_sensor": "↔",
+    "lock": "◆",
+    "motion": "⌁",
+    "camera": "◉",
+    "leak": "◒",
+    "climate": "◐",
+    "temperature": "°",
+    "humidity": "◔",
+    "illuminance": "☼",
+    "energy": "ϟ",
+    "battery": "▰",
+    "media_player": "♪",
+    "presence": "◎",
+    "network_device": "⌘",
+    "remote": "⌁",
+    "scene": "✦",
+    "script": "▶",
+    "sensor": "◇",
+    "device": "◆",
+}
 
 _ACTION_LABELS = {
     "turn_on": "Turn on",
@@ -261,6 +311,11 @@ def _registry(client: Any = None, *, refresh: bool = False) -> Dict[str, Any]:
 
 
 def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -> List[Dict[str, Any]]:
+    definitions = {
+        _token(item.get("id")): item
+        for item in registry.get("category_definitions") or []
+        if isinstance(item, dict) and _token(item.get("id"))
+    }
     rows: List[Dict[str, Any]] = []
     for category in registry.get("categories") or []:
         if not isinstance(category, dict):
@@ -277,6 +332,9 @@ def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -
             {
                 "id": category_id,
                 "name": _text(category.get("name")) or category_id.replace("_", " ").title(),
+                "description": _text(
+                    category.get("description") or (definitions.get(category_id) or {}).get("description")
+                ),
                 "devices": devices,
                 "order": _int(category.get("order"), 1000),
             }
@@ -285,23 +343,34 @@ def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -
     return rows
 
 
-def _category_options(registry: Dict[str, Any], *, actionable_only: bool = False) -> List[Dict[str, str]]:
+def _category_options(registry: Dict[str, Any], *, actionable_only: bool = False) -> List[Dict[str, Any]]:
     return [
-        {"value": row["id"], "label": f"{row['name']} ({len(row['devices'])})"}
+        {
+            "value": row["id"],
+            "label": row["name"],
+            "description": row["description"] or f"{len(row['devices'])} available",
+            "meta": f"{len(row['devices'])} device{'s' if len(row['devices']) != 1 else ''}",
+            "icon": _CATEGORY_ICONS.get(row["id"], "◆"),
+        }
         for row in _category_rows(registry, actionable_only=actionable_only)
     ]
 
 
-def _device_option(device: Dict[str, Any]) -> Dict[str, str]:
+def _device_option(device: Dict[str, Any]) -> Dict[str, Any]:
     provider = _text(device.get("integration_id"))
     device_id = _device_id(device)
     name = _text(device.get("name")) or device_id
     room = _text(device.get("room") or device.get("area"))
     integration = _text(device.get("integration_name")) or provider
-    suffix = " • ".join(item for item in (room, integration) if item)
+    categories = sorted(_device_categories(device))
+    primary_category = categories[0] if categories else "device"
+    details = " • ".join(item for item in (room, integration) if item)
     return {
         "value": _encode_device(provider, device_id),
-        "label": f"{name} — {suffix}" if suffix else name,
+        "label": name,
+        "description": details,
+        "meta": _text(device.get("status") or device.get("state")),
+        "icon": _CATEGORY_ICONS.get(primary_category, "◆"),
     }
 
 
@@ -311,15 +380,24 @@ def _device_dependency(
     current_category: str = "",
     current_values: Any = None,
     multiple: bool = False,
-) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    allow_any: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     current = _list(current_values)
-    options_by_source: Dict[str, List[Dict[str, str]]] = {}
-    all_options: List[Dict[str, str]] = []
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_options: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for category in _category_rows(registry):
         rows = [_device_option(device) for device in category["devices"]]
-        if not multiple:
-            rows = [{"value": "", "label": "Any device in this category"}, *rows]
+        if not multiple and allow_any:
+            rows = [
+                {
+                    "value": "",
+                    "label": "Any device",
+                    "description": "Run when any device in this category matches.",
+                    "icon": "✦",
+                },
+                *rows,
+            ]
         options_by_source[category["id"]] = rows
         for row in rows:
             if not row["value"] or row["value"] in seen:
@@ -334,6 +412,101 @@ def _device_dependency(
         "source_key": "trigger_category" if not multiple else "action_category",
         "options_by_source": options_by_source,
         "default_options": all_options,
+    }
+
+
+def _event_option(value: Any) -> Dict[str, Any]:
+    token = _token(value)
+    row = next((item for item in _EVENT_OPTIONS if item["value"] == token), None)
+    return {
+        "value": token,
+        "label": _text((row or {}).get("label")) or token.replace("_", " ").title(),
+        "icon": _EVENT_ICONS.get(token, "◆"),
+    }
+
+
+def _trigger_event_values_for_device(device: Dict[str, Any]) -> List[str]:
+    found: set[str] = set()
+
+    def add(*values: str) -> None:
+        found.update(_token(value) for value in values if _token(value))
+
+    for source in device.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        source_type = _token(source.get("type"))
+        source_ref = _token(source.get("ref"))
+        corpus = f"{source_type} {source_ref}"
+        if "license_plate" in corpus or "licenseplate" in corpus:
+            add("license_plate")
+        for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
+            if event in corpus:
+                add(event)
+        if any(token in corpus for token in ("contact", "entry", "door_window")):
+            add("opens", "closes")
+        if any(token in corpus for token in ("connectivity", "online", "network")):
+            add("connects", "disconnects")
+        if source_type in {"switch", "light", "input", "binary", "power"}:
+            add("turns_on", "turns_off")
+        if source_type in {"temperature", "humidity", "illuminance", "energy", "sensor", "value"}:
+            add("changed", "above", "below")
+
+    capability_corpus = " ".join(
+        _token(value)
+        for value in [*(device.get("capabilities") or []), *(device.get("features") or [])]
+        if _token(value)
+    )
+    if "license_plate" in capability_corpus or "licenseplate" in capability_corpus:
+        add("license_plate")
+    for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
+        if event in capability_corpus:
+            add(event)
+
+    categories = _device_categories(device)
+    if not found:
+        if "camera" in categories:
+            add("motion")
+        if "motion" in categories:
+            add("motion")
+        if categories.intersection({"entry_sensor", "garage_door", "cover"}):
+            add("opens", "closes")
+        if categories.intersection({"light", "switch", "plug", "fan", "lock", "leak"}):
+            add("turns_on", "turns_off")
+        if categories.intersection({"presence", "network_device"}):
+            add("connects", "disconnects")
+        if categories.intersection({"temperature", "humidity", "illuminance", "energy", "battery", "sensor"}):
+            add("changed", "above", "below")
+    if not found:
+        add("changed")
+    return [row["value"] for row in _EVENT_OPTIONS if row["value"] in found]
+
+
+def _trigger_event_dependency(
+    registry: Dict[str, Any],
+    *,
+    current_device: Any = "",
+    current_event: Any = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_values: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        encoded = _encode_device(device.get("integration_id"), _device_id(device))
+        if not encoded:
+            continue
+        values = _trigger_event_values_for_device(device)
+        all_values.update(values)
+        options_by_source[encoded] = [_event_option(value) for value in values]
+    default_options = [_event_option(row["value"]) for row in _EVENT_OPTIONS if row["value"] in all_values]
+    selected = list(options_by_source.get(_text(current_device), default_options))
+    saved = _token(current_event)
+    if saved and not any(row.get("value") == saved for row in selected):
+        selected.append({**_event_option(saved), "meta": "Saved setting"})
+    return selected, {
+        "source_key": "trigger_device",
+        "options_by_source": options_by_source,
+        "default_options": default_options,
     }
 
 
@@ -425,7 +598,11 @@ def _announcement_options(current_values: Any = None) -> List[Dict[str, str]]:
     ha = _homeassistant_config()
     try:
         return [
-            dict(row)
+            {
+                **dict(row),
+                "description": _text(row.get("description")) or "Speaker, media player, or Tater satellite",
+                "icon": _text(row.get("icon")) or "♪",
+            }
             for row in build_announcement_target_options(
                 homeassistant_base_url=ha["base"],
                 homeassistant_token=ha["token"],
@@ -522,6 +699,10 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     trigger_category = _token(raw.get("trigger_category"))
     trigger_event = _token(raw.get("trigger_event") or "changed")
     action_type = _token(raw.get("action_type") or "device")
+    raw_tts_text = _text(raw.get("tts_text"))
+    tts_mode = _token(raw.get("tts_mode") or ("custom" if raw_tts_text else "default"))
+    if tts_mode not in {"default", "custom"}:
+        tts_mode = "custom" if raw_tts_text else "default"
     if not trigger_category or trigger_event not in {row["value"] for row in _EVENT_OPTIONS}:
         return None
     if action_type not in {"device", "tts", "notification", "camera_ai"}:
@@ -541,7 +722,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "cooldown_seconds": _int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
         "action_type": action_type,
         "action_category": _token(raw.get("action_category")),
-        "action_scope": _token(raw.get("action_scope") or "category"),
+        "action_scope": _token(raw.get("action_scope") or "devices"),
         "action_devices": _list(raw.get("action_devices")),
         "action_room": _token(raw.get("action_room")),
         "action_operation": _token(raw.get("action_operation")),
@@ -549,7 +730,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "action_mode": _text(raw.get("action_mode")),
         "action_text": _text(raw.get("action_text")),
         "action_payload_json": _text(raw.get("action_payload_json")),
-        "tts_text": _text(raw.get("tts_text")),
+        "tts_mode": tts_mode,
+        "tts_text": raw_tts_text,
         "tts_targets": _list(raw.get("tts_targets")),
         "notification_title": _text(raw.get("notification_title") or "Tater Automation"),
         "notification_message": _text(raw.get("notification_message")),
@@ -581,14 +763,16 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "source_rule_id": _text(raw.get("source_rule_id")),
     }
     if rule["action_scope"] not in {"category", "devices"}:
-        rule["action_scope"] = "category"
+        rule["action_scope"] = "devices"
     if action_type == "device":
         if not rule["action_category"] or not rule["action_operation"]:
             return None
         if rule["action_scope"] == "devices" and not rule["action_devices"]:
             return None
     elif action_type == "tts":
-        if not rule["tts_text"] or not rule["tts_targets"]:
+        if not rule["tts_targets"]:
+            return None
+        if rule["tts_mode"] == "custom" and not rule["tts_text"]:
             return None
     elif action_type == "notification":
         if not rule["notification_message"] or not rule["notification_targets"]:
@@ -1007,6 +1191,30 @@ def _render_template(value: Any, context: Dict[str, Any]) -> str:
     return text
 
 
+def _default_tts_template(trigger_event: Any) -> str:
+    event = _token(trigger_event)
+    return {
+        "person": "A person was detected at {device}.",
+        "vehicle": "A vehicle was detected at {device}.",
+        "animal": "An animal was detected at {device}.",
+        "package": "A package was detected at {device}.",
+        "face": "A face was detected at {device}.",
+        "license_plate": "A license plate was detected at {device}.",
+        "motion": "Motion was detected at {device}.",
+        "doorbell": "Someone pressed the doorbell at {device}.",
+        "opens": "{device} opened.",
+        "closes": "{device} closed.",
+        "turns_on": "{device} turned on.",
+        "turns_off": "{device} turned off.",
+        "connects": "{device} connected.",
+        "disconnects": "{device} disconnected.",
+        "above": "{device} rose above the configured value.",
+        "below": "{device} fell below the configured value.",
+        "equals": "{device} reached the configured value.",
+        "contains": "{device} reported the configured text.",
+    }.get(event, "{device} changed.")
+
+
 def _action_payload(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     payload = _json_object(rule.get("action_payload_json"))
     action = _token(rule.get("action_operation"))
@@ -1110,7 +1318,12 @@ def _speech_settings() -> Dict[str, Any]:
 
 
 async def _execute_tts(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-    message = _render_template(rule.get("tts_text"), context)
+    template = (
+        rule.get("tts_text")
+        if _token(rule.get("tts_mode")) == "custom" and _text(rule.get("tts_text"))
+        else _default_tts_template(rule.get("trigger_event"))
+    )
+    message = _render_template(template, context)
     if not message:
         raise ValueError("The TTS message is empty.")
     settings = _speech_settings()
@@ -1575,6 +1788,7 @@ def _rule_from_form(
         "action_mode",
         "action_text",
         "action_payload_json",
+        "tts_mode",
         "tts_text",
         "tts_targets",
         "notification_title",
@@ -1622,10 +1836,10 @@ def _rule_from_form(
         if _token(rule.get("action_scope")) == "devices" and not _list(rule.get("action_devices")):
             raise ValueError("Choose at least one action device.")
     elif action_type == "tts":
-        if not _text(rule.get("tts_text")):
-            raise ValueError("Enter the words Tater should speak.")
         if not _list(rule.get("tts_targets")):
             raise ValueError("Choose at least one announcement target.")
+        if _token(rule.get("tts_mode")) == "custom" and not _text(rule.get("tts_text")):
+            raise ValueError("Enter the words Tater should speak.")
     elif action_type == "notification":
         if not _text(rule.get("notification_message")):
             raise ValueError("Enter a notification message.")
@@ -1639,7 +1853,14 @@ def _rule_from_form(
     raise ValueError("Complete the required automation fields.")
 
 
-def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) -> List[Dict[str, Any]]:
+def _editor_fields(
+    rule: Dict[str, Any],
+    registry: Dict[str, Any],
+    client: Any,
+    *,
+    announcement_catalog: Optional[List[Dict[str, Any]]] = None,
+    notification_catalog: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     trigger_category = _token(rule.get("trigger_category"))
     action_category = _token(rule.get("action_category"))
     trigger_device_options, trigger_device_dependency = _device_dependency(
@@ -1647,6 +1868,15 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
         current_category=trigger_category,
         current_values=rule.get("trigger_device"),
         multiple=False,
+        allow_any=bool(rule.get("id") and not _text(rule.get("trigger_device"))),
+    )
+    current_trigger_device = _text(rule.get("trigger_device"))
+    if not current_trigger_device and trigger_device_options:
+        current_trigger_device = _text(trigger_device_options[0].get("value"))
+    trigger_event_options, trigger_event_dependency = _trigger_event_dependency(
+        registry,
+        current_device=current_trigger_device,
+        current_event=rule.get("trigger_event"),
     )
     action_device_options, action_device_dependency = _device_dependency(
         registry,
@@ -1659,14 +1889,32 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
         current_category=action_category,
         current_action=_token(rule.get("action_operation")),
     )
+    announcement_options = (
+        [dict(row) for row in announcement_catalog if isinstance(row, dict)]
+        if announcement_catalog is not None
+        else _announcement_options(
+            [*_list(rule.get("tts_targets")), *_list(rule.get("camera_tts_targets"))]
+        )
+    )
+    notification_options = (
+        [dict(row) for row in notification_catalog if isinstance(row, dict)]
+        if notification_catalog is not None
+        else [
+            {
+                **row,
+                "description": _text(row.get("description")) or "Notification destination",
+                "icon": _text(row.get("icon")) or "◉",
+            }
+            for row in _notification_options(
+                client,
+                [*_list(rule.get("notification_targets")), *_list(rule.get("camera_notification_targets"))],
+            )
+        ]
+    )
     show_device_action = {"source_key": "action_type", "equals": "device"}
     show_tts = {"source_key": "action_type", "equals": "tts"}
     show_notification = {"source_key": "action_type", "equals": "notification"}
     show_camera_ai = {"source_key": "action_type", "equals": "camera_ai"}
-    show_selected_devices = [
-        show_device_action,
-        {"source_key": "action_scope", "equals": "devices"},
-    ]
     show_trigger_value = {"source_key": "trigger_event", "any_of": ["equals", "contains", "above", "below"]}
     show_numeric_action = {
         "source_key": "action_operation",
@@ -1676,55 +1924,70 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
         "source_key": "action_operation",
         "any_of": ["set_color", "play_media", "play_url", "announce"],
     }
+    def tts_mode_options(event: Any) -> List[Dict[str, Any]]:
+        return [
+            {
+                "value": "default",
+                "label": "Use Tater's Default",
+                "description": _default_tts_template(event),
+                "icon": "✦",
+            },
+            {
+                "value": "custom",
+                "label": "Write My Own",
+                "description": "Type exactly what the selected speakers should say.",
+                "icon": "✎",
+            },
+        ]
+
+    tts_mode_options_by_event = {
+        row["value"]: tts_mode_options(row["value"])
+        for row in _EVENT_OPTIONS
+    }
     return [
-        {"key": "preset", "label": "Preset", "type": "hidden", "value": "custom"},
-        {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
         {
-            "key": "name",
-            "label": "Automation Name",
-            "type": "text",
-            "required": True,
-            "placeholder": "Person detected in the front yard",
-            "value": _text(rule.get("name")),
+            "type": "heading",
+            "label": "1. Trigger",
+            "description": "Choose the device and the exact event that starts this automation.",
         },
         {
             "key": "trigger_category",
-            "label": "When this category…",
+            "label": "Device Category",
             "type": "select",
+            "presentation": "cards",
             "options": _category_options(registry),
             "value": trigger_category,
-            "description": "Categories come from the devices exposed by enabled Tater integrations.",
+            "full_width": True,
         },
         {
             "key": "trigger_device",
-            "label": "Trigger Device",
+            "label": "Which Device?",
             "type": "select",
+            "presentation": "cards",
             "options": trigger_device_options,
             "dependent_options": trigger_device_dependency,
-            "value": _text(rule.get("trigger_device")),
-            "description": "Leave this on any device to watch the entire category.",
-        },
-        {
-            "key": "trigger_room",
-            "label": "Trigger Room",
-            "type": "select",
-            "options": _room_options(registry),
-            "value": _token(rule.get("trigger_room")),
+            "value": current_trigger_device,
+            "description": "Only devices from the selected category are shown.",
+            "full_width": True,
         },
         {
             "key": "trigger_event",
-            "label": "Does this…",
+            "label": "What Should Happen?",
             "type": "select",
-            "options": _EVENT_OPTIONS,
+            "presentation": "cards",
+            "options": trigger_event_options,
+            "dependent_options": trigger_event_dependency,
             "value": _token(rule.get("trigger_event") or "changed"),
+            "description": "These events come from the capabilities reported by the selected device.",
+            "full_width": True,
         },
         {
             "key": "trigger_attribute",
-            "label": "Value Path (optional)",
+            "label": "Value To Watch",
             "type": "text",
             "placeholder": "new_state.attributes.temperature",
             "value": _text(rule.get("trigger_attribute")),
-            "description": "For equals/above/below, optionally compare one nested event value.",
+            "description": "Optional nested value for equals, contains, above, or below.",
             "show_when": show_trigger_value,
         },
         {
@@ -1735,73 +1998,141 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
             "show_when": show_trigger_value,
         },
         {
-            "key": "cooldown_seconds",
-            "label": "Cooldown (seconds)",
-            "type": "number",
-            "value": _int(rule.get("cooldown_seconds"), 30),
-            "description": "Prevents repeated device events from running this automation too often.",
+            "type": "heading",
+            "label": "2. Action",
+            "description": "Choose what Tater should do when the trigger occurs.",
         },
         {
             "key": "action_type",
-            "label": "Then Tater should…",
+            "label": "What Should Tater Do?",
             "type": "select",
+            "presentation": "cards",
             "options": [
-                {"value": "device", "label": "Control integration devices"},
-                {"value": "tts", "label": "Speak an announcement"},
-                {"value": "notification", "label": "Send a notification"},
-                {"value": "camera_ai", "label": "Describe a camera, then announce or notify"},
+                {
+                    "value": "tts",
+                    "label": "Announcement",
+                    "description": "Speak on a Sonos, media player, or Tater satellite.",
+                    "icon": "♪",
+                },
+                {
+                    "value": "device",
+                    "label": "Control a Device",
+                    "description": "Turn something on, change a setting, or run a scene.",
+                    "icon": "⏻",
+                },
+                {
+                    "value": "notification",
+                    "label": "Send a Notification",
+                    "description": "Send a message through a configured notification integration.",
+                    "icon": "◉",
+                },
+                {
+                    "value": "camera_ai",
+                    "label": "Describe a Camera",
+                    "description": "Capture a camera image, describe it, then announce or notify.",
+                    "icon": "◎",
+                },
             ],
-            "value": _token(rule.get("action_type") or "device"),
+            "value": _token(rule.get("action_type") or "tts"),
+            "full_width": True,
+        },
+        {
+            "key": "tts_targets",
+            "label": "Where Should It Play?",
+            "type": "multiselect",
+            "presentation": "cards",
+            "options": announcement_options,
+            "value": _list(rule.get("tts_targets")),
+            "description": "Choose one or more available speakers, media players, or satellites.",
+            "show_when": show_tts,
+            "full_width": True,
+        },
+        {
+            "key": "tts_mode",
+            "label": "Announcement Words",
+            "type": "select",
+            "presentation": "cards",
+            "options": tts_mode_options(rule.get("trigger_event") or "changed"),
+            "dependent_options": {
+                "source_key": "trigger_event",
+                "options_by_source": tts_mode_options_by_event,
+                "default_options": tts_mode_options("changed"),
+            },
+            "value": _token(rule.get("tts_mode") or ("custom" if _text(rule.get("tts_text")) else "default")),
+            "show_when": show_tts,
+            "full_width": True,
+        },
+        {
+            "key": "tts_text",
+            "label": "Custom Announcement",
+            "type": "textarea",
+            "placeholder": "A person was detected in the front yard.",
+            "value": _text(rule.get("tts_text")),
+            "description": "Optional variables: {device}, {room}, {event}, {state}, {value}, {category}, and {provider}.",
+            "show_when_all": [show_tts, {"source_key": "tts_mode", "equals": "custom"}],
+            "full_width": True,
         },
         {
             "key": "action_category",
-            "label": "Action Category",
+            "label": "Device Category",
             "type": "select",
+            "presentation": "cards",
             "options": _category_options(registry, actionable_only=True),
             "value": action_category,
             "show_when": show_device_action,
+            "full_width": True,
         },
         {
             "key": "action_scope",
-            "label": "Control",
+            "label": "Which Ones?",
             "type": "select",
+            "presentation": "cards",
             "options": [
-                {"value": "category", "label": "Every compatible device in the category"},
-                {"value": "devices", "label": "Only selected devices"},
+                {
+                    "value": "devices",
+                    "label": "Selected Devices",
+                    "description": "Choose exactly which devices this automation controls.",
+                    "icon": "◆",
+                },
+                {
+                    "value": "category",
+                    "label": "Every Compatible Device",
+                    "description": "Apply the action to every compatible device in this category.",
+                    "icon": "✦",
+                },
             ],
-            "value": _token(rule.get("action_scope") or "category"),
+            "value": _token(rule.get("action_scope") or "devices"),
             "show_when": show_device_action,
+            "full_width": True,
         },
         {
             "key": "action_devices",
-            "label": "Action Devices",
+            "label": "Which Devices?",
             "type": "multiselect",
+            "presentation": "cards",
             "options": action_device_options,
             "dependent_options": action_device_dependency,
             "value": _list(rule.get("action_devices")),
-            "show_when_all": show_selected_devices,
-        },
-        {
-            "key": "action_room",
-            "label": "Action Room",
-            "type": "select",
-            "options": _room_options(registry),
-            "value": _token(rule.get("action_room")),
-            "description": "Optional: limit the category or selected devices to one room.",
-            "show_when": show_device_action,
+            "show_when_all": [
+                show_device_action,
+                {"source_key": "action_scope", "equals": "devices"},
+            ],
+            "full_width": True,
         },
         {
             "key": "action_operation",
-            "label": "Device Action",
+            "label": "What Should They Do?",
             "type": "select",
+            "presentation": "cards",
             "options": action_options,
             "dependent_options": action_dependency,
             "value": _token(rule.get("action_operation")),
             "show_when": show_device_action,
+            "full_width": True,
         },
         {
             "key": "action_value",
-            "label": "Action Value",
+            "label": "Value",
             "type": "number",
             "placeholder": "0–100 or target temperature",
             "value": _text(rule.get("action_value")),
@@ -1820,37 +2151,21 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
         },
         {
             "key": "action_text",
-            "label": "Action Text / URL",
+            "label": "Color, Text, or URL",
             "type": "text",
             "value": _text(rule.get("action_text")),
             "show_when_all": [show_device_action, show_action_text],
+            "full_width": True,
         },
         {
-            "key": "action_payload_json",
-            "label": "Advanced Action Data (JSON)",
-            "type": "textarea",
-            "placeholder": '{"key":"value"}',
-            "value": _text(rule.get("action_payload_json")),
-            "description": "Optional provider-specific data merged into the device action.",
-            "show_when": show_device_action,
-        },
-        {
-            "key": "tts_text",
-            "label": "Words To Speak",
-            "type": "textarea",
-            "placeholder": "A person was detected in the front yard.",
-            "value": _text(rule.get("tts_text")),
-            "description": "You can use {device}, {room}, {event}, {state}, {value}, {category}, or {provider}.",
-            "show_when": show_tts,
-        },
-        {
-            "key": "tts_targets",
-            "label": "Announcement Targets",
+            "key": "notification_targets",
+            "label": "Where Should It Send?",
             "type": "multiselect",
-            "options": _announcement_options(rule.get("tts_targets")),
-            "value": _list(rule.get("tts_targets")),
-            "description": "Choose Voice Core satellites, Sonos, Home Assistant players, or other supported speakers.",
-            "show_when": show_tts,
+            "presentation": "cards",
+            "options": notification_options,
+            "value": _list(rule.get("notification_targets")),
+            "show_when": show_notification,
+            "full_width": True,
         },
         {
             "key": "notification_title",
@@ -1860,90 +2175,116 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
             "show_when": show_notification,
         },
         {
-            "key": "notification_message",
-            "label": "Notification Message",
-            "type": "textarea",
-            "value": _text(rule.get("notification_message")),
-            "description": "Template variables are the same as TTS announcements.",
-            "show_when": show_notification,
-        },
-        {
-            "key": "notification_targets",
-            "label": "Notification Destinations",
-            "type": "multiselect",
-            "options": _notification_options(client, rule.get("notification_targets")),
-            "value": _list(rule.get("notification_targets")),
-            "show_when": show_notification,
-        },
-        {
             "key": "notification_priority",
             "label": "Priority",
             "type": "select",
-            "options": [{"value": "normal", "label": "Normal"}, {"value": "high", "label": "High"}],
+            "presentation": "cards",
+            "options": [
+                {"value": "normal", "label": "Normal", "icon": "○"},
+                {"value": "high", "label": "High", "icon": "!"},
+            ],
             "value": _text(rule.get("notification_priority") or "normal"),
             "show_when": show_notification,
         },
         {
+            "key": "notification_message",
+            "label": "Message",
+            "type": "textarea",
+            "value": _text(rule.get("notification_message")),
+            "description": "You can use the same variables available for announcements.",
+            "show_when": show_notification,
+            "full_width": True,
+        },
+        {
             "key": "camera_source",
-            "label": "Camera Source",
+            "label": "Which Camera?",
             "type": "select",
+            "presentation": "cards",
             "options": [
-                {"value": "trigger", "label": "The camera that triggered this automation"},
-                {"value": "selected", "label": "Always use a selected camera"},
+                {
+                    "value": "trigger",
+                    "label": "Triggering Camera",
+                    "description": "Use the same camera selected in the trigger.",
+                    "icon": "↻",
+                },
+                {
+                    "value": "selected",
+                    "label": "Another Camera",
+                    "description": "Always capture a separately selected camera.",
+                    "icon": "◎",
+                },
             ],
             "value": _token(rule.get("camera_source") or "trigger"),
             "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
             "key": "camera_device",
             "label": "Camera",
             "type": "select",
+            "presentation": "cards",
             "options": _devices_for_category_options(
                 registry,
                 "camera",
                 require_actions=("camera_snapshot", "snapshot"),
-                placeholder="Select a camera",
             ),
             "value": _text(rule.get("camera_device")),
             "show_when_all": [
                 show_camera_ai,
                 {"source_key": "camera_source", "equals": "selected"},
             ],
+            "full_width": True,
         },
         {
             "key": "vision_prompt",
-            "label": "What Vision Should Describe",
+            "label": "What Should Vision Describe?",
             "type": "textarea",
             "value": _text(
                 rule.get("vision_prompt")
                 or "Briefly describe the important activity in this image. Do not invent details."
             ),
             "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
             "key": "vision_fallback",
             "label": "Fallback Message",
             "type": "text",
             "value": _text(rule.get("vision_fallback") or "Camera activity was detected."),
-            "description": "Used when the camera or vision model is temporarily unavailable.",
+            "description": "Used if the camera or vision model is unavailable.",
             "show_when": show_camera_ai,
+            "full_width": True,
+        },
+        {
+            "key": "camera_tts_targets",
+            "label": "Announcement Speakers",
+            "type": "multiselect",
+            "presentation": "cards",
+            "options": announcement_options,
+            "value": _list(rule.get("camera_tts_targets")),
+            "description": "Optional. Choose speakers if Tater should announce the description.",
+            "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
             "key": "camera_tts_text",
             "label": "Camera Announcement",
             "type": "textarea",
             "value": _text(rule.get("camera_tts_text") or "{vision}"),
-            "description": "Use {vision} to include the camera description.",
+            "description": "Use {vision} to insert the camera description.",
             "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
-            "key": "camera_tts_targets",
-            "label": "Camera Announcement Targets",
+            "key": "camera_notification_targets",
+            "label": "Notification Destinations",
             "type": "multiselect",
-            "options": _announcement_options(rule.get("camera_tts_targets")),
-            "value": _list(rule.get("camera_tts_targets")),
-            "description": "Optional. Leave empty if this camera automation only sends notifications.",
+            "presentation": "cards",
+            "options": notification_options,
+            "value": _list(rule.get("camera_notification_targets")),
+            "description": "Optional. Announce, notify, or do both.",
             "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
             "key": "camera_notification_title",
@@ -1958,46 +2299,94 @@ def _editor_fields(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) 
             "type": "textarea",
             "value": _text(rule.get("camera_notification_message") or "{vision}"),
             "show_when": show_camera_ai,
+            "full_width": True,
         },
         {
-            "key": "camera_notification_targets",
-            "label": "Camera Notification Destinations",
-            "type": "multiselect",
-            "options": _notification_options(client, rule.get("camera_notification_targets")),
-            "value": _list(rule.get("camera_notification_targets")),
-            "description": "Optional. You can announce, notify, or do both.",
-            "show_when": show_camera_ai,
+            "type": "heading",
+            "label": "3. Save",
+            "description": "Give the automation a clear name and choose how quickly it may run again.",
         },
         {
-            "key": "camera_notification_priority",
-            "label": "Camera Notification Priority",
-            "type": "select",
-            "options": [{"value": "normal", "label": "Normal"}, {"value": "high", "label": "High"}],
-            "value": _text(rule.get("camera_notification_priority") or "normal"),
-            "show_when": show_camera_ai,
+            "key": "name",
+            "label": "Automation Name",
+            "type": "text",
+            "required": True,
+            "placeholder": "Front yard person announcement",
+            "value": _text(rule.get("name")),
+            "full_width": True,
+        },
+        {
+            "key": "enabled",
+            "label": "Enabled",
+            "type": "checkbox",
+            "value": _bool(rule.get("enabled"), True),
+        },
+        {
+            "key": "cooldown_seconds",
+            "label": "Wait Before Running Again",
+            "type": "number",
+            "min": 0,
+            "max": 86400,
+            "value": _int(rule.get("cooldown_seconds"), 30),
+            "description": "Seconds to ignore duplicate events after this automation runs.",
         },
     ]
 
 
-def _rule_form(rule: Dict[str, Any], registry: Dict[str, Any], client: Any) -> Dict[str, Any]:
+def _rule_form(
+    rule: Dict[str, Any],
+    registry: Dict[str, Any],
+    client: Any,
+    *,
+    announcement_catalog: Optional[List[Dict[str, Any]]] = None,
+    notification_catalog: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     status = _text(rule.get("last_status")) or "not run"
-    subtitle = (
-        f"{'Enabled' if _bool(rule.get('enabled'), True) else 'Disabled'} • "
-        f"{_text(rule.get('trigger_category')).replace('_', ' ').title()} → "
-        f"{_text(rule.get('action_type')).replace('_', ' ').title()} • "
-        f"last {status}: {_now_label(rule.get('last_run_ts'))}"
-    )
+    trigger_device = _find_device(registry, rule.get("trigger_device"))
+    trigger_name = _text((trigger_device or {}).get("name")) or _text(rule.get("trigger_category")).replace("_", " ").title()
+    trigger_event = _event_option(rule.get("trigger_event"))["label"]
+    action_type = _token(rule.get("action_type"))
+    if action_type == "tts":
+        target_count = len(_list(rule.get("tts_targets")))
+        action_summary = f"Announce on {target_count} speaker{'s' if target_count != 1 else ''}"
+    elif action_type == "device":
+        device_count = len(_list(rule.get("action_devices")))
+        operation = _ACTION_LABELS.get(
+            _token(rule.get("action_operation")),
+            _text(rule.get("action_operation")).replace("_", " ").title(),
+        )
+        action_summary = f"{operation} on {device_count or 'compatible'} device{'s' if device_count != 1 else ''}"
+    elif action_type == "notification":
+        target_count = len(_list(rule.get("notification_targets")))
+        action_summary = f"Notify {target_count} destination{'s' if target_count != 1 else ''}"
+    else:
+        action_summary = "Describe camera and deliver the result"
+    enabled = _bool(rule.get("enabled"), True)
     return {
         "id": rule["id"],
         "group": "rules",
         "title": _text(rule.get("name")) or "Automation",
-        "subtitle": subtitle,
+        "detail": f"Last {status}: {_now_label(rule.get('last_run_ts'))}",
+        "hero_badges": [
+            {"label": "Enabled" if enabled else "Disabled", "tone": "running" if enabled else "muted"},
+            {"label": status.title(), "tone": "running" if status == "ok" else "muted"},
+        ],
+        "summary_rows": [
+            {"label": "Trigger", "value": f"{trigger_name} · {trigger_event}"},
+            {"label": "Action", "value": action_summary},
+        ],
         "save_action": "automation_save_rule",
         "run_action": "automation_run_now",
         "run_label": "Test Now",
         "remove_action": "automation_remove_rule",
         "remove_confirm": "Remove this automation?",
-        "fields": _editor_fields(rule, registry, client),
+        "fields": _editor_fields(
+            rule,
+            registry,
+            client,
+            announcement_catalog=announcement_catalog,
+            notification_catalog=notification_catalog,
+        ),
         "sections": [
             {
                 "label": "Last Run",
@@ -2058,289 +2447,6 @@ def _history_form(row: Dict[str, Any]) -> Dict[str, Any]:
             },
         ],
     }
-
-
-def _starter_forms(registry: Dict[str, Any], client: Any) -> List[Dict[str, Any]]:
-    camera_options = _devices_for_category_options(
-        registry,
-        "camera",
-        require_actions=("camera_snapshot", "snapshot"),
-        placeholder="Select a camera",
-    )
-    entry_options = _devices_for_category_options(
-        registry,
-        "entry_sensor",
-        placeholder="Select a door, window, or garage sensor",
-    )
-    tts_options = _announcement_options()
-    notification_options = _notification_options(client)
-    forms = [
-        {
-            "id": "starter_person_announcement",
-            "group": "starters",
-            "title": "Person Detection Announcement",
-            "subtitle": "Camera sees a person → Vision describes it → Tater speaks",
-            "save_action": "automation_add_preset",
-            "save_label": "Create Automation",
-            "fields": [
-                {
-                    "key": "name",
-                    "label": "Automation Name",
-                    "type": "text",
-                    "value": "Person detection announcement",
-                },
-                {"key": "camera_device", "label": "Camera", "type": "select", "options": camera_options, "value": ""},
-                {
-                    "key": "tts_targets",
-                    "label": "Announcement Targets",
-                    "type": "multiselect",
-                    "options": tts_options,
-                    "value": [],
-                },
-                {
-                    "key": "tts_text",
-                    "label": "Words To Speak",
-                    "type": "textarea",
-                    "value": "{vision}",
-                    "description": "Use {vision} for Tater's short description of the camera snapshot.",
-                },
-                {"key": "cooldown_seconds", "label": "Cooldown (seconds)", "type": "number", "value": 60},
-            ],
-        },
-        {
-            "id": "starter_camera_alert",
-            "group": "starters",
-            "title": "Smart Camera Alert",
-            "subtitle": "Camera activity → Vision describes it → Tater sends a notification",
-            "save_action": "automation_add_preset",
-            "save_label": "Create Automation",
-            "fields": [
-                {"key": "name", "label": "Automation Name", "type": "text", "value": "Smart camera alert"},
-                {"key": "camera_device", "label": "Camera", "type": "select", "options": camera_options, "value": ""},
-                {
-                    "key": "trigger_event",
-                    "label": "When Camera…",
-                    "type": "select",
-                    "options": [
-                        {"value": "motion", "label": "Detects motion"},
-                        {"value": "person", "label": "Detects a person"},
-                        {"value": "vehicle", "label": "Detects a vehicle"},
-                        {"value": "animal", "label": "Detects an animal"},
-                        {"value": "package", "label": "Detects a package"},
-                    ],
-                    "value": "motion",
-                },
-                {
-                    "key": "notification_targets",
-                    "label": "Notification Destinations",
-                    "type": "multiselect",
-                    "options": notification_options,
-                    "value": [],
-                },
-                {
-                    "key": "notification_title",
-                    "label": "Notification Title",
-                    "type": "text",
-                    "value": "Camera Activity",
-                },
-                {
-                    "key": "notification_message",
-                    "label": "Notification Message",
-                    "type": "textarea",
-                    "value": "{vision}",
-                },
-                {"key": "cooldown_seconds", "label": "Cooldown (seconds)", "type": "number", "value": 60},
-            ],
-        },
-        {
-            "id": "starter_doorbell_announcement",
-            "group": "starters",
-            "title": "Doorbell Announcement",
-            "subtitle": "Doorbell pressed → Vision checks the camera → Tater speaks",
-            "save_action": "automation_add_preset",
-            "save_label": "Create Automation",
-            "fields": [
-                {"key": "name", "label": "Automation Name", "type": "text", "value": "Doorbell announcement"},
-                {
-                    "key": "camera_device",
-                    "label": "Doorbell Camera",
-                    "type": "select",
-                    "options": camera_options,
-                    "value": "",
-                },
-                {
-                    "key": "tts_targets",
-                    "label": "Announcement Targets",
-                    "type": "multiselect",
-                    "options": tts_options,
-                    "value": [],
-                },
-                {
-                    "key": "tts_text",
-                    "label": "Words To Speak",
-                    "type": "textarea",
-                    "value": "{vision}",
-                },
-                {"key": "cooldown_seconds", "label": "Cooldown (seconds)", "type": "number", "value": 10},
-            ],
-        },
-        {
-            "id": "starter_entry_announcement",
-            "group": "starters",
-            "title": "Door, Window, or Garage Announcement",
-            "subtitle": "Entry sensor opens → Tater speaks on selected satellites or speakers",
-            "save_action": "automation_add_preset",
-            "save_label": "Create Automation",
-            "fields": [
-                {"key": "name", "label": "Automation Name", "type": "text", "value": "Entry announcement"},
-                {
-                    "key": "entry_device",
-                    "label": "Entry Sensor",
-                    "type": "select",
-                    "options": entry_options,
-                    "value": "",
-                },
-                {
-                    "key": "tts_targets",
-                    "label": "Announcement Targets",
-                    "type": "multiselect",
-                    "options": tts_options,
-                    "value": [],
-                },
-                {
-                    "key": "tts_text",
-                    "label": "Words To Speak",
-                    "type": "textarea",
-                    "value": "{device} opened.",
-                },
-                {"key": "cooldown_seconds", "label": "Cooldown (seconds)", "type": "number", "value": 5},
-            ],
-        },
-    ]
-    awareness_count = _int(client.hlen("awareness:rules"), 0) if hasattr(client, "hlen") else 0
-    if awareness_count > 0:
-        forms.append(
-            {
-                "id": "starter_import_awareness",
-                "group": "starters",
-                "title": "Bring In Awareness Automations",
-                "subtitle": f"Import {awareness_count} existing Awareness rule(s) for review",
-                "save_action": "automation_import_awareness",
-                "save_label": "Import As Disabled",
-                "fields": [
-                    {
-                        "key": "migration_note",
-                        "label": "Safe Migration",
-                        "type": "textarea",
-                        "read_only": True,
-                        "value": (
-                            "Imported automations stay disabled so Awareness and Automation Core cannot both "
-                            "run the same rule. Review and test each imported rule before enabling it."
-                        ),
-                    }
-                ],
-            }
-        )
-    return forms
-
-
-def _rule_from_starter(starter_id: str, values: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
-    now = time.time()
-    name = _text(_value(values, body, "name"))
-    cooldown = _int(_value(values, body, "cooldown_seconds", 30), 30, minimum=0, maximum=86400)
-    tts_targets = _list(_value(values, body, "tts_targets"))
-    tts_text = _text(_value(values, body, "tts_text"))
-    camera_device = _text(_value(values, body, "camera_device"))
-    base: Dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "enabled": True,
-        "preset": "custom",
-        "cooldown_seconds": cooldown,
-        "created_at": now,
-        "updated_at": now,
-    }
-    if starter_id == "starter_person_announcement":
-        if not camera_device or not tts_targets:
-            raise ValueError("Choose a camera and at least one announcement target.")
-        base.update(
-            {
-                "name": name or "Person detection announcement",
-                "trigger_category": "camera",
-                "trigger_device": camera_device,
-                "trigger_event": "person",
-                "action_type": "camera_ai",
-                "camera_source": "selected",
-                "camera_device": camera_device,
-                "vision_prompt": "Briefly describe the person and the important visible activity. Do not invent details.",
-                "vision_fallback": "A person was detected.",
-                "camera_tts_text": tts_text or "{vision}",
-                "camera_tts_targets": tts_targets,
-            }
-        )
-    elif starter_id == "starter_camera_alert":
-        notification_targets = _list(_value(values, body, "notification_targets"))
-        if not camera_device or not notification_targets:
-            raise ValueError("Choose a camera and at least one notification destination.")
-        base.update(
-            {
-                "name": name or "Smart camera alert",
-                "trigger_category": "camera",
-                "trigger_device": camera_device,
-                "trigger_event": _token(_value(values, body, "trigger_event", "motion")),
-                "action_type": "camera_ai",
-                "camera_source": "selected",
-                "camera_device": camera_device,
-                "vision_prompt": "Briefly describe the important visible activity in this camera image. Do not invent details.",
-                "vision_fallback": "Camera activity was detected.",
-                "camera_notification_title": _text(
-                    _value(values, body, "notification_title", "Camera Activity")
-                ),
-                "camera_notification_message": _text(
-                    _value(values, body, "notification_message", "{vision}")
-                ),
-                "camera_notification_targets": notification_targets,
-            }
-        )
-    elif starter_id == "starter_doorbell_announcement":
-        if not camera_device or not tts_targets:
-            raise ValueError("Choose a doorbell camera and at least one announcement target.")
-        base.update(
-            {
-                "name": name or "Doorbell announcement",
-                "trigger_category": "camera",
-                "trigger_device": camera_device,
-                "trigger_event": "doorbell",
-                "action_type": "camera_ai",
-                "camera_source": "selected",
-                "camera_device": camera_device,
-                "vision_prompt": "Briefly describe who or what is at the door. Do not invent details.",
-                "vision_fallback": "Someone is at the door.",
-                "camera_tts_text": tts_text or "{vision}",
-                "camera_tts_targets": tts_targets,
-            }
-        )
-    elif starter_id == "starter_entry_announcement":
-        entry_device = _text(_value(values, body, "entry_device"))
-        if not entry_device or not tts_targets:
-            raise ValueError("Choose an entry sensor and at least one announcement target.")
-        base.update(
-            {
-                "name": name or "Entry announcement",
-                "trigger_category": "entry_sensor",
-                "trigger_device": entry_device,
-                "trigger_event": "opens",
-                "action_type": "tts",
-                "tts_text": tts_text or "{device} opened.",
-                "tts_targets": tts_targets,
-            }
-        )
-    else:
-        raise KeyError("Unknown automation starter.")
-    normalized = _normalize_rule(base)
-    if not normalized:
-        raise ValueError("The starter automation could not be created from those selections.")
-    return normalized
 
 
 def _awareness_target(provider: Any, value: Any) -> str:
@@ -2525,23 +2631,72 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         registry,
         current_category=default_action_category,
     )
+    default_trigger_devices, _trigger_device_dependency = _device_dependency(
+        registry,
+        current_category=default_trigger_category,
+        multiple=False,
+    )
+    default_trigger_device = _text(default_trigger_devices[0].get("value")) if default_trigger_devices else ""
+    default_trigger_events, _trigger_event_options_dependency = _trigger_event_dependency(
+        registry,
+        current_device=default_trigger_device,
+    )
+    default_action_devices, _action_device_dependency = _device_dependency(
+        registry,
+        current_category=default_action_category,
+        multiple=True,
+    )
     blank = {
         "name": "",
         "enabled": True,
         "trigger_category": default_trigger_category,
-        "trigger_event": "changed",
+        "trigger_device": default_trigger_device,
+        "trigger_event": default_trigger_events[0]["value"] if default_trigger_events else "changed",
         "cooldown_seconds": 30,
-        "action_type": "device",
+        "action_type": "tts",
         "action_category": default_action_category,
-        "action_scope": "category",
+        "action_scope": "devices",
+        "action_devices": [default_action_devices[0]["value"]] if default_action_devices else [],
         "action_operation": default_action_options[0]["value"] if default_action_options else "",
+        "tts_mode": "default",
         "notification_title": "Tater Automation",
         "notification_priority": "normal",
     }
-    forms = _starter_forms(registry, client)
-    forms.extend(_history_form(row) for row in history)
+    saved_rules = list(rules.values())
+    announcement_catalog = _announcement_options(
+        [
+            target
+            for rule in saved_rules
+            for target in [*_list(rule.get("tts_targets")), *_list(rule.get("camera_tts_targets"))]
+        ]
+    )
+    notification_catalog = [
+        {
+            **row,
+            "description": _text(row.get("description")) or "Notification destination",
+            "icon": _text(row.get("icon")) or "◉",
+        }
+        for row in _notification_options(
+            client,
+            [
+                target
+                for rule in saved_rules
+                for target in [
+                    *_list(rule.get("notification_targets")),
+                    *_list(rule.get("camera_notification_targets")),
+                ]
+            ],
+        )
+    ]
+    forms = [_history_form(row) for row in history]
     forms.extend(
-        _rule_form(rule, registry, client)
+        _rule_form(
+            rule,
+            registry,
+            client,
+            announcement_catalog=announcement_catalog,
+            notification_catalog=notification_catalog,
+        )
         for rule in sorted(rules.values(), key=lambda item: (_text(item.get("name")).casefold(), item["id"]))
     )
     last_run = _text(runtime.get("last_run_ts"))
@@ -2569,16 +2724,8 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "item_fields_popup": True,
             "item_fields_popup_label": "Edit Automation",
             "item_sections_in_dropdown": True,
-            "default_tab": "rules" if rules else "starters",
+            "default_tab": "rules" if rules else "create",
             "manager_tabs": [
-                {
-                    "key": "starters",
-                    "label": "Quick Start",
-                    "source": "items",
-                    "item_group": "starters",
-                    "selector": False,
-                    "empty_message": "No automation starters are available.",
-                },
                 {
                     "key": "rules",
                     "label": "Automations",
@@ -2587,6 +2734,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "selector": False,
                     "empty_message": "No automations configured.",
                 },
+                {"key": "create", "label": "Create Automation", "source": "add_form"},
                 {
                     "key": "history",
                     "label": "Run History",
@@ -2595,12 +2743,17 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "selector": False,
                     "empty_message": "No automation runs recorded yet.",
                 },
-                {"key": "create", "label": "Create Automation", "source": "add_form"},
             ],
             "add_form": {
                 "action": "automation_add_rule",
                 "submit_label": "Create Automation",
-                "fields": _editor_fields(blank, registry, client),
+                "fields": _editor_fields(
+                    blank,
+                    registry,
+                    client,
+                    announcement_catalog=announcement_catalog,
+                    notification_catalog=notification_catalog,
+                ),
             },
             "item_forms": forms,
         },
@@ -2623,11 +2776,6 @@ def handle_htmlui_tab_action(
     if action_name == "automation_refresh_devices":
         _registry(client, refresh=True)
         return {"ok": True, "message": "Integration devices refreshed."}
-    if action_name == "automation_add_preset":
-        starter_id = _text(body.get("id"))
-        rule = _rule_from_starter(starter_id, values, body)
-        _save_rule(client, rule)
-        return {"ok": True, "id": rule["id"], "message": "Starter automation created."}
     if action_name == "automation_import_awareness":
         result = _import_awareness_rules(client)
         return {

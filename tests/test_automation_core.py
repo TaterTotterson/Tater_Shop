@@ -162,7 +162,11 @@ def sample_registry():
         "room": "Front Yard",
         "category_ids": ["camera"],
         "actions": ["camera_snapshot"],
-        "event_sources": [{"ref": "binary_sensor.unifi_cam-front_smart_person"}],
+        "event_sources": [
+            {"type": "motion", "ref": "binary_sensor.unifi_cam-front_motion"},
+            {"type": "smart_person", "ref": "binary_sensor.unifi_cam-front_smart_person"},
+            {"type": "smart_animal", "ref": "binary_sensor.unifi_cam-front_smart_animal"},
+        ],
     }
     light = {
         "integration_id": "homeassistant",
@@ -319,20 +323,42 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         targets = self.core._action_targets(rule, sample_registry())
         self.assertEqual([item["id"] for item in targets], ["light.kitchen"])
 
-    def test_person_starter_builds_general_camera_ai_rule(self):
+    def test_guided_form_builds_default_announcement_rule(self):
         values = {
             "name": "Front yard person",
-            "camera_device": "unifi_protect|cam-front",
+            "trigger_category": "camera",
+            "trigger_device": "unifi_protect|cam-front",
+            "trigger_event": "person",
+            "action_type": "tts",
+            "tts_mode": "default",
             "tts_targets": ["voice_core:sat-kitchen"],
-            "tts_text": "Front yard: {vision}",
             "cooldown_seconds": 45,
         }
-        rule = self.core._rule_from_starter("starter_person_announcement", values, {})
+        rule = self.core._rule_from_form(values, {"values": values})
         self.assertEqual(rule["trigger_category"], "camera")
         self.assertEqual(rule["trigger_event"], "person")
-        self.assertEqual(rule["action_type"], "camera_ai")
-        self.assertEqual(rule["camera_device"], "unifi_protect|cam-front")
-        self.assertEqual(rule["camera_tts_text"], "Front yard: {vision}")
+        self.assertEqual(rule["action_type"], "tts")
+        self.assertEqual(rule["tts_mode"], "default")
+        self.assertEqual(rule["tts_text"], "")
+
+    async def test_default_announcement_uses_trigger_specific_words(self):
+        rule = self._tts_rule(tts_mode="default", tts_text="")
+        with patch.object(
+            self.core,
+            "speak_announcement_targets",
+            new=AsyncMock(return_value={"ok": True, "sent_count": 1}),
+        ) as speak:
+            await self.core._execute_tts(rule, {"device": "Front Yard"})
+        self.assertEqual(speak.await_args.kwargs["text"], "A person was detected at Front Yard.")
+
+    def test_selected_camera_exposes_only_reported_trigger_events(self):
+        options, dependency = self.core._trigger_event_dependency(
+            sample_registry(),
+            current_device="unifi_protect|cam-front",
+        )
+        values = [row["value"] for row in options]
+        self.assertEqual(values, ["motion", "person", "animal"])
+        self.assertEqual(dependency["source_key"], "trigger_device")
 
     def test_awareness_import_is_disabled_and_deduplicated(self):
         awareness = {
@@ -392,7 +418,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Spoke to kitchen", result["summary"])
         self.assertEqual(speak.await_args.args[1]["vision"], "A person is standing by the door.")
 
-    def test_ui_exposes_quick_start_and_custom_builder(self):
+    def test_ui_removes_quick_start_and_exposes_guided_builder(self):
         with (
             patch.object(self.core, "_registry", return_value=sample_registry()),
             patch.object(
@@ -404,16 +430,30 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         ):
             payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
         tabs = [item["key"] for item in payload["ui"]["manager_tabs"]]
-        self.assertIn("starters", tabs)
+        self.assertNotIn("starters", tabs)
         self.assertIn("rules", tabs)
         self.assertIn("create", tabs)
-        starter_titles = [
-            item["title"]
-            for item in payload["ui"]["item_forms"]
-            if item.get("group") == "starters"
+        self.assertEqual(payload["ui"]["default_tab"], "create")
+        self.assertFalse(
+            any(item.get("group") == "starters" for item in payload["ui"]["item_forms"])
+        )
+        fields = payload["ui"]["add_form"]["fields"]
+        by_key = {item.get("key"): item for item in fields if item.get("key")}
+        self.assertEqual(by_key["trigger_category"]["type"], "select")
+        self.assertEqual(by_key["trigger_device"]["type"], "select")
+        self.assertEqual(by_key["trigger_event"]["type"], "select")
+        self.assertEqual(by_key["action_type"]["type"], "select")
+        self.assertEqual(by_key["tts_targets"]["type"], "multiselect")
+        for key in ("trigger_category", "trigger_device", "trigger_event", "action_type", "tts_targets"):
+            self.assertEqual(by_key[key]["presentation"], "cards")
+        self.assertEqual(by_key["tts_mode"]["value"], "default")
+        trigger_values = [
+            row["value"]
+            for row in by_key["trigger_event"]["dependent_options"]["options_by_source"][
+                "unifi_protect|cam-front"
+            ]
         ]
-        self.assertIn("Person Detection Announcement", starter_titles)
-        self.assertIn("Doorbell Announcement", starter_titles)
+        self.assertEqual(trigger_values, ["motion", "person", "animal"])
 
 
 if __name__ == "__main__":

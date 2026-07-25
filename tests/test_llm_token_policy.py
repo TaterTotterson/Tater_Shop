@@ -139,7 +139,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
             "awareness": "3.4.12",
             "guardian": "1.3.11",
             "memory": "1.0.28",
-            "personal": "1.0.54",
+            "personal": "1.0.55",
             "rss": "1.0.11",
             "tater_tube": "1.2.2",
         }
