@@ -1461,7 +1461,7 @@
       "id": "voicepe_remote_timer",
       "name": "Timer",
       "version": "1.4.0",
-      "min_tater_version": "59",
+      "min_tater_version": "97.7",
       "description": "Set, cancel, snooze, silence, or check a timer.",
       "portals": [
         "voice_core",
@@ -1481,7 +1481,7 @@
       "settings_category": "Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "cc0da5649f50ac9ceda525236ec7de27a04833b63078df4f6cf4435f5de9d863"
+      "sha256": "6ce49b85c08108ba6537ee30bdcf8b9392558dfe0dd26210bcfb9951a51cf24d"
     },
     {
       "id": "weather_forecast",

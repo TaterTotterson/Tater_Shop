@@ -45,7 +45,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
     name = "voicepe_remote_timer"
     verba_name = "Timer"
     version = "1.4.0"
-    min_tater_version = "59"
+    min_tater_version = "97.7"
     pretty_name = "Timer"
     settings_category = "Timer"
 
