@@ -37,26 +37,26 @@ class VoicePERemoteTimerPlugin(ToolVerba):
       - Cancel or snooze a running/ringing timer
 
     Behavior:
-      - Tater owns timer state and syncs it to native satellites.
-      - The satellite keeps a local armed fallback so it can still ring
-        if it disconnects shortly before the deadline.
+      - The native satellite owns all timer state, countdowns, and alarms.
+      - Tater sends live commands and queries; it does not persist timers.
+      - Each satellite can run multiple named timers while disconnected.
     """
 
     name = "voicepe_remote_timer"
     verba_name = "Timer"
-    version = "1.3.1"
+    version = "1.4.0"
     min_tater_version = "59"
     pretty_name = "Timer"
     settings_category = "Timer"
 
     usage = (
         '{"function":"voicepe_remote_timer","arguments":{"query":"ONE natural-language timer request '
-        '(for example: set a timer for 5 minutes, start a 90 second timer, how much time is left, cancel the timer, snooze the timer)."}}'
+        '(for example: set a pasta timer for 5 minutes, start a 90 second timer, how much time is left on the pasta timer, cancel the 10 minute timer, snooze the timer)."}}'
     )
 
     description = (
-        "Use this for normal timer requests. Set, start, create, cancel, stop, silence, snooze, or check timers from one natural-language request. "
-        "Examples: set a timer for 5 minutes; start a 90 second timer; how much time is left; cancel the timer; stop the timer alarm."
+        "Use this for normal timer requests. Set, start, create, cancel, stop, silence, snooze, or check multiple named timers from one natural-language request. "
+        "Examples: set a pasta timer for 5 minutes; start a 90 second timer; how much time is left on the pasta timer; cancel the 10 minute timer."
     )
     verba_dec = "Set, cancel, snooze, silence, or check a timer."
 
@@ -785,7 +785,6 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
         t = re.sub(r"[,;]+", " ", t)
         t = re.sub(r"[()]+", " ", t)
-        t = t.replace(".", " ")
         t = re.sub(r"\s+", " ", t).strip()
 
         if re.fullmatch(r"\d+", t):
@@ -847,6 +846,54 @@ class VoicePERemoteTimerPlugin(ToolVerba):
                 return f"{n_plain.group(1)} minutes"
         return ""
 
+    @staticmethod
+    def _clean_timer_name(value: str) -> str:
+        text = re.sub(r"[^a-z0-9'\- ]+", " ", str(value or "").strip().lower())
+        text = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\b",
+            " ",
+            text,
+        )
+        number_words = (
+            "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+            "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+            "thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|half|quarter"
+        )
+        text = re.sub(
+            rf"\b(?:{number_words})(?:[\s-]+(?:and\s+)?(?:{number_words}))*\s+"
+            r"(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)\b",
+            " ",
+            text,
+        )
+        text = re.sub(r"\b(?:a|an|the|my|me|called|named|for|please)\b", " ", text)
+        text = re.sub(r"\b(?:timer|timers)\b", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" -")
+        return text[:63]
+
+    def _extract_timer_name(self, args: Dict[str, Any], action: str = "") -> str:
+        body = args if isinstance(args, dict) else {}
+        explicit = str(body.get("name") or body.get("label") or body.get("timer_name") or "").strip()
+        if explicit:
+            return self._clean_timer_name(explicit)
+
+        text = self._merged_request_text(body)
+        if not text:
+            return ""
+        patterns = [
+            r"\btimer\s+(?:called|named)\s+(.+?)(?:\s+for\b|$)",
+            r"\b(?:set|start|create)\s+(?:me\s+)?(?:a\s+|an\s+|the\s+)?(.+?)\s+timer\b",
+            r"\b(?:cancel|stop|clear|end|silence)\s+(?:the\s+|my\s+|a\s+)?(.+?)\s+timer\b",
+            r"\b(?:on|for)\s+(?:the\s+|my\s+)?(.+?)\s+timer\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            candidate = self._clean_timer_name(match.group(1))
+            if candidate:
+                return candidate
+        return ""
+
     def _resolve_action_duration(self, args: Dict[str, Any]) -> tuple[str, str]:
         a = args if isinstance(args, dict) else {}
         action = str(a.get("action") or "").strip().lower()
@@ -905,12 +952,13 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         )
         return await self._llm_phrase(llm_client, prompt, fallback)
 
-    async def _llm_started_message(self, seconds: int, llm_client) -> str:
+    async def _llm_started_message(self, seconds: int, llm_client, name: str = "") -> str:
         dur = self._format_remaining(seconds)
-        fallback = f"Timer started for {dur}."
+        timer_name = self._clean_timer_name(name)
+        fallback = f"{timer_name.title()} timer started for {dur}." if timer_name else f"Timer started for {dur}."
         prompt = (
             "The user asked you to start a timer.\n\n"
-            f"Fact: The timer has been started for {dur}.\n\n"
+            f"Fact: The {timer_name + ' ' if timer_name else ''}timer has been started for {dur}.\n\n"
             "Write ONE short, friendly confirmation sentence.\n"
             "Rules:\n- No emojis\n- No markdown\n- Keep it concise\n"
             "Only output the sentence."
@@ -1038,7 +1086,14 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             logger.debug(f"[voicepe_remote_timer] native timer backend unavailable: {e}")
             return None
 
-    async def _native_start_timer(self, duration_text: str, llm_client, context: dict | None = None) -> str | None:
+    async def _native_start_timer(
+        self,
+        duration_text: str,
+        llm_client,
+        context: dict | None = None,
+        *,
+        name: str = "",
+    ) -> str | None:
         native_timers = await self._native_timer_module()
         if native_timers is None:
             return None
@@ -1062,21 +1117,22 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         result = await native_timers.create_timer(
             selector,
             new_seconds,
+            name=name,
             room=self._native_room(context),
             source="verba",
         )
-        if not bool(result.get("ok")) and str(result.get("code") or "") == "already_running":
-            remaining = result.get("remaining_s")
-            try:
-                remaining_seconds = int(remaining)
-            except Exception:
-                remaining_seconds = None
-            return (await self._llm_block_new_timer_message(remaining_seconds, llm_client)).strip()
         if not bool(result.get("ok")):
             return str(result.get("message") or "I couldn't start the timer.").strip()
-        return (await self._llm_started_message(new_seconds, llm_client)).strip()
+        return (await self._llm_started_message(new_seconds, llm_client, name=name)).strip()
 
-    async def _native_status(self, llm_client, context: dict | None = None) -> str | None:
+    async def _native_status(
+        self,
+        llm_client,
+        context: dict | None = None,
+        *,
+        name: str = "",
+        duration_s: int = 0,
+    ) -> str | None:
         native_timers = await self._native_timer_module()
         if native_timers is None:
             return None
@@ -1084,10 +1140,31 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         result = await native_timers.status(
             selector=self._native_selector(context),
             room=self._native_room(context),
+            name=name,
+            duration_s=duration_s,
         )
         timers = result.get("timers") if isinstance(result, dict) else []
         if not timers:
             return (await self._llm_no_timer_message(llm_client)).strip()
+        if len(timers) > 1:
+            descriptions = []
+            for index, timer in enumerate(timers[:5]):
+                if not isinstance(timer, dict):
+                    continue
+                timer_name = self._clean_timer_name(str(timer.get("name") or timer.get("label") or ""))
+                if timer_name:
+                    label = f"the {timer_name} timer"
+                else:
+                    original = int(timer.get("original_duration_s") or timer.get("duration_s") or 0)
+                    label = f"the {self._format_remaining(original)} timer" if original > 0 else f"timer {index + 1}"
+                if str(timer.get("state") or "") == "ringing":
+                    descriptions.append(f"{label} is ringing")
+                else:
+                    remaining = int(timer.get("remaining_s") or 0)
+                    descriptions.append(f"{label} has {self._format_remaining(remaining)} left")
+            if descriptions:
+                return f"You have {len(timers)} timers: " + "; ".join(descriptions) + "."
+
         first = timers[0] if isinstance(timers[0], dict) else {}
         if str(first.get("state") or "") == "ringing":
             return "The timer is going off now."
@@ -1098,7 +1175,15 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             return "A timer is running, but I couldn't read the remaining time."
         return (await self._llm_time_left_message(remaining_seconds, llm_client)).strip()
 
-    async def _native_cancel(self, llm_client, context: dict | None = None) -> str | None:
+    async def _native_cancel(
+        self,
+        llm_client,
+        context: dict | None = None,
+        *,
+        name: str = "",
+        duration_s: int = 0,
+        cancel_all: bool = False,
+    ) -> str | None:
         native_timers = await self._native_timer_module()
         if native_timers is None:
             return None
@@ -1106,13 +1191,28 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         result = await native_timers.cancel_timer(
             selector=self._native_selector(context),
             room=self._native_room(context),
+            name=name,
+            duration_s=duration_s,
+            cancel_all=cancel_all,
             source="verba",
         )
+        if str((result or {}).get("code") or "") == "ambiguous":
+            return str(
+                (result or {}).get("message")
+                or "You have more than one timer. Tell me its name or original duration."
+            ).strip()
         if int((result or {}).get("cancelled") or 0) <= 0:
             return (await self._llm_cancel_nothing_message(llm_client)).strip()
         return (await self._llm_cancelled_message(llm_client)).strip()
 
-    async def _native_snooze(self, duration_text: str, llm_client, context: dict | None = None) -> str | None:
+    async def _native_snooze(
+        self,
+        duration_text: str,
+        llm_client,
+        context: dict | None = None,
+        *,
+        name: str = "",
+    ) -> str | None:
         native_timers = await self._native_timer_module()
         if native_timers is None:
             return None
@@ -1126,9 +1226,15 @@ class VoicePERemoteTimerPlugin(ToolVerba):
             seconds = 300
         result = await native_timers.snooze_timer(
             selector=self._native_selector(context),
+            name=name,
             duration_s=seconds,
             source="verba",
         )
+        if str((result or {}).get("code") or "") == "ambiguous":
+            return str(
+                (result or {}).get("message")
+                or "You have more than one timer. Tell me which one to snooze."
+            ).strip()
         if int((result or {}).get("snoozed") or 0) <= 0:
             return (await self._llm_no_timer_message(llm_client)).strip()
         dur = self._format_remaining(seconds)
@@ -1138,23 +1244,42 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         args = args or {}
         action, duration = self._resolve_action_duration(args)
         merged_request = self._merged_request_text(args)
+        timer_name = self._extract_timer_name(args, action)
+        try:
+            max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
+        except Exception:
+            max_seconds = 7200
+        reference_seconds = self._parse_duration_to_seconds(duration, max_seconds) if duration else 0
 
         if action in ("cancel", "stop", "clear"):
-            return await self._native_cancel(llm_client, context=context)
+            cancel_all = bool(re.search(r"\b(?:all|every)\s+(?:of\s+my\s+)?timers?\b", merged_request))
+            return await self._native_cancel(
+                llm_client,
+                context=context,
+                name=timer_name,
+                duration_s=reference_seconds,
+                cancel_all=cancel_all,
+            )
 
         if action in ("status", "check", "remaining", "time_left"):
-            return await self._native_status(llm_client, context=context)
+            return await self._native_status(
+                llm_client,
+                context=context,
+                name=timer_name,
+                duration_s=reference_seconds,
+            )
 
         if action in ("snooze", "pause"):
             if not duration:
                 duration = self._extract_duration_from_text(merged_request) or "5 minutes"
-            return await self._native_snooze(duration, llm_client, context=context)
+            return await self._native_snooze(
+                duration,
+                llm_client,
+                context=context,
+                name=timer_name,
+            )
 
         if action in ("start", "set") and not duration:
-            try:
-                max_seconds = int((self._get_settings() or {}).get("MAX_SECONDS") or 7200)
-            except Exception:
-                max_seconds = 7200
             llm_seconds = await self._llm_infer_duration_seconds(merged_request, llm_client, max_seconds)
             if llm_seconds:
                 duration = str(llm_seconds)
@@ -1162,9 +1287,19 @@ class VoicePERemoteTimerPlugin(ToolVerba):
                 return "Please provide a valid timer duration (examples: 20s, 2min, 5 minutes, 1h 10m)."
 
         if duration:
-            return await self._native_start_timer(duration, llm_client, context=context)
+            return await self._native_start_timer(
+                duration,
+                llm_client,
+                context=context,
+                name=timer_name,
+            )
 
-        return await self._native_status(llm_client, context=context)
+        return await self._native_status(
+            llm_client,
+            context=context,
+            name=timer_name,
+            duration_s=reference_seconds,
+        )
 
     # ─────────────────────────────────────────────────────────────
     # Read timer state (running + remaining)
