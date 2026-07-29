@@ -1,14 +1,23 @@
 import asyncio
+import base64
 import calendar
+import hashlib
+import io
 import json
 import logging
+import math
 import os
+import re
+import struct
 import threading
 import time
 import uuid
+import wave
 from bisect import bisect_left
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import verba_registry as pr
 from verba_base import ToolVerba
@@ -23,6 +32,19 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from hydra import run_hydra_turn, resolve_agent_limits
 from notify import dispatch_notification, notifier_destination_catalog
+try:
+    from announcement_targets import (
+        get_voice_core_satellite_target_options,
+        normalize_announcement_targets,
+    )
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    get_voice_core_satellite_target_options = None
+
+    def normalize_announcement_targets(value: Any) -> List[str]:
+        if isinstance(value, (list, tuple, set)):
+            return [str(item or "").strip() for item in value if str(item or "").strip()]
+        token = str(value or "").strip()
+        return [token] if token else []
 from notify.queue import (
     ALLOWED_PLATFORMS,
     load_default_targets,
@@ -30,9 +52,14 @@ from notify.queue import (
     normalize_platform,
     resolve_targets,
 )
+try:
+    from tater_paths import agent_lab_path as _tater_agent_lab_path
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.0.41"
+__version__ = "1.2.0"
+MIN_TATER_VERSION = "97.7"
 
 load_dotenv()
 
@@ -56,6 +83,366 @@ REMINDER_RETRY_BASE_SECONDS = 60.0
 REMINDER_RETRY_MAX_SECONDS = 900.0
 SCHEDULER_EXCLUDED_TOOLS = {"reminder", "ai_tasks", "send_message", "attach_file"}
 MEDIA_TYPES = {"image", "audio", "video", "file"}
+BROADCAST_DELIVERY_TYPE = "broadcast"
+BACKGROUND_AUDIO_MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+BACKGROUND_AUDIO_PRESET_SECONDS = 12
+BACKGROUND_AUDIO_PRESET_SAMPLE_RATE = 24000
+BACKGROUND_AUDIO_PRESETS: Tuple[Dict[str, str], ...] = (
+    {
+        "id": "morning_glow",
+        "label": "Morning Glow",
+        "description": "Warm, optimistic synth chords for weather and wake-up announcements.",
+    },
+    {
+        "id": "calm_focus",
+        "label": "Calm Focus",
+        "description": "A soft, steady ambient bed for reminders and status updates.",
+    },
+    {
+        "id": "gentle_rain",
+        "label": "Gentle Rain",
+        "description": "A light, seamless rain-like texture with subtle tonal movement.",
+    },
+    {
+        "id": "bright_pulse",
+        "label": "Bright Pulse",
+        "description": "A quiet rhythmic pulse for upbeat announcements.",
+    },
+)
+_background_audio_preset_lock = threading.Lock()
+
+
+def _background_audio_root() -> Path:
+    if callable(_tater_agent_lab_path):
+        return Path(_tater_agent_lab_path("ai_task", "background_audio")).resolve()
+    configured = str(os.getenv("TATER_AGENT_ROOT") or "").strip()
+    base = Path(configured).expanduser() if configured else Path.cwd() / "agent_lab"
+    return (base / "ai_task" / "background_audio").resolve()
+
+
+def _background_audio_base_url() -> str:
+    try:
+        port = int(str(os.getenv("HTMLUI_PORT") or "8501").strip())
+    except Exception:
+        port = 8501
+    if port < 1 or port > 65535:
+        port = 8501
+    return f"http://127.0.0.1:{port}/api/ai-tasks/background-audio"
+
+
+def _background_audio_file_url(kind: str, filename: str) -> str:
+    clean_kind = str(kind or "").strip().lower()
+    clean_filename = Path(str(filename or "").strip()).name
+    if clean_kind not in {"presets", "uploads"} or not clean_filename:
+        return ""
+    return f"{_background_audio_base_url()}/{clean_kind}/{quote(clean_filename)}"
+
+
+def _background_audio_periodic_frequency(frequency: float) -> float:
+    duration = float(BACKGROUND_AUDIO_PRESET_SECONDS)
+    return max(1.0 / duration, round(float(frequency) * duration) / duration)
+
+
+def _background_audio_preset_sample(preset_id: str, t: float) -> float:
+    tau = math.tau
+
+    def tone(frequency: float, phase: float = 0.0) -> float:
+        return math.sin(tau * _background_audio_periodic_frequency(frequency) * t + phase)
+
+    if preset_id == "morning_glow":
+        breath = 0.72 + (0.18 * math.sin(tau * t / 6.0))
+        pad = (tone(261.63) + tone(329.63, 0.7) + tone(392.0, 1.4)) / 3.0
+        shimmer_gate = (0.5 + (0.5 * math.sin(tau * t / 3.0))) ** 6
+        shimmer = tone(659.25, 0.3) * shimmer_gate
+        return (0.25 * breath * pad) + (0.055 * shimmer)
+
+    if preset_id == "calm_focus":
+        breath = 0.68 + (0.2 * math.sin(tau * t / 12.0))
+        low = (tone(130.81) + tone(196.0, 0.8)) * 0.5
+        air = (tone(261.63, 1.1) + tone(293.66, 2.0)) * 0.5
+        return (0.22 * breath * low) + (0.07 * air)
+
+    if preset_id == "gentle_rain":
+        texture = 0.0
+        frequencies = (487.0, 613.0, 743.0, 887.0, 1061.0, 1229.0, 1451.0, 1693.0)
+        for index, frequency in enumerate(frequencies):
+            texture += tone(frequency, 0.73 * index) * (0.7 / math.sqrt(index + 2.0))
+        texture /= 4.0
+        drift = tone(174.61, 0.5) * (0.5 + (0.5 * math.sin(tau * t / 6.0)))
+        return (0.16 * texture) + (0.045 * drift)
+
+    pulse = (0.5 + (0.5 * math.sin(tau * t / 1.5))) ** 5
+    chord = (tone(220.0) + tone(277.18, 0.6) + tone(329.63, 1.2)) / 3.0
+    upper = tone(554.37, 0.9) * (0.5 + (0.5 * math.sin(tau * t / 3.0)))
+    return (0.2 * chord * (0.35 + (0.65 * pulse))) + (0.045 * upper)
+
+
+def _write_background_audio_preset(path: Path, preset_id: str) -> None:
+    sample_rate = int(BACKGROUND_AUDIO_PRESET_SAMPLE_RATE)
+    frame_count = sample_rate * int(BACKGROUND_AUDIO_PRESET_SECONDS)
+    pcm = bytearray(frame_count * 2)
+    for index in range(frame_count):
+        sample = _background_audio_preset_sample(preset_id, index / sample_rate)
+        value = int(max(-0.92, min(0.92, sample)) * 32767.0)
+        struct.pack_into("<h", pcm, index * 2, value)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with wave.open(str(temp_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(bytes(pcm))
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _ensure_background_audio_presets() -> Dict[str, Path]:
+    root = _background_audio_root() / "presets"
+    out: Dict[str, Path] = {}
+    with _background_audio_preset_lock:
+        for preset in BACKGROUND_AUDIO_PRESETS:
+            preset_id = str(preset.get("id") or "").strip()
+            if not preset_id:
+                continue
+            path = root / f"{preset_id}.wav"
+            if not path.is_file() or path.stat().st_size <= 44:
+                _write_background_audio_preset(path, preset_id)
+            out[preset_id] = path
+    return out
+
+
+def _background_audio_preset_url(preset_id: Any) -> str:
+    clean_id = str(preset_id or "").strip().lower()
+    known = {str(row.get("id") or "") for row in BACKGROUND_AUDIO_PRESETS}
+    if clean_id not in known:
+        raise ValueError("Choose a valid background audio preset.")
+    paths = _ensure_background_audio_presets()
+    path = paths.get(clean_id)
+    if not path or not path.is_file():
+        raise ValueError("The selected background audio preset could not be created.")
+    return _background_audio_file_url("presets", path.name)
+
+
+def _background_audio_detect_extension(filename: Any, content_type: Any, data: bytes) -> str:
+    suffix = Path(str(filename or "").strip()).suffix.lower()
+    content = str(content_type or "").split(";", 1)[0].strip().lower()
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WAVE":
+        detected = ".wav"
+    elif data.startswith(b"fLaC"):
+        detected = ".flac"
+    elif data.startswith(b"ID3") or any(
+        data[index] == 0xFF and (data[index + 1] & 0xE0) == 0xE0
+        for index in range(max(0, min(len(data) - 1, 4096)))
+    ):
+        detected = ".mp3"
+    else:
+        raise ValueError("Uploaded background audio must be a valid WAV, MP3, or FLAC file.")
+
+    content_extensions = {
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/flac": ".flac",
+        "audio/x-flac": ".flac",
+    }
+    claimed = suffix or content_extensions.get(content, "")
+    if claimed and claimed not in {".wav", ".mp3", ".flac"}:
+        raise ValueError("Uploaded background audio must use a .wav, .mp3, or .flac filename.")
+    if claimed and claimed != detected:
+        raise ValueError("Uploaded background audio content does not match its filename.")
+    if detected == ".wav":
+        try:
+            with wave.open(io.BytesIO(data), "rb") as wav_file:
+                channels = int(wav_file.getnchannels())
+                sample_width = int(wav_file.getsampwidth())
+                sample_rate = int(wav_file.getframerate())
+                frame_count = int(wav_file.getnframes())
+        except Exception as exc:
+            raise ValueError("Uploaded WAV background audio is invalid or unsupported.") from exc
+        if (
+            channels not in {1, 2}
+            or sample_width != 2
+            or sample_rate < 8000
+            or sample_rate > 96000
+            or frame_count <= 0
+        ):
+            raise ValueError(
+                "Uploaded WAV background audio must be 16-bit mono or stereo at 8–96 kHz."
+            )
+    return detected
+
+
+def _store_background_audio_upload(raw: Any) -> str:
+    upload = raw if isinstance(raw, dict) else {}
+    encoded = str(upload.get("data_b64") or "").strip()
+    if not encoded:
+        raise ValueError("Choose a WAV, MP3, or FLAC file to upload.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("The uploaded background audio could not be decoded.") from exc
+    if not data:
+        raise ValueError("The uploaded background audio is empty.")
+    if len(data) > BACKGROUND_AUDIO_MAX_UPLOAD_BYTES:
+        raise ValueError("Uploaded background audio must be 16 MB or smaller.")
+
+    extension = _background_audio_detect_extension(
+        upload.get("filename"),
+        upload.get("content_type"),
+        data,
+    )
+    source_stem = Path(str(upload.get("filename") or "background-audio")).stem
+    safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", source_stem).strip("-_").lower()
+    if not safe_stem:
+        safe_stem = "background-audio"
+    digest = hashlib.sha256(data).hexdigest()[:12]
+    filename = f"{safe_stem[:48]}-{digest}{extension}"
+    root = _background_audio_root() / "uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / filename
+    if not path.is_file() or path.stat().st_size != len(data):
+        temp_path = root / f".{filename}.{uuid.uuid4().hex}.tmp"
+        try:
+            temp_path.write_bytes(data)
+            os.replace(temp_path, path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return _background_audio_file_url("uploads", filename)
+
+
+def _background_audio_source_from_url(url: Any) -> str:
+    text = str(url or "").strip()
+    for preset in BACKGROUND_AUDIO_PRESETS:
+        preset_id = str(preset.get("id") or "").strip()
+        if text.endswith(f"/presets/{preset_id}.wav"):
+            return f"preset:{preset_id}"
+    if "/api/ai-tasks/background-audio/uploads/" in text:
+        return "upload"
+    return "custom"
+
+
+def _delivery_clamped_int(value: Any, default: int, minimum: int = 0, maximum: int = 100) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = int(default)
+    return max(int(minimum), min(int(maximum), parsed))
+
+
+def _normalize_audio_scene(raw: Any) -> Dict[str, Any]:
+    scene = raw if isinstance(raw, dict) else {}
+    background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
+    finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
+    background_url = str(
+        background.get("url")
+        or scene.get("background_url")
+        or scene.get("background_audio_url")
+        or ""
+    ).strip()
+    if not background_url:
+        return {}
+
+    loop_value = background.get("loop", scene.get("loop", True))
+    if isinstance(loop_value, bool):
+        loop_enabled = loop_value
+    else:
+        loop_enabled = str(loop_value or "").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "disabled",
+        }
+
+    return {
+        "background": {
+            "url": background_url,
+            "loop": bool(loop_enabled),
+            "volume_percent": _delivery_clamped_int(
+                background.get("volume_percent", scene.get("background_volume_percent")),
+                60,
+            ),
+        },
+        "ducking": {
+            "target_percent": _delivery_clamped_int(
+                ducking.get("target_percent", scene.get("ducking_target_percent")),
+                35,
+            ),
+            "attack_ms": _delivery_clamped_int(
+                ducking.get("attack_ms", scene.get("ducking_attack_ms")),
+                150,
+                0,
+                10000,
+            ),
+            "release_ms": _delivery_clamped_int(
+                ducking.get("release_ms", scene.get("ducking_release_ms")),
+                350,
+                0,
+                10000,
+            ),
+        },
+        "finish": {
+            "fade_ms": _delivery_clamped_int(
+                finish.get("fade_ms", scene.get("fade_ms")),
+                500,
+                0,
+                10000,
+            ),
+        },
+    }
+
+
+def _normalize_delivery(raw: Any) -> Dict[str, Any]:
+    delivery = raw if isinstance(raw, dict) else {}
+    delivery_type = str(delivery.get("type") or delivery.get("mode") or "").strip().lower()
+    if delivery_type != BROADCAST_DELIVERY_TYPE:
+        return {}
+
+    target_source = (
+        delivery.get("targets")
+        or delivery.get("target")
+        or delivery.get("announcement_targets")
+    )
+    if isinstance(target_source, dict):
+        target_source = (
+            target_source.get("targets")
+            or target_source.get("target")
+            or target_source.get("selector")
+            or target_source.get("satellite")
+        )
+    targets = normalize_announcement_targets(target_source)
+    scope = str(delivery.get("scope") or "").strip().lower()
+    if scope not in {"everywhere", "selected"}:
+        scope = "selected" if targets else "everywhere"
+    if scope == "selected" and not targets:
+        return {}
+
+    normalized: Dict[str, Any] = {
+        "type": BROADCAST_DELIVERY_TYPE,
+        "scope": scope,
+        "targets": list(targets),
+    }
+    audio_scene = _normalize_audio_scene(delivery.get("audio_scene"))
+    if audio_scene:
+        normalized["audio_scene"] = audio_scene
+    return normalized
+
+
+def _is_broadcast_delivery(raw: Any) -> bool:
+    return bool(_normalize_delivery(raw))
+
+
 class _StubObject:
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
@@ -721,6 +1108,7 @@ async def _render_scheduled_message(
     origin: Dict[str, Any],
     platform: str,
     targets: Dict[str, Any],
+    delivery: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     task_prompt = _normalize_runtime_task_prompt(task_prompt)
     if not task_prompt:
@@ -739,6 +1127,13 @@ async def _render_scheduled_message(
         "\"Since no existing ... was found\".\n"
         "If the task asks for creative output (for example a joke), provide it directly.\n"
     )
+    if _is_broadcast_delivery(delivery):
+        system_prompt += (
+            "The scheduler will speak your final response as a broadcast.\n"
+            "Do not call the broadcast tool during this task.\n"
+            "If the task text says to broadcast or announce something, treat that as a request to compose the final spoken message.\n"
+            "Return only the concise, natural announcement that should be spoken, without markdown or delivery commentary.\n"
+        )
 
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
     user_prompt = (
@@ -773,10 +1168,22 @@ async def _render_scheduled_message(
         reminder_id=reminder_id,
     )
     blocked_scheduler_tools = {str(name).strip().lower() for name in SCHEDULER_EXCLUDED_TOOLS}
+    if _is_broadcast_delivery(delivery):
+        blocked_scheduler_tools.add("broadcast")
 
     def _scheduler_admin_guard(tool_name: str) -> Optional[Dict[str, Any]]:
         func = str(tool_name or "").strip().lower()
         if func in blocked_scheduler_tools:
+            if func == "broadcast" and _is_broadcast_delivery(delivery):
+                return {
+                    "tool": func,
+                    "ok": False,
+                    "error": {
+                        "code": "broadcast_delivery_managed",
+                        "message": "The scheduler handles this task's broadcast delivery after Hydra returns the final text.",
+                    },
+                    "summary_for_user": "Return the final announcement text without calling Broadcast.",
+                }
             return {
                 "tool": func,
                 "ok": False,
@@ -814,6 +1221,44 @@ async def _render_scheduled_message(
     return text, attachments
 
 
+async def _deliver_scheduled_broadcast(
+    *,
+    announcement: str,
+    delivery: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized = _normalize_delivery(delivery)
+    if not normalized:
+        raise RuntimeError("Scheduled broadcast delivery is invalid.")
+
+    registry = dict(pr.get_verba_registry_snapshot() or {})
+    plugin = registry.get("broadcast")
+    if plugin is None:
+        raise RuntimeError("Broadcast Verba is not installed.")
+    if not get_plugin_enabled("broadcast"):
+        raise RuntimeError("Broadcast Verba is disabled.")
+
+    deliver = getattr(plugin, "deliver_prepared_announcement", None)
+    if not callable(deliver):
+        raise RuntimeError("Broadcast Verba must be updated before AI Task broadcast delivery can run.")
+
+    selected_targets = normalized.get("targets") if normalized.get("scope") == "selected" else None
+    result = await deliver(
+        str(announcement or "").strip(),
+        audio_scene=normalized.get("audio_scene"),
+        targets=selected_targets,
+    )
+    if not isinstance(result, dict) or result.get("ok") is False:
+        detail = ""
+        if isinstance(result, dict):
+            error = result.get("error")
+            if isinstance(error, dict):
+                detail = str(error.get("message") or "").strip()
+            else:
+                detail = str(error or "").strip()
+        raise RuntimeError(detail or "Scheduled broadcast delivery failed.")
+    return result
+
+
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client if redis_client is not None else globals().get("redis_client")
     if client is None:
@@ -846,6 +1291,8 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         interval = _ai_tasks_ui_as_float(schedule.get("interval_sec"), 0.0)
         enabled = _ai_tasks_ui_is_enabled(row.get("enabled", row.get("_enabled")), True)
         platform = str(row.get("platform") or "").strip() or "unknown"
+        delivery = _normalize_delivery(row.get("delivery"))
+        delivery_label = BROADCAST_DELIVERY_TYPE if delivery else platform
         title = str(row.get("title") or "").strip()
         task_prompt = str(row.get("task_prompt") or "").strip()
         message = str(row.get("message") or "").strip()
@@ -867,7 +1314,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         items.append(
             {
                 "title": _ai_tasks_ui_derive_title(title, command_text),
-                "subtitle": f"{platform} · {status_label} · {recurrence_text}",
+                "subtitle": f"{delivery_label} · {status_label} · {recurrence_text}",
                 "detail": f"Next run: {due_text} · {preview}",
             }
         )
@@ -1825,6 +2272,223 @@ def _ai_tasks_ui_decode_destination_value(raw_value: Any) -> Tuple[str, Dict[str
     return platform, targets
 
 
+def _ai_tasks_ui_broadcast_destination_options() -> List[Dict[str, str]]:
+    out = [
+        {
+            "value": _ai_tasks_ui_encode_destination_value(
+                BROADCAST_DELIVERY_TYPE,
+                {"scope": "everywhere"},
+            ),
+            "label": "Broadcast: Everywhere",
+        }
+    ]
+    if not callable(get_voice_core_satellite_target_options):
+        return out
+    try:
+        options = get_voice_core_satellite_target_options(current_values=[])
+    except Exception:
+        options = []
+    seen = {out[0]["value"]}
+    for row in options or []:
+        if not isinstance(row, dict):
+            continue
+        target = _ai_tasks_ui_clean_text(row.get("value"))
+        if not target:
+            continue
+        value = _ai_tasks_ui_encode_destination_value(
+            BROADCAST_DELIVERY_TYPE,
+            {"scope": "selected", "target": target},
+        )
+        if not value or value in seen:
+            continue
+        label = _ai_tasks_ui_clean_text(row.get("label")) or target
+        out.append({"value": value, "label": f"Broadcast: {label}"})
+        seen.add(value)
+    return out
+
+
+def _ai_tasks_ui_delivery_destination_value(
+    platform: str,
+    targets: Dict[str, Any],
+    delivery: Any,
+) -> str:
+    normalized = _normalize_delivery(delivery)
+    if not normalized:
+        return _ai_tasks_ui_encode_destination_value(platform, targets)
+    if normalized.get("scope") == "selected" and normalized.get("targets"):
+        return _ai_tasks_ui_encode_destination_value(
+            BROADCAST_DELIVERY_TYPE,
+            {
+                "scope": "selected",
+                "target": str(normalized["targets"][0]),
+            },
+        )
+    return _ai_tasks_ui_encode_destination_value(
+        BROADCAST_DELIVERY_TYPE,
+        {"scope": "everywhere"},
+    )
+
+
+def _ai_tasks_ui_broadcast_destination_values(options: Any) -> List[str]:
+    out: List[str] = []
+    for row in options or []:
+        if not isinstance(row, dict):
+            continue
+        value = _ai_tasks_ui_clean_text(row.get("value"))
+        platform, _targets = _ai_tasks_ui_decode_destination_value(value)
+        if platform == BROADCAST_DELIVERY_TYPE and value and value not in out:
+            out.append(value)
+    return out
+
+
+def _ai_tasks_ui_broadcast_audio_fields(
+    delivery: Any = None,
+    *,
+    destination_values: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    normalized = _normalize_delivery(delivery)
+    scene = normalized.get("audio_scene") if isinstance(normalized.get("audio_scene"), dict) else {}
+    background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
+    finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
+    background_url = _ai_tasks_ui_clean_text(background.get("url"))
+    enabled = bool(background_url)
+    source = _background_audio_source_from_url(background_url) if enabled else "preset:morning_glow"
+    broadcast_values = [
+        _ai_tasks_ui_clean_text(item)
+        for item in list(destination_values or [])
+        if _ai_tasks_ui_clean_text(item)
+    ]
+    if not broadcast_values:
+        broadcast_values = _ai_tasks_ui_broadcast_destination_values(
+            _ai_tasks_ui_broadcast_destination_options()
+        )
+    show_for_broadcast = {
+        "source_key": "destination",
+        "any_of": broadcast_values,
+    }
+    show_for_audio = [
+        show_for_broadcast,
+        {"source_key": "broadcast_audio_enabled", "equals": True},
+    ]
+    source_options = [
+        {
+            "value": f"preset:{preset['id']}",
+            "label": f"{preset['label']} — {preset['description']}",
+        }
+        for preset in BACKGROUND_AUDIO_PRESETS
+    ]
+    source_options.extend(
+        [
+            {"value": "upload", "label": "Upload your own audio"},
+            {"value": "custom", "label": "Custom audio URL"},
+        ]
+    )
+    return [
+        {
+            "key": "broadcast_audio_enabled",
+            "label": "Use Background Audio",
+            "type": "checkbox",
+            "description": "Loop an audio bed underneath the spoken result.",
+            "value": enabled,
+            "show_when": show_for_broadcast,
+        },
+        {
+            "key": "background_audio_source",
+            "label": "Background Audio",
+            "type": "select",
+            "description": "Choose a Tater loop, upload your own audio, or provide a stable URL.",
+            "options": source_options,
+            "value": source,
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "background_audio_upload",
+            "label": "Upload Background Audio",
+            "type": "file",
+            "accept": ".wav,.mp3,.flac,audio/wav,audio/mpeg,audio/flac",
+            "file_encoding": "base64",
+            "max_bytes": BACKGROUND_AUDIO_MAX_UPLOAD_BYTES,
+            "description": "WAV, MP3, or FLAC up to 16 MB. It is stored in Agent Lab when you save.",
+            "value": "",
+            "show_when_all": [
+                *show_for_audio,
+                {"source_key": "background_audio_source", "equals": "upload"},
+            ],
+        },
+        {
+            "key": "background_audio_existing_url",
+            "label": "Existing Background Audio URL",
+            "type": "hidden",
+            "value": background_url,
+        },
+        {
+            "key": "background_audio_url",
+            "label": "Background Audio URL",
+            "type": "text",
+            "description": "A stable HTTP(S) URL for WAV, MP3, or FLAC audio.",
+            "value": background_url if source == "custom" else "",
+            "show_when_all": [
+                *show_for_audio,
+                {"source_key": "background_audio_source", "equals": "custom"},
+            ],
+        },
+        {
+            "key": "background_volume_percent",
+            "label": "Background Volume (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "value": _delivery_clamped_int(background.get("volume_percent"), 60),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "ducking_target_percent",
+            "label": "Ducked Level (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "description": "Background level during speech, as a percentage of the configured background volume.",
+            "value": _delivery_clamped_int(ducking.get("target_percent"), 35),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "ducking_attack_ms",
+            "label": "Duck Attack (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _delivery_clamped_int(ducking.get("attack_ms"), 150, 0, 10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "ducking_release_ms",
+            "label": "Duck Release (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _delivery_clamped_int(ducking.get("release_ms"), 350, 0, 10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "background_fade_ms",
+            "label": "Background Fade-Out (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _delivery_clamped_int(finish.get("fade_ms"), 500, 0, 10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "background_loop",
+            "label": "Loop Background Audio",
+            "type": "checkbox",
+            "value": bool(background.get("loop", True)),
+            "show_when_all": show_for_audio,
+        },
+    ]
+
+
 def _ai_tasks_ui_platform_options(
     schedules: Optional[List[Dict[str, Any]]] = None,
     *,
@@ -1925,6 +2589,12 @@ def _ai_tasks_ui_destination_options_all_platforms(*, catalog: Dict[str, Any]) -
             label = _ai_tasks_ui_clean_text(row.get("label")) or _ai_tasks_ui_destination_label(platform_name, targets)
             out.append({"value": value, "label": f"{platform_label}: {label}"})
             seen.add(value)
+    for row in _ai_tasks_ui_broadcast_destination_options():
+        value = _ai_tasks_ui_clean_text(row.get("value"))
+        if not value or value in seen:
+            continue
+        out.append(dict(row))
+        seen.add(value)
     return out
 
 
@@ -2875,8 +3545,46 @@ async def _ai_tasks_kernel_schedule(
 
     explicit_arg_targets = _ai_tasks_kernel_collect_explicit_targets(payload)
     requested_dest = normalize_platform(payload.get("platform"))
+    raw_delivery = payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {}
+    requested_delivery_type = str(
+        raw_delivery.get("type")
+        or raw_delivery.get("mode")
+        or payload.get("delivery_type")
+        or ("broadcast" if requested_dest == BROADCAST_DELIVERY_TYPE else "")
+    ).strip().lower()
+    if requested_delivery_type == BROADCAST_DELIVERY_TYPE:
+        delivery_source: Dict[str, Any] = dict(raw_delivery)
+        delivery_source["type"] = BROADCAST_DELIVERY_TYPE
+        if not (
+            delivery_source.get("targets")
+            or delivery_source.get("target")
+            or delivery_source.get("announcement_targets")
+        ):
+            delivery_source["targets"] = (
+                payload.get("broadcast_targets")
+                or payload.get("broadcast_target")
+                or (payload.get("targets") if requested_dest == BROADCAST_DELIVERY_TYPE else None)
+            )
+        if not isinstance(delivery_source.get("audio_scene"), dict) and isinstance(payload.get("audio_scene"), dict):
+            delivery_source["audio_scene"] = payload.get("audio_scene")
+        delivery = _normalize_delivery(delivery_source)
+        if not delivery:
+            return {
+                "tool": "ai_tasks",
+                "ok": False,
+                "error": "Cannot schedule: selected broadcast delivery requires a satellite target.",
+            }
+    else:
+        delivery = {}
+
+    delivery_owns_targets = requested_dest == BROADCAST_DELIVERY_TYPE
     origin_dest = normalize_platform(origin_payload.get("platform"))
     dest = origin_dest or runtime_platform or requested_dest
+    if requested_dest == BROADCAST_DELIVERY_TYPE:
+        requested_dest = ""
+        explicit_arg_targets = {}
+        if dest == BROADCAST_DELIVERY_TYPE:
+            dest = origin_dest or runtime_platform or "webui"
     if requested_dest and requested_dest in ALLOWED_PLATFORMS and requested_dest != dest:
         requested_targets = _ai_tasks_kernel_normalize_targets(requested_dest, explicit_arg_targets)
         # Only allow cross-platform overrides when explicit target routing is provided.
@@ -2907,7 +3615,11 @@ async def _ai_tasks_kernel_schedule(
 
     cron_text = str(schedule_result.get("cron") or recurrence.get("cron") or "").strip()
 
-    raw_targets = await _ai_tasks_kernel_coerce_targets(payload, request_text, llm_client)
+    raw_targets = (
+        {}
+        if delivery_owns_targets
+        else await _ai_tasks_kernel_coerce_targets(payload, request_text, llm_client)
+    )
     if not raw_targets:
         # Default to the room/channel/chat where the request originated.
         raw_targets = _ai_tasks_kernel_origin_targets_for_dest(dest, origin_payload)
@@ -2986,6 +3698,8 @@ async def _ai_tasks_kernel_schedule(
         "schedule": schedule_payload,
         "enabled": True,
     }
+    if delivery:
+        reminder["delivery"] = delivery
     redis_obj.set(f"{REMINDER_KEY_PREFIX}{reminder_id}", json.dumps(reminder))
     redis_obj.zadd(REMINDER_DUE_ZSET, {reminder_id: float(next_run)})
 
@@ -3010,6 +3724,7 @@ async def _ai_tasks_kernel_schedule(
         "title": title,
         "targets": resolved_targets or {},
         "schedule": schedule_payload,
+        "delivery": delivery,
     }
 
 
@@ -3050,9 +3765,22 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
         recurrence_text = _ai_tasks_ui_recurrence_label(schedule, interval)
         schedule_text = _ai_tasks_ui_schedule_edit_text(schedule)
         targets_payload = row.get("targets") if isinstance(row.get("targets"), dict) else {}
+        delivery = _normalize_delivery(row.get("delivery"))
         destination_options = _ai_tasks_ui_destination_options_all_platforms(catalog=catalog)
         requires_target = bool(platform_map.get(platform, {}).get("requires_target"))
-        if targets_payload:
+        if delivery:
+            destination_value = _ai_tasks_ui_delivery_destination_value(platform, targets_payload, delivery)
+            known_values = {str(item.get("value") or "") for item in destination_options}
+            if destination_value and destination_value not in known_values:
+                delivery_targets = list(delivery.get("targets") or [])
+                target_label = delivery_targets[0] if delivery_targets else "Everywhere"
+                destination_options.append(
+                    {
+                        "value": destination_value,
+                        "label": f"Broadcast: {target_label} (current)",
+                    }
+                )
+        elif targets_payload:
             destination_value = _ai_tasks_ui_encode_destination_value(platform, targets_payload)
             known_values = {str(item.get("value") or "") for item in destination_options}
             if destination_value and destination_value not in known_values:
@@ -3066,6 +3794,9 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
             destination_value = ""
         else:
             destination_value = _ai_tasks_ui_encode_destination_value(platform, {})
+        broadcast_destination_values = _ai_tasks_ui_broadcast_destination_values(
+            destination_options
+        )
 
         due_ts = _ai_tasks_ui_as_float(row.get("_due_ts"), _ai_tasks_ui_as_float(schedule.get("next_run_ts"), 0.0))
         if due_ts > 0:
@@ -3078,7 +3809,10 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
             {
                 "id": reminder_id,
                 "title": _ai_tasks_ui_derive_title(title, task_prompt),
-                "subtitle": f"{platform} · {'Enabled' if enabled else 'Disabled'} · {recurrence_text} · next: {due_text}",
+                "subtitle": (
+                    f"{'broadcast' if delivery else platform} · "
+                    f"{'Enabled' if enabled else 'Disabled'} · {recurrence_text} · next: {due_text}"
+                ),
                 "save_action": "ai_tasks_save_schedule",
                 "remove_action": "ai_tasks_remove_schedule",
                 "run_action": "ai_tasks_run_now",
@@ -3114,10 +3848,14 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
                         "key": "destination",
                         "label": "Room / Destination",
                         "type": "select",
-                        "description": "Choose where this task should post output.",
+                        "description": "Choose where the finished result should be delivered or spoken.",
                         "options": destination_options,
                         "value": destination_value,
                     },
+                    *_ai_tasks_ui_broadcast_audio_fields(
+                        delivery,
+                        destination_values=broadcast_destination_values,
+                    ),
                 ],
             }
         )
@@ -3175,10 +3913,15 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
                     "key": "destination",
                     "label": "Room / Destination (optional)",
                     "type": "select",
-                    "description": "Known rooms/channels discovered by the notifier destination catalog.",
+                    "description": "Choose a notification destination or a Tater satellite broadcast target.",
                     "options": add_destination_options,
                     "value": "",
                 },
+                *_ai_tasks_ui_broadcast_audio_fields(
+                    destination_values=_ai_tasks_ui_broadcast_destination_values(
+                        add_destination_options
+                    ),
+                ),
                 {
                     "key": "enabled",
                     "label": "Enabled",
@@ -3225,6 +3968,131 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             schedule_payload["cron"] = cron_text
         return schedule_payload
 
+    def _broadcast_delivery_from_form(
+        destination_targets: Dict[str, Any],
+        *,
+        existing: Any = None,
+    ) -> Dict[str, Any]:
+        current = _normalize_delivery(existing)
+        current_scene = current.get("audio_scene") if isinstance(current.get("audio_scene"), dict) else {}
+        current_background = (
+            current_scene.get("background")
+            if isinstance(current_scene.get("background"), dict)
+            else {}
+        )
+        current_ducking = (
+            current_scene.get("ducking")
+            if isinstance(current_scene.get("ducking"), dict)
+            else {}
+        )
+        current_finish = (
+            current_scene.get("finish")
+            if isinstance(current_scene.get("finish"), dict)
+            else {}
+        )
+
+        target = _ai_tasks_ui_clean_text((destination_targets or {}).get("target"))
+        scope = _ai_tasks_ui_clean_text((destination_targets or {}).get("scope")).lower()
+        if scope not in {"everywhere", "selected"}:
+            scope = "selected" if target else "everywhere"
+        if scope == "selected" and not target:
+            raise ValueError("Choose a satellite for selected broadcast delivery.")
+
+        delivery_payload: Dict[str, Any] = {
+            "type": BROADCAST_DELIVERY_TYPE,
+            "scope": scope,
+            "targets": normalize_announcement_targets([target]) if target else [],
+        }
+
+        audio_enabled = _ai_tasks_ui_is_enabled(
+            _value("broadcast_audio_enabled", bool(current_background.get("url"))),
+            bool(current_background.get("url")),
+        )
+        if audio_enabled:
+            existing_url = _ai_tasks_ui_clean_text(
+                _value("background_audio_existing_url", current_background.get("url"))
+            )
+            custom_url = _ai_tasks_ui_clean_text(_value("background_audio_url"))
+            uploaded_audio = _value("background_audio_upload")
+            source = _ai_tasks_ui_clean_text(_value("background_audio_source")).lower()
+            if not source:
+                if isinstance(uploaded_audio, dict) and uploaded_audio.get("data_b64"):
+                    source = "upload"
+                elif custom_url:
+                    source = "custom"
+                elif existing_url:
+                    source = _background_audio_source_from_url(existing_url)
+                else:
+                    source = "preset:morning_glow"
+
+            if source.startswith("preset:"):
+                background_url = _background_audio_preset_url(source.split(":", 1)[1])
+            elif source == "upload":
+                if isinstance(uploaded_audio, dict) and uploaded_audio.get("data_b64"):
+                    background_url = _store_background_audio_upload(uploaded_audio)
+                elif (
+                    existing_url
+                    and "/api/ai-tasks/background-audio/uploads/" in existing_url
+                ):
+                    background_url = existing_url
+                else:
+                    raise ValueError("Choose a background audio file to upload.")
+            elif source == "custom":
+                background_url = custom_url
+                if (
+                    not background_url
+                    and existing_url
+                    and _background_audio_source_from_url(existing_url) == "custom"
+                ):
+                    background_url = existing_url
+                if not background_url.lower().startswith(("http://", "https://")):
+                    raise ValueError("Background Audio URL must start with http:// or https://.")
+            else:
+                raise ValueError("Choose a valid background audio source.")
+
+            if not background_url:
+                raise ValueError("Background audio is required when background audio is enabled.")
+            delivery_payload["audio_scene"] = {
+                "background": {
+                    "url": background_url,
+                    "loop": _ai_tasks_ui_is_enabled(
+                        _value("background_loop", current_background.get("loop", True)),
+                        True,
+                    ),
+                    "volume_percent": _delivery_clamped_int(
+                        _value("background_volume_percent", current_background.get("volume_percent")),
+                        60,
+                    ),
+                },
+                "ducking": {
+                    "target_percent": _delivery_clamped_int(
+                        _value("ducking_target_percent", current_ducking.get("target_percent")),
+                        35,
+                    ),
+                    "attack_ms": _delivery_clamped_int(
+                        _value("ducking_attack_ms", current_ducking.get("attack_ms")),
+                        150,
+                        0,
+                        10000,
+                    ),
+                    "release_ms": _delivery_clamped_int(
+                        _value("ducking_release_ms", current_ducking.get("release_ms")),
+                        350,
+                        0,
+                        10000,
+                    ),
+                },
+                "finish": {
+                    "fade_ms": _delivery_clamped_int(
+                        _value("background_fade_ms", current_finish.get("fade_ms")),
+                        500,
+                        0,
+                        10000,
+                    ),
+                },
+            }
+        return _normalize_delivery(delivery_payload)
+
     if action_name == "ai_tasks_add_schedule":
         task_prompt = _ai_tasks_ui_clean_text(_value("task_prompt"))
         if not task_prompt:
@@ -3241,21 +4109,28 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             str(item.get("value") or "").strip().lower()
             for item in _ai_tasks_ui_platform_options([], redis_obj=client, catalog=catalog)
         }
+        allowed_platforms.add("webui")
         destination_raw = _ai_tasks_ui_clean_text(_value("destination"))
         destination_platform, destination_targets = _ai_tasks_ui_decode_destination_value(destination_raw)
-        if destination_platform and destination_platform in allowed_platforms:
+        delivery: Dict[str, Any] = {}
+        if destination_platform == BROADCAST_DELIVERY_TYPE:
+            delivery = _broadcast_delivery_from_form(destination_targets)
+            platform = "webui"
+        elif destination_platform and destination_platform in allowed_platforms:
             platform = destination_platform
         if platform not in allowed_platforms:
             raise ValueError(f"Unsupported portal: {platform}")
 
-        targets: Dict[str, Any] = dict(destination_targets) if isinstance(destination_targets, dict) else {}
-        if destination_raw and not destination_platform and not targets:
-            targets = _ai_tasks_ui_target_from_text(platform, destination_raw)
-        if not targets and not destination_platform:
-            # Legacy/manual fallback for old payloads that still submit a text target field.
-            target_text = _ai_tasks_ui_clean_text(_value("target"))
-            if target_text:
-                targets = _ai_tasks_ui_target_from_text(platform, target_text)
+        targets: Dict[str, Any] = {}
+        if not delivery:
+            targets = dict(destination_targets) if isinstance(destination_targets, dict) else {}
+            if destination_raw and not destination_platform and not targets:
+                targets = _ai_tasks_ui_target_from_text(platform, destination_raw)
+            if not targets and not destination_platform:
+                # Legacy/manual fallback for old payloads that still submit a text target field.
+                target_text = _ai_tasks_ui_clean_text(_value("target"))
+                if target_text:
+                    targets = _ai_tasks_ui_target_from_text(platform, target_text)
 
         enabled = _ai_tasks_ui_is_enabled(_value("enabled", True), True)
         title = _ai_tasks_ui_clean_text(_value("title"))
@@ -3275,6 +4150,8 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "schedule": schedule_payload,
             "enabled": bool(enabled),
         }
+        if delivery:
+            reminder["delivery"] = delivery
         _ai_tasks_ui_save_reminder(client, reminder_id, reminder)
         due_ts = _ai_tasks_ui_as_float(schedule_payload.get("next_run_ts"), 0.0)
         _ai_tasks_ui_set_due(client, reminder_id, due_ts if enabled else 0.0)
@@ -3300,6 +4177,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             str(item.get("value") or "").strip().lower()
             for item in _ai_tasks_ui_platform_options([], redis_obj=client, catalog=catalog)
         }
+        allowed_platforms.add("webui")
         if platform not in allowed_platforms:
             raise ValueError(f"Unsupported portal: {platform}")
 
@@ -3327,11 +4205,23 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
 
         current_platform = _ai_tasks_ui_clean_text(current.get("platform")).lower()
         current_targets = current.get("targets") if isinstance(current.get("targets"), dict) else {}
-        current_destination_value = _ai_tasks_ui_encode_destination_value(current_platform, current_targets)
+        current_delivery = _normalize_delivery(current.get("delivery"))
+        current_destination_value = _ai_tasks_ui_delivery_destination_value(
+            current_platform,
+            current_targets,
+            current_delivery,
+        )
 
         destination_raw = _ai_tasks_ui_clean_text(_value("destination"))
         destination_platform, destination_targets = _ai_tasks_ui_decode_destination_value(destination_raw)
-        if destination_platform and destination_platform in allowed_platforms:
+        delivery: Dict[str, Any] = {}
+        if destination_platform == BROADCAST_DELIVERY_TYPE:
+            delivery = _broadcast_delivery_from_form(
+                destination_targets,
+                existing=current_delivery,
+            )
+            platform = current_platform or "webui"
+        elif destination_platform and destination_platform in allowed_platforms:
             stale_destination_for_platform_switch = (
                 platform != current_platform
                 and destination_raw
@@ -3339,8 +4229,12 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             )
             if not stale_destination_for_platform_switch:
                 platform = destination_platform
+        elif not destination_raw and current_delivery:
+            delivery = current_delivery
 
-        if destination_platform and destination_platform == platform:
+        if delivery:
+            targets = current_targets if platform == current_platform else {}
+        elif destination_platform and destination_platform == platform:
             targets = dict(destination_targets)
         elif destination_platform and destination_platform != platform:
             targets = {}
@@ -3366,6 +4260,10 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                 "enabled": bool(enabled),
             }
         )
+        if delivery:
+            current["delivery"] = delivery
+        else:
+            current.pop("delivery", None)
         _ai_tasks_ui_save_reminder(client, reminder_id, current)
         due_ts = _ai_tasks_ui_as_float(schedule_payload.get("next_run_ts"), 0.0)
         _ai_tasks_ui_set_due(client, reminder_id, due_ts if enabled else 0.0)
@@ -3420,11 +4318,15 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "ai_tasks",
-            "description": "schedule one-time or recurring AI tasks with natural phrases/cron and route output to a portal target",
+            "description": "schedule one-time or recurring AI tasks with natural phrases/cron and deliver the result to a portal or satellite broadcast target",
             "usage": (
                 '{"function":"ai_tasks","arguments":{"task_prompt":"<what to do>","when":"at 6:30am"}} '
                 'or {"function":"ai_tasks","arguments":{"task_prompt":"<what to do each run>",'
-                '"when":"weekdays at 8am","platform":"discord","targets":{"channel":"#general"}}}'
+                '"when":"weekdays at 8am","platform":"discord","targets":{"channel":"#general"}}} '
+                'or {"function":"ai_tasks","arguments":{"task_prompt":"fetch the weather and create a short '
+                'motivating wake-up announcement","when":"weekdays at 7am","delivery":{"type":"broadcast",'
+                '"scope":"everywhere","audio_scene":{"background":{"url":"https://example.test/morning.mp3",'
+                '"loop":true,"volume_percent":60},"ducking":{"target_percent":35}}}}}'
             ),
         },
     ]
@@ -3518,6 +4420,7 @@ def run(stop_event: Optional[object] = None):
             origin = reminder.get("origin") or {}
             meta = reminder.get("meta") or {}
             schedule = reminder.get("schedule") or {}
+            delivery = _normalize_delivery(reminder.get("delivery"))
 
             if not dest or (not message and not task_prompt):
                 logger.warning(f"[AI Tasks] Invalid reminder {reminder_id}; dropping.")
@@ -3535,6 +4438,7 @@ def run(stop_event: Optional[object] = None):
                         origin=origin,
                         platform=dest,
                         targets=targets,
+                        delivery=delivery,
                     )
                 )
                 if rendered_text:
@@ -3548,20 +4452,29 @@ def run(stop_event: Optional[object] = None):
                     else:
                         outbound_message = "Scheduled task completed."
 
-                result = loop.run_until_complete(
-                    dispatch_notification(
-                        platform=dest,
-                        title=title,
-                        content=outbound_message,
-                        targets=targets,
-                        origin=origin,
-                        meta=meta,
-                        attachments=rendered_attachments,
+                if delivery:
+                    result = loop.run_until_complete(
+                        _deliver_scheduled_broadcast(
+                            announcement=outbound_message,
+                            delivery=delivery,
+                        )
                     )
-                )
+                else:
+                    result = loop.run_until_complete(
+                        dispatch_notification(
+                            platform=dest,
+                            title=title,
+                            content=outbound_message,
+                            targets=targets,
+                            origin=origin,
+                            meta=meta,
+                            attachments=rendered_attachments,
+                        )
+                    )
                 if isinstance(result, str) and result.startswith("Cannot queue"):
                     raise RuntimeError(result)
-                logger.info("[AI Tasks] Reminder %s queued to %s.", reminder_id, dest)
+                delivery_name = BROADCAST_DELIVERY_TYPE if delivery else dest
+                logger.info("[AI Tasks] Reminder %s queued to %s.", reminder_id, delivery_name)
             except Exception as e:
                 retry_ts = _retry_due(reminder_id, reminder, e)
                 logger.error(

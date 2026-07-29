@@ -38,8 +38,8 @@ class BroadcastPlugin(ToolVerba):
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.2.0"
-    min_tater_version = "59"
+    version = "1.3.0"
+    min_tater_version = "97.7"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>","room":"<optional room or satellite>"}}'
     description = (
         "Send a one-time spoken announcement. If the user specifies a room, area, or satellite, send it only there. "
@@ -69,6 +69,53 @@ class BroadcastPlugin(ToolVerba):
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
+    argument_schema = {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "The message to announce.",
+            },
+            "room": {
+                "type": "string",
+                "description": "Optional room or satellite. Omit to broadcast everywhere.",
+            },
+            "audio_scene": {
+                "type": "object",
+                "description": "Optional looping background audio played underneath the announcement on compatible Tater satellites.",
+                "properties": {
+                    "background": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "Stable HTTP(S) URL for WAV, MP3, or FLAC background audio."},
+                            "loop": {"type": "boolean", "description": "Loop the background until the announcement finishes."},
+                            "volume_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+                        },
+                    },
+                    "ducking": {
+                        "type": "object",
+                        "properties": {
+                            "target_percent": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100,
+                                "description": "Background level during speech, as a percentage of its configured volume.",
+                            },
+                            "attack_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
+                            "release_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
+                        },
+                    },
+                    "finish": {
+                        "type": "object",
+                        "properties": {
+                            "fade_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
+                        },
+                    },
+                },
+            },
+        },
+        "required": ["text"],
+    }
 
     @staticmethod
     def _decode_redis_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
@@ -325,6 +372,73 @@ class BroadcastPlugin(ToolVerba):
             text, room = self._split_room_from_text(text)
         return text, room
 
+    @staticmethod
+    def _clamped_int(value: Any, default: int, minimum: int = 0, maximum: int = 100) -> int:
+        try:
+            parsed = int(float(value))
+        except Exception:
+            parsed = int(default)
+        return max(int(minimum), min(int(maximum), parsed))
+
+    @classmethod
+    def _normalize_audio_scene(cls, raw: Any) -> Dict[str, Any]:
+        scene = raw if isinstance(raw, dict) else {}
+        background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+        ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
+        finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
+
+        background_url = str(
+            background.get("url")
+            or scene.get("background_url")
+            or scene.get("background_audio_url")
+            or ""
+        ).strip()
+        if not background_url:
+            return {}
+
+        loop_raw = background.get("loop", scene.get("loop", True))
+        if isinstance(loop_raw, bool):
+            loop = loop_raw
+        else:
+            loop = str(loop_raw or "").strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+        return {
+            "background": {
+                "url": background_url,
+                "loop": bool(loop),
+                "volume_percent": cls._clamped_int(
+                    background.get("volume_percent", scene.get("background_volume_percent")),
+                    60,
+                ),
+            },
+            "ducking": {
+                "target_percent": cls._clamped_int(
+                    ducking.get("target_percent", scene.get("ducking_target_percent")),
+                    35,
+                ),
+                "attack_ms": cls._clamped_int(
+                    ducking.get("attack_ms", scene.get("ducking_attack_ms")),
+                    150,
+                    0,
+                    10000,
+                ),
+                "release_ms": cls._clamped_int(
+                    ducking.get("release_ms", scene.get("ducking_release_ms")),
+                    350,
+                    0,
+                    10000,
+                ),
+            },
+            "finish": {
+                "fade_ms": cls._clamped_int(
+                    finish.get("fade_ms", scene.get("fade_ms")),
+                    500,
+                    0,
+                    10000,
+                ),
+            },
+        }
+
     async def _make_announcement_text(self, raw_text: str, llm_client) -> str:
         raw_text = (raw_text or "").strip()
         if not raw_text:
@@ -362,9 +476,22 @@ class BroadcastPlugin(ToolVerba):
 
         return raw_text[:max_chars]
 
-    async def _broadcast(self, raw_text: str, llm_client, room: str = "") -> dict:
+    async def _broadcast(
+        self,
+        raw_text: str,
+        llm_client,
+        room: str = "",
+        *,
+        audio_scene: Any = None,
+        prepared: bool = False,
+        targets_override: Any = None,
+    ) -> dict:
         settings = self._get_settings()
-        targets, target_scope = self._select_targets(settings, room)
+        override_targets = normalize_announcement_targets(targets_override)
+        if override_targets:
+            targets, target_scope = override_targets, "selected"
+        else:
+            targets, target_scope = self._select_targets(settings, room)
         if not targets:
             if room and not self._is_everywhere(room):
                 return action_failure(
@@ -380,11 +507,9 @@ class BroadcastPlugin(ToolVerba):
                 say_hint="Explain there are no connected broadcast targets.",
             )
 
-        announcement = (
-            await self._make_announcement_text(raw_text, llm_client)
-            if llm_client
-            else (raw_text or "").strip()
-        )
+        announcement = (raw_text or "").strip()
+        if not prepared and llm_client:
+            announcement = await self._make_announcement_text(raw_text, llm_client)
         if not announcement:
             return action_failure(
                 code="missing_announcement_text",
@@ -401,6 +526,7 @@ class BroadcastPlugin(ToolVerba):
         direct_tts_model = str(speech.get("tts_model") or "")
         direct_tts_voice = str(speech.get("tts_voice") or "")
         ha = load_homeassistant_config(required=False)
+        normalized_scene = self._normalize_audio_scene(audio_scene)
 
         try:
             tts_result = await speak_announcement_targets(
@@ -421,6 +547,7 @@ class BroadcastPlugin(ToolVerba):
                 voice_core_wyoming_port=speech.get("wyoming_tts_port"),
                 voice_core_wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
                 default_backend=announcement_backend,
+                audio_scene=normalized_scene,
             )
         except Exception as exc:
             logger.error("[broadcast] TTS call failed: %s", exc)
@@ -434,6 +561,11 @@ class BroadcastPlugin(ToolVerba):
         sent_count = int(tts_result.get("sent_count") or 0)
         target_count = int(tts_result.get("target_count") or len(targets))
         warnings = [str(item) for item in list(tts_result.get("warnings") or []) if str(item).strip()]
+        audio_scene_warnings = [
+            str(item)
+            for item in list(tts_result.get("audio_scene_warnings") or [])
+            if str(item).strip()
+        ]
 
         if not tts_result.get("ok") or sent_count <= 0:
             detail = str(tts_result.get("error") or "").strip()
@@ -457,6 +589,10 @@ class BroadcastPlugin(ToolVerba):
             "voice_core_sent_count": int(tts_result.get("voice_core_sent_count") or 0),
             "targets": list(targets),
             "target_scope": target_scope,
+            "audio_scene_enabled": bool(normalized_scene),
+            "audio_scene_sent_count": int(tts_result.get("audio_scene_sent_count") or 0),
+            "audio_scene_fallback_count": int(tts_result.get("audio_scene_fallback_count") or 0),
+            "audio_scene_warnings": audio_scene_warnings[:10],
         }
         if room:
             facts["requested_room"] = room
@@ -473,15 +609,49 @@ class BroadcastPlugin(ToolVerba):
                 say_hint="Confirm partial broadcast success and mention failed targets if useful.",
             )
 
+        scene_fallback_count = int(tts_result.get("audio_scene_fallback_count") or 0)
+        if scene_fallback_count:
+            return action_success(
+                facts=facts,
+                summary_for_user=(
+                    f"Broadcast sent to {target_count} target{'s' if target_count != 1 else ''} using {backend_used}. "
+                    f"{scene_fallback_count} target{'s' if scene_fallback_count != 1 else ''} played TTS without the background audio."
+                ),
+                say_hint="Confirm the broadcast and briefly mention that background audio was unavailable on some targets.",
+            )
+
         return action_success(
             facts=facts,
             summary_for_user=f"Broadcast sent to {target_count} target{'s' if target_count != 1 else ''} using {backend_used}.",
             say_hint="Confirm the broadcast was sent successfully.",
         )
 
+    async def deliver_prepared_announcement(
+        self,
+        announcement: str,
+        *,
+        room: str = "",
+        audio_scene: Any = None,
+        targets: Any = None,
+    ) -> dict:
+        """Deliver final text without asking another LLM to rewrite it."""
+        return await self._broadcast(
+            announcement,
+            None,
+            room=room,
+            audio_scene=audio_scene,
+            prepared=True,
+            targets_override=targets,
+        )
+
     async def _broadcast_from_args(self, args: Dict[str, Any], llm_client) -> dict:
         text, room = self._request_from_args(args or {})
-        return await self._broadcast(text, llm_client, room=room)
+        return await self._broadcast(
+            text,
+            llm_client,
+            room=room,
+            audio_scene=(args or {}).get("audio_scene"),
+        )
 
     async def handle_homeassistant(self, args, llm_client):
         return await self._broadcast_from_args(args or {}, llm_client)
