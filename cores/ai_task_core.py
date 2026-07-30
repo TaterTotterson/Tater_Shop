@@ -59,7 +59,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 
 from dotenv import load_dotenv
 __version__ = "1.2.0"
-MIN_TATER_VERSION = "97.7"
+MIN_TATER_VERSION = "98"
 
 load_dotenv()
 

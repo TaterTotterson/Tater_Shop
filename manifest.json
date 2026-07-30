@@ -41,7 +41,7 @@
       "id": "broadcast",
       "name": "Broadcast",
       "version": "1.3.0",
-      "min_tater_version": "97.7",
+      "min_tater_version": "98",
       "description": "Send a one-time spoken announcement to all satellites or one specified room.",
       "portals": [
         "voice_core",
@@ -61,7 +61,7 @@
       "settings_category": "Broadcast",
       "tags": [],
       "entry": "verba/broadcast.py",
-      "sha256": "54c7cc015ff8b7fea94cba84de88b62afb8cffc398f2cc7ddf159b38555acb35"
+      "sha256": "868e83240567ab1858c51657873b3169cf9a2f1ef27f9c1b61e59e35c22e2ddd"
     },
     {
       "id": "camera_control",

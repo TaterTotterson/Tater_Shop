@@ -39,7 +39,7 @@ class BroadcastPlugin(ToolVerba):
     name = "broadcast"
     verba_name = "Broadcast"
     version = "1.3.0"
-    min_tater_version = "97.7"
+    min_tater_version = "98"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>","room":"<optional room or satellite>"}}'
     description = (
         "Send a one-time spoken announcement. If the user specifies a room, area, or satellite, send it only there. "
