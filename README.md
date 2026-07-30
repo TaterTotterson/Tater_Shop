@@ -504,6 +504,11 @@ Common `settings_manager` keys:
 - `stats_refresh_button`: show a refresh button.
 - `item_fields_dropdown`, `item_fields_popup`, `item_sections_in_dropdown`: controls how item fields are displayed.
 
+An item card may include an `actions` list when it needs several independent
+controls. Each entry accepts `action`, `label`, and optional `tone`, `confirm`,
+`working_text`, and `success_text` values. Tater sends the card id and its
+current field values to `handle_htmlui_tab_action()` for each button.
+
 Common field types:
 
 - `text`
