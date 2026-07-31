@@ -353,6 +353,16 @@ class MusicCoreTests(unittest.TestCase):
             [row["value"] for row in roon_options],
             ["integration:roon:zone-kitchen"],
         )
+        self.assertTrue(
+            all(
+                call.kwargs.get("include_homeassistant") is True
+                for call in announcement_targets.build_announcement_target_options.call_args_list
+            )
+        )
+        integration_registry.get_integration_devices_by_capability.assert_called_with(
+            "media_player",
+            self.core.redis_client,
+        )
 
     def test_native_client_state_is_credential_free_and_exposes_targets(self):
         with patch.object(
@@ -594,14 +604,7 @@ class MusicCoreTests(unittest.TestCase):
             if row.get("id") == "player:main"
         )
         fields = {row["key"]: row for row in player["fields"]}
-        self.assertEqual(fields["provider"]["type"], "select")
-        self.assertEqual(
-            {row["value"] for row in fields["provider"]["options"]},
-            {"tater_tube", "plex", "emby", "jellyfin", "navidrome", "roon"},
-        )
-        self.assertIn("targets", fields)
-        self.assertEqual(fields["targets"]["label"], "Play On")
-        self.assertEqual(fields["targets"]["type"], "multiselect")
+        self.assertEqual(set(fields), {"query", "shuffle", "volume_percent"})
         self.assertEqual(
             [row["action"] for row in player["actions"]],
             [
@@ -612,6 +615,29 @@ class MusicCoreTests(unittest.TestCase):
             ],
         )
         self.assertEqual(player["save_action"], "music_ui_save_player")
+        self.assertEqual(player["card_variant"], "player_bar")
+        self.assertFalse(player["show_save_button"])
+        self.assertEqual(player["settings_label"], "🔊")
+        self.assertEqual(player["popup_fields"][0]["key"], "targets")
+        self.assertEqual(player["popup_fields"][0]["label"], "Play On")
+        self.assertEqual(player["popup_fields"][0]["type"], "multiselect")
+        self.assertEqual(payload["ui"]["appearance"], "music_library")
+        self.assertEqual(payload["ui"]["persistent_item_groups"], ["player"])
+        self.assertEqual(payload["ui"]["default_tab"], "library")
+        tabs = {row["key"]: row for row in payload["ui"]["manager_tabs"]}
+        self.assertNotIn("player", tabs)
+        self.assertEqual(
+            [row["key"] for row in tabs["library"]["groups"]],
+            ["genres", "artists", "albums"],
+        )
+        self.assertTrue(all(row["selector"] is False for row in tabs["library"]["groups"]))
+        library_tiles = [
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("group") in {"genres", "artists", "albums"}
+        ]
+        self.assertTrue(library_tiles)
+        self.assertTrue(all(row.get("card_variant") == "library_tile" for row in library_tiles))
         settings = next(
             row
             for row in payload["ui"]["item_forms"]
@@ -637,6 +663,34 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual(providers["provider:plex"]["fields"][1]["type"], "password")
         self.assertEqual(providers["provider:roon"]["fields"], [])
+
+    def test_player_search_keeps_destinations_selected_from_speaker_popup(self):
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "stopped",
+                    "targets": ["voice_core:native:kitchen"],
+                    "provider": "tater_tube",
+                }
+            ),
+        )
+        with patch.object(
+            self.core,
+            "_play_request",
+            return_value={"summary_for_user": "Playing reggae."},
+        ) as play_request:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_play",
+                payload={"values": {"query": "reggae", "shuffle": True}},
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            play_request.call_args.args[0]["targets"],
+            ["voice_core:native:kitchen"],
+        )
 
 
     def test_empty_player_search_replays_current_queue_at_zero_volume(self):

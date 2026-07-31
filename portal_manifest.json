@@ -5,7 +5,7 @@
       "id": "discord",
       "name": "Discord",
       "module_key": "discord_portal",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Discord integration portal for Tater.",
       "settings_category": "Discord Settings",
@@ -13,7 +13,7 @@
       "autostart_key": "discord_portal_running",
       "tags": [],
       "entry": "portals/discord_portal.py",
-      "sha256": "9b8c137da9abdc45c77d32b42de5b68f151502e57a040d308f52cac4f12874e5"
+      "sha256": "2a0cc0c74bcd5af5c01489d94fe1f52227552a0b37fb0e5bacd2c93875379367"
     },
     {
       "id": "homekit",

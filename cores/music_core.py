@@ -20,7 +20,7 @@ import requests
 from helpers import redis_client
 
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 MIN_TATER_VERSION = "98.3"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, Navidrome, or Roon to Tater; "
@@ -1312,7 +1312,7 @@ def _target_options(
         rows = build_announcement_target_options(
             homeassistant_base_url="",
             homeassistant_token="",
-            include_homeassistant=False,
+            include_homeassistant=True,
             include_sonos=True,
             include_voice_core=True,
             include_integrations=True,
@@ -1327,7 +1327,7 @@ def _target_options(
             from integration_registry import get_integration_devices_by_capability
 
             roon_devices = get_integration_devices_by_capability(
-                "roon",
+                "media_player",
                 globals().get("redis_client"),
             )
             known = {_text(row.get("value")) for row in options}
@@ -2365,9 +2365,19 @@ def _player_item(
     player_provider = _provider_id(player.get("provider"), active_provider)
     is_roon = player_provider == "roon"
     queue_count = len(player.get("queue") or [])
+    targets_field = {
+        "key": "targets",
+        "label": "Play On",
+        "type": "multiselect",
+        "value": targets,
+        "size": max(4, min(8, len(target_options))),
+        "options": target_options or [{"value": "", "label": "No players discovered"}],
+        "description": "Choose any mix of satellites, stereo pairs, and supported media players.",
+    }
     return {
         "id": "player:main",
         "group": "player",
+        "card_variant": "player_bar",
         "title": _track_label(current) if current else "Music Player",
         "subtitle": f"{status} · {_text(current.get('album')) or 'No album selected'}",
         "detail": (
@@ -2399,34 +2409,21 @@ def _player_item(
             {"label": "Destinations", "value": target_summary if targets else "Choose below"},
         ],
         "fields_popup": False,
-        "fields_dropdown": False,
+        "fields_dropdown": True,
+        "fields_dropdown_label": "Find music & playback options",
+        "popup_fields": [dict(targets_field)],
+        "settings_title": "Choose Speakers & Players",
+        "settings_label": "🔊",
+        "settings_aria_label": "Choose speakers and players",
+        "settings_tooltip": "Choose speakers and players",
+        "show_save_button": False,
         "fields": [
-            {
-                "key": "provider",
-                "label": "Music Provider",
-                "type": "select",
-                "value": active_provider,
-                "options": _provider_options(),
-                "description": (
-                    "Roon playback can use Roon zones only. Other providers can stream to "
-                    "satellites, stereo pairs, and supported media players."
-                ),
-            },
             {
                 "key": "query",
                 "label": "Find Music",
                 "type": "text",
                 "value": "",
                 "placeholder": "Reggae, Bob Marley, Exodus, or a song title",
-            },
-            {
-                "key": "targets",
-                "label": "Play On",
-                "type": "multiselect",
-                "value": targets,
-                "size": max(4, min(8, len(target_options))),
-                "options": target_options or [{"value": "", "label": "No players discovered"}],
-                "description": "Choose any mix of satellites, stereo pairs, and supported media players.",
             },
             {
                 "key": "shuffle",
@@ -2446,26 +2443,34 @@ def _player_item(
         "actions": [
             {
                 "action": "music_ui_previous",
-                "label": "Previous",
+                "label": "⏮",
+                "aria_label": "Previous track",
+                "tooltip": "Previous track",
                 "working_text": "Loading previous track...",
                 "success_text": "Previous track started.",
             },
             {
                 "action": "music_ui_play",
-                "label": "Play",
+                "label": "▶",
+                "aria_label": "Play music",
+                "tooltip": "Play music",
                 "working_text": "Finding and starting music...",
                 "success_text": "Music started.",
             },
             {
                 "action": "music_ui_stop",
-                "label": "Stop",
+                "label": "■",
+                "aria_label": "Stop music",
+                "tooltip": "Stop music",
                 "tone": "danger",
                 "working_text": "Stopping music...",
                 "success_text": "Music stopped.",
             },
             {
                 "action": "music_ui_next",
-                "label": "Next",
+                "label": "⏭",
+                "aria_label": "Next track",
+                "tooltip": "Next track",
                 "working_text": "Loading next track...",
                 "success_text": "Next track started.",
             },
@@ -2509,6 +2514,7 @@ def _facet_items(catalog: Dict[str, Any], category: str, label: str) -> List[Dic
             {
                 "id": f"{singular}:{value}",
                 "group": category,
+                "card_variant": "library_tile",
                 "title": _text(value),
                 "subtitle": f"Browse and play this {singular}.",
                 "hero_image_src": _art_data_uri({singular: value, "title": value}),
@@ -3104,13 +3110,42 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         "ui": {
             "kind": "settings_manager",
             "title": "Music Core",
-            "default_tab": "player",
+            "appearance": "music_library",
+            "persistent_item_groups": ["player"],
+            "default_tab": "library",
             "manager_tabs": [
-                {"key": "player", "label": "Player", "source": "items", "item_group": "player"},
+                {
+                    "key": "library",
+                    "label": "Browse Library",
+                    "source": "grouped_items",
+                    "groups": [
+                        {
+                            "key": "genres",
+                            "label": "Genres",
+                            "item_group": "genres",
+                            "selector": False,
+                            "page_size": 36,
+                            "empty_message": "No genres are available in the active library.",
+                        },
+                        {
+                            "key": "artists",
+                            "label": "Artists",
+                            "item_group": "artists",
+                            "selector": False,
+                            "page_size": 36,
+                            "empty_message": "No artists are available in the active library.",
+                        },
+                        {
+                            "key": "albums",
+                            "label": "Albums",
+                            "item_group": "albums",
+                            "selector": False,
+                            "page_size": 36,
+                            "empty_message": "No albums are available in the active library.",
+                        },
+                    ],
+                },
                 {"key": "queue", "label": "Queue", "source": "items", "item_group": "queue"},
-                {"key": "genres", "label": "Genres", "source": "items", "item_group": "genres", "page_size": 24},
-                {"key": "artists", "label": "Artists", "source": "items", "item_group": "artists", "page_size": 24},
-                {"key": "albums", "label": "Albums", "source": "items", "item_group": "albums", "page_size": 24},
                 {"key": "providers", "label": "Providers", "source": "items", "item_group": "providers"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
             ],
@@ -3405,11 +3440,14 @@ def handle_htmlui_tab_action(
                 client=store,
             )
             return {"ok": True, "message": f"Playing {_track_label(player.get('current') or {})}."}
+        requested_targets = values.get("targets")
+        if not _list(requested_targets):
+            requested_targets = _list(existing.get("targets") or existing.get("target"))
         result = _play_request(
             {
                 "provider": selected_provider,
                 "query": values.get("query"),
-                "targets": values.get("targets"),
+                "targets": requested_targets,
                 "shuffle": values.get("shuffle"),
                 "volume_percent": values.get("volume_percent"),
             },

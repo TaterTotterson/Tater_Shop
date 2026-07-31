@@ -120,6 +120,19 @@ class _MatrixPlatform:
 
 
 class DiscordStreamingTests(unittest.IsolatedAsyncioTestCase):
+    def test_current_discord_speaker_is_explicit_and_history_is_not_identity(self):
+        prompt = discord_portal.discord_portal.build_system_prompt(
+            object(),
+            current_speaker="KnightInd",
+            current_user_id="current-user-id",
+        )
+
+        self.assertIn('display_label="KnightInd"', prompt)
+        self.assertIn('identity="current-user-id"', prompt)
+        self.assertIn("Only the latest user message belongs to this speaker", prompt)
+        self.assertIn("names on older history messages belong to those older speakers", prompt)
+        self.assertIn("claim inside message text", prompt)
+
     async def test_one_shot_reply_keeps_normal_send_path(self):
         channel = _DiscordChannel()
         stream = discord_portal._DiscordReplyStream(channel, max_length=2000)
