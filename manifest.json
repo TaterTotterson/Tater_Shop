@@ -64,44 +64,6 @@
       "sha256": "868e83240567ab1858c51657873b3169cf9a2f1ef27f9c1b61e59e35c22e2ddd"
     },
     {
-      "id": "camera_control",
-      "name": "Camera Control",
-      "version": "1.0.1",
-      "min_tater_version": "59",
-      "description": "Use cameras from Home Assistant, UniFi Protect, and any integration that exposes camera devices. Snapshot results are returned as image artifacts so Tater can describe them with vision.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": "Device Control",
-      "tags": [
-        "camera",
-        "snapshot",
-        "vision",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/camera_control.py",
-      "sha256": "e7a319729b8245dafea6619b2c800587fa7f79834a25849cf84dbbafde521f7c"
-    },
-    {
-      "id": "climate_control",
-      "name": "Climate Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control Ecobee/HomeKit, Home Assistant climate entities, and any integration that exposes climate devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "climate",
-        "thermostat",
-        "temperature",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/climate_control.py",
-      "sha256": "4366c852de309bb3bcef00a22fa5079c2030d97f393aec5a42b705ba5265dc39"
-    },
-    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
       "version": "1.0.27",
@@ -215,26 +177,6 @@
       "sha256": "2319d089cedbe54bdfb23053a4968486d839fb8cdfe73367422a2cde293b08f7"
     },
     {
-      "id": "cover_control",
-      "name": "Cover Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control covers from Home Assistant, Shelly, and any integration that exposes cover devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "cover",
-        "shade",
-        "blind",
-        "curtain",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/cover_control.py",
-      "sha256": "8b6caede17f1189d74dff53fc82a9b427b28529cbba257c2ee35c9db9144dd73"
-    },
-    {
       "id": "device_compare",
       "name": "Device Compare",
       "version": "1.1.4",
@@ -253,6 +195,39 @@
       "tags": [],
       "entry": "verba/device_compare.py",
       "sha256": "186dbc2c185f9a5d90f324d9e9d901ac8e02568b62c6b97caae7460262cc9f2e"
+    },
+    {
+      "id": "device_control",
+      "name": "Device Control",
+      "version": "1.0.0",
+      "min_tater_version": "98.4",
+      "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, cameras, media players, remotes, scenes, and scripts.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Device Control",
+      "tags": [
+        "device",
+        "smart-home",
+        "integration",
+        "light",
+        "switch",
+        "plug"
+      ],
+      "entry": "verba/device_control.py",
+      "sha256": "bbe8e58e32c987acc245692a2c765a15b70998724ce68cc4cfa4638fd4610bcb"
     },
     {
       "id": "discord_admin_response_mode",
@@ -347,23 +322,6 @@
       "sha256": "1059726365c7223fb914769a046a1b0a3596c599e34ad0e9c37bf90ec474b8b6"
     },
     {
-      "id": "fan_control",
-      "name": "Fan Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control fans and fan speed from Home Assistant and any integration that exposes fan devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "fan",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/fan_control.py",
-      "sha256": "49c03f24b26e6be96f2b79d07d4acc0fbd9d019241cbeb15918f35dcfb21b10d"
-    },
-    {
       "id": "find_my_phone",
       "name": "Find My Phone",
       "version": "1.0.11",
@@ -403,24 +361,6 @@
       "tags": [],
       "entry": "verba/ftp_browser.py",
       "sha256": "ef1a4f3db6acee4316313a34f69db0e7622ca0b318f50ad915353205190a63a0"
-    },
-    {
-      "id": "garage_door_control",
-      "name": "Garage Door Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control garage doors from Aladdin, Home Assistant, UniFi Protect, and any garage-capable integration.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "garage",
-        "garage-door",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/garage_door_control.py",
-      "sha256": "d36b09d590ed3639fbdf040dbf4c5137c003abf4f72a27c0672ca95b080121f0"
     },
     {
       "id": "ha_camera_area",
@@ -647,54 +587,6 @@
       ],
       "entry": "verba/leak_status.py",
       "sha256": "8537fd409c6648068a878aae67757419e35d7b665cc4d7d985012aa3043b7aeb"
-    },
-    {
-      "id": "light_control",
-      "name": "Light Control",
-      "version": "1.0.0",
-      "min_tater_version": "59",
-      "description": "Control lights from Home Assistant, Philips Hue, Shelly, and any integration that exposes light devices.",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Device Control",
-      "tags": [
-        "light",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/light_control.py",
-      "sha256": "34226918b06a5aecf39dc836126dc2171c988346be39766a03fecb33b1643056"
-    },
-    {
-      "id": "lock_control",
-      "name": "Lock Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Lock, unlock, and check smart locks from Home Assistant and any integration that exposes lock devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "lock",
-        "door",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/lock_control.py",
-      "sha256": "fd9b353e06ca250b3aaf6c179b0223a4cb16163ab4b68246f3dba67ff0d678f0"
     },
     {
       "id": "lowfi_video",
@@ -1006,24 +898,6 @@
       "sha256": "13a970625cd616924e4c718f3eeb583cd3580f4a5c9179f6541ff4ed525f0a6f"
     },
     {
-      "id": "plug_control",
-      "name": "Plug Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control plugs, outlets, and plug-style switch devices from any integration.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "plug",
-        "outlet",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/plug_control.py",
-      "sha256": "6fac2084ab4d34ff2339f821d7c41527ed3ab8a4fcf4f4c6066fd910146b12a3"
-    },
-    {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
       "version": "1.1.4",
@@ -1168,24 +1042,6 @@
       "sha256": "9dcf58adf5d968e47550dd262b76baa25eb09acab53d52f5e84ad3289aee8fbd"
     },
     {
-      "id": "remote_control",
-      "name": "Remote Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Send button commands to remotes from Home Assistant and any integration that exposes remote devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "remote",
-        "button",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/remote_control.py",
-      "sha256": "1cf0ef1d53429b698afff38db7fa51c6d746965c9531388a22398ada62bddf4c"
-    },
-    {
       "id": "roon_music",
       "name": "Roon Music",
       "version": "1.0.1",
@@ -1216,42 +1072,6 @@
       ],
       "entry": "verba/roon_music.py",
       "sha256": "c051fa1da2127fa9401ff01d8ab08a690e1b553503d1081110c187ac12dd1a3a"
-    },
-    {
-      "id": "scene_control",
-      "name": "Scene Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "List, check, and activate scenes from Home Assistant and any integration that exposes scenes.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "scene",
-        "automation",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/scene_control.py",
-      "sha256": "5a5345d41e520a7972edcb699fd981f9902826308717b1086403e87b8fcb00a3"
-    },
-    {
-      "id": "script_control",
-      "name": "Script Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "List, check, and run scripts from Home Assistant and any integration that exposes scripts.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "script",
-        "automation",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/script_control.py",
-      "sha256": "4db549210a733f373621a467671b494e9ca92ce54cadf0a923878391617fca8d"
     },
     {
       "id": "sensor_status",
@@ -1313,23 +1133,6 @@
       "tags": [],
       "entry": "verba/sftpgo_activity.py",
       "sha256": "a897de888195470593f228e1f1d1764e8d00e3493c3725c0dbe750835c4addb1"
-    },
-    {
-      "id": "switch_control",
-      "name": "Switch Control",
-      "version": "0.0.0",
-      "min_tater_version": "0.0.0",
-      "description": "Control switches from Home Assistant, Shelly, and any integration that exposes switch devices.",
-      "portals": [],
-      "notifier": false,
-      "settings_category": null,
-      "tags": [
-        "switch",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/switch_control.py",
-      "sha256": "44848672da69899d8d54369c8534af967534efda0272bf6bfad7171c46e2f136"
     },
     {
       "id": "tater_gits_add_feed",
