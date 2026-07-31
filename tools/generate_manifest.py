@@ -70,10 +70,58 @@ def ensure_tag(values: list[str], tag: str) -> list[str]:
 def extract_verba_meta(py_file: Path) -> dict:
     tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
 
-    class_assigns = {}
-    for n in tree.body:
-        if not isinstance(n, ast.ClassDef):
+    verba_class_name = ""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
             continue
+        if not any(isinstance(target, ast.Name) and target.id == "verba" for target in node.targets):
+            continue
+        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            verba_class_name = node.value.func.id
+            break
+
+    class_defs = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+
+    def assignments_for(class_name: str, visiting: set[str] | None = None) -> dict:
+        node = class_defs.get(class_name)
+        if node is None:
+            return {}
+        visiting = set(visiting or ())
+        if class_name in visiting:
+            return {}
+        visiting.add(class_name)
+
+        assigns = {}
+        for base in node.bases:
+            base_name = ""
+            if isinstance(base, ast.Name):
+                base_name = base.id
+            elif isinstance(base, ast.Attribute):
+                base_name = base.attr
+            if base_name in class_defs:
+                assigns.update(assignments_for(base_name, visiting))
+
+        for stmt in node.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                key = stmt.targets[0].id
+                if key in FIELDS:
+                    val = literal(stmt.value)
+                    if val is not None:
+                        assigns[key] = val
+        return assigns
+
+    class_assigns = assignments_for(verba_class_name) if verba_class_name else {}
+    if class_assigns:
+        candidate_names = ()
+    else:
+        candidate_names = tuple(class_defs)
+
+    for class_name in candidate_names:
+        n = class_defs[class_name]
         base_names = []
         for b in n.bases:
             if isinstance(b, ast.Name):
@@ -81,16 +129,10 @@ def extract_verba_meta(py_file: Path) -> dict:
             elif isinstance(b, ast.Attribute):
                 base_names.append(b.attr)
 
-        looks_like_verba = bool({"ToolVerba", "CategoryDeviceControlBase"} & set(base_names))
-
-        assigns = {}
-        for stmt in n.body:
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-                key = stmt.targets[0].id
-                if key in FIELDS:
-                    val = literal(stmt.value)
-                    if val is not None:
-                        assigns[key] = val
+        looks_like_verba = bool(
+            {"ToolVerba", "CategoryDeviceControlBase", "_DeviceVerbaRuntime"} & set(base_names)
+        )
+        assigns = assignments_for(class_name)
 
         if looks_like_verba or ("name" in assigns and ("portals" in assigns or "platforms" in assigns)):
             class_assigns = assigns

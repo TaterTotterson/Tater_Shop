@@ -201,7 +201,9 @@ verba = ExampleLookupPlugin()
 
 ### Verba Contract
 
-The manifest generator reads class attributes from the first `ToolVerba` subclass:
+The manifest generator reads class attributes from the class instantiated by the
+module-level `verba = ...` assignment, including attributes inherited from a
+local base class:
 
 - `name`: stable tool id. Use lowercase snake case.
 - `verba_name` or `pretty_name`: display name.
@@ -214,6 +216,11 @@ The manifest generator reads class attributes from the first `ToolVerba` subclas
 - `tags`: optional store and routing tags.
 
 Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the main request payload natural-language: prefer one field such as `query` or `request` containing what the user asked. The metadata and examples teach the routing model when to choose the verba and what argument shape to pass; the verba still owns the domain-specific interpretation after it receives that natural-language request.
+
+Each `verba/*.py` file is downloaded independently and must be a complete
+runtime artifact. It may import stable APIs supplied by Tater, such as
+`verba_base`, `verba_result`, and `integration_registry`, but it must not import
+another Shop Verba or depend on an unlisted companion file.
 
 For flexible verbas, accept one user request in `query`, extract the natural-language request, try a small deterministic match, then use an internal `llm_client` call to choose from a constrained set of actions when code alone is not enough. After that, validate the result, resolve settings and known entities, fetch or act on real API data, and dispatch to the real action. If the request cannot be mapped to a known action, return `action_failure(...)` with the missing information instead of guessing.
 
@@ -543,6 +550,7 @@ Keep kernel tools narrow. They should be safe to call repeatedly and should not 
 After editing shop files, regenerate the relevant manifest:
 
 ```bash
+python3 tools/sync_device_verba_runtime.py  # after editing the embedded device runtime
 python3 tools/generate_manifest.py
 python3 tools/generate_core_manifest.py
 python3 tools/generate_portal_manifest.py

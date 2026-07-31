@@ -1,5 +1,3 @@
-# Generated as a standalone Shop artifact. Run tools/sync_device_verba_runtime.py after editing the shared runtime.
-# BEGIN EMBEDDED DEVICE VERBA RUNTIME
 """Build-time source for the runtime embedded in standalone device Verbas."""
 
 import base64
@@ -1415,24 +1413,3 @@ class _DeviceVerbaRuntime(ToolVerba):
 
     async def handle_meshtastic(self, packet, args, llm_client):
         return await self._handle(args or {}, llm_client)
-# END EMBEDDED DEVICE VERBA RUNTIME
-
-
-class IlluminanceStatusPlugin(_DeviceVerbaRuntime):
-    name = "illuminance_status"
-    verba_name = "Light Sensor Status"
-    pretty_name = "Light Sensor Status"
-    description = "Read light-level and illuminance sensors across integrations."
-    verba_dec = "Read lux and light-level sensors from Hue, Shelly, Home Assistant, UniFi Protect, and other integrations."
-    tags = ["illuminance", "lux", "light-sensor", "sensor", "integration"]
-    routing_keywords = ["light sensor", "illuminance", "lux", "light level"]
-    forced_route = "illuminance"
-    forced_domain_hint = "light sensor"
-    usage = '{"function":"illuminance_status","arguments":{"query":"what is the porch light level?"}}'
-    category_id = "illuminance"
-    category_label = "light sensors"
-    singular_label = "light sensor"
-    ignored_target_words = {"light", "level", "illuminance", "lux", "sensor", "sensors", "the", "my", "all"}
-
-
-verba = IlluminanceStatusPlugin()
