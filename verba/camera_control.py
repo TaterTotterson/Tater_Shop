@@ -1418,161 +1418,214 @@ class _DeviceVerbaRuntime(ToolVerba):
 # END EMBEDDED DEVICE VERBA RUNTIME
 
 
-class DeviceControlPlugin(_DeviceVerbaRuntime):
-    name = "device_control"
-    verba_name = "Device Control"
-    pretty_name = "Device Control"
+import asyncio
+
+
+class CameraControlPlugin(_DeviceVerbaRuntime):
+    name = "camera_control"
+    verba_name = "Camera Control"
+    pretty_name = "Camera Control"
     version = "1.0.3"
     min_tater_version = "98.4"
     settings_category = "Device Control"
-    platforms = [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic",
-    ]
     description = (
-        "Use for any request to control or check smart-home devices across integrations, "
-        "including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, "
-        "media players, remotes, scenes, and scripts. Use Camera Control for cameras and snapshots."
+        "Check cameras, capture snapshots, and use vision to describe current activity across all enabled integrations."
     )
-    verba_dec = description
+    verba_dec = (
+        "Use for requests about cameras, doorbells, snapshots, camera images, or current visible activity in a "
+        "named camera-covered area, including questions like 'what's happening in the front yard?', "
+        "'who is at the door?', or 'is anyone on the porch?'"
+    )
     when_to_use = (
-        "Use for any request to control or inspect an integrated smart-home device. "
-        "Choose this tool from the requested action and target name; do not guess the device's "
-        "technical category from words such as lights, plug, or switch. For cameras, snapshots, "
-        "or requests about what a camera sees, use Camera Control instead."
+        "Use for camera and doorbell status, snapshot, image, and visual activity requests. Also use when the "
+        "user asks what is happening, who is there, whether anyone is outside, or what can be seen in a named "
+        "camera-covered area such as the front yard, driveway, porch, garage, or backyard."
     )
     how_to_use = (
-        "Pass the user's natural-language request unchanged in query. The verba searches every "
-        "action-compatible device, resolves names and aliases, and dispatches through the owning integration."
+        "Pass the user's natural-language camera request unchanged in query. The Verba resolves the camera "
+        "across enabled integrations, captures a snapshot, and uses the configured vision model to describe it."
     )
-    tags = ["device", "smart-home", "integration", "light", "switch", "plug"]
+    tags = ["camera", "snapshot", "vision", "device", "integration"]
     routing_keywords = [
-        "device",
-        "light",
-        "switch",
-        "plug",
-        "outlet",
-        "fan",
-        "thermostat",
-        "cover",
-        "blind",
-        "lock",
-        "remote",
-        "scene",
-        "script",
-        "turn on",
-        "turn off",
-    ]
-    forced_route = "device"
-    forced_domain_hint = "device"
-    usage = '{"function":"device_control","arguments":{"query":"turn on the Christmas tree lights"}}'
-    example_calls = [
-        '{"function":"device_control","arguments":{"query":"turn on the Christmas tree lights"}}',
-        '{"function":"device_control","arguments":{"query":"set the kitchen lights to 30 percent"}}',
-        '{"function":"device_control","arguments":{"query":"close the bedroom blinds"}}',
-        '{"function":"device_control","arguments":{"query":"lock the front door"}}',
-    ]
-    common_needs = [
-        "The requested action and a room, device name, or user-facing device alias when the target is not global."
-    ]
-    missing_info_prompts = ["Which room or device should I use?"]
-
-    inventory_scope = "all"
-    category_id = "device"
-    category_label = "devices"
-    singular_label = "device"
-    max_candidates_setting = "DEVICE_MAX_CANDIDATES"
-    allowed_actions = {
-        "list",
-        "status",
-        "turn_on",
-        "turn_off",
-        "toggle",
-        "set_brightness",
-        "set_color",
-        "set_percentage",
-        "open",
-        "close",
-        "stop",
-        "set_position",
-        "lock",
-        "unlock",
-        "set_temperature",
-        "set_hvac_mode",
-        "send_command",
-        "activate",
-        "run",
-        "playpause",
-        "play",
-        "pause",
-        "next",
-        "previous",
-        "mute",
-        "unmute",
-        "set_volume",
-        "volume_up",
-        "volume_down",
-        "announce",
-        "play_media",
-    }
-    control_actions = allowed_actions - {"list", "status"}
-    ignored_target_words = {
-        "device",
-        "devices",
-        "entity",
-        "entities",
-        "light",
-        "lights",
-        "lamp",
-        "lamps",
-        "bulb",
-        "bulbs",
-        "dimmer",
-        "dimmers",
-        "switch",
-        "switches",
-        "relay",
-        "relays",
-        "plug",
-        "plugs",
-        "outlet",
-        "outlets",
-        "fan",
-        "fans",
-        "cover",
-        "covers",
-        "shade",
-        "shades",
-        "blind",
-        "blinds",
-        "curtain",
-        "curtains",
-        "lock",
-        "locks",
-        "thermostat",
-        "thermostats",
         "camera",
         "cameras",
-        "remote",
-        "remotes",
-        "scene",
-        "scenes",
-        "script",
-        "scripts",
+        "snapshot",
+        "photo",
+        "picture",
+        "image",
+        "vision",
+        "describe",
+        "doorbell",
+        "what do you see",
+        "what's happening",
+        "what is happening",
+        "what's going on",
+        "who is there",
+        "is anyone outside",
+        "front yard",
+        "driveway",
+        "porch",
+        "backyard",
+    ]
+    forced_route = "camera"
+    forced_domain_hint = "camera"
+    usage = '{"function":"camera_control","arguments":{"query":"take a snapshot from the porch camera"}}'
+    example_calls = [
+        '{"function":"camera_control","arguments":{"query":"what is happening in the front yard?"}}',
+        '{"function":"camera_control","arguments":{"query":"is anyone on the porch?"}}',
+        '{"function":"camera_control","arguments":{"query":"show the driveway camera status"}}',
+        '{"function":"camera_control","arguments":{"query":"take a snapshot from the porch camera"}}',
+        '{"function":"camera_control","arguments":{"query":"look at the front door camera and tell me what you see"}}',
+    ]
+    common_needs = ["Camera name, room, or area when the request does not identify a specific camera."]
+    missing_info_prompts = ["Which camera, room, or area should I use?"]
+
+    category_id = "camera"
+    category_label = "cameras"
+    singular_label = "camera"
+    allowed_actions = {"list", "status", "camera_snapshot"}
+    control_actions = {"camera_snapshot"}
+    ignored_target_words = {
+        "camera",
+        "cameras",
+        "snapshot",
+        "photo",
+        "picture",
+        "image",
+        "doorbell",
+        "what",
+        "whats",
+        "happening",
+        "going",
+        "who",
+        "anyone",
+        "anything",
+        "outside",
+        "there",
+        "s",
         "the",
         "my",
         "all",
     }
 
+    def _normalize_action(self, value, query):
+        explicit = self._text(value).lower().replace("-", "_").replace(" ", "_")
+        if explicit in {"camera_snapshot", "snapshot", "photo", "picture", "image"}:
+            return "camera_snapshot"
+        if explicit in {"list", "status", "state", "check"}:
+            return super()._normalize_action(value, query)
+        query_text = self._text(query).lower().replace("’", "'")
+        snapshot_request = re.search(
+            r"\b(snapshot|picture|photo|image|look|see)\b|"
+            r"\bwhat(?:'s| is)\s+(?:happening|going on)\b|"
+            r"\bwho(?:'s| is)\s+(?:there|outside)\b|"
+            r"\b(?:is|are)\s+(?:there\s+)?(?:anyone|anything|somebody|someone)\b|"
+            r"\b(?:activity|happening)\s+(?:at|in|on|outside)\b|"
+            r"\bshow me\b(?!.*\bstatus\b)",
+            query_text,
+        )
+        if snapshot_request:
+            return "camera_snapshot"
+        return super()._normalize_action(value, query)
 
-verba = DeviceControlPlugin()
+    def _vision_prompt(self, query, artifact):
+        camera_name = self._text((artifact or {}).get("device_name")) or "camera"
+        request = self._text(query) or "What is happening in this image?"
+        return (
+            f"This is a current snapshot from {camera_name}. Answer the user's request: {request}\n"
+            "Briefly describe only what is visibly happening now. Mention relevant people, animals, vehicles, "
+            "packages, and other notable activity. Do not identify people or invent details that are not visible."
+        )
+
+    def _describe_snapshot_artifact(self, artifact, query):
+        from kernel_tools import image_describe
+
+        return image_describe(
+            prompt=self._vision_prompt(query, artifact),
+            image_ref=artifact,
+            name=(artifact or {}).get("name"),
+            mimetype=(artifact or {}).get("mimetype"),
+        )
+
+    async def _handle(self, args, llm_client):
+        result = await super()._handle(args, llm_client)
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result
+
+        artifacts = [
+            item
+            for item in (result.get("artifacts") or [])
+            if isinstance(item, dict) and self._text(item.get("type")).lower() == "image"
+        ]
+        if not artifacts:
+            return result
+
+        query = self._text((args or {}).get("query"))
+        descriptions = []
+        failures = []
+        for artifact in artifacts:
+            camera_name = self._text(artifact.get("device_name") or artifact.get("name")) or "Camera"
+            try:
+                vision_result = await asyncio.to_thread(
+                    self._describe_snapshot_artifact,
+                    artifact,
+                    query,
+                )
+            except Exception as exc:
+                failures.append({"camera": camera_name, "error": str(exc)})
+                continue
+
+            if isinstance(vision_result, dict) and vision_result.get("ok"):
+                vision_data = vision_result.get("data") if isinstance(vision_result.get("data"), dict) else {}
+                description = self._text(
+                    vision_data.get("description")
+                    or vision_data.get("text")
+                    or vision_result.get("summary_for_user")
+                )
+                if description:
+                    descriptions.append(
+                        {
+                            "camera": camera_name,
+                            "description": description,
+                            "model": self._text(vision_data.get("model")),
+                        }
+                    )
+                    continue
+
+            error = vision_result.get("error") if isinstance(vision_result, dict) else {}
+            message = self._text(error.get("message")) if isinstance(error, dict) else ""
+            failures.append({"camera": camera_name, "error": message or "Vision returned no description."})
+
+        facts = dict(result.get("facts") or {})
+        facts["vision_count"] = len(descriptions)
+        facts["vision_failure_count"] = len(failures)
+        result["facts"] = facts
+
+        data = dict(result.get("data") or {})
+        data["vision_descriptions"] = descriptions
+        data["vision_failures"] = failures
+        result["data"] = data
+
+        if descriptions:
+            result["summary_for_user"] = "\n".join(
+                f"{row['camera']}: {row['description']}" for row in descriptions
+            )
+            result["say_hint"] = (
+                "Answer the user's camera question directly from the returned vision descriptions. "
+                "Do not add visual details that the vision model did not report."
+            )
+        elif failures:
+            failure_message = "; ".join(
+                f"{row['camera']}: {row['error']}" for row in failures[:3]
+            )
+            snapshot_summary = self._text(result.get("summary_for_user"))
+            result["summary_for_user"] = (
+                f"{snapshot_summary} Vision analysis was unavailable: {failure_message}"
+            ).strip()
+            result["say_hint"] = (
+                "Explain that the snapshot was captured but vision analysis failed, and ask whether to retry."
+            )
+        return result
+
+
+verba = CameraControlPlugin()

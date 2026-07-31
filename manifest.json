@@ -77,6 +77,38 @@
       "sha256": "868e83240567ab1858c51657873b3169cf9a2f1ef27f9c1b61e59e35c22e2ddd"
     },
     {
+      "id": "camera_control",
+      "name": "Camera Control",
+      "version": "1.0.3",
+      "min_tater_version": "98.4",
+      "description": "Use for requests about cameras, doorbells, snapshots, camera images, or current visible activity in a named camera-covered area, including questions like 'what's happening in the front yard?', 'who is at the door?', or 'is anyone on the porch?'",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": "Device Control",
+      "tags": [
+        "camera",
+        "snapshot",
+        "vision",
+        "device",
+        "integration"
+      ],
+      "entry": "verba/camera_control.py",
+      "sha256": "181925ed12cd5a75b3b01d503149f49b9b8fea2352af50d193ecfa5b3e22d20d"
+    },
+    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
       "version": "1.0.27",
@@ -212,9 +244,9 @@
     {
       "id": "device_control",
       "name": "Device Control",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "98.4",
-      "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, cameras, media players, remotes, scenes, and scripts.",
+      "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, media players, remotes, scenes, and scripts. Use Camera Control for cameras and snapshots.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -240,7 +272,7 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "a701c68558af8979b1fdd5ff0e760c3b7c0a3e2c3f93112104318ca454a2315c"
+      "sha256": "585ba9fd9fe58191988cc66c3ec5fd00e069864b8c2384983b35b146c80c8f2e"
     },
     {
       "id": "discord_admin_response_mode",

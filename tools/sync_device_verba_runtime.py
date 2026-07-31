@@ -20,6 +20,7 @@ START_MARKER = "# BEGIN EMBEDDED DEVICE VERBA RUNTIME"
 END_MARKER = "# END EMBEDDED DEVICE VERBA RUNTIME"
 TARGETS = (
     "battery_status.py",
+    "camera_control.py",
     "device_control.py",
     "energy_status.py",
     "entry_sensor_status.py",

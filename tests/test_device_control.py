@@ -6,11 +6,13 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 
 SHOP_ROOT = Path(__file__).resolve().parents[1]
 CATEGORY_DEVICE_VERBAS = {
     "battery_status",
+    "camera_control",
     "device_control",
     "energy_status",
     "entry_sensor_status",
@@ -24,7 +26,6 @@ CATEGORY_DEVICE_VERBAS = {
     "temperature_status",
 }
 REMOVED_CONTROL_VERBAS = {
-    "camera_control",
     "climate_control",
     "cover_control",
     "fan_control",
@@ -86,6 +87,7 @@ def _load_verba_module(verba_id: str):
 
 
 device_control_module = _load_verba_module("device_control")
+camera_control_module = _load_verba_module("camera_control")
 
 
 class StandaloneCategoryVerbaTests(unittest.TestCase):
@@ -124,7 +126,10 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
                 self.assertEqual(row["entry"], f"verba/{verba_id}.py")
                 self.assertEqual(
                     row["version"],
-                    "1.0.2" if verba_id == "device_control" else "1.0.1",
+                    {
+                        "camera_control": "1.0.3",
+                        "device_control": "1.0.3",
+                    }.get(verba_id, "1.0.1"),
                 )
                 self.assertEqual(row["min_tater_version"], "98.4")
                 self.assertEqual(len(row["sha256"]), 64)
@@ -136,12 +141,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
 
         self.assertEqual(plugin.name, "device_control")
         self.assertEqual(plugin.inventory_scope, "all")
-        self.assertEqual(
-            plugin.description,
-            "Use for any request to control or check smart-home devices across integrations, "
-            "including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, "
-            "cameras, media players, remotes, scenes, and scripts.",
-        )
+        self.assertIn("Use Camera Control for cameras and snapshots", plugin.description)
         self.assertIn("do not guess", plugin.when_to_use)
         for action in (
             "turn_on",
@@ -150,14 +150,14 @@ class DeviceControlVerbaTests(unittest.TestCase):
             "set_position",
             "set_temperature",
             "lock",
-            "camera_snapshot",
         ):
             self.assertIn(action, plugin.allowed_actions)
+        self.assertNotIn("camera_snapshot", plugin.allowed_actions)
 
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.2")
+        self.assertEqual(plugin.version, "1.0.3")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)
@@ -170,7 +170,144 @@ class DeviceControlVerbaTests(unittest.TestCase):
         manifest = json.loads((SHOP_ROOT / "manifest.json").read_text(encoding="utf-8"))
         catalog_ids = {str(row.get("id") or "") for row in manifest.get("verbas", [])}
         self.assertIn("device_control", catalog_ids)
+        self.assertIn("camera_control", catalog_ids)
         self.assertTrue(REMOVED_CONTROL_VERBAS.isdisjoint(catalog_ids))
+
+
+class CameraControlVerbaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plugin = camera_control_module.CameraControlPlugin()
+
+    def test_camera_verba_owns_snapshot_requests(self) -> None:
+        self.assertEqual(self.plugin.name, "camera_control")
+        self.assertEqual(self.plugin.version, "1.0.3")
+        self.assertEqual(self.plugin.min_tater_version, "98.4")
+        self.assertEqual(self.plugin.category_id, "camera")
+        self.assertEqual(
+            self.plugin.allowed_actions,
+            {"list", "status", "camera_snapshot"},
+        )
+        self.assertEqual(
+            self.plugin.verba_dec,
+            "Use for requests about cameras, doorbells, snapshots, camera images, or current visible activity in a "
+            "named camera-covered area, including questions like 'what's happening in the front yard?', "
+            "'who is at the door?', or 'is anyone on the porch?'",
+        )
+        self.assertEqual(
+            self.plugin._normalize_action("", "show me a snapshot from the front door camera"),
+            "camera_snapshot",
+        )
+        self.assertEqual(
+            self.plugin._normalize_action("", "what is happening in the front yard?"),
+            "camera_snapshot",
+        )
+        self.assertEqual(
+            self.plugin._clean_target("what is happening in the front yard?"),
+            "front yard",
+        )
+
+    def test_snapshot_bytes_become_an_image_artifact(self) -> None:
+        self.plugin._store_snapshot_blob = lambda _raw: "tater:blob:camera_snapshot:test"
+        artifact = self.plugin._camera_snapshot_artifact(
+            result={"bytes": b"camera-image", "content_type": "image/jpeg"},
+            device={
+                "integration_id": "homeassistant",
+                "id": "camera.front_door",
+                "name": "Front Door",
+            },
+            index=0,
+        )
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact["type"], "image")
+        self.assertEqual(artifact["mimetype"], "image/jpeg")
+        self.assertEqual(artifact["source"], "camera_control")
+        self.assertEqual(artifact["device_id"], "camera.front_door")
+        self.assertEqual(artifact["blob_key"], "tater:blob:camera_snapshot:test")
+
+    def test_snapshot_uses_taters_configured_vision_tool(self) -> None:
+        calls = []
+        kernel_tools_stub = types.ModuleType("kernel_tools")
+
+        def image_describe(**kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "data": {"description": "A person is walking up the driveway.", "model": "vision-model"},
+                "summary_for_user": "A person is walking up the driveway.",
+            }
+
+        kernel_tools_stub.image_describe = image_describe
+        artifact = {
+            "type": "image",
+            "name": "Driveway-snapshot.jpg",
+            "mimetype": "image/jpeg",
+            "device_name": "Driveway",
+            "blob_key": "tater:blob:camera_snapshot:test",
+        }
+        with patch.dict(sys.modules, {"kernel_tools": kernel_tools_stub}):
+            result = self.plugin._describe_snapshot_artifact(
+                artifact,
+                "what is happening in the driveway?",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["image_ref"], artifact)
+        self.assertIn("what is happening in the driveway", calls[0]["prompt"])
+
+
+class CameraVisionWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_description_is_returned_to_the_assistant(self) -> None:
+        plugin = camera_control_module.CameraControlPlugin()
+        snapshot_result = {
+            "ok": True,
+            "facts": {"action": "camera_snapshot", "artifact_count": 1},
+            "data": {"intent": {"action": "camera_snapshot"}},
+            "summary_for_user": "Captured 1 camera snapshot for Front Yard.",
+            "say_hint": "",
+            "artifacts": [
+                {
+                    "type": "image",
+                    "name": "Front-Yard-snapshot.jpg",
+                    "mimetype": "image/jpeg",
+                    "device_name": "Front Yard",
+                    "blob_key": "tater:blob:camera_snapshot:test",
+                }
+            ],
+        }
+        vision_result = {
+            "ok": True,
+            "data": {
+                "description": "A delivery van is parked by the curb.",
+                "model": "vision-model",
+            },
+            "summary_for_user": "A delivery van is parked by the curb.",
+        }
+
+        with patch.object(
+            camera_control_module._DeviceVerbaRuntime,
+            "_handle",
+            new=AsyncMock(return_value=snapshot_result),
+        ), patch.object(
+            plugin,
+            "_describe_snapshot_artifact",
+            return_value=vision_result,
+        ) as describe:
+            result = await plugin._handle(
+                {"query": "what is happening in the front yard?"},
+                llm_client=None,
+            )
+
+        describe.assert_called_once()
+        self.assertEqual(result["facts"]["vision_count"], 1)
+        self.assertEqual(
+            result["data"]["vision_descriptions"][0]["description"],
+            "A delivery van is parked by the curb.",
+        )
+        self.assertEqual(
+            result["summary_for_user"],
+            "Front Yard: A delivery van is parked by the curb.",
+        )
 
 
 class UnifiedDeviceSelectionTests(unittest.IsolatedAsyncioTestCase):
