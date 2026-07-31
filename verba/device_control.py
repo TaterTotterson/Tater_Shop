@@ -1422,7 +1422,7 @@ class DeviceControlPlugin(_DeviceVerbaRuntime):
     name = "device_control"
     verba_name = "Device Control"
     pretty_name = "Device Control"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [

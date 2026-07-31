@@ -212,7 +212,7 @@
     {
       "id": "device_control",
       "name": "Device Control",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, cameras, media players, remotes, scenes, and scripts.",
       "portals": [
@@ -240,7 +240,7 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "a1ff54e43111bdf8f4bdeefed453ad0051099d926d2b2f825207d843d768ca00"
+      "sha256": "d1eed60b7300748db8432685728444c24d2cc897f152b3832579e7205fa4ed48"
     },
     {
       "id": "discord_admin_response_mode",

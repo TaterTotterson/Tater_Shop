@@ -153,7 +153,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.1")
+        self.assertEqual(plugin.version, "1.0.2")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)
