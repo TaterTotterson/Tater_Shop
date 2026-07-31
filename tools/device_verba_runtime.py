@@ -65,7 +65,7 @@ class _DeviceVerbaRuntime(ToolVerba):
     name = "_device_verba_runtime"
     verba_name = "Device Verba Runtime"
     pretty_name = "Device Verba Runtime"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [

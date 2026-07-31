@@ -122,6 +122,10 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
             with self.subTest(verba_id=verba_id):
                 row = catalog[verba_id]
                 self.assertEqual(row["entry"], f"verba/{verba_id}.py")
+                self.assertEqual(
+                    row["version"],
+                    "1.0.2" if verba_id == "device_control" else "1.0.1",
+                )
                 self.assertEqual(row["min_tater_version"], "98.4")
                 self.assertEqual(len(row["sha256"]), 64)
 

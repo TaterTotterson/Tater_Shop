@@ -23,7 +23,7 @@
     {
       "id": "battery_status",
       "name": "Battery Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read battery status from Hue, Ecobee/HomeKit, Aladdin, UniFi Protect, Home Assistant, and other integrations.",
       "portals": [
@@ -48,7 +48,7 @@
         "integration"
       ],
       "entry": "verba/battery_status.py",
-      "sha256": "c81ea8b9f38680ff85ac73ab05ce3598b4b6810eeb21750ec2655eaa1353c396"
+      "sha256": "486de482f0390c4f26ee23d04656c621db8613955a86fc5ffa75cda32819a220"
     },
     {
       "id": "broadcast",
@@ -240,7 +240,7 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "d1eed60b7300748db8432685728444c24d2cc897f152b3832579e7205fa4ed48"
+      "sha256": "a701c68558af8979b1fdd5ff0e760c3b7c0a3e2c3f93112104318ca454a2315c"
     },
     {
       "id": "discord_admin_response_mode",
@@ -299,7 +299,7 @@
     {
       "id": "energy_status",
       "name": "Energy Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read energy and power data from Shelly, Home Assistant, and other integrations.",
       "portals": [
@@ -326,12 +326,12 @@
         "integration"
       ],
       "entry": "verba/energy_status.py",
-      "sha256": "9ec29d56cba7a70ee51f20e92f9f6ad838c7335b88a9b738174b3e8a3f92e327"
+      "sha256": "7db2b7e1ca8bfebef15583a642ebe90ae781f4caed599e8bf3ad721d0960afff"
     },
     {
       "id": "entry_sensor_status",
       "name": "Door & Window Sensor Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read entry sensor status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
       "portals": [
@@ -358,7 +358,7 @@
         "integration"
       ],
       "entry": "verba/entry_sensor_status.py",
-      "sha256": "043dbb7c2e879ca1ad14a2a7e4a1f57a7095cc27989d1cbef3392bcad9efcee4"
+      "sha256": "e35fbe425758caf43335ada3e569b54d779dae11d5a089d119cbdab72366ab5c"
     },
     {
       "id": "find_my_phone",
@@ -434,7 +434,7 @@
     {
       "id": "humidity_status",
       "name": "Humidity Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read humidity from Ecobee/HomeKit, Home Assistant, Hue, Shelly, UniFi Protect, and other integrations.",
       "portals": [
@@ -459,12 +459,12 @@
         "integration"
       ],
       "entry": "verba/humidity_status.py",
-      "sha256": "181fd65a072c97e9766a500d4fe1d760da038f36ac1d9e89d98927b0b3188711"
+      "sha256": "0a347a65c5d995f09a13ca732d2fb90688b9f66699199104e6965259497cdf5b"
     },
     {
       "id": "illuminance_status",
       "name": "Light Sensor Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read lux and light-level sensors from Hue, Shelly, Home Assistant, UniFi Protect, and other integrations.",
       "portals": [
@@ -491,7 +491,7 @@
         "integration"
       ],
       "entry": "verba/illuminance_status.py",
-      "sha256": "dbd1c6ff0c2e409a6ca7ba2b2d4ee30caa21a4283d3b89372fbade79f9ec0696"
+      "sha256": "5df76c6e7db60bb685d30efedbcb87c2a5549028c35a6b62ae8409ee0dc4bbb6"
     },
     {
       "id": "irc_admin_op",
@@ -637,7 +637,7 @@
     {
       "id": "leak_status",
       "name": "Leak Sensor Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read leak sensor status from UniFi Protect, Home Assistant, and other integrations.",
       "portals": [
@@ -664,7 +664,7 @@
         "integration"
       ],
       "entry": "verba/leak_status.py",
-      "sha256": "b867142fc22c8b10c6b907d15627bc7d31ad13cffb8060838a5b3cce6791d7ca"
+      "sha256": "6d0d2f4d13f9e7410557bd49094be3cb1bc320ec7135d8f05250ca5bf46854c0"
     },
     {
       "id": "lowfi_video",
@@ -807,7 +807,7 @@
     {
       "id": "motion_status",
       "name": "Motion Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read motion status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
       "portals": [
@@ -833,7 +833,7 @@
         "integration"
       ],
       "entry": "verba/motion_status.py",
-      "sha256": "7b4808df08269e41a270accf8fec196bb18b3a7ed09c43e5f1939f6a184dafb2"
+      "sha256": "80c76e8a0fe7d551f751509f255f522cf45f7eeb257edab9f846b0cf7dca9801"
     },
     {
       "id": "music_assistant",
@@ -864,7 +864,7 @@
     {
       "id": "network_device_status",
       "name": "Network Device Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read network device status from UniFi Network and any integration that exposes network devices.",
       "portals": [
@@ -890,7 +890,7 @@
         "integration"
       ],
       "entry": "verba/network_device_status.py",
-      "sha256": "428585c9b419984053a7c383e8ff2e4c90e1104ea21a3b93f15ada85a32ca315"
+      "sha256": "00435dc0773685654d484e85f8b43872fdea6c03bedc69f5378309592fa46d84"
     },
     {
       "id": "obsidian_note",
@@ -1129,7 +1129,7 @@
     {
       "id": "presence_status",
       "name": "Presence Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read presence from UniFi Network clients, Ecobee/HomeKit occupancy sensors, and other integrations.",
       "portals": [
@@ -1156,7 +1156,7 @@
         "integration"
       ],
       "entry": "verba/presence_status.py",
-      "sha256": "446a028d1375f94b44c9454feae068eebd11d3c9062b6f6c9a0e00ce6b2aac6d"
+      "sha256": "a9d56a6601f7ec4234aa341664841c8469c3ef294f677d9664d3591a0db74dba"
     },
     {
       "id": "roon_music",
@@ -1193,7 +1193,7 @@
     {
       "id": "sensor_status",
       "name": "Sensor Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read other sensor status from all enabled integrations through the shared device registry.",
       "portals": [
@@ -1218,7 +1218,7 @@
         "integration"
       ],
       "entry": "verba/sensor_status.py",
-      "sha256": "b15c8884281ca2c789720af3a945e9b87640108172b5356e9166f289b02fa966"
+      "sha256": "16bad3cd6c5d83608d1be42dad0307215b55e7f8fd7755f2c7695dce4abd6577"
     },
     {
       "id": "sftpgo_account",
@@ -1289,7 +1289,7 @@
     {
       "id": "temperature_status",
       "name": "Temperature Status",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Read temperature from Ecobee/HomeKit, Home Assistant, Hue, Shelly, UniFi Protect, and other integrations.",
       "portals": [
@@ -1314,7 +1314,7 @@
         "integration"
       ],
       "entry": "verba/temperature_status.py",
-      "sha256": "741c3380c31dedc815194894140bbc3564c986c9c55811136b35b4945f7c1f13"
+      "sha256": "81b0bf2833a79847ac28324807273bbe35f7b0cdbf7ba99f14e9817ba04bc68a"
     },
     {
       "id": "unifi_network_health",
