@@ -20,8 +20,8 @@ import requests
 from helpers import redis_client
 
 
-__version__ = "2.1.0"
-MIN_TATER_VERSION = "98.3"
+__version__ = "2.2.0"
+MIN_TATER_VERSION = "98.6"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, Navidrome, or Roon to Tater; "
     "browse music and play voice-controlled queues across satellites, stereo pairs, and media players."
@@ -1637,6 +1637,8 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
             0,
             100,
         )
+        if _text(player.get("status")).lower() == "playing":
+            _stop_target(targets)
         result = _play_track(track, targets, volume_percent=volume, client=store)
         player.update(
             {
@@ -1685,18 +1687,20 @@ def _create_and_start_queue(
     store = client or globals().get("redis_client")
     cfg = _settings(store)
     maximum = _as_int(cfg.get("maximum_queue_tracks"), 200, 1, 1000)
-    queue = [dict(track) for track in tracks[:maximum]]
+    original_queue = [dict(track) for track in tracks[:maximum]]
+    queue = [dict(track) for track in original_queue]
     if shuffle and len(queue) > 1:
         random.SystemRandom().shuffle(queue)
     with _state_lock:
         previous = _player(store)
         old_targets = _list(previous.get("targets") or previous.get("target"))
-        if previous.get("status") == "playing" and old_targets and old_targets != targets:
+        if previous.get("status") == "playing" and old_targets:
             _stop_target(old_targets)
         player = {
             "status": "queued",
             "provider": _provider_id(queue[0].get("provider"), _provider_id(cfg.get("provider"))),
             "queue": queue,
+            "queue_original": original_queue,
             "index": 0,
             "current": queue[0],
             "targets": _list(targets),
@@ -1736,6 +1740,53 @@ def _advance_player(direction: int, *, client: Any = None) -> Dict[str, Any]:
         if next_index < 0:
             next_index = len(queue) - 1 if repeat == "all" else 0
     return _start_player_index(next_index, client=store)
+
+
+def _set_player_shuffle(enabled: bool, *, client: Any = None) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    with _state_lock:
+        player = _player(store)
+        queue = [dict(track) for track in list(player.get("queue") or []) if isinstance(track, dict)]
+        if not queue:
+            player["shuffle"] = bool(enabled)
+            _save_player(player, store)
+            return player
+
+        index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
+        original = [
+            dict(track)
+            for track in list(player.get("queue_original") or queue)
+            if isinstance(track, dict)
+        ]
+        player["queue_original"] = original
+        if enabled:
+            remaining = queue[index + 1 :]
+            random.SystemRandom().shuffle(remaining)
+        else:
+            used = queue[: index + 1]
+
+            def track_token(track: Dict[str, Any]) -> str:
+                return _text(track.get("id") or track.get("url") or track.get("stream_url")) or json.dumps(
+                    track,
+                    sort_keys=True,
+                    default=str,
+                )
+
+            used_counts: Dict[str, int] = {}
+            for track in used:
+                token = track_token(track)
+                used_counts[token] = used_counts.get(token, 0) + 1
+            remaining = []
+            for track in original:
+                token = track_token(track)
+                if used_counts.get(token, 0) > 0:
+                    used_counts[token] -= 1
+                    continue
+                remaining.append(dict(track))
+        player["queue"] = [*queue[: index + 1], *remaining]
+        player["shuffle"] = bool(enabled)
+        _save_player(player, store)
+        return player
 
 
 def _stop_player(*, client: Any = None) -> Dict[str, Any]:
@@ -2364,7 +2415,22 @@ def _player_item(
     target_summary = _target_summary(targets)
     player_provider = _provider_id(player.get("provider"), active_provider)
     is_roon = player_provider == "roon"
-    queue_count = len(player.get("queue") or [])
+    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+    queue_count = len(queue)
+    current_index = _as_int(player.get("index"), -1, -1, max(0, queue_count - 1))
+    track_list = [
+        {
+            "id": f"queue:{index}",
+            "position": index + 1,
+            "title": _text(track.get("title")) or "Untitled",
+            "artist": _text(track.get("artist") or track.get("album_artist")),
+            "album": _text(track.get("album")),
+            "duration": _text(track.get("duration_display")),
+            "active": index == current_index,
+        }
+        for index, track in enumerate(queue[:200])
+        if isinstance(track, dict)
+    ]
     targets_field = {
         "key": "targets",
         "label": "Play On",
@@ -2386,7 +2452,7 @@ def _player_item(
                 if is_roon
                 else (
                     f"Playing on {target_summary}. Queue position "
-                    f"{_as_int(player.get('index'), -1, -1, 100000) + 1} of {queue_count}."
+                    f"{current_index + 1} of {queue_count}."
                 )
             )
             if current
@@ -2409,8 +2475,7 @@ def _player_item(
             {"label": "Destinations", "value": target_summary if targets else "Choose below"},
         ],
         "fields_popup": False,
-        "fields_dropdown": True,
-        "fields_dropdown_label": "Find music & playback options",
+        "fields_dropdown": False,
         "popup_fields": [dict(targets_field)],
         "settings_title": "Choose Speakers & Players",
         "settings_label": "🔊",
@@ -2419,25 +2484,22 @@ def _player_item(
         "show_save_button": False,
         "fields": [
             {
-                "key": "query",
-                "label": "Find Music",
-                "type": "text",
-                "value": "",
-                "placeholder": "Reggae, Bob Marley, Exodus, or a song title",
-            },
-            {
-                "key": "shuffle",
-                "label": "Shuffle",
-                "type": "checkbox",
-                "value": bool(player.get("shuffle")),
-            },
-            {
                 "key": "volume_percent",
-                "label": "Volume (%)",
-                "type": "number",
+                "label": "Volume",
+                "type": "range",
                 "value": _as_int(player.get("volume_percent"), 75, 0, 100),
+                "min": 0,
+                "max": 100,
+                "step": 1,
+                "suffix": "%",
+                "action": "music_ui_set_volume",
             },
         ],
+        "track_list": track_list,
+        "track_list_label": "Current Track List",
+        "track_list_action": "music_ui_queue_play",
+        "track_list_shuffle": bool(player.get("shuffle")),
+        "track_list_shuffle_action": "music_ui_set_shuffle",
         "save_action": "music_ui_save_player",
         "save_label": "Set Player",
         "actions": [
@@ -2478,32 +2540,26 @@ def _player_item(
     }
 
 
-def _queue_items(player: Dict[str, Any]) -> List[Dict[str, Any]]:
-    items = []
-    current_index = _as_int(player.get("index"), -1, -1, 100000)
-    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
-    for index, track in enumerate(queue[:200]):
-        items.append(
+def _search_item() -> Dict[str, Any]:
+    return {
+        "id": "search:music",
+        "group": "search",
+        "card_variant": "music_search",
+        "title": "Search Your Library",
+        "subtitle": "Find a genre, artist, album, or song and start a fresh track list.",
+        "fields_dropdown": False,
+        "fields": [
             {
-                "id": f"queue:{index}",
-                "group": "queue",
-                "title": f"{index + 1}. {_track_label(track)}",
-                "subtitle": " · ".join(
-                    value for value in [_text(track.get("album")), _text(track.get("genre"))] if value
-                ),
-                "detail": _text(track.get("duration_display")),
-                "hero_image_src": _art_data_uri(track),
-                "hero_badges": [
-                    {
-                        "label": "NOW PLAYING" if index == current_index else "QUEUED",
-                        "tone": "good" if index == current_index else "muted",
-                    }
-                ],
-                "run_action": "music_ui_queue_play",
-                "run_label": "Play This Track",
-            }
-        )
-    return items
+                "key": "query",
+                "label": "Find Music",
+                "type": "text",
+                "value": "",
+                "placeholder": "Reggae, Bob Marley, Exodus, or a song title",
+            },
+        ],
+        "run_action": "music_ui_play",
+        "run_label": "Play Search",
+    }
 
 
 def _facet_items(catalog: Dict[str, Any], category: str, label: str) -> List[Dict[str, Any]]:
@@ -3019,8 +3075,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             target_options.append({"value": saved, "label": f"Saved player: {saved}"})
             known_targets.add(saved)
 
-    item_forms = [_player_item(player, target_options, active_provider)]
-    item_forms.extend(_queue_items(player))
+    item_forms = [_player_item(player, target_options, active_provider), _search_item()]
     item_forms.extend(_facet_items(catalog, "genres", "Genre"))
     item_forms.extend(_facet_items(catalog, "artists", "Artist"))
     item_forms.extend(_facet_items(catalog, "albums", "Album"))
@@ -3111,6 +3166,8 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "kind": "settings_manager",
             "title": "Music Core",
             "appearance": "music_library",
+            "live_updates": True,
+            "poll_interval_ms": 3000,
             "persistent_item_groups": ["player"],
             "default_tab": "library",
             "manager_tabs": [
@@ -3119,6 +3176,13 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "label": "Browse Library",
                     "source": "grouped_items",
                     "groups": [
+                        {
+                            "key": "search",
+                            "label": "Search",
+                            "item_group": "search",
+                            "selector": False,
+                            "empty_message": "Search is unavailable.",
+                        },
                         {
                             "key": "genres",
                             "label": "Genres",
@@ -3145,7 +3209,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         },
                     ],
                 },
-                {"key": "queue", "label": "Queue", "source": "items", "item_group": "queue"},
                 {"key": "providers", "label": "Providers", "source": "items", "item_group": "providers"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
             ],
@@ -3426,6 +3489,7 @@ def handle_htmlui_tab_action(
             _validate_catalog_provider_targets(targets)
             if old_targets and old_targets != targets:
                 _stop_target(old_targets)
+                existing["status"] = "stopped"
             existing["targets"] = targets
             existing["shuffle"] = _as_bool(values.get("shuffle"), bool(existing.get("shuffle")))
             existing["volume_percent"] = _as_int(
@@ -3448,8 +3512,16 @@ def handle_htmlui_tab_action(
                 "provider": selected_provider,
                 "query": values.get("query"),
                 "targets": requested_targets,
-                "shuffle": values.get("shuffle"),
-                "volume_percent": values.get("volume_percent"),
+                "shuffle": (
+                    values.get("shuffle")
+                    if values.get("shuffle") is not None
+                    else existing.get("shuffle")
+                ),
+                "volume_percent": (
+                    values.get("volume_percent")
+                    if values.get("volume_percent") is not None
+                    else existing.get("volume_percent")
+                ),
             },
             {},
             store,
@@ -3483,6 +3555,7 @@ def handle_htmlui_tab_action(
                 _roon_control("stop", client=store)
             else:
                 _stop_target(old_targets)
+            player["status"] = "stopped"
         _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
         player["provider"] = selected_provider
         player["targets"] = targets
@@ -3527,6 +3600,28 @@ def handle_htmlui_tab_action(
             )
             return {"ok": True, "message": f"Moved music to {_target_summary(targets)}."}
         return {"ok": True, "message": f"Music player set to {_target_summary(targets)}."}
+
+    if action_name == "music_ui_set_volume":
+        player = _player(store)
+        volume = _as_int(
+            values.get("volume_percent"),
+            _as_int(player.get("volume_percent"), 75, 0, 100),
+            0,
+            100,
+        )
+        player["volume_percent"] = volume
+        _save_player(player, store)
+        return {"ok": True, "message": f"Music volume set to {volume}%."}
+
+    if action_name == "music_ui_set_shuffle":
+        player = _set_player_shuffle(
+            _as_bool(values.get("shuffle"), False),
+            client=store,
+        )
+        return {
+            "ok": True,
+            "message": "Shuffle is on." if player.get("shuffle") else "Shuffle is off.",
+        }
 
     if action_name == "music_ui_stop":
         player = _player(store)
@@ -3582,6 +3677,7 @@ def handle_htmlui_tab_action(
                     )
                 ),
                 "shuffle": facet != "album",
+                "volume_percent": current_player.get("volume_percent"),
             },
             {},
             store,

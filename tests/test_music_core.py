@@ -604,7 +604,12 @@ class MusicCoreTests(unittest.TestCase):
             if row.get("id") == "player:main"
         )
         fields = {row["key"]: row for row in player["fields"]}
-        self.assertEqual(set(fields), {"query", "shuffle", "volume_percent"})
+        self.assertEqual(set(fields), {"volume_percent"})
+        self.assertEqual(fields["volume_percent"]["type"], "range")
+        self.assertEqual(fields["volume_percent"]["action"], "music_ui_set_volume")
+        self.assertEqual(player["track_list"], [])
+        self.assertEqual(player["track_list_action"], "music_ui_queue_play")
+        self.assertEqual(player["track_list_shuffle_action"], "music_ui_set_shuffle")
         self.assertEqual(
             [row["action"] for row in player["actions"]],
             [
@@ -622,15 +627,26 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(player["popup_fields"][0]["label"], "Play On")
         self.assertEqual(player["popup_fields"][0]["type"], "multiselect")
         self.assertEqual(payload["ui"]["appearance"], "music_library")
+        self.assertTrue(payload["ui"]["live_updates"])
+        self.assertEqual(payload["ui"]["poll_interval_ms"], 3000)
         self.assertEqual(payload["ui"]["persistent_item_groups"], ["player"])
         self.assertEqual(payload["ui"]["default_tab"], "library")
         tabs = {row["key"]: row for row in payload["ui"]["manager_tabs"]}
         self.assertNotIn("player", tabs)
         self.assertEqual(
             [row["key"] for row in tabs["library"]["groups"]],
-            ["genres", "artists", "albums"],
+            ["search", "genres", "artists", "albums"],
         )
         self.assertTrue(all(row["selector"] is False for row in tabs["library"]["groups"]))
+        self.assertNotIn("queue", tabs)
+        search = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "search:music"
+        )
+        self.assertEqual(search["group"], "search")
+        self.assertEqual(search["fields"][0]["key"], "query")
+        self.assertEqual(search["run_action"], "music_ui_play")
         library_tiles = [
             row
             for row in payload["ui"]["item_forms"]
@@ -664,6 +680,125 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(providers["provider:plex"]["fields"][1]["type"], "password")
         self.assertEqual(providers["provider:roon"]["fields"], [])
 
+    def test_player_track_list_marks_current_track_and_keeps_album_together(self):
+        album_tracks = [
+            {**self.tracks[0], "id": "album:1", "title": "First Song", "album": "Exodus"},
+            {**self.tracks[0], "id": "album:2", "title": "Second Song", "album": "Exodus"},
+        ]
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "queue": album_tracks,
+                    "queue_original": album_tracks,
+                    "index": 1,
+                    "current": album_tracks[1],
+                    "targets": ["voice_core:native:kitchen"],
+                    "provider": "tater_tube",
+                }
+            ),
+        )
+        with patch.object(self.core, "_target_options", return_value=[]):
+            payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
+        player = next(row for row in payload["ui"]["item_forms"] if row.get("id") == "player:main")
+        self.assertEqual([row["title"] for row in player["track_list"]], ["First Song", "Second Song"])
+        self.assertEqual([row["active"] for row in player["track_list"]], [False, True])
+
+    def test_next_track_stops_active_session_before_starting_the_next_track(self):
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "queue": self.tracks,
+                    "queue_original": self.tracks,
+                    "index": 0,
+                    "current": self.tracks[0],
+                    "targets": ["voice_core:native:kitchen"],
+                    "provider": "tater_tube",
+                }
+            ),
+        )
+        with patch.object(self.core, "_stop_target", return_value=[]) as stop, patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play:
+            player = self.core._advance_player(1, client=self.redis)
+        stop.assert_called_once_with(["voice_core:native:kitchen"])
+        self.assertEqual(play.call_args.args[0]["id"], "track:two")
+        self.assertEqual(player["index"], 1)
+        self.assertEqual(player["current"]["id"], "track:two")
+
+    def test_starting_another_album_replaces_the_existing_track_list(self):
+        first_album = [{**self.tracks[0], "id": "first:1"}, {**self.tracks[0], "id": "first:2"}]
+        second_album = [{**self.tracks[1], "id": "second:1"}]
+        with patch.object(self.core, "_stop_target", return_value=[]) as stop, patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ):
+            self.core._create_and_start_queue(
+                first_album,
+                targets=["voice_core:native:kitchen"],
+                shuffle=False,
+                volume_percent=70,
+                client=self.redis,
+            )
+            player = self.core._create_and_start_queue(
+                second_album,
+                targets=["voice_core:native:kitchen"],
+                shuffle=False,
+                volume_percent=70,
+                client=self.redis,
+            )
+        self.assertEqual([row["id"] for row in player["queue"]], ["second:1"])
+        self.assertEqual([row["id"] for row in player["queue_original"]], ["second:1"])
+        stop.assert_called_once_with(["voice_core:native:kitchen"])
+
+    def test_live_volume_and_shuffle_actions_update_the_player_without_restarting(self):
+        queue = [
+            {**self.tracks[0], "id": "track:one"},
+            {**self.tracks[1], "id": "track:two"},
+            {**self.tracks[1], "id": "track:three", "title": "So What"},
+        ]
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "queue": queue,
+                    "queue_original": queue,
+                    "index": 0,
+                    "current": queue[0],
+                    "targets": ["voice_core:native:kitchen"],
+                    "provider": "tater_tube",
+                    "volume_percent": 70,
+                }
+            ),
+        )
+        volume_result = self.core.handle_htmlui_tab_action(
+            action="music_ui_set_volume",
+            payload={"values": {"volume_percent": 42}},
+            redis_client=self.redis,
+        )
+        shuffle_result = self.core.handle_htmlui_tab_action(
+            action="music_ui_set_shuffle",
+            payload={"values": {"shuffle": True}},
+            redis_client=self.redis,
+        )
+        player = self.core._player(self.redis)
+        self.assertTrue(volume_result["ok"])
+        self.assertTrue(shuffle_result["ok"])
+        self.assertEqual(player["volume_percent"], 42)
+        self.assertTrue(player["shuffle"])
+        self.assertEqual(player["queue"][0]["id"], "track:one")
+        self.assertEqual(
+            {row["id"] for row in player["queue"][1:]},
+            {"track:two", "track:three"},
+        )
+
     def test_player_search_keeps_destinations_selected_from_speaker_popup(self):
         self.redis.set(
             self.core.PLAYER_KEY,
@@ -672,6 +807,8 @@ class MusicCoreTests(unittest.TestCase):
                     "status": "stopped",
                     "targets": ["voice_core:native:kitchen"],
                     "provider": "tater_tube",
+                    "shuffle": False,
+                    "volume_percent": 42,
                 }
             ),
         )
@@ -682,7 +819,7 @@ class MusicCoreTests(unittest.TestCase):
         ) as play_request:
             result = self.core.handle_htmlui_tab_action(
                 action="music_ui_play",
-                payload={"values": {"query": "reggae", "shuffle": True}},
+                payload={"values": {"query": "reggae"}},
                 redis_client=self.redis,
             )
 
@@ -691,6 +828,8 @@ class MusicCoreTests(unittest.TestCase):
             play_request.call_args.args[0]["targets"],
             ["voice_core:native:kitchen"],
         )
+        self.assertFalse(play_request.call_args.args[0]["shuffle"])
+        self.assertEqual(play_request.call_args.args[0]["volume_percent"], 42)
 
 
     def test_empty_player_search_replays_current_queue_at_zero_volume(self):
