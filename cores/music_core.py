@@ -25,12 +25,13 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.3.0"
+__version__ = "2.5.0"
 MIN_TATER_VERSION = "98.6"
 CORE_DESCRIPTION = (
-    "Connect Tater Tube, Plex, Emby, Jellyfin, Navidrome, or Roon to Tater; "
-    "browse music, build AI-named recommendations from listening history, and play "
-    "voice-controlled queues across satellites, stereo pairs, and media players."
+    "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; "
+    "browse music with provider-native album art, build AI-named recommendations from listening history, and keep "
+    "voice-controlled queues playing with a smart continuous-radio refill across "
+    "satellites, stereo pairs, and media players."
 )
 TAGS = [
     "music",
@@ -40,12 +41,12 @@ TAGS = [
     "emby",
     "jellyfin",
     "navidrome",
-    "roon",
     "satellite",
     "stereo",
     "multi-room",
     "queue",
     "recommendations",
+    "album-art",
 ]
 
 logger = logging.getLogger("music_core")
@@ -65,7 +66,6 @@ CORE_SETTINGS = {
                 {"value": "emby", "label": "Emby"},
                 {"value": "jellyfin", "label": "Jellyfin"},
                 {"value": "navidrome", "label": "Navidrome"},
-                {"value": "roon", "label": "Roon"},
             ],
             "description": "Music source used by Music Core. More providers can be added without changing the player.",
         },
@@ -145,13 +145,16 @@ MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
 MAX_HISTORY_EVENTS = 300
 MAX_RECOMMENDATION_CANDIDATES = 200
+CATALOG_ARTWORK_SCHEMA = 2
+CONTINUATION_TRIGGER_REMAINING_TRACKS = 2
+CONTINUATION_BATCH_TRACKS = 12
+MAX_CONTINUATION_CANDIDATES = 200
 PROVIDER_LABELS = {
     "tater_tube": "Tater Tube Server",
     "plex": "Plex",
     "emby": "Emby",
     "jellyfin": "Jellyfin",
     "navidrome": "Navidrome",
-    "roon": "Roon",
 }
 CATALOG_PROVIDER_IDS = {"tater_tube", "plex", "emby", "jellyfin", "navidrome"}
 GENERIC_SEARCH_WORDS = {
@@ -174,9 +177,14 @@ GENERIC_SEARCH_WORDS = {
 
 _state_lock = threading.RLock()
 _artwork_cache: Dict[str, Dict[str, Any]] = {}
+_catalog_sync_lock = threading.Lock()
+_catalog_sync_started_at = 0.0
 _recommendation_lock = threading.Lock()
 _recommendation_started_at = 0.0
 _recommendation_thread: Optional[threading.Thread] = None
+_continuation_lock = threading.Lock()
+_continuation_started_at = 0.0
+_continuation_thread: Optional[threading.Thread] = None
 
 
 def _text(value: Any) -> str:
@@ -248,7 +256,6 @@ def _provider_id(value: Any, default: str = "tater_tube") -> str:
         "tater_tube_server": "tater_tube",
         "jelly_fin": "jellyfin",
         "navidrome_server": "navidrome",
-        "roon_core": "roon",
     }
     token = aliases.get(token, token)
     return token if token in PROVIDER_LABELS else default
@@ -414,23 +421,9 @@ class TaterTubeMusicProvider:
         return f"{self.server_url}/api/tater/local/stream?{query}"
 
     def artwork_url(self, track: Dict[str, Any]) -> str:
-        if not _as_bool(track.get("has_artwork"), False):
-            return ""
-        category_id = _text(track.get("category_id"))
-        if category_id.startswith("local:"):
-            category_id = category_id[len("local:") :]
-        path = _text(track.get("path"))
-        if not category_id or not path:
-            return ""
-        query = urlencode(
-            {
-                "category_id": category_id,
-                "source": _as_int(track.get("source_index"), 0, 0, 10000),
-                "path": path,
-                "player_token": self.token,
-            }
-        )
-        return f"{self.server_url}/api/tater/music/artwork?{query}"
+        # Tater Tube does not expose provider-managed album art yet. Music Core
+        # deliberately uses its generated cover rather than extracting file tags.
+        return ""
 
     def catalog(self) -> Dict[str, Any]:
         try:
@@ -566,6 +559,19 @@ class PlexMusicProvider:
         separator = "&" if "?" in path else "?"
         return f"{self.server_url}/{path.lstrip('/')}{separator}{urlencode({'X-Plex-Token': self.token})}"
 
+    def artwork_url(self, track: Dict[str, Any]) -> str:
+        path = _text(track.get("artwork_path"))
+        if not path:
+            return ""
+        if path.startswith(("http://", "https://")):
+            if urlparse(path).netloc.casefold() != urlparse(self.server_url).netloc.casefold():
+                return ""
+            base = path
+        else:
+            base = f"{self.server_url}/{path.lstrip('/')}"
+        separator = "&" if "?" in base else "?"
+        return f"{base}{separator}{urlencode({'X-Plex-Token': self.token})}"
+
     def catalog(self) -> Dict[str, Any]:
         payload = self.request("library/sections", timeout=60)
         container = payload.get("MediaContainer") if isinstance(payload, dict) else {}
@@ -641,6 +647,19 @@ class PlexMusicProvider:
                             "size_bytes": part.get("size"),
                             "stream_path": part.get("key"),
                             "container": part.get("container") or first_media.get("container"),
+                            "artwork_path": (
+                                item.get("parentThumb")
+                                or item.get("thumb")
+                                or item.get("squareArt")
+                                or item.get("grandparentThumb")
+                            ),
+                            "artwork_version": item.get("updatedAt") or item.get("parentKey"),
+                            "has_artwork": bool(
+                                item.get("parentThumb")
+                                or item.get("thumb")
+                                or item.get("squareArt")
+                                or item.get("grandparentThumb")
+                            ),
                             "provider": self.provider_id,
                         }
                     )
@@ -744,6 +763,21 @@ class MediaBrowserMusicProvider:
         stream_path = f"Audio/{quote(item_id, safe='')}/stream.{container}"
         return f"{self.api_url(stream_path)}?{query}"
 
+    def artwork_url(self, track: Dict[str, Any]) -> str:
+        item_id = _text(track.get("artwork_item_id"))
+        if not item_id:
+            return ""
+        query = {
+            "maxWidth": 1200,
+            "quality": 90,
+            "api_key": self.api_key,
+        }
+        tag = _text(track.get("artwork_version"))
+        if tag:
+            query["tag"] = tag
+        image_path = f"Items/{quote(item_id, safe='')}/Images/Primary"
+        return f"{self.api_url(image_path)}?{urlencode(query)}"
+
     def catalog(self) -> Dict[str, Any]:
         user_id = self.resolved_user_id()
         tracks: List[Dict[str, Any]] = []
@@ -757,7 +791,8 @@ class MediaBrowserMusicProvider:
                     "Recursive": "true",
                     "Fields": (
                         "Genres,MediaSources,Path,Album,AlbumArtist,Artists,"
-                        "ProductionYear,IndexNumber,ParentIndexNumber"
+                        "ProductionYear,IndexNumber,ParentIndexNumber,AlbumId,"
+                        "AlbumPrimaryImageTag,ImageTags"
                     ),
                     "SortBy": "AlbumArtist,Album,SortName",
                     "SortOrder": "Ascending",
@@ -797,6 +832,15 @@ class MediaBrowserMusicProvider:
                     if isinstance(first_artist, dict)
                     else first_artist
                 )
+                image_tags = item.get("ImageTags") if isinstance(item.get("ImageTags"), dict) else {}
+                item_image_tag = _text(image_tags.get("Primary"))
+                album_image_tag = _text(item.get("AlbumPrimaryImageTag"))
+                artwork_item_id = (
+                    _text(item.get("Id"))
+                    if item_image_tag
+                    else (_text(item.get("AlbumId")) if album_image_tag else "")
+                )
+                artwork_tag = item_image_tag or album_image_tag
                 tracks.append(
                     {
                         "id": f"{self.provider_id}:{_text(item.get('Id'))}",
@@ -816,6 +860,9 @@ class MediaBrowserMusicProvider:
                         "size_bytes": source.get("Size"),
                         "path": path,
                         "container": container,
+                        "artwork_item_id": artwork_item_id,
+                        "artwork_version": artwork_tag,
+                        "has_artwork": bool(artwork_item_id and artwork_tag),
                         "provider": self.provider_id,
                     }
                 )
@@ -902,6 +949,13 @@ class NavidromeMusicProvider:
         query = urlencode({**self.auth_params(), "id": item_id, "format": "raw"})
         return f"{self.server_url}/rest/stream.view?{query}"
 
+    def artwork_url(self, track: Dict[str, Any]) -> str:
+        artwork_id = _text(track.get("artwork_item_id"))
+        if not artwork_id:
+            return ""
+        query = urlencode({**self.auth_params(), "id": artwork_id, "size": 1200})
+        return f"{self.server_url}/rest/getCoverArt.view?{query}"
+
     def catalog(self) -> Dict[str, Any]:
         tracks: List[Dict[str, Any]] = []
         offset = 0
@@ -952,6 +1006,9 @@ class NavidromeMusicProvider:
                         "path": song.get("path"),
                         "container": song.get("suffix"),
                         "media_type": song.get("contentType"),
+                        "artwork_item_id": song.get("coverArt"),
+                        "artwork_version": song.get("coverArt"),
+                        "has_artwork": bool(_text(song.get("coverArt"))),
                         "provider": self.provider_id,
                     }
                 )
@@ -968,26 +1025,6 @@ class NavidromeMusicProvider:
         }
 
 
-class RoonMusicProvider:
-    provider_id = "roon"
-
-    @property
-    def connected(self) -> bool:
-        try:
-            from tateros import integration_store as integration_store_module
-
-            module = integration_store_module.integration_module("roon")
-            status_fn = getattr(module, "integration_status", None) if module else None
-            status = status_fn() if callable(status_fn) else {}
-            return bool(
-                isinstance(status, dict)
-                and status.get("enabled")
-                and status.get("configured")
-            )
-        except Exception:
-            return False
-
-
 def _provider(client: Any = None, provider_id: Any = "") -> Any:
     cfg = _settings(client)
     selected = _text(provider_id or cfg.get("provider") or "tater_tube").lower()
@@ -999,8 +1036,6 @@ def _provider(client: Any = None, provider_id: Any = "") -> Any:
         return MediaBrowserMusicProvider.from_settings(cfg, selected)
     if selected == "navidrome":
         return NavidromeMusicProvider.from_settings(cfg)
-    if selected == "roon":
-        return RoonMusicProvider()
     raise ValueError(f"Unsupported music provider: {selected}")
 
 
@@ -1026,8 +1061,6 @@ def _provider_from_settings(settings: Dict[str, Any], provider_id: str) -> Any:
         return MediaBrowserMusicProvider.from_settings(settings, selected)
     if selected == "navidrome":
         return NavidromeMusicProvider.from_settings(settings)
-    if selected == "roon":
-        return RoonMusicProvider()
     raise ValueError(f"Unsupported music provider: {selected}")
 
 
@@ -1065,6 +1098,18 @@ def _normalize_track(row: Dict[str, Any]) -> Dict[str, Any]:
     source_index = _as_int(row.get("sourceIndex") or row.get("source_index"), 0, 0, 10000)
     path = _text(row.get("path") or row.get("partKey") or row.get("part_key"))
     provider_id = _text(row.get("provider") or "tater_tube").lower()
+    artwork_path = _text(row.get("artwork_path"))
+    artwork_item_id = _text(row.get("artwork_item_id"))
+    artwork_version = _text(row.get("artwork_version"))
+    declared_artwork = (
+        _as_bool(row.get("hasArtwork"), False)
+        if row.get("hasArtwork") is not None
+        else _as_bool(row.get("has_artwork"), False)
+    )
+    has_artwork = bool(
+        provider_id != "tater_tube"
+        and (declared_artwork or artwork_path or artwork_item_id)
+    )
     if not track_id:
         identity = "\x00".join(
             [
@@ -1109,11 +1154,10 @@ def _normalize_track(row: Dict[str, Any]) -> Dict[str, Any]:
         "media_type": _text(row.get("media_type") or row.get("content_type")).lower(),
         "size_bytes": _as_int(row.get("sizeBytes") or row.get("size_bytes"), 0, 0, 10**15),
         "modified_unix": _as_int(row.get("modifiedUnix") or row.get("modified_unix"), 0, 0, 10**12),
-        "has_artwork": (
-            _as_bool(row.get("hasArtwork"), False)
-            if row.get("hasArtwork") is not None
-            else _as_bool(row.get("has_artwork"), bool(_text(row.get("poster"))))
-        ),
+        "artwork_path": artwork_path,
+        "artwork_item_id": artwork_item_id,
+        "artwork_version": artwork_version,
+        "has_artwork": has_artwork,
         "provider": provider_id,
     }
 
@@ -1140,16 +1184,36 @@ def _catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
         return {}
     selected = _text(provider_id or _settings(store).get("provider") or "tater_tube").lower()
     cached_provider = _text(payload.get("provider") or "tater_tube").lower()
-    return payload if cached_provider == selected else {}
+    if cached_provider != selected:
+        return {}
+    if selected == "tater_tube":
+        for track in payload.get("tracks") or []:
+            if isinstance(track, dict):
+                track["has_artwork"] = False
+                track["artwork_path"] = ""
+                track["artwork_item_id"] = ""
+        return payload
+    if _as_int(payload.get("artwork_schema"), 0, 0, 100) < CATALOG_ARTWORK_SCHEMA:
+        return {}
+    return payload
 
 
-def _sync_catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
+def _catalog_needs_artwork_refresh(client: Any = None, provider_id: Any = "") -> bool:
+    store = client or globals().get("redis_client")
+    selected = _provider_id(provider_id, _provider_id(_settings(store).get("provider")))
+    payload = _load_json(store, CATALOG_KEY, {})
+    if not isinstance(payload, dict) or not payload:
+        return True
+    if _provider_id(payload.get("provider")) != selected:
+        return True
+    if selected == "tater_tube":
+        return False
+    return _as_int(payload.get("artwork_schema"), 0, 0, 100) < CATALOG_ARTWORK_SCHEMA
+
+
+def _sync_catalog_impl(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     selected = _text(provider_id or _settings(store).get("provider") or "tater_tube").lower()
-    if selected == "roon":
-        raise ValueError(
-            "Roon resolves its library through the Roon Core at play time and does not expose streamable tracks."
-        )
     provider = _provider(store, selected)
     if not provider.connected:
         raise ValueError(
@@ -1174,6 +1238,7 @@ def _sync_catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
     genres = _facet_values(tracks, "genres")
     payload = {
         "provider": selected,
+        "artwork_schema": CATALOG_ARTWORK_SCHEMA,
         "catalog_id": _text(raw.get("catalog_id")) if isinstance(raw, dict) else "",
         "tracks": tracks,
         "artists": artists,
@@ -1202,6 +1267,46 @@ def _sync_catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
         },
     )
     return payload
+
+
+def _sync_catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
+    global _catalog_sync_started_at
+    if not _catalog_sync_lock.acquire(blocking=False):
+        raise RuntimeError("Music library sync is already running.")
+    store = client or globals().get("redis_client")
+    _catalog_sync_started_at = time.time()
+    try:
+        payload = _sync_catalog_impl(store, provider_id)
+        finished_at = time.time()
+        runtime = _runtime(store)
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_sync_finished_at": finished_at,
+                "last_sync_duration_ms": max(0.0, (finished_at - _catalog_sync_started_at) * 1000.0),
+                "last_sync_error": "",
+                "last_sync_error_at": "",
+                "sync_run_count": _as_int(runtime.get("sync_run_count"), 0, 0, 1_000_000_000) + 1,
+            },
+        )
+        return payload
+    except Exception as exc:
+        finished_at = time.time()
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_sync_finished_at": finished_at,
+                "last_sync_duration_ms": max(0.0, (finished_at - _catalog_sync_started_at) * 1000.0),
+                "last_sync_error": _text(exc)[:500],
+                "last_sync_error_at": finished_at,
+            },
+        )
+        raise
+    finally:
+        _catalog_sync_started_at = 0.0
+        _catalog_sync_lock.release()
 
 
 def _clean_query_tokens(value: Any) -> List[str]:
@@ -1337,15 +1442,47 @@ def _player(client: Any = None) -> Dict[str, Any]:
     payload = _load_json(store, PLAYER_KEY, {})
     if not isinstance(payload, dict):
         payload = {}
+    configured_provider = _provider_id(_settings(store).get("provider"))
+    removed_provider = _text(payload.get("provider")).casefold() == "roon"
     payload.setdefault("status", "idle")
-    payload.setdefault("provider", _provider_id(_settings(store).get("provider")))
+    payload["provider"] = _provider_id(payload.get("provider"), configured_provider)
     payload.setdefault("queue", [])
+    if removed_provider:
+        payload.update(
+            {
+                "status": "stopped",
+                "queue": [],
+                "queue_original": [],
+                "current": {},
+                "index": -1,
+                "started_at": 0.0,
+                "continuation_pending": False,
+            }
+        )
+    if _provider_id(payload.get("provider")) == "tater_tube":
+        for collection_key in ("queue", "queue_original"):
+            for track in payload.get(collection_key) or []:
+                if isinstance(track, dict):
+                    track["has_artwork"] = False
+                    track["artwork_path"] = ""
+                    track["artwork_item_id"] = ""
+        current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+        if current:
+            current["has_artwork"] = False
+            current["artwork_path"] = ""
+            current["artwork_item_id"] = ""
     payload.setdefault("index", -1)
     targets = _normalize_stereo_targets(payload.get("targets") or payload.get("target"))
     payload["targets"] = targets
     payload["target"] = targets[0] if targets else ""
     payload.setdefault("shuffle", False)
     payload.setdefault("repeat", "off")
+    payload.setdefault(
+        "continuous_radio",
+        _provider_id(payload.get("provider")) in CATALOG_PROVIDER_IDS,
+    )
+    payload.setdefault("continuation_pending", False)
+    payload.setdefault("radio_name", "Tater Continuous Radio")
     return payload
 
 
@@ -1735,6 +1872,7 @@ def _generate_recommendations(
     global _recommendation_started_at
     if not _recommendation_lock.acquire(blocking=False):
         raise RuntimeError("Tater music recommendations are already being refreshed.")
+    store = client or globals().get("redis_client")
     _recommendation_started_at = time.time()
     owns_loop = loop is None
     active_loop = loop or asyncio.new_event_loop()
@@ -1742,14 +1880,40 @@ def _generate_recommendations(
         asyncio.set_event_loop(active_loop)
     try:
         model = llm_client if llm_client is not None else _get_primary_llm_client_from_env()
-        return _generate_recommendations_impl(active_loop, model, client)
+        result = _generate_recommendations_impl(active_loop, model, store)
+        finished_at = time.time()
+        runtime = _runtime(store)
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_recommendation_finished_at": finished_at,
+                "last_recommendation_duration_ms": max(
+                    0.0,
+                    (finished_at - _recommendation_started_at) * 1000.0,
+                ),
+                "recommendation_run_count": _as_int(
+                    runtime.get("recommendation_run_count"),
+                    0,
+                    0,
+                    1_000_000_000,
+                )
+                + 1,
+            },
+        )
+        return result
     except Exception as exc:
         now = time.time()
         _save_hash(
-            client or globals().get("redis_client"),
+            store,
             RUNTIME_KEY,
             {
                 "last_recommendation_attempt_at": now,
+                "last_recommendation_finished_at": now,
+                "last_recommendation_duration_ms": max(
+                    0.0,
+                    (now - _recommendation_started_at) * 1000.0,
+                ),
                 "last_recommendation_error": _text(exc)[:500],
                 "last_recommendation_error_at": now,
             },
@@ -1783,6 +1947,461 @@ def _schedule_recommendation_refresh(client: Any = None) -> bool:
         )
         _recommendation_thread.start()
         return True
+
+
+def _radio_session_token(player: Dict[str, Any]) -> str:
+    token = _text(player.get("queue_session_id"))
+    if token:
+        return token
+    created_at = _text(player.get("created_at"))
+    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+    identity = "\x00".join(
+        [
+            created_at,
+            _provider_id(player.get("provider")),
+            *[_text(track.get("id")) for track in queue[:4] if isinstance(track, dict)],
+        ]
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20] if identity else ""
+
+
+def _continuation_candidate_tracks(
+    player: Dict[str, Any],
+    client: Any = None,
+    *,
+    limit: int = MAX_CONTINUATION_CANDIDATES,
+) -> tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Rank real catalog tracks with the active song and queue as the strongest signal."""
+    store = client or globals().get("redis_client")
+    provider_id = _provider_id(player.get("provider"), _provider_id(_settings(store).get("provider")))
+    catalog = _catalog(store, provider_id)
+    tracks = [dict(row) for row in catalog.get("tracks") or [] if isinstance(row, dict)]
+    if not tracks:
+        return [], {}, []
+
+    queue = [dict(row) for row in player.get("queue") or [] if isinstance(row, dict)]
+    index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
+    current = (
+        dict(player.get("current"))
+        if isinstance(player.get("current"), dict)
+        else (queue[index] if queue else {})
+    )
+    nearby = queue[max(0, index - 2) : min(len(queue), index + 4)]
+    current_artist = _text(current.get("album_artist") or current.get("artist")).casefold()
+    current_album = _text(current.get("album")).casefold()
+    current_genres = {
+        _text(value).casefold() for value in current.get("genres") or [] if _text(value)
+    }
+    nearby_artists = {
+        _text(track.get("album_artist") or track.get("artist")).casefold()
+        for track in nearby
+        if _text(track.get("album_artist") or track.get("artist"))
+    }
+    nearby_genres = {
+        _text(genre).casefold()
+        for track in nearby
+        for genre in track.get("genres") or []
+        if _text(genre)
+    }
+
+    history = [
+        row
+        for row in _listening_history(store)[-120:]
+        if _provider_id(row.get("provider")) == provider_id
+    ]
+    history_artist_counts: Dict[str, int] = {}
+    history_genre_counts: Dict[str, int] = {}
+    recent_history_ids = set()
+    for event in history:
+        artist = _text(event.get("album_artist") or event.get("artist")).casefold()
+        if artist:
+            history_artist_counts[artist] = history_artist_counts.get(artist, 0) + 1
+        for genre in event.get("genres") or []:
+            token = _text(genre).casefold()
+            if token:
+                history_genre_counts[token] = history_genre_counts.get(token, 0) + 1
+    for event in history[-50:]:
+        if _text(event.get("track_id")):
+            recent_history_ids.add(_text(event.get("track_id")))
+
+    queue_ids = {_text(track.get("id")) for track in queue if _text(track.get("id"))}
+
+    def similarity(track: Dict[str, Any]) -> int:
+        artist = _text(track.get("album_artist") or track.get("artist")).casefold()
+        album = _text(track.get("album")).casefold()
+        genres = {_text(value).casefold() for value in track.get("genres") or [] if _text(value)}
+        score = 0
+        if current_artist and artist == current_artist:
+            score += 120
+        if current_album and album == current_album:
+            score += 45
+        score += len(current_genres & genres) * 90
+        if artist in nearby_artists:
+            score += 55
+        score += len(nearby_genres & genres) * 35
+        score += min(25, history_artist_counts.get(artist, 0) * 3)
+        score += min(30, sum(history_genre_counts.get(genre, 0) for genre in genres))
+        return score
+
+    session_token = _radio_session_token(player)
+
+    def ordering(track: Dict[str, Any]) -> tuple[Any, ...]:
+        track_id = _text(track.get("id"))
+        dispersion = hashlib.sha256(f"{session_token}\x00{track_id}".encode("utf-8")).hexdigest()
+        return (
+            track_id in recent_history_ids,
+            -similarity(track),
+            dispersion,
+        )
+
+    unique_pool = [track for track in tracks if _text(track.get("id")) not in queue_ids]
+    if not unique_pool:
+        unique_pool = list(tracks)
+    ordered = sorted(unique_pool, key=ordering)
+    relevant = [track for track in ordered if similarity(track) > 0]
+    discovery = [track for track in ordered if similarity(track) <= 0]
+    selected = [*relevant[:160], *discovery[: max(0, limit - min(160, len(relevant)))]]
+    selected = selected[:limit]
+    candidate_map = {_text(track.get("id")): track for track in selected if _text(track.get("id"))}
+    candidates = [
+        {
+            "id": track_id,
+            "title": _text(track.get("title")) or "Untitled",
+            "artist": _text(track.get("artist") or track.get("album_artist")),
+            "album": _text(track.get("album")),
+            "genres": [_text(value) for value in track.get("genres") or [] if _text(value)][:8],
+            "year": _text(track.get("year")),
+        }
+        for track_id, track in candidate_map.items()
+    ]
+    return candidates, candidate_map, selected
+
+
+def _append_continuation_tracks(
+    session_token: str,
+    tracks: List[Dict[str, Any]],
+    *,
+    station_name: str = "",
+    source: str = "ai",
+    allow_repeats: bool = False,
+    client: Any = None,
+) -> int:
+    store = client or globals().get("redis_client")
+    with _state_lock:
+        player = _player(store)
+        if (
+            _text(player.get("status")).lower() != "playing"
+            or _provider_id(player.get("provider")) not in CATALOG_PROVIDER_IDS
+            or _radio_session_token(player) != session_token
+        ):
+            return 0
+        queue = [dict(row) for row in player.get("queue") or [] if isinstance(row, dict)]
+        if not queue:
+            return 0
+        index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
+        existing_ids = {_text(track.get("id")) for track in queue if _text(track.get("id"))}
+        incoming: List[Dict[str, Any]] = []
+        seen_incoming = set()
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            track_id = _text(track.get("id"))
+            if not track_id or track_id in seen_incoming:
+                continue
+            if not allow_repeats and track_id in existing_ids:
+                continue
+            seen_incoming.add(track_id)
+            incoming.append(dict(track))
+        if not incoming:
+            return 0
+
+        maximum = max(
+            2,
+            _as_int(_settings(store).get("maximum_queue_tracks"), 200, 1, 1000),
+        )
+        required_space = max(0, len(queue) + len(incoming) - maximum)
+        trim_count = min(index, required_space)
+        if trim_count:
+            queue = queue[trim_count:]
+            index -= trim_count
+        available = max(0, maximum - len(queue))
+        incoming = incoming[:available]
+        if not incoming:
+            return 0
+        queue.extend(incoming)
+        player.update(
+            {
+                "queue": queue,
+                "queue_original": [dict(track) for track in queue],
+                "index": index,
+                "current": queue[index],
+                "continuous_radio": True,
+                "continuation_pending": False,
+                "radio_name": _text(station_name)[:80]
+                or _text(player.get("radio_name"))
+                or "Tater Continuous Radio",
+                "radio_source": source,
+                "radio_last_refill_at": time.time(),
+                "radio_last_refill_count": len(incoming),
+            }
+        )
+        _save_player(player, store)
+        return len(incoming)
+
+
+def _fallback_continuation_tracks(
+    player: Dict[str, Any],
+    client: Any = None,
+    *,
+    count: int = CONTINUATION_BATCH_TRACKS,
+) -> List[Dict[str, Any]]:
+    store = client or globals().get("redis_client")
+    _candidates, _candidate_map, ordered = _continuation_candidate_tracks(
+        player,
+        store,
+        limit=MAX_CONTINUATION_CANDIDATES,
+    )
+    if ordered:
+        return [dict(track) for track in ordered[: max(1, count)]]
+    provider_id = _provider_id(player.get("provider"))
+    catalog = _catalog(store, provider_id)
+    tracks = [dict(row) for row in catalog.get("tracks") or [] if isinstance(row, dict)]
+    return tracks[: max(1, count)]
+
+
+def _generate_continuation_impl(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    player: Dict[str, Any],
+    session_token: str,
+    client: Any = None,
+) -> int:
+    store = client or globals().get("redis_client")
+    candidates, candidate_map, ordered = _continuation_candidate_tracks(player, store)
+    if not candidates:
+        raise ValueError("The active music library has no tracks for continuous radio.")
+    queue = [dict(row) for row in player.get("queue") or [] if isinstance(row, dict)]
+    index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
+    current = (
+        dict(player.get("current"))
+        if isinstance(player.get("current"), dict)
+        else (queue[index] if queue else {})
+    )
+    compact = lambda track: {
+        "title": _text(track.get("title")),
+        "artist": _text(track.get("artist") or track.get("album_artist")),
+        "album": _text(track.get("album")),
+        "genres": [_text(value) for value in track.get("genres") or [] if _text(value)][:8],
+        "year": _text(track.get("year")),
+    }
+    history = [
+        {
+            "title": _text(event.get("title")),
+            "artist": _text(event.get("artist") or event.get("album_artist")),
+            "album": _text(event.get("album")),
+            "genres": list(event.get("genres") or [])[:6],
+        }
+        for event in reversed(_listening_history(store)[-30:])
+    ]
+    result = _music_llm_json(
+        loop,
+        llm_client,
+        (
+            "You are Tater's continuous-radio music programmer. The currently playing song is the strongest "
+            "signal. Choose a smooth sequence of similar songs from only the supplied catalog IDs, using artist, "
+            "genre, album context, era, and the nearby queue to preserve the current musical direction. Listening "
+            "history is secondary context. Avoid abrupt genre changes and unnecessary repeats, but allow adjacent "
+            "artists and discoveries that genuinely fit. Give the station a short creative name. Return JSON only "
+            "in this exact shape: "
+            '{"station_name":"short name","items":[{"track_id":"exact catalog id"}]}. '
+            f"Return up to {CONTINUATION_BATCH_TRACKS} unique tracks in playback order."
+        ),
+        {
+            "currently_playing": compact(current),
+            "recent_queue": [compact(track) for track in queue[max(0, index - 2) : index]],
+            "up_next": [compact(track) for track in queue[index + 1 : index + 4]],
+            "recent_listening": history,
+            "catalog_candidates": candidates,
+        },
+    )
+    selections: List[Dict[str, Any]] = []
+    seen = set()
+    for row in result.get("items") or []:
+        if isinstance(row, str):
+            row = {"track_id": row}
+        if not isinstance(row, dict) or len(selections) >= CONTINUATION_BATCH_TRACKS:
+            continue
+        track_id = _text(row.get("track_id") or row.get("candidate_id"))
+        track = candidate_map.get(track_id)
+        if not track or track_id in seen:
+            continue
+        seen.add(track_id)
+        selections.append(dict(track))
+    for track in ordered:
+        track_id = _text(track.get("id"))
+        if len(selections) >= CONTINUATION_BATCH_TRACKS:
+            break
+        if track_id and track_id not in seen:
+            seen.add(track_id)
+            selections.append(dict(track))
+    if not selections:
+        raise RuntimeError("The continuous-radio model did not select any playable tracks.")
+    return _append_continuation_tracks(
+        session_token,
+        selections,
+        station_name=_text(result.get("station_name")) or "Tater Continuous Radio",
+        source="ai",
+        client=store,
+    )
+
+
+def _generate_continuation(
+    player: Dict[str, Any],
+    session_token: str,
+    client: Any = None,
+    *,
+    llm_client: Any = None,
+) -> int:
+    global _continuation_started_at
+    if not _continuation_lock.acquire(blocking=False):
+        return 0
+    _continuation_started_at = time.time()
+    store = client or globals().get("redis_client")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        model = llm_client if llm_client is not None else _get_primary_llm_client_from_env()
+        added = _generate_continuation_impl(loop, model, player, session_token, store)
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_continuation_at": time.time(),
+                "last_continuation_error": "",
+                "last_continuation_error_at": "",
+            },
+        )
+        return added
+    except Exception as exc:
+        fallback = _fallback_continuation_tracks(
+            player,
+            store,
+            count=CONTINUATION_BATCH_TRACKS,
+        )
+        added = _append_continuation_tracks(
+            session_token,
+            fallback,
+            station_name="Tater Continuous Radio",
+            source="smart_fallback",
+            allow_repeats=True,
+            client=store,
+        )
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_continuation_at": time.time() if added else "",
+                "last_continuation_error": _text(exc)[:500],
+                "last_continuation_error_at": time.time(),
+            },
+        )
+        logger.warning("[Music] continuous-radio AI refill failed; added %s fallback tracks: %s", added, exc)
+        return added
+    finally:
+        with _state_lock:
+            latest = _player(store)
+            if (
+                _radio_session_token(latest) == session_token
+                and latest.get("continuation_pending")
+            ):
+                latest["continuation_pending"] = False
+                _save_player(latest, store)
+        finished_at = time.time()
+        runtime = _runtime(store)
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_continuation_finished_at": finished_at,
+                "last_continuation_duration_ms": max(
+                    0.0,
+                    (finished_at - _continuation_started_at) * 1000.0,
+                ),
+                "continuation_run_count": _as_int(
+                    runtime.get("continuation_run_count"),
+                    0,
+                    0,
+                    1_000_000_000,
+                )
+                + 1,
+            },
+        )
+        loop.close()
+        asyncio.set_event_loop(None)
+        _continuation_started_at = 0.0
+        _continuation_lock.release()
+
+
+def _schedule_continuation_refresh(
+    player: Optional[Dict[str, Any]] = None,
+    client: Any = None,
+) -> bool:
+    global _continuation_thread
+    store = client or globals().get("redis_client")
+    with _state_lock:
+        current_player = dict(player) if isinstance(player, dict) else _player(store)
+        queue = [dict(row) for row in current_player.get("queue") or [] if isinstance(row, dict)]
+        if (
+            _text(current_player.get("status")).lower() != "playing"
+            or _provider_id(current_player.get("provider")) not in CATALOG_PROVIDER_IDS
+            or _text(current_player.get("repeat")).lower() == "one"
+            or not queue
+        ):
+            return False
+        index = _as_int(current_player.get("index"), 0, 0, max(0, len(queue) - 1))
+        if len(queue) - index - 1 > CONTINUATION_TRIGGER_REMAINING_TRACKS:
+            return False
+        maximum = max(
+            2,
+            _as_int(_settings(store).get("maximum_queue_tracks"), 200, 1, 1000),
+        )
+        if len(queue) >= maximum and index == 0:
+            return False
+        if _continuation_thread is not None and _continuation_thread.is_alive():
+            return False
+        session_token = _radio_session_token(current_player) or uuid.uuid4().hex
+        current_player["queue_session_id"] = session_token
+        current_player["continuous_radio"] = True
+        current_player["continuation_pending"] = True
+        _save_player(current_player, store)
+        snapshot = json.loads(json.dumps(current_player))
+
+        def worker() -> None:
+            _generate_continuation(snapshot, session_token, store)
+
+        _continuation_thread = threading.Thread(
+            target=worker,
+            name="music-continuous-radio",
+            daemon=True,
+        )
+        _continuation_thread.start()
+        return True
+
+
+def _append_end_of_queue_fallback(player: Dict[str, Any], client: Any = None) -> int:
+    store = client or globals().get("redis_client")
+    session_token = _radio_session_token(player)
+    if not session_token:
+        return 0
+    tracks = _fallback_continuation_tracks(player, store, count=4)
+    return _append_continuation_tracks(
+        session_token,
+        tracks,
+        station_name=_text(player.get("radio_name")) or "Tater Continuous Radio",
+        source="end_of_queue_fallback",
+        allow_repeats=True,
+        client=store,
+    )
 
 
 def _origin_value(origin: Dict[str, Any], *keys: str) -> str:
@@ -1835,7 +2454,13 @@ def _stereo_member_target_map() -> Dict[str, str]:
 def _normalize_stereo_targets(value: Any) -> List[str]:
     """Replace paired satellite selections with one deduplicated stereo target."""
     routes = _stereo_member_target_map()
-    return _list([routes.get(target.casefold(), target) for target in _list(value)])
+    return _list(
+        [
+            routes.get(target.casefold(), target)
+            for target in _list(value)
+            if not target.casefold().startswith("integration:roon:")
+        ]
+    )
 
 
 def _target_options(
@@ -1859,48 +2484,12 @@ def _target_options(
         options = [
             dict(row)
             for row in rows
-            if isinstance(row, dict) and _text(row.get("value"))
-        ]
-        try:
-            from integration_registry import get_integration_devices_by_capability
-
-            roon_devices = get_integration_devices_by_capability(
-                "media_player",
-                globals().get("redis_client"),
+            if (
+                isinstance(row, dict)
+                and _text(row.get("value"))
+                and not _text(row.get("value")).casefold().startswith("integration:roon:")
             )
-            known = {_text(row.get("value")) for row in options}
-            for device in roon_devices:
-                if not isinstance(device, dict):
-                    continue
-                if _text(device.get("integration_id")).lower() != "roon":
-                    continue
-                device_id = _text(device.get("id") or device.get("ref"))
-                if not device_id:
-                    continue
-                value = f"integration:roon:{quote(device_id, safe='')}"
-                if value in known:
-                    continue
-                known.add(value)
-                name = _text(device.get("name")) or device_id
-                room = _text(device.get("room") or device.get("area"))
-                suffix = f" • {room}" if room and room.casefold() != name.casefold() else ""
-                options.append({"value": value, "label": f"Roon: {name}{suffix}"})
-        except Exception as exc:
-            logger.debug("[Music] Roon target discovery unavailable: %s", exc)
-
-        selected = _provider_id(provider_id, "") if _text(provider_id) else ""
-        if selected == "roon":
-            options = [
-                row
-                for row in options
-                if _text(row.get("value")).lower().startswith("integration:roon:")
-            ]
-        elif selected in CATALOG_PROVIDER_IDS:
-            options = [
-                row
-                for row in options
-                if not _text(row.get("value")).lower().startswith("integration:roon:")
-            ]
+        ]
         if not include_stereo_members:
             paired_members = _stereo_member_target_map()
             options = [
@@ -2265,6 +2854,10 @@ def _create_and_start_queue(
             "repeat": _text(previous.get("repeat") or "off"),
             "volume_percent": volume_percent,
             "created_at": time.time(),
+            "queue_session_id": uuid.uuid4().hex,
+            "continuous_radio": True,
+            "continuation_pending": False,
+            "radio_name": "Tater Continuous Radio",
             "started_at": 0.0,
             "duration_seconds": 0.0,
             "last_error": "",
@@ -2290,10 +2883,17 @@ def _advance_player(direction: int, *, client: Any = None) -> Dict[str, Any]:
             if repeat == "all":
                 next_index = 0
             else:
-                _stop_target(player.get("targets") or player.get("target"))
-                player.update({"status": "finished", "index": len(queue) - 1, "started_at": 0.0})
-                _save_player(player, store)
-                return player
+                if _provider_id(player.get("provider")) in CATALOG_PROVIDER_IDS:
+                    _append_end_of_queue_fallback(player, store)
+                    player = _player(store)
+                    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+                    index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
+                    next_index = index + 1
+                if next_index >= len(queue):
+                    _stop_target(player.get("targets") or player.get("target"))
+                    player.update({"status": "finished", "index": len(queue) - 1, "started_at": 0.0})
+                    _save_player(player, store)
+                    return player
         if next_index < 0:
             next_index = len(queue) - 1 if repeat == "all" else 0
     return _start_player_index(next_index, client=store)
@@ -2363,8 +2963,6 @@ def _advance_finished_player(client: Any = None) -> None:
     store = client or globals().get("redis_client")
     player = _reconcile_native_playback(_player(store), store)
     if _text(player.get("status")).lower() != "playing":
-        return
-    if _provider_id(player.get("provider")) == "roon":
         return
     duration = _as_float(player.get("duration_seconds"))
     started = _as_float(player.get("started_at"))
@@ -2451,37 +3049,6 @@ def _reconcile_native_playback(player: Dict[str, Any], client: Any = None) -> Di
     return player
 
 
-def _roon_device_targets(targets: Any) -> List[Dict[str, str]]:
-    try:
-        from announcement_targets import split_announcement_targets
-
-        grouped = split_announcement_targets(_list(targets))
-    except Exception as exc:
-        raise ValueError(f"Could not read Roon zones: {exc}") from exc
-    unsupported = (
-        list(grouped.get("voice_core_selectors") or [])
-        + list(grouped.get("homeassistant_media_players") or [])
-        + list(grouped.get("sonos_speakers") or [])
-        + list(grouped.get("unifi_protect_cameras") or [])
-    )
-    devices = [
-        dict(row)
-        for row in list(grouped.get("integration_devices") or [])
-        if isinstance(row, dict)
-    ]
-    roon_devices = [
-        row for row in devices if _text(row.get("integration_id")).lower() == "roon"
-    ]
-    if unsupported or len(roon_devices) != len(devices):
-        raise ValueError(
-            "Roon library playback can target only Roon zones. "
-            "Roon does not expose its audio files for direct satellite or other media-player streaming."
-        )
-    if not roon_devices:
-        raise ValueError("Choose one or more Roon zones for Roon playback.")
-    return roon_devices
-
-
 def _validate_catalog_provider_targets(targets: Any) -> None:
     roon_targets = [
         target
@@ -2490,165 +3057,9 @@ def _validate_catalog_provider_targets(targets: Any) -> None:
     ]
     if roon_targets:
         raise ValueError(
-            "Roon zones can play only from the Roon provider. Choose Roon as the "
-            "Music Provider or select satellites and other supported media players."
+            "Roon zones cannot receive Music Core streams. Choose satellites, stereo pairs, "
+            "or another supported media player."
         )
-
-
-def _roon_media_query(args: Dict[str, Any]) -> tuple[str, str]:
-    title = _text(args.get("title") or args.get("track") or args.get("song"))
-    artist = _text(args.get("artist"))
-    album = _text(args.get("album"))
-    genre = _text(args.get("genre"))
-    query = _text(args.get("query") or args.get("music"))
-    if title:
-        query = f"{title} by {artist}" if artist else title
-        return query, "track"
-    if album:
-        query = f"{album} by {artist}" if artist else album
-        return query, "album"
-    if artist:
-        return artist, "artist"
-    if genre:
-        return genre, "genre"
-    return query, _text(args.get("media_kind") or "any").lower()
-
-
-def _roon_play_request(
-    args: Dict[str, Any],
-    origin: Optional[Dict[str, Any]],
-    client: Any,
-) -> Dict[str, Any]:
-    requested_targets = (
-        args.get("targets")
-        or args.get("target")
-        or args.get("destinations")
-        or args.get("destination")
-        or args.get("players")
-        or args.get("player")
-    )
-    targets = _resolve_targets(
-        requested_targets,
-        room=args.get("rooms") or args.get("room"),
-        origin=origin,
-        client=client,
-        provider_id="roon",
-    )
-    devices = _roon_device_targets(targets)
-    query, media_kind = _roon_media_query(args)
-    shuffle = _as_bool(args.get("shuffle"), media_kind in {"artist", "genre", "radio", "any"})
-    if not query and not shuffle:
-        raise ValueError("Tell Music Core what to play from Roon.")
-
-    from integration_registry import run_integration_device_action
-
-    successes: List[Dict[str, Any]] = []
-    failures: List[str] = []
-    for device in devices:
-        device_id = _text(device.get("device_id"))
-        try:
-            result = run_integration_device_action(
-                "roon",
-                "play_media",
-                device_id,
-                {
-                    "query": query,
-                    "media_kind": media_kind,
-                    "random": shuffle,
-                },
-            )
-            if isinstance(result, dict) and result.get("ok") is False:
-                failures.append(
-                    f"{device_id}: {_text(result.get('message') or result.get('error')) or 'failed'}"
-                )
-            else:
-                successes.append(result if isinstance(result, dict) else {"ok": True})
-        except Exception as exc:
-            failures.append(f"{device_id}: {exc}")
-    if not successes:
-        raise RuntimeError("; ".join(failures) or "Roon playback failed.")
-
-    player = {
-        "status": "playing",
-        "provider": "roon",
-        "queue": [],
-        "index": -1,
-        "current": {
-            "id": "roon:dynamic",
-            "title": query or "Random music",
-            "artist": "",
-            "album": "",
-            "genres": [media_kind] if media_kind == "genre" else [],
-            "genre": media_kind if media_kind == "genre" else "",
-            "provider": "roon",
-        },
-        "targets": targets,
-        "shuffle": shuffle,
-        "repeat": "off",
-        "started_at": time.time(),
-        "duration_seconds": 0.0,
-        "warnings": failures,
-        "playback_result": {
-            "target_count": len(targets),
-            "sent_count": len(successes),
-        },
-    }
-    _save_player(player, client)
-    _record_listening_history(player["current"], targets, client=client)
-    return {
-        "ok": True,
-        "provider": "roon",
-        "target": targets[0],
-        "targets": targets,
-        "target_count": len(targets),
-        "queue_count": 0,
-        "shuffle": shuffle,
-        "warnings": failures,
-        "now_playing": _public_track(player["current"]),
-        "summary_for_user": (
-            f"Playing {query or 'music'} from Roon on {_target_summary(targets)}."
-        ),
-    }
-
-
-def _roon_control(action: str, *, client: Any = None) -> Dict[str, Any]:
-    store = client or globals().get("redis_client")
-    player = _player(store)
-    targets = _list(player.get("targets") or player.get("target"))
-    devices = _roon_device_targets(targets)
-    control = {
-        "replay": "play",
-        "resume": "play",
-        "play": "play",
-        "previous": "previous",
-        "next": "next",
-        "pause": "pause",
-        "stop": "stop",
-    }.get(_text(action).lower())
-    if not control:
-        raise ValueError("Roon supports play, pause, stop, next, and previous controls.")
-    from integration_registry import run_integration_device_action
-
-    failures: List[str] = []
-    sent = 0
-    for device in devices:
-        device_id = _text(device.get("device_id"))
-        try:
-            result = run_integration_device_action("roon", control, device_id, {})
-            if isinstance(result, dict) and result.get("ok") is False:
-                failures.append(
-                    f"{device_id}: {_text(result.get('message') or result.get('error')) or 'failed'}"
-                )
-            else:
-                sent += 1
-        except Exception as exc:
-            failures.append(f"{device_id}: {exc}")
-    if sent <= 0:
-        raise RuntimeError("; ".join(failures) or f"Roon {control} failed.")
-    player["status"] = "stopped" if control == "stop" else "playing"
-    player["warnings"] = failures
-    _save_player(player, store)
-    return player
 
 
 def _play_request(args: Dict[str, Any], origin: Optional[Dict[str, Any]], client: Any) -> Dict[str, Any]:
@@ -2657,9 +3068,6 @@ def _play_request(args: Dict[str, Any], origin: Optional[Dict[str, Any]], client
     if _text(args.get("provider")) and selected_provider != _provider_id(cfg.get("provider")):
         _save_hash(client, SETTINGS_KEY, {"provider": selected_provider})
         cfg["provider"] = selected_provider
-    if selected_provider == "roon":
-        return _roon_play_request(args, origin, client)
-
     catalog = _catalog(client, selected_provider)
     if not isinstance(catalog.get("tracks"), list) or not catalog.get("tracks"):
         catalog = _sync_catalog(client, selected_provider)
@@ -2727,7 +3135,7 @@ def _play_request(args: Dict[str, Any], origin: Optional[Dict[str, Any]], client
         "summary_for_user": (
             f"Playing {_track_label(player.get('current') or {})} on {_target_summary(targets)}. "
             f"The queue has {len(player.get('queue') or [])} track"
-            f"{'' if len(player.get('queue') or []) == 1 else 's'}."
+            f"{'' if len(player.get('queue') or []) == 1 else 's'}, and continuous radio will keep it playing."
         ),
     }
 
@@ -2744,7 +3152,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
             "usage": (
                 '{"function":"music_play","arguments":{"query":"reggae music","genre":"reggae",'
                 '"artist":"","album":"","title":"","targets":["Kitchen","Living Room"],'
-                '"rooms":[],"provider":"tater_tube|plex|emby|jellyfin|navidrome|roon",'
+                '"rooms":[],"provider":"tater_tube|plex|emby|jellyfin|navidrome",'
                 '"shuffle":true,"volume_percent":75}}'
             ),
         },
@@ -2810,11 +3218,6 @@ async def run_hydra_kernel_tool(
                 values.get("provider"),
                 _provider_id(cfg.get("provider")),
             )
-            if selected_provider == "roon":
-                raise ValueError(
-                    "Roon searches its library at play time. Use music_play with "
-                    "provider roon and a song, artist, album, or genre."
-                )
             if not (_catalog(store, selected_provider).get("tracks") or []):
                 await asyncio.to_thread(_sync_catalog, store, selected_provider)
             matches = _search_tracks(
@@ -2840,11 +3243,7 @@ async def run_hydra_kernel_tool(
     if tool_id == "music_control":
         action = _text(values.get("action")).lower()
         try:
-            current_player = _player(store)
-            is_roon = _provider_id(current_player.get("provider")) == "roon"
-            if is_roon and action in {"next", "previous", "stop", "replay", "play", "resume", "pause"}:
-                player = await asyncio.to_thread(_roon_control, action, client=store)
-            elif action == "next":
+            if action == "next":
                 player = await asyncio.to_thread(_advance_player, 1, client=store)
             elif action == "previous":
                 player = await asyncio.to_thread(_advance_player, -1, client=store)
@@ -2887,24 +3286,14 @@ async def run_hydra_kernel_tool(
                 )
                 if not targets:
                     raise ValueError("Choose one or more valid music destinations.")
-                if player_provider == "roon":
-                    _roon_device_targets(targets)
-                else:
-                    _validate_catalog_provider_targets(targets)
+                _validate_catalog_provider_targets(targets)
                 old_targets = _list(player.get("targets") or player.get("target"))
                 was_playing = _text(player.get("status")).lower() == "playing"
                 if was_playing and old_targets and old_targets != targets:
-                    if _provider_id(player.get("provider")) == "roon":
-                        await asyncio.to_thread(_roon_control, "stop", client=store)
-                    else:
-                        _stop_target(old_targets)
+                    _stop_target(old_targets)
                 player["targets"] = targets
                 _save_player(player, store)
                 if was_playing and old_targets != targets:
-                    if _provider_id(player.get("provider")) == "roon":
-                        raise ValueError(
-                            "Roon destinations changed. Start the Roon request again so it can play on the new zones."
-                        )
                     player = await asyncio.to_thread(
                         _start_player_index,
                         _as_int(player.get("index"), 0, 0, 100000),
@@ -2923,6 +3312,8 @@ async def run_hydra_kernel_tool(
                 "target_count": len(targets),
                 "now_playing": _public_track(player.get("current") or {}),
                 "queue_count": len(player.get("queue") or []),
+                "continuous_radio": bool(player.get("continuous_radio")),
+                "radio_name": _text(player.get("radio_name")),
                 "summary_for_user": (
                     f"Music is {_text(player.get('status')) or 'idle'} on {_target_summary(targets)}."
                 ),
@@ -2943,6 +3334,8 @@ async def run_hydra_kernel_tool(
             "queue_index": _as_int(player.get("index"), -1, -1, 100000),
             "shuffle": bool(player.get("shuffle")),
             "repeat": _text(player.get("repeat") or "off"),
+            "continuous_radio": bool(player.get("continuous_radio")),
+            "radio_name": _text(player.get("radio_name")),
             "summary_for_user": (
                 f"{_track_label(player.get('current') or {})} is {_text(player.get('status'))} "
                 f"on {_target_summary(targets)}."
@@ -2955,17 +3348,6 @@ async def run_hydra_kernel_tool(
             values.get("provider"),
             _provider_id(_settings(store).get("provider")),
         )
-        if selected_provider == "roon":
-            return {
-                "ok": False,
-                "error": {
-                    "code": "music_browse_unsupported",
-                    "message": (
-                        "Roon resolves its library through Roon Browse at play time. "
-                        "Use music_play with provider roon."
-                    ),
-                },
-            }
         catalog = _catalog(store, selected_provider)
         if not (catalog.get("tracks") or []):
             catalog = await asyncio.to_thread(_sync_catalog, store, selected_provider)
@@ -3033,9 +3415,11 @@ def _artwork_proxy_url(track: Dict[str, Any]) -> str:
         "track_id": track_id,
         "provider": _provider_id(track.get("provider")),
     }
-    modified = _as_int(track.get("modified_unix"), 0, 0, 10**12)
-    if modified:
-        query["v"] = str(modified)
+    version = _text(track.get("artwork_version")) or _text(
+        _as_int(track.get("modified_unix"), 0, 0, 10**12)
+    )
+    if version and version != "0":
+        query["v"] = version[:128]
     return f"/api/cores/music_core/webhook/artwork?{urlencode(query)}"
 
 
@@ -3085,7 +3469,6 @@ def _player_item(
     targets = _list(player.get("targets") or player.get("target"))
     target_summary = _target_summary(targets)
     player_provider = _provider_id(player.get("provider"), active_provider)
-    is_roon = player_provider == "roon"
     queue = player.get("queue") if isinstance(player.get("queue"), list) else []
     queue_count = len(queue)
     current_index = _as_int(player.get("index"), -1, -1, max(0, queue_count - 1))
@@ -3123,12 +3506,8 @@ def _player_item(
             _text(player.get("last_error"))
             if status == "ERROR" and _text(player.get("last_error"))
             else (
-                f"Playing from Roon on {target_summary}."
-                if is_roon
-                else (
-                    f"Playing on {target_summary}. Queue position "
-                    f"{current_index + 1} of {queue_count}."
-                )
+                f"Playing on {target_summary}. Queue position "
+                f"{current_index + 1} of {queue_count}. Continuous radio keeps adding similar tracks."
             )
             if current
             else "Search your connected music library and choose where it should play."
@@ -3139,6 +3518,14 @@ def _player_item(
             {
                 "label": status,
                 "tone": "good" if status == "PLAYING" else ("warn" if status == "ERROR" else "muted"),
+            },
+            {
+                "label": (
+                    "RADIO MIXING"
+                    if player.get("continuation_pending")
+                    else _text(player.get("radio_name") or "Continuous Radio").upper()
+                ),
+                "tone": "good",
             },
             {"label": PROVIDER_LABELS[player_provider].upper(), "tone": "muted"},
             {"label": f"{queue_count} TRACKS", "tone": "muted"},
@@ -3269,8 +3656,6 @@ def _client_target_kind(value: Any) -> str:
     token = _text(value).lower()
     if token.startswith("voice_core:"):
         return "satellite"
-    if token.startswith("integration:roon:"):
-        return "roon_zone"
     if token.startswith(("ha:", "sonos:", "integration:")):
         return "media_player"
     return "player"
@@ -3357,6 +3742,9 @@ def get_client_music_state(
             "queue_index": _as_int(player.get("index"), -1, -1, 100000),
             "shuffle": bool(player.get("shuffle")),
             "repeat": _text(player.get("repeat") or "off"),
+            "continuous_radio": bool(player.get("continuous_radio")),
+            "radio_name": _text(player.get("radio_name")),
+            "continuation_pending": bool(player.get("continuation_pending")),
             "volume_percent": _as_int(
                 player.get("volume_percent"),
                 _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
@@ -3397,11 +3785,7 @@ def run_client_music_action(
         _provider_id(cfg.get("provider")),
     )
     if command in {"refresh", "sync"}:
-        if selected_provider == "roon":
-            if not _paired(cfg, "roon"):
-                raise ValueError("Pair Roon in Tater Settings → Integrations → Roon first.")
-        else:
-            _sync_catalog(store, selected_provider)
+        _sync_catalog(store, selected_provider)
         return get_client_music_state(client=store)
     if command in {"set_provider", "provider"}:
         if not _paired(cfg, selected_provider):
@@ -3413,8 +3797,6 @@ def run_client_music_action(
     if command == "play":
         track_id = _text(values.get("track_id"))
         if track_id:
-            if selected_provider == "roon":
-                raise ValueError("Roon chooses music by search instead of a streamable track ID.")
             track = _client_track(track_id, selected_provider, store)
             targets = _resolve_targets(
                 values.get("targets") or values.get("target"),
@@ -3452,11 +3834,8 @@ def run_client_music_action(
         }
 
     player = _reconcile_native_playback(_player(store), store)
-    is_roon = _provider_id(player.get("provider")) == "roon"
     if command in {"next", "previous", "stop", "replay", "play", "resume", "pause"}:
-        if is_roon:
-            updated = _roon_control(command, client=store)
-        elif command == "next":
+        if command == "next":
             updated = _advance_player(1, client=store)
         elif command == "previous":
             updated = _advance_player(-1, client=store)
@@ -3468,7 +3847,7 @@ def run_client_music_action(
                 client=store,
             )
         else:
-            raise ValueError("Pause is available for Roon and on-device playback only.")
+            raise ValueError("Pause is not available for streamed Music Core playback.")
         return {
             "ok": True,
             "player": {
@@ -3492,8 +3871,6 @@ def get_client_music_stream_source(
         provider_id,
         _provider_id(_settings(store).get("provider")),
     )
-    if selected_provider == "roon":
-        raise ValueError("Roon audio can play only through Roon zones.")
     track = _client_track(track_id, selected_provider, store)
     source_url = _provider(store, selected_provider).stream_url(track)
     if not source_url:
@@ -3515,11 +3892,6 @@ def _provider_connection_detail(
         return _text(
             cfg.get("tater_tube_server_url") or cfg.get("server_url")
         ) or "Pair with a Player PIN from Tater Tube Server."
-    if provider_id == "roon":
-        return (
-            "Roon uses Tater's existing Roon integration and plays through Roon zones. "
-            "Pair it in Tater Settings → Integrations → Roon."
-        )
     return _text(cfg.get(f"{provider_id}_server_url")) or (
         f"Enter the {PROVIDER_LABELS[provider_id]} server connection below."
     )
@@ -3675,47 +4047,34 @@ def _provider_cards(
                 "tone": "good" if connected else "warn",
             },
         ]
-        if provider_id in CATALOG_PROVIDER_IDS:
-            badges.append({"label": f"{track_count} TRACKS", "tone": "muted"})
-        else:
-            badges.append({"label": "ROON ZONES", "tone": "muted"})
+        badges.append({"label": f"{track_count} TRACKS", "tone": "muted"})
 
         actions: List[Dict[str, Any]] = []
-        if provider_id == "roon":
+        actions.append(
+            {
+                "action": "music_provider_connect",
+                "label": "Connect / Test",
+                "working_text": f"Connecting to {label}...",
+                "success_text": f"{label} connected.",
+            }
+        )
+        if connected:
             actions.append(
                 {
                     "action": "music_provider_activate",
-                    "label": "Use Roon" if not active else "Refresh Roon Status",
-                    "working_text": "Checking the Roon integration...",
-                    "success_text": "Roon is ready for Music Core.",
+                    "label": "Use Provider" if not active else "Rescan Library",
+                    "working_text": f"Loading the {label} library...",
+                    "success_text": f"{label} library loaded.",
                 }
             )
-        else:
             actions.append(
                 {
-                    "action": "music_provider_connect",
-                    "label": "Connect / Test",
-                    "working_text": f"Connecting to {label}...",
-                    "success_text": f"{label} connected.",
+                    "action": "music_provider_disconnect",
+                    "label": "Disconnect",
+                    "tone": "danger",
+                    "confirm": f"Disconnect Music Core from {label}?",
                 }
             )
-            if connected:
-                actions.append(
-                    {
-                        "action": "music_provider_activate",
-                        "label": "Use Provider" if not active else "Rescan Library",
-                        "working_text": f"Loading the {label} library...",
-                        "success_text": f"{label} library loaded.",
-                    }
-                )
-                actions.append(
-                    {
-                        "action": "music_provider_disconnect",
-                        "label": "Disconnect",
-                        "tone": "danger",
-                        "confirm": f"Disconnect Music Core from {label}?",
-                    }
-                )
         cards.append(
             {
                 "id": f"provider:{provider_id}",
@@ -3730,7 +4089,7 @@ def _provider_cards(
                 "hero_badges": badges,
                 "fields": _provider_fields(cfg, provider_id),
                 "fields_popup": False,
-                "fields_dropdown": bool(provider_id != "roon"),
+                "fields_dropdown": True,
                 "actions": actions,
             }
         )
@@ -3750,7 +4109,6 @@ def _recommendation_ui_items(
         if _provider_id(row.get("provider")) == active_provider
     ]
     enabled = _as_bool(cfg.get("recommendations_enabled"), True)
-    catalog_provider = active_provider in CATALOG_PROVIDER_IDS
     published = _recommendations(client)
     if _provider_id(published.get("provider"), "") != active_provider:
         published = {}
@@ -3758,8 +4116,6 @@ def _recommendation_ui_items(
     last_error = _text(runtime.get("last_recommendation_error"))
     if not enabled:
         detail = "Turn on Tater Recommendations in Settings to create AI-named music mixes."
-    elif not catalog_provider:
-        detail = "Roon resolves music dynamically, so recommendations require a catalog-based provider."
     elif not history:
         detail = "Start playing music and Tater will learn enough to prepare your first mixes."
     elif last_error and not published:
@@ -3784,7 +4140,7 @@ def _recommendation_ui_items(
             "generated_at": generated_at,
             "history_event_count": len(history),
             "recommendations_enabled": enabled,
-            "refresh_available": bool(enabled and catalog_provider and history),
+            "refresh_available": bool(enabled and history),
             "refresh_running": bool(
                 _recommendation_lock.locked()
                 or (_recommendation_thread is not None and _recommendation_thread.is_alive())
@@ -3979,21 +4335,13 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             {"label": "Genres", "value": len(catalog.get("genres") or [])},
             {
                 "label": "Last Scan",
-                "value": (
-                    "On demand through Roon"
-                    if active_provider == "roon"
-                    else _format_time(
-                        catalog.get("synced_at") or runtime.get("last_sync_at")
-                    )
+                "value": _format_time(
+                    catalog.get("synced_at") or runtime.get("last_sync_at")
                 ),
             },
         ],
         "items": [],
-        "empty_message": (
-            "Connect a music provider to load its library."
-            if active_provider != "roon"
-            else "Roon searches its library when playback starts."
-        ),
+        "empty_message": "Connect a music provider to load its library.",
         "ui": {
             "kind": "settings_manager",
             "title": "Music Core",
@@ -4183,8 +4531,6 @@ def _connect_provider(
 
 
 def _disconnect_provider(provider_id: str, client: Any) -> Dict[str, Any]:
-    if provider_id == "roon":
-        raise ValueError("Manage the Roon connection in Tater Settings → Integrations → Roon.")
     fields = {
         "tater_tube": (
             "tater_tube_server_url",
@@ -4302,17 +4648,8 @@ def handle_htmlui_tab_action(
     if action_name == "music_provider_activate":
         provider_id = _provider_from_card(body)
         if not _paired(_settings(store), provider_id):
-            if provider_id == "roon":
-                raise ValueError(
-                    "Pair and enable Roon in Tater Settings → Integrations → Roon first."
-                )
             raise ValueError(f"Connect {PROVIDER_LABELS[provider_id]} first.")
         _save_hash(store, SETTINGS_KEY, {"provider": provider_id})
-        if provider_id == "roon":
-            return {
-                "ok": True,
-                "message": "Roon is active. Choose Roon zones in the player, then search or ask Tater to play music.",
-            }
         catalog = _sync_catalog(store, provider_id)
         return {
             "ok": True,
@@ -4386,16 +4723,6 @@ def handle_htmlui_tab_action(
         queue = existing.get("queue") if isinstance(existing.get("queue"), list) else []
         if (
             not _text(values.get("query"))
-            and selected_provider == "roon"
-            and existing_provider == "roon"
-        ):
-            player = _roon_control("play", client=store)
-            return {
-                "ok": True,
-                "message": f"Resumed Roon on {_target_summary(player.get('targets'))}.",
-            }
-        if (
-            not _text(values.get("query"))
             and queue
             and selected_provider == existing_provider
         ):
@@ -4466,8 +4793,7 @@ def handle_htmlui_tab_action(
         )
         if not targets:
             raise ValueError("Choose one or more valid satellites, stereo pairs, or media players.")
-        if selected_provider == "roon":
-            _roon_device_targets(targets)
+        _validate_catalog_provider_targets(targets)
         was_playing = _text(player.get("status")).lower() == "playing"
         old_provider = _provider_id(
             player.get("provider"),
@@ -4475,10 +4801,7 @@ def handle_htmlui_tab_action(
         )
         provider_changed = old_provider != selected_provider
         if was_playing and old_targets and (old_targets != targets or provider_changed):
-            if old_provider == "roon":
-                _roon_control("stop", client=store)
-            else:
-                _stop_target(old_targets)
+            _stop_target(old_targets)
             player["status"] = "stopped"
         _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
         player["provider"] = selected_provider
@@ -4502,22 +4825,6 @@ def handle_htmlui_tab_action(
                 ),
             }
         if was_playing and old_targets != targets:
-            if selected_provider == "roon":
-                query = _text(
-                    (player.get("current") or {}).get("title")
-                    if isinstance(player.get("current"), dict)
-                    else ""
-                )
-                result = _roon_play_request(
-                    {
-                        "query": query,
-                        "targets": targets,
-                        "shuffle": player.get("shuffle"),
-                    },
-                    {},
-                    store,
-                )
-                return {"ok": True, "message": _text(result.get("summary_for_user"))}
             player = _start_player_index(
                 _as_int(player.get("index"), 0, 0, 100000),
                 client=store,
@@ -4548,29 +4855,15 @@ def handle_htmlui_tab_action(
         }
 
     if action_name == "music_ui_stop":
-        player = _player(store)
-        if _provider_id(player.get("provider")) == "roon":
-            _roon_control("stop", client=store)
-        else:
-            _stop_player(client=store)
+        _stop_player(client=store)
         return {"ok": True, "message": "Music stopped."}
 
     if action_name == "music_ui_next":
-        current = _player(store)
-        player = (
-            _roon_control("next", client=store)
-            if _provider_id(current.get("provider")) == "roon"
-            else _advance_player(1, client=store)
-        )
+        player = _advance_player(1, client=store)
         return {"ok": True, "message": f"Playing {_track_label(player.get('current') or {})}."}
 
     if action_name == "music_ui_previous":
-        current = _player(store)
-        player = (
-            _roon_control("previous", client=store)
-            if _provider_id(current.get("provider")) == "roon"
-            else _advance_player(-1, client=store)
-        )
+        player = _advance_player(-1, client=store)
         return {"ok": True, "message": f"Playing {_track_label(player.get('current') or {})}."}
 
     if action_name == "music_ui_queue_play":
@@ -4618,7 +4911,7 @@ def _fetch_track_artwork(track: Dict[str, Any], client: Any = None) -> Dict[str,
     source_url = artwork_url_fn(track) if callable(artwork_url_fn) else ""
     source_url = _text(source_url)
     if not source_url:
-        raise KeyError("This track does not have embedded artwork.")
+        raise KeyError("This provider does not have artwork for the track.")
 
     cache_key = hashlib.sha256(source_url.encode("utf-8")).hexdigest()
     with _state_lock:
@@ -4637,7 +4930,7 @@ def _fetch_track_artwork(track: Dict[str, Any], client: Any = None) -> Dict[str,
     if not content_type.startswith("image/"):
         raise ValueError("The music provider did not return an image.")
     if not body or len(body) > 12 * 1024 * 1024:
-        raise ValueError("The embedded artwork is empty or too large.")
+        raise ValueError("The provider artwork is empty or too large.")
 
     cached = {"body": body, "content_type": content_type}
     with _state_lock:
@@ -4672,6 +4965,147 @@ def handle_core_webhook(
     )
 
 
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    store = redis_client or globals().get("redis_client")
+    cfg = _settings(store)
+    runtime = _runtime(store)
+    provider_id = _provider_id(cfg.get("provider"))
+    connected = _paired(cfg, provider_id)
+    catalog_interval = _as_int(
+        cfg.get("catalog_sync_interval_seconds"),
+        DEFAULT_SYNC_INTERVAL_SECONDS,
+        60,
+        86400,
+    )
+    recommendation_interval = (
+        _as_int(cfg.get("recommendation_interval_hours"), 12, 1, 168) * 3600
+    )
+    recommendations_enabled = _as_bool(cfg.get("recommendations_enabled"), True)
+    has_history = any(
+        _provider_id(row.get("provider")) == provider_id
+        for row in _listening_history(store)
+    )
+    last_sync = max(
+        _as_float(runtime.get("last_sync_finished_at")),
+        _as_float(runtime.get("last_sync_at")),
+    )
+    last_recommendation = max(
+        _as_float(runtime.get("last_recommendation_finished_at")),
+        _as_float(runtime.get("last_recommendation_at")),
+        _as_float(runtime.get("last_recommendation_attempt_at")),
+    )
+    last_continuation = max(
+        _as_float(runtime.get("last_continuation_finished_at")),
+        _as_float(runtime.get("last_continuation_at")),
+    )
+    recommendation_running = bool(
+        _recommendation_lock.locked()
+        or (_recommendation_thread is not None and _recommendation_thread.is_alive())
+    )
+    continuation_running = bool(
+        _continuation_lock.locked()
+        or (_continuation_thread is not None and _continuation_thread.is_alive())
+    )
+    return {
+        "label": "Music Core",
+        "order": 35,
+        "tasks": [
+            {
+                "id": "catalog_sync",
+                "label": "Music Library Sync",
+                "description": "Refreshes artists, albums, genres, tracks, and provider artwork.",
+                "interval_seconds": catalog_interval,
+                "running": _catalog_sync_lock.locked(),
+                "started_at": _catalog_sync_started_at,
+                "finished_at": last_sync,
+                "duration_ms": _as_float(runtime.get("last_sync_duration_ms")),
+                "next_run_at": last_sync + catalog_interval if last_sync else 0.0,
+                "last_error": _text(runtime.get("last_sync_error")),
+                "run_count": _as_int(runtime.get("sync_run_count"), 0, 0, 1_000_000_000),
+                "available": connected,
+                "unavailable_reason": f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before syncing music.",
+                "status": "idle" if connected else "waiting",
+                "requires_running": True,
+                "order": 10,
+            },
+            {
+                "id": "recommendation_refresh",
+                "label": "Tater Recommendations",
+                "description": "Builds fresh AI-named playlists from listening history.",
+                "interval_seconds": recommendation_interval,
+                "enabled": recommendations_enabled,
+                "running": recommendation_running,
+                "started_at": _recommendation_started_at,
+                "finished_at": last_recommendation,
+                "duration_ms": _as_float(runtime.get("last_recommendation_duration_ms")),
+                "next_run_at": (
+                    last_recommendation + recommendation_interval
+                    if last_recommendation and recommendations_enabled
+                    else 0.0
+                ),
+                "last_error": _text(runtime.get("last_recommendation_error")),
+                "run_count": _as_int(
+                    runtime.get("recommendation_run_count"),
+                    0,
+                    0,
+                    1_000_000_000,
+                ),
+                "available": connected and has_history,
+                "unavailable_reason": (
+                    f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before refreshing recommendations."
+                    if not connected
+                    else "Play some music first so Tater has listening history to use."
+                ),
+                "status": "idle" if connected and has_history else "waiting",
+                "requires_running": True,
+                "order": 20,
+            },
+            {
+                "id": "continuous_radio_refill",
+                "label": "Continuous-Radio Refill",
+                "description": "Automatically extends an active queue when playback nears its final tracks.",
+                "interval_seconds": 0,
+                "enabled": True,
+                "manual": False,
+                "schedule_label": "Event driven",
+                "next_run_label": "Near queue end",
+                "running": continuation_running,
+                "started_at": _continuation_started_at,
+                "finished_at": last_continuation,
+                "duration_ms": _as_float(runtime.get("last_continuation_duration_ms")),
+                "last_error": _text(runtime.get("last_continuation_error")),
+                "run_count": _as_int(
+                    runtime.get("continuation_run_count"),
+                    0,
+                    0,
+                    1_000_000_000,
+                ),
+                "available": connected,
+                "unavailable_reason": f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before starting continuous radio.",
+                "status": "idle" if connected else "waiting",
+                "requires_running": True,
+                "order": 30,
+            },
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    store = redis_client or globals().get("redis_client")
+    task = _text(task_id).lower()
+    provider_id = _provider_id(_settings(store).get("provider"))
+    if task == "catalog_sync":
+        catalog = _sync_catalog(store, provider_id)
+        return {"ok": True, "track_count": len(catalog.get("tracks") or [])}
+    if task == "recommendation_refresh":
+        recommendations = _generate_recommendations(store)
+        return {
+            "ok": True,
+            "playlist_count": len(recommendations.get("playlists") or []),
+        }
+    raise KeyError(f"Unknown Music Core task: {task_id}")
+
+
 def run(stop_event: Optional[object] = None) -> None:
     logger.info("[Music] Core starting.")
     try:
@@ -4693,11 +5127,15 @@ def run(stop_event: Optional[object] = None) -> None:
             try:
                 if (
                     active_provider in CATALOG_PROVIDER_IDS
-                    and now - _as_float(runtime.get("last_sync_at")) >= interval
+                    and (
+                        _catalog_needs_artwork_refresh(provider_id=active_provider)
+                        or now - _as_float(runtime.get("last_sync_at")) >= interval
+                    )
                 ):
                     _sync_catalog(provider_id=active_provider)
                     runtime = _runtime()
                 _advance_finished_player()
+                _schedule_continuation_refresh()
                 recommendation_interval = (
                     _as_int(cfg.get("recommendation_interval_hours"), 12, 1, 168) * 3600
                 )
