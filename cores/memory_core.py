@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import textwrap
 import hashlib
@@ -750,13 +751,16 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.28"
+__version__ = "1.0.29"
 
 
 load_dotenv()
 
 logger = logging.getLogger("memory_core")
 logger.setLevel(logging.INFO)
+
+_MEMORY_TASK_LOCK = threading.Lock()
+_MEMORY_TASK_STARTED_AT = 0.0
 
 CORE_SETTINGS = {
     "category": "Memory Core Settings",
@@ -2545,6 +2549,61 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, int]:
     return stats
 
 
+def _run_memory_cycle_once(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
+    global _MEMORY_TASK_STARTED_AT
+    if not _MEMORY_TASK_LOCK.acquire(blocking=False):
+        raise RuntimeError("Memory extraction is already running.")
+    cycle_start = time.time()
+    _MEMORY_TASK_STARTED_AT = cycle_start
+    stats_key = "mem:stats:memory_core"
+    try:
+        stats = _run_cycle(llm_client, settings) if llm_client is not None else {
+            "enabled_platform_count": 0,
+            "scanned_scopes": 0,
+            "processed_messages": 0,
+            "updated_facts": 0,
+            "updated_docs": 0,
+        }
+        finished_at = time.time()
+        try:
+            run_count = int(float(redis_client.hget(stats_key, "run_count") or 0)) + 1
+        except Exception:
+            run_count = 1
+        redis_client.hset(
+            stats_key,
+            mapping={
+                "last_run_ts": str(cycle_start),
+                "last_finished_ts": str(finished_at),
+                "last_duration_ms": str(max(0.0, (finished_at - cycle_start) * 1000.0)),
+                "last_error": "",
+                "run_count": str(run_count),
+                "enabled_platform_count": str(stats.get("enabled_platform_count") or 0),
+                "scanned_scopes": str(stats.get("scanned_scopes") or 0),
+                "processed_messages": str(stats.get("processed_messages") or 0),
+                "updated_facts": str(stats.get("updated_facts") or 0),
+                "updated_docs": str(stats.get("updated_docs") or 0),
+            },
+        )
+        return {"ok": True, **stats}
+    except Exception as exc:
+        finished_at = time.time()
+        try:
+            redis_client.hset(
+                stats_key,
+                mapping={
+                    "last_finished_ts": str(finished_at),
+                    "last_duration_ms": str(max(0.0, (finished_at - cycle_start) * 1000.0)),
+                    "last_error": str(exc),
+                },
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        _MEMORY_TASK_STARTED_AT = 0.0
+        _MEMORY_TASK_LOCK.release()
+
+
 def _sleep_with_stop(seconds: int, stop_event) -> None:
     target = max(1, int(seconds))
     elapsed = 0.0
@@ -2571,8 +2630,6 @@ def run(stop_event=None):
         if not settings_logged:
             settings_logged = True
             logger.info("[memory_core] extraction interval set to %ss", interval_seconds)
-        cycle_start = time.time()
-
         if llm_client is None:
             try:
                 llm_client = _get_primary_llm_client_from_env()
@@ -2584,25 +2641,7 @@ def run(stop_event=None):
                 llm_client = None
 
         try:
-            stats = _run_cycle(llm_client, settings) if llm_client is not None else {
-                "enabled_platform_count": 0,
-                "scanned_scopes": 0,
-                "processed_messages": 0,
-                "updated_facts": 0,
-                "updated_docs": 0,
-            }
-            stats_key = "mem:stats:memory_core"
-            redis_client.hset(
-                stats_key,
-                mapping={
-                    "last_run_ts": str(cycle_start),
-                    "enabled_platform_count": str(stats.get("enabled_platform_count") or 0),
-                    "scanned_scopes": str(stats.get("scanned_scopes") or 0),
-                    "processed_messages": str(stats.get("processed_messages") or 0),
-                    "updated_facts": str(stats.get("updated_facts") or 0),
-                    "updated_docs": str(stats.get("updated_docs") or 0),
-                },
-            )
+            stats = _run_memory_cycle_once(llm_client, settings)
             if (
                 int(stats.get("processed_messages") or 0) > 0
                 or int(stats.get("updated_facts") or 0) > 0
@@ -2905,6 +2944,10 @@ def _memory_core_stats() -> Dict[str, Any]:
 
     stats = {
         "last_run_ts": _to_float(raw.get("last_run_ts"), 0.0),
+        "last_finished_ts": _to_float(raw.get("last_finished_ts"), _to_float(raw.get("last_run_ts"), 0.0)),
+        "last_duration_ms": _to_float(raw.get("last_duration_ms"), 0.0),
+        "last_error": str(raw.get("last_error") or "").strip(),
+        "run_count": _to_int(raw.get("run_count"), 0),
         "enabled_platform_count": _to_int(raw.get("enabled_platform_count"), 0),
         "scanned_scopes": _to_int(raw.get("scanned_scopes"), 0),
         "processed_messages": _to_int(raw.get("processed_messages"), 0),
@@ -2913,6 +2956,43 @@ def _memory_core_stats() -> Dict[str, Any]:
     }
     stats["last_run_text"] = _format_unix_ts(stats.get("last_run_ts"))
     return stats
+
+
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    del redis_client
+    settings = _load_settings()
+    interval = _as_int(settings.get("interval_seconds"), 180, min_value=30, max_value=3600)
+    stats = _memory_core_stats()
+    finished_at = float(stats.get("last_finished_ts") or stats.get("last_run_ts") or 0.0)
+    return {
+        "label": "Memory Core",
+        "order": 20,
+        "tasks": [
+            {
+                "id": "memory_extraction",
+                "label": "Memory Extraction",
+                "description": "Extracts durable user and room memories from new conversations.",
+                "interval_seconds": interval,
+                "running": _MEMORY_TASK_LOCK.locked(),
+                "started_at": _MEMORY_TASK_STARTED_AT,
+                "finished_at": finished_at,
+                "duration_ms": float(stats.get("last_duration_ms") or 0.0),
+                "next_run_at": finished_at + interval if finished_at else 0.0,
+                "last_error": str(stats.get("last_error") or ""),
+                "run_count": int(stats.get("run_count") or 0),
+                "requires_running": True,
+                "order": 10,
+            }
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, **_kwargs) -> Dict[str, Any]:
+    if str(task_id or "").strip().lower() != "memory_extraction":
+        raise KeyError(f"Unknown Memory Core task: {task_id}")
+    settings = _load_settings()
+    llm_client = _get_primary_llm_client_from_env()
+    return _run_memory_cycle_once(llm_client, settings)
 
 
 def _memory_core_doc_discovery() -> Dict[str, Any]:

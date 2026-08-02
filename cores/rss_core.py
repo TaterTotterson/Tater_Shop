@@ -6,6 +6,7 @@ import json
 import feedparser
 import logging
 import requests
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
@@ -16,11 +17,15 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 
 logger = logging.getLogger("rss")
 logger.setLevel(logging.INFO)
+
+_RSS_RUNTIME_KEY = "rss:runtime"
+_RSS_TASK_LOCK = threading.Lock()
+_RSS_TASK_STARTED_AT = 0.0
 
 load_dotenv()
 
@@ -1093,19 +1098,21 @@ class RSSManager:
         )
         return bool(enabled_notifiers)
 
-    async def poll_feeds(self, stop_event=None):
-        logger.info("Starting RSS feed polling...")
-        no_notifier_logged = False
+    async def poll_once(self, stop_event=None) -> Dict[str, Any]:
+        global _RSS_TASK_STARTED_AT
+        if not _RSS_TASK_LOCK.acquire(blocking=False):
+            raise RuntimeError("RSS feed check is already running.")
+        started_at = time.time()
+        _RSS_TASK_STARTED_AT = started_at
+        checked_count = 0
+        posted_count = 0
+        errors: List[str] = []
+        idle = False
         try:
-            while not (stop_event and stop_event.is_set()):
-                if not self.any_notifier_enabled():
-                    if not no_notifier_logged:
-                        no_notifier_logged = True
-                        logger.info("[RSS] No notifier routes are enabled. Polling is idle.")
-                    await _interruptible_poll_sleep(stop_event, _get_poll_interval())
-                    continue
-                no_notifier_logged = False
-
+            if not self.any_notifier_enabled():
+                idle = True
+                logger.info("[RSS] No notifier routes are enabled. Polling is idle.")
+            else:
                 feeds = self.get_feeds()
                 for feed_url, feed_cfg in feeds.items():
                     if stop_event and stop_event.is_set():
@@ -1113,16 +1120,15 @@ class RSSManager:
                     try:
                         if not feed_cfg.get("enabled", False):
                             continue
+                        checked_count += 1
                         last_ts = float(feed_cfg.get("last_ts") or 0.0)
                         feed_platforms = feed_cfg.get("portals") or {}
                         parsed_feed = await asyncio.to_thread(feedparser.parse, feed_url)
                         if parsed_feed.bozo:
-                            logger.error(
-                                f"Error parsing feed {feed_url}: {parsed_feed.bozo_exception}"
-                            )
-                            continue
+                            raise RuntimeError(str(parsed_feed.bozo_exception or "Feed parsing failed."))
 
                         feed_title = parsed_feed.feed.get("title", feed_url)
+
                         def get_entry_ts(entry) -> float:
                             if "published_parsed" in entry and entry.published_parsed:
                                 return time.mktime(entry.published_parsed)
@@ -1130,22 +1136,15 @@ class RSSManager:
                                 return time.mktime(entry.updated_parsed)
                             return 0.0
 
-                        sorted_entries = sorted(
-                            parsed_feed.entries,
-                            key=get_entry_ts,
-                        )
-
+                        sorted_entries = sorted(parsed_feed.entries, key=get_entry_ts)
                         new_entries = []
                         for entry in sorted_entries:
                             ts = get_entry_ts(entry)
-                            if ts <= 0:
-                                continue
-                            if ts > last_ts:
+                            if ts > 0 and ts > last_ts:
                                 new_entries.append((ts, entry))
 
                         if not new_entries:
                             continue
-
                         latest_ts, latest_entry = max(new_entries, key=lambda row: row[0])
                         if len(new_entries) > 1:
                             logger.info(
@@ -1157,9 +1156,49 @@ class RSSManager:
                             break
                         await self.process_entry(feed_title, latest_entry, feed_platforms)
                         update_feed(self.redis, feed_url, {"last_ts": latest_ts})
-                    except Exception as e:
-                        logger.error(f"Error processing feed {feed_url}: {e}")
+                        posted_count += 1
+                    except Exception as exc:
+                        message = f"{feed_url}: {exc}"
+                        errors.append(message)
+                        logger.error("Error processing feed %s: %s", feed_url, exc)
 
+            finished_at = time.time()
+            try:
+                run_count = int(float(self.redis.hget(_RSS_RUNTIME_KEY, "run_count") or 0)) + 1
+            except Exception:
+                run_count = 1
+            self.redis.hset(
+                _RSS_RUNTIME_KEY,
+                mapping={
+                    "last_run_ts": str(started_at),
+                    "last_finished_ts": str(finished_at),
+                    "last_duration_ms": str(max(0.0, (finished_at - started_at) * 1000.0)),
+                    "last_error": "; ".join(errors[:3]),
+                    "run_count": str(run_count),
+                    "checked_count": str(checked_count),
+                    "posted_count": str(posted_count),
+                    "status": "idle" if idle else "error" if errors else "ok",
+                },
+            )
+            return {
+                "ok": not bool(errors),
+                "idle": idle,
+                "checked_count": checked_count,
+                "posted_count": posted_count,
+                "errors": errors,
+            }
+        finally:
+            _RSS_TASK_STARTED_AT = 0.0
+            _RSS_TASK_LOCK.release()
+
+    async def poll_feeds(self, stop_event=None):
+        logger.info("Starting RSS feed polling...")
+        try:
+            while not (stop_event and stop_event.is_set()):
+                try:
+                    await self.poll_once(stop_event=stop_event)
+                except RuntimeError as exc:
+                    logger.info("[RSS] %s", exc)
                 if stop_event and stop_event.is_set():
                     break
                 await _interruptible_poll_sleep(stop_event, _get_poll_interval())
@@ -1223,6 +1262,51 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> dict:
         "empty_message": "No RSS feeds configured yet.",
         "ui": _rss_manager_ui(client),
     }
+
+
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    raw = client.hgetall(_RSS_RUNTIME_KEY) or {} if client is not None else {}
+
+    def number(key: str, default: float = 0.0) -> float:
+        try:
+            return float(raw.get(key) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    interval = _get_poll_interval()
+    finished_at = number("last_finished_ts", number("last_run_ts"))
+    manager = RSSManager(llm_client=None)
+    notifier_ready = manager.any_notifier_enabled()
+    return {
+        "label": "RSS Core",
+        "order": 50,
+        "tasks": [
+            {
+                "id": "feed_check",
+                "label": "Feed Check",
+                "description": "Checks enabled RSS feeds and delivers the newest unseen item through configured routes.",
+                "interval_seconds": interval,
+                "running": _RSS_TASK_LOCK.locked(),
+                "started_at": _RSS_TASK_STARTED_AT,
+                "finished_at": finished_at,
+                "duration_ms": number("last_duration_ms"),
+                "next_run_at": finished_at + interval if finished_at else 0.0,
+                "last_error": _clean_text(raw.get("last_error")),
+                "run_count": int(number("run_count")),
+                "status": "idle" if notifier_ready else "waiting",
+                "requires_running": True,
+                "order": 10,
+            }
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, **_kwargs) -> Dict[str, Any]:
+    if str(task_id or "").strip().lower() != "feed_check":
+        raise KeyError(f"Unknown RSS Core task: {task_id}")
+    manager = RSSManager(llm_client=_get_primary_llm_client_from_env())
+    return asyncio.run(manager.poll_once())
 
 
 def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:

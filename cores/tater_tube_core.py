@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -21,7 +22,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
@@ -32,6 +33,11 @@ TAGS = ["tater-tube", "media", "recommendations", "context", "tts"]
 
 logger = logging.getLogger("tater_tube_core")
 logger.setLevel(logging.INFO)
+
+_TATER_TUBE_SYNC_LOCK = threading.Lock()
+_TATER_TUBE_SYNC_STARTED_AT = 0.0
+_TATER_TUBE_RECOMMEND_LOCK = threading.Lock()
+_TATER_TUBE_RECOMMEND_STARTED_AT = 0.0
 
 CORE_SETTINGS = {
     "category": "Tater Tube Core Settings",
@@ -379,7 +385,7 @@ def _format_time(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _sync_context(client: Any = None) -> Dict[str, Any]:
+def _sync_context_impl(client: Any = None) -> Dict[str, Any]:
     redis_obj = client or globals().get("redis_client")
     cfg = _settings(redis_obj)
     if not _paired(cfg):
@@ -408,6 +414,18 @@ def _sync_context(client: Any = None) -> Dict[str, Any]:
     return context
 
 
+def _sync_context(client: Any = None) -> Dict[str, Any]:
+    global _TATER_TUBE_SYNC_STARTED_AT
+    if not _TATER_TUBE_SYNC_LOCK.acquire(blocking=False):
+        raise RuntimeError("Tater Tube viewing-context sync is already running.")
+    _TATER_TUBE_SYNC_STARTED_AT = time.time()
+    try:
+        return _sync_context_impl(client)
+    finally:
+        _TATER_TUBE_SYNC_STARTED_AT = 0.0
+        _TATER_TUBE_SYNC_LOCK.release()
+
+
 def _llm_json(loop: asyncio.AbstractEventLoop, llm_client: Any, system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if llm_client is None:
         raise RuntimeError("No primary LLM is configured for Tater.")
@@ -432,7 +450,7 @@ def _llm_json(loop: asyncio.AbstractEventLoop, llm_client: Any, system_prompt: s
     return parsed
 
 
-def _generate_recommendations(
+def _generate_recommendations_impl(
     loop: asyncio.AbstractEventLoop,
     llm_client: Any,
     client: Any = None,
@@ -593,6 +611,86 @@ def _generate_recommendations(
         },
     )
     return cache
+
+
+def _generate_recommendations(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    client: Any = None,
+) -> Dict[str, Any]:
+    global _TATER_TUBE_RECOMMEND_STARTED_AT
+    if not _TATER_TUBE_RECOMMEND_LOCK.acquire(blocking=False):
+        raise RuntimeError("Tater Tube recommendation refresh is already running.")
+    _TATER_TUBE_RECOMMEND_STARTED_AT = time.time()
+    try:
+        return _generate_recommendations_impl(loop, llm_client, client)
+    finally:
+        _TATER_TUBE_RECOMMEND_STARTED_AT = 0.0
+        _TATER_TUBE_RECOMMEND_LOCK.release()
+
+
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    cfg = _settings(client)
+    runtime = _runtime(client)
+    paired = _paired(cfg)
+    sync_interval = _as_int(cfg.get("poll_interval_seconds"), 300, 30, 86400)
+    recommendation_interval = _as_int(cfg.get("recommendation_interval_hours"), 6, 1, 168) * 3600
+    last_sync = _as_float(runtime.get("last_sync_at"), 0.0)
+    last_recommendation = _as_float(runtime.get("last_recommendation_at"), 0.0)
+    error = _text(runtime.get("last_error"))
+    return {
+        "label": "Tater Tube Core",
+        "order": 60,
+        "tasks": [
+            {
+                "id": "viewing_context_sync",
+                "label": "Viewing-Context Sync",
+                "description": "Refreshes recent household viewing activity from Tater Tube Server.",
+                "interval_seconds": sync_interval,
+                "running": _TATER_TUBE_SYNC_LOCK.locked(),
+                "started_at": _TATER_TUBE_SYNC_STARTED_AT,
+                "finished_at": last_sync,
+                "next_run_at": last_sync + sync_interval if last_sync else 0.0,
+                "last_error": error,
+                "available": paired,
+                "status": "idle" if paired else "waiting",
+                "requires_running": True,
+                "order": 10,
+            },
+            {
+                "id": "recommendation_refresh",
+                "label": "Recommendation Refresh",
+                "description": "Creates and publishes a fresh batch of Tater's Picks from current viewing context.",
+                "interval_seconds": recommendation_interval,
+                "running": _TATER_TUBE_RECOMMEND_LOCK.locked(),
+                "started_at": _TATER_TUBE_RECOMMEND_STARTED_AT,
+                "finished_at": last_recommendation,
+                "next_run_at": last_recommendation + recommendation_interval if last_recommendation else 0.0,
+                "last_error": error,
+                "available": paired,
+                "status": "idle" if paired else "waiting",
+                "requires_running": True,
+                "order": 20,
+            },
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    client = redis_client or globals().get("redis_client")
+    task = str(task_id or "").strip().lower()
+    if task == "viewing_context_sync":
+        context = _sync_context(client)
+        return {"ok": True, "event_count": len(context.get("events") or [])}
+    if task == "recommendation_refresh":
+        loop = asyncio.new_event_loop()
+        try:
+            recommendations = _generate_recommendations(loop, _get_primary_llm_client_from_env(), client)
+        finally:
+            loop.close()
+        return {"ok": True, "recommendation_count": len(recommendations.get("items") or [])}
+    raise KeyError(f"Unknown Tater Tube Core task: {task_id}")
 
 
 def _prompt_context(client: Any = None) -> str:

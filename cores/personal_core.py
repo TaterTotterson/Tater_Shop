@@ -6,6 +6,7 @@ import imaplib
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -28,12 +29,15 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.55"
+__version__ = "1.0.56"
 
 load_dotenv()
 
 logger = logging.getLogger("personal_core")
 logger.setLevel(logging.INFO)
+
+_PERSONAL_TASK_LOCK = threading.Lock()
+_PERSONAL_TASK_STARTED_AT = 0.0
 
 
 def _integration_module(integration_id: str):
@@ -6830,8 +6834,17 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _save_cycle_stats(stats: Dict[str, Any], *, cycle_start: float) -> None:
+    finished_at = time.time()
+    try:
+        run_count = int(float(redis_client.hget(_PERSONAL_STATS_KEY, "run_count") or 0)) + 1
+    except Exception:
+        run_count = 1
     mapping = {
         "last_run_ts": str(float(cycle_start)),
+        "last_finished_ts": str(finished_at),
+        "last_duration_ms": str(max(0.0, (finished_at - float(cycle_start)) * 1000.0)),
+        "last_error": "",
+        "run_count": str(run_count),
         "account_count": str(_as_int(stats.get("account_count"), 0, minimum=0)),
         "ok_count": str(_as_int(stats.get("ok_count"), 0, minimum=0)),
         "error_count": str(_as_int(stats.get("error_count"), 0, minimum=0)),
@@ -6883,6 +6896,10 @@ def _load_cycle_stats() -> Dict[str, Any]:
 
     out = {
         "last_run_ts": _as_float(raw.get("last_run_ts"), 0.0, minimum=0.0),
+        "last_finished_ts": _as_float(raw.get("last_finished_ts"), _as_float(raw.get("last_run_ts"), 0.0, minimum=0.0), minimum=0.0),
+        "last_duration_ms": _as_float(raw.get("last_duration_ms"), 0.0, minimum=0.0),
+        "last_error": _text(raw.get("last_error")),
+        "run_count": _as_int(raw.get("run_count"), 0, minimum=0),
         "account_count": _as_int(raw.get("account_count"), 0, minimum=0),
         "ok_count": _as_int(raw.get("ok_count"), 0, minimum=0),
         "error_count": _as_int(raw.get("error_count"), 0, minimum=0),
@@ -6915,6 +6932,75 @@ def _load_cycle_stats() -> Dict[str, Any]:
     }
     out["last_run_text"] = _iso_from_ts(out.get("last_run_ts"))
     return out
+
+
+def _run_personal_cycle_once(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
+    global _PERSONAL_TASK_STARTED_AT
+    if not _PERSONAL_TASK_LOCK.acquire(blocking=False):
+        raise RuntimeError("Personal inbox and calendar scan is already running.")
+    cycle_start = time.time()
+    _PERSONAL_TASK_STARTED_AT = cycle_start
+    try:
+        stats = _run_cycle(llm_client, settings)
+        _save_cycle_stats(stats, cycle_start=cycle_start)
+        return {"ok": True, **stats}
+    except Exception as exc:
+        finished_at = time.time()
+        try:
+            redis_client.hset(
+                _PERSONAL_STATS_KEY,
+                mapping={
+                    "last_finished_ts": str(finished_at),
+                    "last_duration_ms": str(max(0.0, (finished_at - cycle_start) * 1000.0)),
+                    "last_error": str(exc),
+                },
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        _PERSONAL_TASK_STARTED_AT = 0.0
+        _PERSONAL_TASK_LOCK.release()
+
+
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    del redis_client
+    settings = _load_settings()
+    interval = _as_int(settings.get("interval_seconds"), 300, minimum=30, maximum=3600)
+    stats = _load_cycle_stats()
+    finished_at = float(stats.get("last_finished_ts") or stats.get("last_run_ts") or 0.0)
+    return {
+        "label": "Personal Core",
+        "order": 30,
+        "tasks": [
+            {
+                "id": "personal_scan",
+                "label": "Inbox & Calendar Scan",
+                "description": "Refreshes personal email insights, events, deliveries, actions, and notifications.",
+                "interval_seconds": interval,
+                "running": _PERSONAL_TASK_LOCK.locked(),
+                "started_at": _PERSONAL_TASK_STARTED_AT,
+                "finished_at": finished_at,
+                "duration_ms": float(stats.get("last_duration_ms") or 0.0),
+                "next_run_at": finished_at + interval if finished_at else 0.0,
+                "last_error": str(stats.get("last_error") or ""),
+                "run_count": int(stats.get("run_count") or 0),
+                "requires_running": True,
+                "order": 10,
+            }
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, **_kwargs) -> Dict[str, Any]:
+    if str(task_id or "").strip().lower() != "personal_scan":
+        raise KeyError(f"Unknown Personal Core task: {task_id}")
+    settings = _load_settings()
+    try:
+        llm_client = _get_primary_llm_client_from_env()
+    except Exception:
+        llm_client = None
+    return _run_personal_cycle_once(llm_client, settings)
 
 
 def _sleep_with_stop(seconds: int, stop_event: Optional[object]) -> None:
@@ -6950,10 +7036,8 @@ def run(stop_event: Optional[object] = None) -> None:
                 logger.warning("[personal_core] could not initialize LLM client: %s", exc)
                 llm_client = None
 
-        cycle_start = time.time()
         try:
-            stats = _run_cycle(llm_client, settings)
-            _save_cycle_stats(stats, cycle_start=cycle_start)
+            stats = _run_personal_cycle_once(llm_client, settings)
             logger.info(
                 "[personal_core] cycle: accounts=%s ok=%s errors=%s new_emails=%s calendar_events=%s calendar_auto_added=%s events=%s deliveries=%s actions=%s notifications=%s",
                 _as_int(stats.get("account_count"), 0, minimum=0),
@@ -10557,9 +10641,7 @@ def _run_ui_tool_action(
             llm_client = _get_primary_llm_client_from_env()
         except Exception:
             llm_client = None
-        cycle_start = time.time()
-        stats = _run_cycle(llm_client, settings)
-        _save_cycle_stats(stats, cycle_start=cycle_start)
+        stats = _run_personal_cycle_once(llm_client, settings)
         message = (
             "Personal scan complete: "
             f"accounts={_as_int(stats.get('account_count'), 0, minimum=0)}, "

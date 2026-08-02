@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.11"
+__version__ = "1.3.12"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -189,6 +189,8 @@ _GUARDIAN_JSON_MODE_SUPPORTED: Optional[bool] = None
 _AI_REFRESH_STATE_LOCK = threading.Lock()
 _AI_REFRESH_RUNNING = False
 _AI_REFRESH_FORCE_RERUN = False
+_GUARDIAN_POLL_LOCK = threading.Lock()
+_GUARDIAN_POLL_STARTED_AT = 0.0
 
 
 def _integration_module(integration_id: str):
@@ -1071,7 +1073,7 @@ def _dedupe_devices(rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]
     return out
 
 
-def _poll_once(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
+def _poll_once_impl(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
     store = client or redis_client
     if store is None:
         raise ValueError("Redis connection is unavailable.")
@@ -1194,8 +1196,16 @@ def _poll_once(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
         for result in source_results
     ]
     last_error = "; ".join(row["error"] for row in source_status if row.get("enabled") and row.get("error"))
+    finished_at = time.time()
+    try:
+        run_count = int(float(store.hget(RUNTIME_KEY, "poll_run_count") or 0)) + 1
+    except Exception:
+        run_count = 1
     runtime = {
         "last_poll_ts": str(now_ts),
+        "last_poll_finished_ts": str(finished_at),
+        "last_poll_duration_ms": str(max(0.0, (finished_at - now_ts) * 1000.0)),
+        "poll_run_count": str(run_count),
         "last_error": last_error,
         "last_event_count": str(len(events)),
         "inventory_count": str(len(current_inventory)),
@@ -1232,6 +1242,18 @@ def _poll_once(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
         "ai_analysis": ai_analysis,
         "ai_analysis_pending": ai_analysis_pending,
     }
+
+
+def _poll_once(client: Any = None, *, llm_client: Any = None) -> Dict[str, Any]:
+    global _GUARDIAN_POLL_STARTED_AT
+    if not _GUARDIAN_POLL_LOCK.acquire(blocking=False):
+        raise RuntimeError("Guardian network inventory scan is already running.")
+    _GUARDIAN_POLL_STARTED_AT = time.time()
+    try:
+        return _poll_once_impl(client, llm_client=llm_client)
+    finally:
+        _GUARDIAN_POLL_STARTED_AT = 0.0
+        _GUARDIAN_POLL_LOCK.release()
 
 
 def _load_events(limit: int = MAX_UI_EVENTS, client: Any = None) -> List[Dict[str, Any]]:
@@ -2060,6 +2082,82 @@ def _schedule_ai_analysis_refresh(
         daemon=True,
     ).start()
     return True
+
+
+def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    store = redis_client or globals().get("redis_client")
+    settings = _load_settings(store)
+    runtime = _runtime(store)
+    analysis = _load_ai_analysis(store)
+    poll_interval = _as_int(
+        settings.get("poll_interval_seconds"),
+        DEFAULT_POLL_INTERVAL_SECONDS,
+        minimum=5,
+        maximum=86400,
+    )
+    analysis_interval = _as_int(
+        settings.get("ai_analysis_interval_seconds"),
+        DEFAULT_AI_ANALYSIS_INTERVAL_SECONDS,
+        minimum=30,
+        maximum=86400,
+    )
+    poll_finished_at = _as_float(runtime.get("last_poll_finished_ts"), _as_float(runtime.get("last_poll_ts"), 0.0))
+    analysis_finished_at = max(
+        _as_float(analysis.get("generated_at"), 0.0),
+        _as_float(analysis.get("input_checked_at"), 0.0),
+        _as_float(runtime.get("ai_analysis_ts"), 0.0),
+    )
+    with _AI_REFRESH_STATE_LOCK:
+        analysis_running = bool(_AI_REFRESH_RUNNING)
+    return {
+        "label": "Guardian Core",
+        "order": 40,
+        "tasks": [
+            {
+                "id": "network_inventory",
+                "label": "Network Inventory Scan",
+                "description": "Refreshes network devices, health checks, and security events.",
+                "interval_seconds": poll_interval,
+                "running": _GUARDIAN_POLL_LOCK.locked(),
+                "started_at": _GUARDIAN_POLL_STARTED_AT,
+                "finished_at": poll_finished_at,
+                "duration_ms": _as_float(runtime.get("last_poll_duration_ms"), 0.0),
+                "next_run_at": poll_finished_at + poll_interval if poll_finished_at else 0.0,
+                "last_error": _text(runtime.get("last_error")),
+                "run_count": _as_int(runtime.get("poll_run_count"), 0, minimum=0),
+                "requires_running": True,
+                "order": 10,
+            },
+            {
+                "id": "ai_security_analysis",
+                "label": "AI Security Analysis",
+                "description": "Reviews the latest Guardian inventory and events for security findings.",
+                "interval_seconds": analysis_interval,
+                "running": analysis_running,
+                "finished_at": analysis_finished_at,
+                "next_run_at": analysis_finished_at + analysis_interval if analysis_finished_at else 0.0,
+                "last_error": _text(runtime.get("ai_analysis_error")),
+                "requires_running": True,
+                "order": 20,
+            },
+        ],
+    }
+
+
+def run_core_system_task(*, task_id: str, redis_client=None, **_kwargs) -> Dict[str, Any]:
+    store = redis_client or globals().get("redis_client")
+    task = str(task_id or "").strip().lower()
+    if task == "network_inventory":
+        return _poll_once(store, llm_client=_guardian_llm_client_from_env())
+    if task == "ai_security_analysis":
+        queued = _schedule_ai_analysis_refresh(
+            store,
+            llm_client=_guardian_llm_client_from_env(),
+            settings=_load_settings(store),
+            force=True,
+        )
+        return {"ok": True, "queued": bool(queued), "message": "Guardian AI security analysis queued."}
+    raise KeyError(f"Unknown Guardian Core task: {task_id}")
 
 
 def _percent_label(part: int, total: int) -> str:

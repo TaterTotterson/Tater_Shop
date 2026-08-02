@@ -72,7 +72,7 @@
       "id": "guardian",
       "name": "Guardian Core",
       "module_key": "guardian_core",
-      "version": "1.3.11",
+      "version": "1.3.12",
       "min_tater_version": "59",
       "description": "Network guardian core for device inventory, change detection, security analysis, and health monitoring.",
       "settings_category": "Guardian Core Settings",
@@ -86,13 +86,13 @@
         "security"
       ],
       "entry": "cores/guardian_core.py",
-      "sha256": "b67f6291502c338ad71aeb4fbdae2cea33a02e030edc42db28ace75a81736115"
+      "sha256": "d1a8ddf181a4173eccacad2dbcc71b8c4e751de1a5c56b46db03ee5b91313107"
     },
     {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.28",
+      "version": "1.0.29",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
@@ -100,7 +100,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "da60e87328e4ffbc4ce85d905f96416a733be48670b6045a9b070a969b5da062"
+      "sha256": "166f2290d8a3c09da9b91d6d17cef89fb833bd84b00c37b92fd0c76887e322df"
     },
     {
       "id": "music",
@@ -134,7 +134,7 @@
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.55",
+      "version": "1.0.56",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -142,13 +142,13 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "c7f67f64a4aa67cf391fbc96014d7fc0fa82a26c332ffe87d8e856837e76ec52"
+      "sha256": "f90ea53ceba88e7498d39aabe40957a2c04d6ba7507a28542ef6d8d47b5791e1"
     },
     {
       "id": "rss",
       "name": "RSS Core",
       "module_key": "rss_core",
-      "version": "1.0.11",
+      "version": "1.0.12",
       "min_tater_version": "59",
       "description": "RSS Core integration core for Tater.",
       "settings_category": "RSS Core Settings",
@@ -156,13 +156,13 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "b2b12463d4d83d8ef69e60af945b6f88f07dcb3c3626cc4214a3c036fa3ee750"
+      "sha256": "266a8a692a9add1d2c07eb879d09713b9b1b3dc416e4719d39721bdc1c34e208"
     },
     {
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "min_tater_version": "59",
       "description": "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, publish AI-selected movie and series recommendations, and voice Tater's Picks with the user's TTS settings.",
       "settings_category": "Tater Tube Core Settings",
@@ -176,7 +176,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "0d184b7e4dabc16bc6638e4dbf6e9f14ae3f142f5d13c4a16e628065b09fc759"
+      "sha256": "5159b17771c7e9fadbcd7853fab553619b64df3fe022c24035cef3582cbafad7"
     }
   ]
 }
