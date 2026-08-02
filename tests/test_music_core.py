@@ -560,6 +560,7 @@ class MusicCoreTests(unittest.TestCase):
             [row["value"] for row in stream_options],
             ["voice_core:native:kitchen"],
         )
+        self.assertEqual(stream_options[0]["label"], "Tater Sat: Kitchen")
         self.assertTrue(
             all(
                 call.kwargs.get("include_homeassistant") is True
@@ -1129,6 +1130,8 @@ class MusicCoreTests(unittest.TestCase):
                 self.tracks[0],
                 targets,
                 volume_percent=55,
+                start_position_seconds=37,
+                mixed_sync_adjustment_ms=125,
                 client=self.redis,
             )
         self.assertTrue(result["ok"])
@@ -1136,6 +1139,14 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["volume_percent"],
             55,
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["start_position_seconds"],
+            37,
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["mixed_sync_adjustment_ms"],
+            125,
         )
 
     def test_hydra_exposes_play_search_control_status_and_browse(self):
@@ -1186,6 +1197,13 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(player["track_list"], [])
         self.assertEqual(player["track_list_action"], "music_ui_queue_play")
         self.assertEqual(player["track_list_shuffle_action"], "music_ui_set_shuffle")
+        self.assertEqual(player["playback"]["seek_action"], "music_ui_seek")
+        self.assertEqual(
+            player["playback"]["seek_relative_action"],
+            "music_ui_seek_relative",
+        )
+        self.assertEqual(player["playback"]["seek_step_seconds"], 15)
+        self.assertFalse(player["playback"]["seekable"])
         self.assertEqual(
             [row["action"] for row in player["actions"]],
             [
@@ -1202,6 +1220,8 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(player["popup_fields"][0]["key"], "targets")
         self.assertEqual(player["popup_fields"][0]["label"], "Play On")
         self.assertEqual(player["popup_fields"][0]["type"], "multiselect")
+        self.assertEqual(player["popup_fields"][1]["key"], "mixed_sync_adjustment_ms")
+        self.assertEqual(player["popup_fields"][1]["type"], "range")
         self.assertEqual(payload["ui"]["appearance"], "music_library")
         self.assertTrue(payload["ui"]["live_updates"])
         self.assertEqual(payload["ui"]["poll_interval_ms"], 3000)
@@ -1238,6 +1258,8 @@ class MusicCoreTests(unittest.TestCase):
         )
         settings_fields = {row["key"]: row for row in settings["fields"]}
         self.assertEqual(settings_fields["default_targets"]["type"], "multiselect")
+        self.assertTrue(settings_fields["catalog_sync_interval_seconds"]["compact"])
+        self.assertEqual(settings_fields["mixed_sync_default_adjustment_ms"]["value"], 0)
         self.assertTrue(settings_fields["recommendations_enabled"]["value"])
         recommendation_intro = next(
             row
@@ -1453,11 +1475,16 @@ class MusicCoreTests(unittest.TestCase):
                 }
             ),
         )
-        volume_result = self.core.handle_htmlui_tab_action(
-            action="music_ui_set_volume",
-            payload={"values": {"volume_percent": 42}},
-            redis_client=self.redis,
-        )
+        with patch.object(
+            self.core,
+            "_set_target_volume",
+            return_value={"sent_count": 1, "warnings": []},
+        ) as set_target_volume:
+            volume_result = self.core.handle_htmlui_tab_action(
+                action="music_ui_set_volume",
+                payload={"values": {"volume_percent": 42}},
+                redis_client=self.redis,
+            )
         shuffle_result = self.core.handle_htmlui_tab_action(
             action="music_ui_set_shuffle",
             payload={"values": {"shuffle": True}},
@@ -1467,11 +1494,142 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(volume_result["ok"])
         self.assertTrue(shuffle_result["ok"])
         self.assertEqual(player["volume_percent"], 42)
+        set_target_volume.assert_called_once()
+        self.assertEqual(set_target_volume.call_args.args[1], 42)
         self.assertTrue(player["shuffle"])
         self.assertEqual(player["queue"][0]["id"], "track:one")
         self.assertEqual(
             {row["id"] for row in player["queue"][1:]},
             {"track:two", "track:three"},
+        )
+
+    def test_seek_restarts_current_track_at_requested_position_without_history(self):
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "queue": self.tracks,
+                    "index": 0,
+                    "current": self.tracks[0],
+                    "targets": ["voice_core:native:kitchen"],
+                    "provider": "tater_tube",
+                    "volume_percent": 70,
+                    "duration_seconds": 180,
+                    "started_at": 100,
+                    "position_offset_seconds": 0,
+                }
+            ),
+        )
+        with patch.object(self.core, "_require_native_seek_support") as compatible, patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ), patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play_track, patch.object(self.core, "_record_listening_history") as history:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_seek",
+                payload={"values": {"position_seconds": 75}},
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        compatible.assert_called_once_with(["voice_core:native:kitchen"])
+        self.assertEqual(play_track.call_args.kwargs["start_position_seconds"], 75)
+        history.assert_not_called()
+        player = self.core._player(self.redis)
+        self.assertEqual(player["position_offset_seconds"], 75)
+        self.assertEqual(player["status"], "playing")
+
+    def test_player_position_combines_seek_offset_with_live_elapsed_time(self):
+        position = self.core._player_position_seconds(
+            {
+                "status": "playing",
+                "position_offset_seconds": 40,
+                "started_at": 100,
+                "duration_seconds": 180,
+            },
+            now=112.5,
+        )
+        self.assertEqual(position, 52.5)
+
+    def test_mixed_sync_adjustment_is_saved_per_exact_player_group(self):
+        first_group = ["voice_core:native:kitchen", "sonos:RINCON_LIVING"]
+        second_group = ["voice_core:native:office", "sonos:RINCON_LIVING"]
+
+        saved = self.core._save_mixed_sync_adjustment(self.redis, first_group, 225)
+
+        self.assertEqual(saved, 225)
+        cfg = self.core._settings(self.redis)
+        self.assertEqual(self.core._mixed_sync_adjustment(first_group, cfg), 225)
+        self.assertEqual(self.core._mixed_sync_adjustment(second_group, cfg), 0)
+
+    def test_live_volume_is_sent_to_the_active_native_media_session(self):
+        calls = []
+        announcement_targets = types.ModuleType("announcement_targets")
+        announcement_targets.split_announcement_targets = lambda _targets: {
+            "voice_core_selectors": ["native:kitchen"],
+            "integration_devices": [],
+            "homeassistant_media_players": [],
+            "sonos_speakers": [],
+        }
+        native_satellite = types.ModuleType("tater_voice.native_satellite")
+
+        async def has_capability(selector, capability):
+            calls.append(("capability", selector, capability))
+            return True
+
+        async def send_request(selector, command, payload, timeout_s=0):
+            calls.append(("request", selector, command, payload, timeout_s))
+            return {"ok": True}
+
+        native_satellite.client_has_capability = has_capability
+        native_satellite.send_request = send_request
+        native_satellite.run_on_runtime_loop = lambda awaitable, timeout=0: asyncio.run(awaitable)
+        stereo_pairs = types.ModuleType("tater_voice.stereo_pairs")
+        stereo_pairs.is_stereo_selector = lambda _selector: False
+        stereo_pairs.get_pair = lambda _selector: {}
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        tater_voice.stereo_pairs = stereo_pairs
+        player = {
+            "status": "playing",
+            "targets": ["voice_core:native:kitchen"],
+            "playback_result": {
+                "voice_core_sessions": [
+                    {
+                        "session_id": "session-1",
+                        "target": "native:kitchen",
+                        "selectors": ["native:kitchen"],
+                    }
+                ]
+            },
+        }
+
+        with patch.dict(
+            sys.modules,
+            {
+                "announcement_targets": announcement_targets,
+                "tater_voice": tater_voice,
+                "tater_voice.native_satellite": native_satellite,
+                "tater_voice.stereo_pairs": stereo_pairs,
+            },
+        ):
+            result = self.core._set_target_volume(player, 42)
+
+        self.assertEqual(result, {"sent_count": 1, "warnings": []})
+        self.assertIn(
+            ("capability", "native:kitchen", "media_session_volume"),
+            calls,
+        )
+        request = next(row for row in calls if row[0] == "request")
+        self.assertEqual(request[2], "media.session.volume")
+        self.assertEqual(
+            request[3],
+            {"session_id": "session-1", "volume_percent": 42},
         )
 
     def test_player_search_keeps_destinations_selected_from_speaker_popup(self):

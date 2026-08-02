@@ -25,13 +25,13 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.5.0"
-MIN_TATER_VERSION = "98.6"
+__version__ = "2.6.0"
+MIN_TATER_VERSION = "98.7"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; "
     "browse music with provider-native album art, build AI-named recommendations from listening history, and keep "
     "voice-controlled queues playing with a smart continuous-radio refill across "
-    "satellites, stereo pairs, and media players."
+    "clock-synchronized satellites, native Sonos groups, stereo pairs, and media players."
 )
 TAGS = [
     "music",
@@ -86,6 +86,15 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 75,
             "description": "Starting volume for Tater satellite media sessions.",
+        },
+        "mixed_sync_default_adjustment_ms": {
+            "label": "Default Mixed Sync Adjustment (ms)",
+            "type": "number",
+            "default": 0,
+            "description": (
+                "Fine-tunes mixed Sonos and Tater satellite groups. Positive values delay satellites; "
+                "negative values start them earlier."
+            ),
         },
         "default_shuffle": {
             "label": "Shuffle Broad Requests",
@@ -275,6 +284,47 @@ def _settings(client: Any = None) -> Dict[str, str]:
         return _decode_hash(store.hgetall(SETTINGS_KEY) or {})
     except Exception:
         return {}
+
+
+def _target_group_signature(targets: Any) -> str:
+    values = sorted({_text(value) for value in _list(targets) if _text(value)})
+    if not values:
+        return ""
+    return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()[:20]
+
+
+def _mixed_sync_calibrations(cfg: Dict[str, Any]) -> Dict[str, int]:
+    raw = cfg.get("mixed_sync_calibrations")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        _text(key): _as_int(value, 0, -750, 3000)
+        for key, value in raw.items()
+        if _text(key)
+    }
+
+
+def _mixed_sync_adjustment(targets: Any, cfg: Dict[str, Any]) -> int:
+    default = _as_int(cfg.get("mixed_sync_default_adjustment_ms"), 0, -750, 3000)
+    signature = _target_group_signature(targets)
+    return _mixed_sync_calibrations(cfg).get(signature, default) if signature else default
+
+
+def _save_mixed_sync_adjustment(client: Any, targets: Any, value: Any) -> int:
+    cfg = _settings(client)
+    adjustment = _as_int(value, _mixed_sync_adjustment(targets, cfg), -750, 3000)
+    signature = _target_group_signature(targets)
+    if not signature:
+        return adjustment
+    calibrations = _mixed_sync_calibrations(cfg)
+    calibrations[signature] = adjustment
+    _save_hash(client, SETTINGS_KEY, {"mixed_sync_calibrations": json.dumps(calibrations, sort_keys=True)})
+    return adjustment
 
 
 def _runtime(client: Any = None) -> Dict[str, str]:
@@ -1475,6 +1525,7 @@ def _player(client: Any = None) -> Dict[str, Any]:
     targets = _normalize_stereo_targets(payload.get("targets") or payload.get("target"))
     payload["targets"] = targets
     payload["target"] = targets[0] if targets else ""
+    payload["mixed_sync_adjustment_ms"] = _mixed_sync_adjustment(targets, _settings(store))
     payload.setdefault("shuffle", False)
     payload.setdefault("repeat", "off")
     payload.setdefault(
@@ -2463,6 +2514,16 @@ def _normalize_stereo_targets(value: Any) -> List[str]:
     )
 
 
+def _compact_target_option(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Use shorter satellite labels in Music Core's space-limited pickers."""
+    option = dict(row)
+    label = _text(option.get("label"))
+    prefix = "Tater Satellite:"
+    if label.casefold().startswith(prefix.casefold()):
+        option["label"] = f"Tater Sat:{label[len(prefix):]}"
+    return option
+
+
 def _target_options(
     current_values: Any = None,
     provider_id: Any = "",
@@ -2482,7 +2543,7 @@ def _target_options(
             current_values=current_values,
         )
         options = [
-            dict(row)
+            _compact_target_option(row)
             for row in rows
             if (
                 isinstance(row, dict)
@@ -2657,6 +2718,8 @@ def _play_track(
     targets: Any,
     *,
     volume_percent: int,
+    start_position_seconds: float = 0.0,
+    mixed_sync_adjustment_ms: int = 0,
     client: Any = None,
 ) -> Dict[str, Any]:
     provider = _provider(client, track.get("provider"))
@@ -2674,6 +2737,8 @@ def _play_track(
         filename=Path(_text(track.get("path")) or "music-track").name,
         text=f"Playing {_track_label(track)}.",
         volume_percent=volume_percent,
+        start_position_seconds=max(0.0, _as_float(start_position_seconds)),
+        mixed_sync_adjustment_ms=_as_int(mixed_sync_adjustment_ms, 0, -750, 3000),
         timeout_s=max(180.0, duration + 120.0),
         respect_reply_playback=False,
     )
@@ -2751,7 +2816,183 @@ def _stop_target(targets: Any) -> List[str]:
     return warnings
 
 
-def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
+def _player_position_seconds(player: Dict[str, Any], *, now: Optional[float] = None) -> float:
+    position = max(0.0, _as_float(player.get("position_offset_seconds")))
+    started_at = _as_float(player.get("started_at"))
+    if _text(player.get("status")).lower() == "playing" and started_at > 0:
+        position += max(0.0, (time.time() if now is None else float(now)) - started_at)
+    return position
+
+
+def _native_session_members(player: Dict[str, Any]) -> List[Dict[str, Any]]:
+    playback_result = (
+        player.get("playback_result")
+        if isinstance(player.get("playback_result"), dict)
+        else {}
+    )
+    members: List[Dict[str, Any]] = []
+    for session in list(playback_result.get("voice_core_sessions") or []):
+        if not isinstance(session, dict) or not _text(session.get("session_id")):
+            continue
+        selectors = _list(session.get("selectors") or session.get("target"))
+        for selector in selectors:
+            if selector:
+                members.append(
+                    {
+                        "selector": selector,
+                        "session_id": _text(session.get("session_id")),
+                        "target": _text(session.get("target")),
+                    }
+                )
+    return members
+
+
+def _require_native_seek_support(targets: Any) -> None:
+    try:
+        from announcement_targets import split_announcement_targets
+        from tater_voice import native_satellite, stereo_pairs
+
+        grouped = split_announcement_targets(_list(targets))
+        selectors = list(grouped.get("voice_core_selectors") or [])
+        members: List[str] = []
+        for selector in selectors:
+            pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
+            if isinstance(pair, dict) and pair:
+                members.extend(
+                    member
+                    for member in (
+                        _text(pair.get("left_selector")),
+                        _text(pair.get("right_selector")),
+                    )
+                    if member
+                )
+            elif selector:
+                members.append(selector)
+        unsupported = []
+        for member in members:
+            supported = native_satellite.run_on_runtime_loop(
+                native_satellite.client_has_capability(
+                    member,
+                    "media_session_start_position",
+                ),
+                timeout=4.0,
+            )
+            if not supported:
+                unsupported.append(member)
+        if unsupported:
+            raise ValueError(
+                "Seeking needs the latest satellite firmware on "
+                + ", ".join(unsupported)
+                + "."
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Could not confirm satellite seek support: {exc}") from exc
+
+
+def _set_target_volume(player: Dict[str, Any], volume_percent: int) -> Dict[str, Any]:
+    targets = _list(player.get("targets") or player.get("target"))
+    if not targets:
+        return {"sent_count": 0, "warnings": ["No playback destinations are selected."]}
+    try:
+        from announcement_targets import split_announcement_targets
+
+        grouped = split_announcement_targets(targets)
+    except Exception as exc:
+        return {"sent_count": 0, "warnings": [_text(exc)]}
+
+    sent_count = 0
+    warnings: List[str] = []
+    native_members = _native_session_members(player)
+    if grouped.get("voice_core_selectors") and not native_members:
+        warnings.append("The current satellite playback session is unavailable; start the track again.")
+    if native_members:
+        try:
+            from tater_voice import native_satellite, stereo_pairs
+
+            pair_scales: Dict[str, int] = {}
+            for target in grouped.get("voice_core_selectors") or []:
+                pair = stereo_pairs.get_pair(target) if stereo_pairs.is_stereo_selector(target) else {}
+                if not isinstance(pair, dict) or not pair:
+                    continue
+                pair_scales[_text(pair.get("left_selector"))] = _as_int(
+                    pair.get("left_volume_percent"), 100, 0, 100
+                )
+                pair_scales[_text(pair.get("right_selector"))] = _as_int(
+                    pair.get("right_volume_percent"), 100, 0, 100
+                )
+            for member in native_members:
+                selector = _text(member.get("selector"))
+                try:
+                    supported = native_satellite.run_on_runtime_loop(
+                        native_satellite.client_has_capability(selector, "media_session_volume"),
+                        timeout=4.0,
+                    )
+                    if not supported:
+                        raise RuntimeError("update satellite firmware to enable live music volume")
+                    member_volume = round(volume_percent * pair_scales.get(selector, 100) / 100)
+                    native_satellite.run_on_runtime_loop(
+                        native_satellite.send_request(
+                            selector,
+                            "media.session.volume",
+                            {
+                                "session_id": _text(member.get("session_id")),
+                                "volume_percent": max(0, min(100, member_volume)),
+                            },
+                            timeout_s=4.0,
+                        ),
+                        timeout=6.0,
+                    )
+                    sent_count += 1
+                except Exception as exc:
+                    warnings.append(f"{selector}: {exc}")
+        except Exception as exc:
+            warnings.append(_text(exc))
+
+    integration_targets = list(grouped.get("integration_devices") or [])
+    integration_targets.extend(
+        {"integration_id": "homeassistant", "device_id": entity_id}
+        for entity_id in grouped.get("homeassistant_media_players") or []
+    )
+    integration_targets.extend(
+        {"integration_id": "sonos", "device_id": speaker}
+        for speaker in grouped.get("sonos_speakers") or []
+    )
+    if integration_targets:
+        try:
+            from integration_registry import run_integration_device_action
+
+            for row in integration_targets:
+                integration_id = _text(row.get("integration_id"))
+                device_id = _text(row.get("device_id"))
+                try:
+                    result = run_integration_device_action(
+                        integration_id,
+                        "set_volume",
+                        device_id,
+                        {
+                            "volume_percent": volume_percent,
+                            "volume": volume_percent / 100.0,
+                        },
+                    )
+                    if isinstance(result, dict) and result.get("ok") is False:
+                        raise RuntimeError(_text(result.get("error")) or "volume change failed")
+                    sent_count += 1
+                except Exception as exc:
+                    warnings.append(f"{integration_id}:{device_id}: {exc}")
+        except Exception as exc:
+            warnings.append(_text(exc))
+    return {"sent_count": sent_count, "warnings": warnings}
+
+
+def _start_player_index(
+    index: int,
+    *,
+    start_position_seconds: float = 0.0,
+    record_history: bool = True,
+    client: Any = None,
+) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     with _state_lock:
         player = _player(store)
@@ -2776,7 +3017,18 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
         )
         if _text(player.get("status")).lower() == "playing":
             _stop_target(targets)
-        result = _play_track(track, targets, volume_percent=volume, client=store)
+        duration = max(0.0, _as_float(track.get("duration_seconds")))
+        start_position = max(0.0, _as_float(start_position_seconds))
+        if duration > 0:
+            start_position = min(duration, start_position)
+        result = _play_track(
+            track,
+            targets,
+            volume_percent=volume,
+            start_position_seconds=start_position,
+            mixed_sync_adjustment_ms=_mixed_sync_adjustment(targets, cfg),
+            client=store,
+        )
         playback_result = {
             key: result.get(key)
             for key in (
@@ -2788,9 +3040,14 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
                 "integration_sent_count",
                 "media_session_sent_count",
                 "media_session_fallback_count",
+                "mixed_sync_adjustment_ms",
+                "mixed_native_start_lead_ms",
+                "sonos_proxy_used",
             )
             if result.get(key) is not None
         }
+        if isinstance(result.get("sonos_group"), dict):
+            playback_result["sonos_group"] = dict(result["sonos_group"])
         voice_core_sessions = [
             dict(row)
             for row in list(result.get("voice_core_sessions") or [])
@@ -2804,8 +3061,10 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
                 "index": index,
                 "current": track,
                 "started_at": time.time(),
-                "duration_seconds": max(0.0, _as_float(track.get("duration_seconds"))),
+                "position_offset_seconds": start_position,
+                "duration_seconds": duration,
                 "volume_percent": volume,
+                "mixed_sync_adjustment_ms": _mixed_sync_adjustment(targets, cfg),
                 "last_error": "",
                 "playback_result": playback_result,
                 "warnings": [
@@ -2816,8 +3075,29 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
             }
         )
         _save_player(player, store)
-        _record_listening_history(track, targets, client=store)
+        if record_history:
+            _record_listening_history(track, targets, client=store)
         return player
+
+
+def _seek_player(position_seconds: float, *, client: Any = None) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    player = _player(store)
+    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+    if not queue:
+        raise ValueError("The music queue is empty.")
+    duration = max(0.0, _as_float(player.get("duration_seconds")))
+    if duration <= 0:
+        raise ValueError("This track does not report a duration, so it cannot be seeked.")
+    position = max(0.0, min(max(0.0, duration - 1.0), _as_float(position_seconds)))
+    if position > 0:
+        _require_native_seek_support(player.get("targets") or player.get("target"))
+    return _start_player_index(
+        _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1)),
+        start_position_seconds=position,
+        record_history=False,
+        client=store,
+    )
 
 
 def _create_and_start_queue(
@@ -2853,12 +3133,14 @@ def _create_and_start_queue(
             "shuffle": bool(shuffle),
             "repeat": _text(previous.get("repeat") or "off"),
             "volume_percent": volume_percent,
+            "mixed_sync_adjustment_ms": _mixed_sync_adjustment(targets, cfg),
             "created_at": time.time(),
             "queue_session_id": uuid.uuid4().hex,
             "continuous_radio": True,
             "continuation_pending": False,
             "radio_name": "Tater Continuous Radio",
             "started_at": 0.0,
+            "position_offset_seconds": 0.0,
             "duration_seconds": 0.0,
             "last_error": "",
         }
@@ -2891,7 +3173,16 @@ def _advance_player(direction: int, *, client: Any = None) -> Dict[str, Any]:
                     next_index = index + 1
                 if next_index >= len(queue):
                     _stop_target(player.get("targets") or player.get("target"))
-                    player.update({"status": "finished", "index": len(queue) - 1, "started_at": 0.0})
+                    player.update(
+                        {
+                            "status": "finished",
+                            "index": len(queue) - 1,
+                            "started_at": 0.0,
+                            "position_offset_seconds": max(
+                                0.0, _as_float(player.get("duration_seconds"))
+                            ),
+                        }
+                    )
                     _save_player(player, store)
                     return player
         if next_index < 0:
@@ -2952,7 +3243,13 @@ def _stop_player(*, client: Any = None) -> Dict[str, Any]:
         player = _player(store)
         targets = _list(player.get("targets") or player.get("target"))
         warnings = _stop_target(targets) if targets else []
-        player.update({"status": "stopped", "started_at": 0.0})
+        player.update(
+            {
+                "status": "stopped",
+                "started_at": 0.0,
+                "position_offset_seconds": 0.0,
+            }
+        )
         if warnings:
             player["warnings"] = warnings
         _save_player(player, store)
@@ -2965,8 +3262,7 @@ def _advance_finished_player(client: Any = None) -> None:
     if _text(player.get("status")).lower() != "playing":
         return
     duration = _as_float(player.get("duration_seconds"))
-    started = _as_float(player.get("started_at"))
-    if duration <= 0 or started <= 0 or time.time() < started + duration + 1.0:
+    if duration <= 0 or _player_position_seconds(player) < duration + 1.0:
         return
     try:
         if _text(player.get("repeat")).lower() == "one":
@@ -3468,10 +3764,15 @@ def _player_item(
     status = _text(player.get("status") or "idle").upper()
     targets = _list(player.get("targets") or player.get("target"))
     target_summary = _target_summary(targets)
+    player_warnings = [_text(value) for value in list(player.get("warnings") or []) if _text(value)]
     player_provider = _provider_id(player.get("provider"), active_provider)
     queue = player.get("queue") if isinstance(player.get("queue"), list) else []
     queue_count = len(queue)
     current_index = _as_int(player.get("index"), -1, -1, max(0, queue_count - 1))
+    duration_seconds = max(0.0, _as_float(player.get("duration_seconds")))
+    position_seconds = _player_position_seconds(player)
+    if duration_seconds > 0:
+        position_seconds = min(duration_seconds, position_seconds)
     track_list = [
         {
             "id": f"queue:{index}",
@@ -3505,6 +3806,8 @@ def _player_item(
         "detail": (
             _text(player.get("last_error"))
             if status == "ERROR" and _text(player.get("last_error"))
+            else "Playback warning: " + player_warnings[0]
+            if player_warnings
             else (
                 f"Playing on {target_summary}. Queue position "
                 f"{current_index + 1} of {queue_count}. Continuous radio keeps adding similar tracks."
@@ -3514,6 +3817,16 @@ def _player_item(
         ),
         "hero_image_src": _artwork_display_url(current),
         "hero_image_alt": f"{_track_label(current) if current else 'Music'} artwork",
+        "playback": {
+            "status": status.lower(),
+            "position_seconds": position_seconds,
+            "duration_seconds": duration_seconds,
+            "position_updated_at": time.time(),
+            "seekable": bool(current and duration_seconds > 0),
+            "seek_action": "music_ui_seek",
+            "seek_relative_action": "music_ui_seek_relative",
+            "seek_step_seconds": 15,
+        },
         "hero_badges": [
             {
                 "label": status,
@@ -3532,6 +3845,7 @@ def _player_item(
             {"label": "SHUFFLE" if player.get("shuffle") else "IN ORDER", "tone": "muted"},
             {"label": f"REPEAT {_text(player.get('repeat') or 'off').upper()}", "tone": "muted"},
             {"label": f"{len(targets)} PLAYER{'' if len(targets) == 1 else 'S'}", "tone": "muted"},
+            *([{"label": "PARTIAL PLAYBACK", "tone": "warn"}] if player_warnings else []),
         ],
         "summary_rows": [
             {"label": "Artist", "value": _text(current.get("artist") or current.get("album_artist")) or "—"},
@@ -3541,7 +3855,23 @@ def _player_item(
         ],
         "fields_popup": False,
         "fields_dropdown": False,
-        "popup_fields": [dict(targets_field)],
+        "popup_fields": [
+            dict(targets_field),
+            {
+                "key": "mixed_sync_adjustment_ms",
+                "label": "Mixed Sonos / Sat Sync",
+                "type": "range",
+                "value": _as_int(player.get("mixed_sync_adjustment_ms"), 0, -750, 3000),
+                "min": -750,
+                "max": 3000,
+                "step": 25,
+                "suffix": " ms",
+                "description": (
+                    "Fine-tunes this exact player group. Positive values delay Tater sats; "
+                    "negative values start them earlier."
+                ),
+            },
+        ],
         "settings_title": "Choose Speakers & Players",
         "settings_label": "🔊",
         "settings_aria_label": "Choose speakers and players",
@@ -4253,6 +4583,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "key": "catalog_sync_interval_seconds",
                         "label": "Catalog Sync Interval (sec)",
                         "type": "number",
+                        "compact": True,
                         "value": _as_int(cfg.get("catalog_sync_interval_seconds"), 900, 60, 86400),
                     },
                     {
@@ -4272,6 +4603,19 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "label": "Default Volume (%)",
                         "type": "number",
                         "value": _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
+                    },
+                    {
+                        "key": "mixed_sync_default_adjustment_ms",
+                        "label": "Default Mixed Sync Adjustment (ms)",
+                        "type": "number",
+                        "value": _as_int(cfg.get("mixed_sync_default_adjustment_ms"), 0, -750, 3000),
+                        "min": -750,
+                        "max": 3000,
+                        "step": 25,
+                        "description": (
+                            "Starting adjustment for new Sonos + Tater Sat groups. Each group can be calibrated "
+                            "from the player popup."
+                        ),
                     },
                     {
                         "key": "default_shuffle",
@@ -4677,6 +5021,7 @@ def handle_htmlui_tab_action(
             "catalog_sync_interval_seconds",
             "default_targets",
             "default_volume_percent",
+            "mixed_sync_default_adjustment_ms",
             "default_shuffle",
             "maximum_queue_tracks",
             "recommendations_enabled",
@@ -4794,18 +5139,35 @@ def handle_htmlui_tab_action(
         if not targets:
             raise ValueError("Choose one or more valid satellites, stereo pairs, or media players.")
         _validate_catalog_provider_targets(targets)
+        if "mixed_sync_adjustment_ms" in values:
+            mixed_sync_adjustment = _save_mixed_sync_adjustment(
+                store,
+                targets,
+                values.get("mixed_sync_adjustment_ms"),
+            )
+        else:
+            mixed_sync_adjustment = _mixed_sync_adjustment(targets, _settings(store))
         was_playing = _text(player.get("status")).lower() == "playing"
+        resume_position = _player_position_seconds(player) if was_playing else 0.0
+        old_mixed_sync_adjustment = _as_int(
+            player.get("mixed_sync_adjustment_ms"),
+            0,
+            -750,
+            3000,
+        )
+        mixed_sync_changed = old_mixed_sync_adjustment != mixed_sync_adjustment
         old_provider = _provider_id(
             player.get("provider"),
             _provider_id(_settings(store).get("provider")),
         )
         provider_changed = old_provider != selected_provider
-        if was_playing and old_targets and (old_targets != targets or provider_changed):
+        if was_playing and old_targets and (old_targets != targets or provider_changed or mixed_sync_changed):
             _stop_target(old_targets)
             player["status"] = "stopped"
         _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
         player["provider"] = selected_provider
         player["targets"] = targets
+        player["mixed_sync_adjustment_ms"] = mixed_sync_adjustment
         player["shuffle"] = _as_bool(values.get("shuffle"), bool(player.get("shuffle")))
         player["volume_percent"] = _as_int(
             values.get("volume_percent"),
@@ -4824,12 +5186,20 @@ def handle_htmlui_tab_action(
                     "Enter music to start playback."
                 ),
             }
-        if was_playing and old_targets != targets:
+        if was_playing and (old_targets != targets or mixed_sync_changed):
             player = _start_player_index(
                 _as_int(player.get("index"), 0, 0, 100000),
+                start_position_seconds=resume_position,
                 client=store,
             )
-            return {"ok": True, "message": f"Moved music to {_target_summary(targets)}."}
+            return {
+                "ok": True,
+                "message": (
+                    f"Updated mixed playback sync for {_target_summary(targets)}."
+                    if mixed_sync_changed and old_targets == targets
+                    else f"Moved music to {_target_summary(targets)}."
+                ),
+            }
         return {"ok": True, "message": f"Music player set to {_target_summary(targets)}."}
 
     if action_name == "music_ui_set_volume":
@@ -4840,9 +5210,51 @@ def handle_htmlui_tab_action(
             0,
             100,
         )
+        live_result = {"sent_count": 0, "warnings": []}
+        if _text(player.get("status")).lower() == "playing":
+            live_result = _set_target_volume(player, volume)
+            if _as_int(live_result.get("sent_count"), 0, 0, 10000) <= 0:
+                warning = "; ".join(
+                    _text(value)
+                    for value in list(live_result.get("warnings") or [])
+                    if _text(value)
+                )
+                raise ValueError(warning or "The active players could not change volume.")
         player["volume_percent"] = volume
+        warnings = [
+            _text(value)
+            for value in list(live_result.get("warnings") or [])
+            if _text(value)
+        ]
+        if warnings:
+            player["warnings"] = warnings
         _save_player(player, store)
-        return {"ok": True, "message": f"Music volume set to {volume}%."}
+        return {
+            "ok": True,
+            "message": (
+                f"Music volume set to {volume}%. " + " ".join(warnings)
+                if warnings
+                else f"Music volume set to {volume}%."
+            ),
+        }
+
+    if action_name == "music_ui_seek":
+        player = _seek_player(
+            _as_float(values.get("position_seconds")),
+            client=store,
+        )
+        position = _player_position_seconds(player)
+        return {"ok": True, "message": f"Moved to {round(position)} seconds."}
+
+    if action_name == "music_ui_seek_relative":
+        current = _player(store)
+        delta = _as_float(values.get("delta_seconds"))
+        player = _seek_player(
+            _player_position_seconds(current) + delta,
+            client=store,
+        )
+        position = _player_position_seconds(player)
+        return {"ok": True, "message": f"Moved to {round(position)} seconds."}
 
     if action_name == "music_ui_set_shuffle":
         player = _set_player_shuffle(

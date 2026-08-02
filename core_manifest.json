@@ -106,11 +106,11 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "2.5.0",
-      "min_tater_version": "98.6",
-      "description": "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; browse music with provider-native album art, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across satellites, stereo pairs, and media players.",
+      "version": "2.6.0",
+      "min_tater_version": "98.7",
+      "description": "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; browse music with provider-native album art, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
-      "required_settings_count": 10,
+      "required_settings_count": 11,
       "autostart_key": "music_core_running",
       "tags": [
         "music",
@@ -128,7 +128,7 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "66767ba7c1a17e3d80722c486074b8e5d38fc5bfcdd3946c5648fa236ea2fb9d"
+      "sha256": "eafd28fac5a35626988f15c3fe233ef0f83964d6b20261b724823eaa85fa51c1"
     },
     {
       "id": "personal",
