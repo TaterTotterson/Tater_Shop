@@ -1191,6 +1191,28 @@
       "sha256": "a9d56a6601f7ec4234aa341664841c8469c3ef294f677d9664d3591a0db74dba"
     },
     {
+      "id": "reachy_vision",
+      "name": "Reachy Vision",
+      "version": "1.0.0",
+      "min_tater_version": "98.4",
+      "description": "Use when someone asks Tater to look at them or something in front of Reachy, including 'how do I look?', 'do you like what I'm wearing?', 'what am I wearing?', 'look at this', or 'what do you see?'. Do not use for named home-security cameras; use Camera Control for those.",
+      "portals": [
+        "voice_core"
+      ],
+      "notifier": false,
+      "settings_category": "Reachy Vision",
+      "tags": [
+        "reachy",
+        "camera",
+        "snapshot",
+        "vision",
+        "appearance",
+        "outfit"
+      ],
+      "entry": "verba/reachy_vision.py",
+      "sha256": "e68b4eac15bc19bc03b3023d700bb1f8b6d2ee9d6927ab9acc5be15d7582f0ce"
+    },
+    {
       "id": "roon_music",
       "name": "Roon Music",
       "version": "1.0.1",
