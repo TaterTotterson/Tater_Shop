@@ -106,7 +106,7 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "min_tater_version": "98.6",
       "description": "Connect Tater Tube, Plex, Emby, Jellyfin, Navidrome, or Roon to Tater; browse music and play voice-controlled queues across satellites, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
@@ -127,7 +127,7 @@
         "queue"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "9dc659884ae6e96ed229b8cf87278aabdc51f386fe66ab9a097f91cc00bcedea"
+      "sha256": "39788679ac670d969e65e145b24b61f5fd4a96939bcbb6b9cff0a8842f5ba22d"
     },
     {
       "id": "personal",

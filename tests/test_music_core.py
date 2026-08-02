@@ -82,6 +82,8 @@ class MusicCoreTests(unittest.TestCase):
                 "category_id": "local:music",
                 "source_index": 0,
                 "path": "Bob Marley/Exodus/09 Three Little Birds.flac",
+                "has_artwork": True,
+                "modified_unix": 1234,
                 "provider": "tater_tube",
             },
             {
@@ -129,6 +131,144 @@ class MusicCoreTests(unittest.TestCase):
         self.assertIn("player_token=player-token", url)
         self.assertNotIn("player-token", json.dumps(self.tracks))
         self.assertEqual(self.core._track_media_type(self.tracks[0]), "audio/flac")
+
+        artwork_url = provider.artwork_url(self.tracks[0])
+        self.assertIn("/api/tater/music/artwork?", artwork_url)
+        self.assertIn("player_token=player-token", artwork_url)
+
+    def test_normalized_embedded_artwork_uses_credential_free_core_proxy(self):
+        track = self.core._normalize_track(
+            {
+                "ratingKey": "track:art",
+                "title": "Covered Song",
+                "categoryId": "local:music",
+                "path": "Artist/Album/song.flac",
+                "poster": "http://tube.local/artwork?player_token=secret",
+            }
+        )
+        self.assertTrue(track["has_artwork"])
+        self.assertNotIn("secret", json.dumps(track))
+        public = self.core._public_track(track)
+        self.assertEqual(
+            public["artwork_url"],
+            "/api/cores/music_core/webhook/artwork?track_id=track%3Aart&provider=tater_tube",
+        )
+
+    def test_artwork_webhook_proxies_provider_image_and_caches_it(self):
+        response = Mock()
+        response.content = b"\xff\xd8album-cover\xff\xd9"
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.raise_for_status.return_value = None
+        self.core._artwork_cache.clear()
+        starlette = types.ModuleType("starlette")
+        starlette_responses = types.ModuleType("starlette.responses")
+
+        class FakeResponse:
+            def __init__(self, content=b"", media_type=None, headers=None, status_code=200):
+                self.body = bytes(content)
+                self.media_type = media_type
+                self.headers = dict(headers or {})
+                self.status_code = status_code
+
+        starlette_responses.Response = FakeResponse
+        starlette.responses = starlette_responses
+        with patch.dict(
+            sys.modules,
+            {"starlette": starlette, "starlette.responses": starlette_responses},
+        ), patch.object(self.core.requests, "get", return_value=response) as fetch:
+            first = self.core.handle_core_webhook(
+                webhook="artwork",
+                query={"track_id": "track:one", "provider": "tater_tube"},
+                redis_client=self.redis,
+            )
+            second = self.core.handle_core_webhook(
+                webhook="artwork",
+                query={"track_id": "track:one", "provider": "tater_tube"},
+                redis_client=self.redis,
+            )
+        self.assertEqual(first.body, b"\xff\xd8album-cover\xff\xd9")
+        self.assertEqual(first.media_type, "image/jpeg")
+        self.assertEqual(second.body, first.body)
+        fetch.assert_called_once()
+
+    def test_native_session_failure_updates_player_status(self):
+        player = {
+            "status": "playing",
+            "started_at": 100,
+            "targets": ["voice_core:native:kitchen"],
+            "playback_result": {
+                "voice_core_sessions": [
+                    {
+                        "target": "native:kitchen",
+                        "session_id": "music-session-1",
+                        "selectors": ["native:kitchen"],
+                    }
+                ]
+            },
+        }
+        native_satellite = types.SimpleNamespace(
+            status_snapshot_sync=lambda: {
+                "clients": {
+                    "native:kitchen": {
+                        "media_session": {
+                            "active": False,
+                            "session_id": "music-session-1",
+                            "ok": False,
+                            "finished_ts": 101,
+                        }
+                    }
+                }
+            }
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}):
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        self.assertEqual(reconciled["status"], "error")
+        self.assertIn("native:kitchen", reconciled["last_error"])
+        self.assertEqual(
+            self.core._player(self.redis)["status"],
+            "error",
+        )
+
+    def test_native_session_failure_is_only_a_warning_when_another_player_was_started(self):
+        player = {
+            "status": "playing",
+            "started_at": 100,
+            "playback_result": {
+                "sent_count": 2,
+                "voice_core_sent_count": 1,
+                "voice_core_sessions": [
+                    {
+                        "target": "native:kitchen",
+                        "session_id": "music-session-1",
+                        "selectors": ["native:kitchen"],
+                    }
+                ],
+            },
+        }
+        native_satellite = types.SimpleNamespace(
+            status_snapshot_sync=lambda: {
+                "clients": {
+                    "native:kitchen": {
+                        "media_session": {
+                            "active": False,
+                            "session_id": "music-session-1",
+                            "ok": False,
+                            "finished_ts": 101,
+                        }
+                    }
+                }
+            }
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}):
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        self.assertEqual(reconciled["status"], "playing")
+        self.assertTrue(reconciled["warnings"])
 
     def test_plex_catalog_and_stream_url(self):
         provider = self.core.PlexMusicProvider(
@@ -362,6 +502,117 @@ class MusicCoreTests(unittest.TestCase):
         integration_registry.get_integration_devices_by_capability.assert_called_with(
             "media_player",
             self.core.redis_client,
+        )
+
+    def test_target_picker_hides_satellites_that_belong_to_a_stereo_pair(self):
+        announcement_targets = types.ModuleType("announcement_targets")
+        announcement_targets.build_announcement_target_options = Mock(
+            return_value=[
+                {
+                    "value": "voice_core:native:sat1",
+                    "label": "Tater Satellite: Sat 1",
+                },
+                {
+                    "value": "voice_core:native:voicepe",
+                    "label": "Tater Satellite: Voice PE",
+                },
+                {
+                    "value": "voice_core:stereo:bedroom12",
+                    "label": "Tater Stereo: Bedroom",
+                },
+                {
+                    "value": "voice_core:native:kitchen",
+                    "label": "Tater Satellite: Kitchen",
+                },
+            ]
+        )
+        integration_registry = types.ModuleType("integration_registry")
+        integration_registry.get_integration_devices_by_capability = Mock(return_value=[])
+        stereo_pairs = types.ModuleType("tater_voice.stereo_pairs")
+        stereo_pairs.list_pairs = Mock(
+            return_value=[
+                {
+                    "selector": "stereo:bedroom12",
+                    "left_selector": "native:sat1",
+                    "right_selector": "native:voicepe",
+                }
+            ]
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.stereo_pairs = stereo_pairs
+
+        with patch.dict(
+            sys.modules,
+            {
+                "announcement_targets": announcement_targets,
+                "integration_registry": integration_registry,
+                "tater_voice": tater_voice,
+                "tater_voice.stereo_pairs": stereo_pairs,
+            },
+        ):
+            visible = self.core._target_options(provider_id="tater_tube")
+            resolution_options = self.core._target_options(
+                provider_id="tater_tube",
+                include_stereo_members=True,
+            )
+
+        self.assertEqual(
+            {row["value"] for row in visible},
+            {
+                "voice_core:stereo:bedroom12",
+                "voice_core:native:kitchen",
+            },
+        )
+        self.assertEqual(len(resolution_options), 4)
+
+    def test_target_resolution_routes_stereo_members_to_the_pair_and_deduplicates(self):
+        member_routes = {
+            "native:sat1": "voice_core:stereo:bedroom12",
+            "voice_core:native:sat1": "voice_core:stereo:bedroom12",
+            "native:voicepe": "voice_core:stereo:bedroom12",
+            "voice_core:native:voicepe": "voice_core:stereo:bedroom12",
+        }
+        options = [
+            {
+                "value": "voice_core:native:sat1",
+                "label": "Tater Satellite: Sat 1",
+            },
+            {
+                "value": "voice_core:native:voicepe",
+                "label": "Tater Satellite: Voice PE",
+            },
+            {
+                "value": "voice_core:stereo:bedroom12",
+                "label": "Tater Stereo: Bedroom",
+            },
+        ]
+        with patch.object(
+            self.core,
+            "_stereo_member_target_map",
+            return_value=member_routes,
+        ), patch.object(
+            self.core,
+            "_target_options",
+            return_value=options,
+        ) as target_options:
+            targets = self.core._resolve_targets(
+                [
+                    "Tater Satellite: Sat 1",
+                    "voice_core:native:voicepe",
+                    "voice_core:stereo:bedroom12",
+                ],
+                client=self.redis,
+                provider_id="tater_tube",
+            )
+            origin_targets = self.core._resolve_targets(
+                origin={"satellite_selector": "native:sat1"},
+                client=self.redis,
+            )
+
+        self.assertEqual(targets, ["voice_core:stereo:bedroom12"])
+        self.assertEqual(origin_targets, ["voice_core:stereo:bedroom12"])
+        self.assertTrue(
+            all(call.kwargs.get("include_stereo_members") is True for call in target_options.call_args_list)
         )
 
     def test_native_client_state_is_credential_free_and_exposes_targets(self):
@@ -680,6 +931,96 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(providers["provider:plex"]["fields"][1]["type"], "password")
         self.assertEqual(providers["provider:roon"]["fields"], [])
 
+    def test_player_ui_upgrades_saved_stereo_members_without_readding_them(self):
+        member_routes = {
+            "native:sat1": "voice_core:stereo:bedroom12",
+            "voice_core:native:sat1": "voice_core:stereo:bedroom12",
+            "native:voicepe": "voice_core:stereo:bedroom12",
+            "voice_core:native:voicepe": "voice_core:stereo:bedroom12",
+        }
+        pair_option = {
+            "value": "voice_core:stereo:bedroom12",
+            "label": "Tater Stereo: Bedroom",
+        }
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "stopped",
+                    "targets": [
+                        "voice_core:native:sat1",
+                        "voice_core:native:voicepe",
+                    ],
+                }
+            ),
+        )
+        self.redis.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "default_targets": json.dumps(
+                    [
+                        "voice_core:native:sat1",
+                        "voice_core:native:voicepe",
+                    ]
+                )
+            },
+        )
+        with patch.object(
+            self.core,
+            "_stereo_member_target_map",
+            return_value=member_routes,
+        ), patch.object(
+            self.core,
+            "_target_options",
+            return_value=[pair_option],
+        ):
+            payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
+
+        player = next(
+            row for row in payload["ui"]["item_forms"] if row.get("id") == "player:main"
+        )
+        settings = next(
+            row for row in payload["ui"]["item_forms"] if row.get("id") == "settings:music"
+        )
+        default_targets = next(
+            row for row in settings["fields"] if row.get("key") == "default_targets"
+        )
+        self.assertEqual(
+            player["popup_fields"][0]["value"],
+            ["voice_core:stereo:bedroom12"],
+        )
+        self.assertEqual(default_targets["value"], ["voice_core:stereo:bedroom12"])
+        self.assertEqual(default_targets["options"], [pair_option])
+
+    def test_saving_defaults_routes_stereo_members_to_the_pair(self):
+        member_routes = {
+            "voice_core:native:sat1": "voice_core:stereo:bedroom12",
+            "voice_core:native:voicepe": "voice_core:stereo:bedroom12",
+        }
+        with patch.object(
+            self.core,
+            "_stereo_member_target_map",
+            return_value=member_routes,
+        ):
+            result = self.core.handle_htmlui_tab_action(
+                action="music_save_settings",
+                payload={
+                    "values": {
+                        "default_targets": [
+                            "voice_core:native:sat1",
+                            "voice_core:native:voicepe",
+                        ]
+                    }
+                },
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            json.loads(self.redis.hgetall(self.core.SETTINGS_KEY)["default_targets"]),
+            ["voice_core:stereo:bedroom12"],
+        )
+
     def test_player_track_list_marks_current_track_and_keeps_album_together(self):
         album_tracks = [
             {**self.tracks[0], "id": "album:1", "title": "First Song", "album": "Exodus"},
@@ -704,6 +1045,12 @@ class MusicCoreTests(unittest.TestCase):
         player = next(row for row in payload["ui"]["item_forms"] if row.get("id") == "player:main")
         self.assertEqual([row["title"] for row in player["track_list"]], ["First Song", "Second Song"])
         self.assertEqual([row["active"] for row in player["track_list"]], [False, True])
+        self.assertTrue(
+            all(
+                row["image_src"].startswith("/api/cores/music_core/webhook/artwork?")
+                for row in player["track_list"]
+            )
+        )
 
     def test_next_track_stops_active_session_before_starting_the_next_track(self):
         self.redis.set(
