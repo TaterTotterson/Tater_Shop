@@ -39,6 +39,9 @@ class FakeRedis:
 def load_music_core():
     helpers = types.ModuleType("helpers")
     helpers.redis_client = FakeRedis()
+    helpers.extract_json = lambda value: value
+    helpers.get_llm_client_from_env = lambda: None
+    helpers.get_primary_llm_client_from_env = lambda: None
     sys.modules["helpers"] = helpers
 
     path = Path(__file__).resolve().parents[1] / "cores" / "music_core.py"
@@ -789,6 +792,130 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(player["status"], "playing")
         self.assertEqual(player["targets"], result["targets"])
         self.assertEqual(player["volume_percent"], 65)
+        history = self.core._listening_history(self.redis)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["track_id"], "track:one")
+        self.assertEqual(history[0]["genres"], ["Reggae", "Roots Reggae"])
+        self.assertNotIn("player-token", json.dumps(history))
+
+    def test_recommendations_use_real_catalog_ids_and_publish_ai_named_playlists(self):
+        self.core._record_listening_history(
+            self.tracks[0],
+            ["voice_core:native:kitchen"],
+            client=self.redis,
+        )
+        candidates, _candidate_map = self.core._recommendation_candidates(
+            self.core._catalog(self.redis),
+            self.core._listening_history(self.redis),
+        )
+        album_candidate = next(
+            row for row in candidates if row["type"] == "album" and row["title"] == "Exodus"
+        )
+        song_candidate = next(
+            row
+            for row in candidates
+            if row["type"] == "song" and row["title"] == "Blue in Green"
+        )
+
+        class FakeLlm:
+            async def chat(self, **_kwargs):
+                return {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "A mellow roots-and-jazz detour made for you.",
+                                "playlists": [
+                                    {
+                                        "name": "Sunlit Side Roads",
+                                        "description": "Easygoing favorites with a jazz turn.",
+                                        "items": [
+                                            {
+                                                "candidate_id": album_candidate["id"],
+                                                "reason": "It follows the roots sound you played.",
+                                            },
+                                            {
+                                                "candidate_id": song_candidate["id"],
+                                                "reason": "A calm exploratory change of pace.",
+                                            },
+                                            {
+                                                "candidate_id": "song:not-in-the-library",
+                                                "reason": "This must be discarded.",
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        )
+                    }
+                }
+
+        result = self.core._generate_recommendations(
+            self.redis,
+            llm_client=FakeLlm(),
+        )
+        self.assertEqual(result["playlists"][0]["name"], "Sunlit Side Roads")
+        self.assertEqual(len(result["playlists"][0]["items"]), 2)
+        self.assertEqual(
+            result["playlists"][0]["track_ids"],
+            ["track:one", "track:two"],
+        )
+        self.assertEqual(
+            self.core._recommendations(self.redis)["summary"],
+            "A mellow roots-and-jazz detour made for you.",
+        )
+
+    def test_recommendation_playlist_plays_on_current_player_destinations(self):
+        self.redis.set(
+            self.core.RECOMMENDATIONS_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "playlists": [
+                        {
+                            "id": "morning-mix",
+                            "name": "Morning Mix",
+                            "track_ids": ["track:two", "track:one"],
+                        }
+                    ],
+                }
+            ),
+        )
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "stopped",
+                    "targets": ["voice_core:native:kitchen"],
+                    "volume_percent": 44,
+                }
+            ),
+        )
+        with patch.object(
+            self.core,
+            "_target_options",
+            return_value=[
+                {
+                    "value": "voice_core:native:kitchen",
+                    "label": "Tater Satellite: Kitchen",
+                }
+            ],
+        ), patch.object(
+            self.core,
+            "_validate_catalog_provider_targets",
+        ), patch.object(
+            self.core,
+            "_create_and_start_queue",
+            return_value={"current": self.tracks[1]},
+        ) as start:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_recommendation_play",
+                payload={"id": "recommendation:morning-mix", "values": {}},
+                redis_client=self.redis,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual([row["id"] for row in start.call_args.args[0]], ["track:two", "track:one"])
+        self.assertEqual(start.call_args.kwargs["targets"], ["voice_core:native:kitchen"])
+        self.assertEqual(start.call_args.kwargs["volume_percent"], 44)
 
     def test_play_track_forwards_mixed_targets_to_tater_router(self):
         playback = types.ModuleType("media_playback")
@@ -884,6 +1011,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(payload["ui"]["default_tab"], "library")
         tabs = {row["key"]: row for row in payload["ui"]["manager_tabs"]}
         self.assertNotIn("player", tabs)
+        self.assertEqual(tabs["recommendations"]["item_group"], "recommendations")
         self.assertEqual(
             [row["key"] for row in tabs["library"]["groups"]],
             ["search", "genres", "artists", "albums"],
@@ -912,6 +1040,14 @@ class MusicCoreTests(unittest.TestCase):
         )
         settings_fields = {row["key"]: row for row in settings["fields"]}
         self.assertEqual(settings_fields["default_targets"]["type"], "multiselect")
+        self.assertTrue(settings_fields["recommendations_enabled"]["value"])
+        recommendation_intro = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "recommendations:overview"
+        )
+        self.assertEqual(recommendation_intro["group"], "recommendations")
+        self.assertFalse(recommendation_intro["refresh_available"])
         providers = {
             row["id"]: row
             for row in payload["ui"]["item_forms"]

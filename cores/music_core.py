@@ -17,14 +17,20 @@ from urllib.parse import quote, urlencode, urlparse
 
 import requests
 
-from helpers import redis_client
+from helpers import extract_json, get_llm_client_from_env, redis_client
+
+try:
+    from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 MIN_TATER_VERSION = "98.6"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, Navidrome, or Roon to Tater; "
-    "browse music and play voice-controlled queues across satellites, stereo pairs, and media players."
+    "browse music, build AI-named recommendations from listening history, and play "
+    "voice-controlled queues across satellites, stereo pairs, and media players."
 )
 TAGS = [
     "music",
@@ -39,6 +45,7 @@ TAGS = [
     "stereo",
     "multi-room",
     "queue",
+    "recommendations",
 ]
 
 logger = logging.getLogger("music_core")
@@ -92,6 +99,30 @@ CORE_SETTINGS = {
             "default": 200,
             "description": "Maximum number of matched tracks placed in one queue.",
         },
+        "recommendations_enabled": {
+            "label": "Tater Recommendations",
+            "type": "checkbox",
+            "default": True,
+            "description": "Use listening history and Tater's primary AI model to prepare named music mixes.",
+        },
+        "recommendation_interval_hours": {
+            "label": "Recommendation Refresh (hours)",
+            "type": "number",
+            "default": 12,
+            "description": "How often Music Core refreshes Tater Recommendations in the background.",
+        },
+        "recommendation_playlist_count": {
+            "label": "Recommendation Playlists",
+            "type": "number",
+            "default": 3,
+            "description": "Number of AI-named recommendation playlists to prepare.",
+        },
+        "recommendation_items_per_playlist": {
+            "label": "Albums & Songs Per Playlist",
+            "type": "number",
+            "default": 6,
+            "description": "Maximum recommended albums and songs in each playlist.",
+        },
     },
     "tags": TAGS,
 }
@@ -106,10 +137,14 @@ SETTINGS_KEY = "music_core_settings"
 RUNTIME_KEY = "music_core_runtime"
 CATALOG_KEY = "music_core_catalog_v1"
 PLAYER_KEY = "music_core_player_v1"
+HISTORY_KEY = "music_core_listening_history_v1"
+RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_SYNC_INTERVAL_SECONDS = 900
 MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
+MAX_HISTORY_EVENTS = 300
+MAX_RECOMMENDATION_CANDIDATES = 200
 PROVIDER_LABELS = {
     "tater_tube": "Tater Tube Server",
     "plex": "Plex",
@@ -139,6 +174,9 @@ GENERIC_SEARCH_WORDS = {
 
 _state_lock = threading.RLock()
 _artwork_cache: Dict[str, Dict[str, Any]] = {}
+_recommendation_lock = threading.Lock()
+_recommendation_started_at = 0.0
+_recommendation_thread: Optional[threading.Thread] = None
 
 
 def _text(value: Any) -> str:
@@ -1320,6 +1358,433 @@ def _save_player(player: Dict[str, Any], client: Any = None) -> None:
     _save_json(store, PLAYER_KEY, player)
 
 
+def _listening_history(client: Any = None) -> List[Dict[str, Any]]:
+    store = client or globals().get("redis_client")
+    payload = _load_json(store, HISTORY_KEY, [])
+    if not isinstance(payload, list):
+        return []
+    return [dict(row) for row in payload if isinstance(row, dict)]
+
+
+def _record_listening_history(
+    track: Dict[str, Any],
+    targets: Any = None,
+    *,
+    client: Any = None,
+) -> None:
+    """Record successful starts without retaining credentials or stream URLs."""
+    store = client or globals().get("redis_client")
+    track_id = _text(track.get("id"))
+    title = _text(track.get("title"))
+    if store is None or not (track_id or title):
+        return
+    now = time.time()
+    history = _listening_history(store)
+    if history:
+        latest = history[-1]
+        if (
+            _text(latest.get("track_id")) == track_id
+            and now - _as_float(latest.get("played_at")) < 30.0
+        ):
+            return
+    history.append(
+        {
+            "track_id": track_id,
+            "title": title or "Untitled",
+            "artist": _text(track.get("artist") or track.get("album_artist")),
+            "album_artist": _text(track.get("album_artist") or track.get("artist")),
+            "album": _text(track.get("album")),
+            "genres": [_text(value) for value in track.get("genres") or [] if _text(value)],
+            "provider": _provider_id(track.get("provider")),
+            "targets": _list(targets),
+            "played_at": now,
+        }
+    )
+    _save_json(store, HISTORY_KEY, history[-MAX_HISTORY_EVENTS:])
+
+
+def _recommendations(client: Any = None) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    payload = _load_json(store, RECOMMENDATIONS_KEY, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _recommendation_candidates(
+    catalog: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    *,
+    limit: int = MAX_RECOMMENDATION_CANDIDATES,
+) -> tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    tracks = [dict(row) for row in catalog.get("tracks") or [] if isinstance(row, dict)]
+    if not tracks:
+        return [], {}
+
+    artist_counts: Dict[str, int] = {}
+    album_counts: Dict[str, int] = {}
+    genre_counts: Dict[str, int] = {}
+    recent_track_ids = set()
+    recent_albums = set()
+    for event in history[-120:]:
+        artist = _text(event.get("album_artist") or event.get("artist")).casefold()
+        album = _text(event.get("album")).casefold()
+        if artist:
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        if album:
+            album_counts[album] = album_counts.get(album, 0) + 1
+        for genre in event.get("genres") or []:
+            token = _text(genre).casefold()
+            if token:
+                genre_counts[token] = genre_counts.get(token, 0) + 1
+    for event in history[-40:]:
+        track_id = _text(event.get("track_id"))
+        album = _text(event.get("album")).casefold()
+        if track_id:
+            recent_track_ids.add(track_id)
+        if album:
+            recent_albums.add(album)
+
+    def affinity(track: Dict[str, Any]) -> int:
+        artist = _text(track.get("album_artist") or track.get("artist")).casefold()
+        album = _text(track.get("album")).casefold()
+        genres = [_text(value).casefold() for value in track.get("genres") or []]
+        return (
+            artist_counts.get(artist, 0) * 5
+            + album_counts.get(album, 0) * 3
+            + sum(genre_counts.get(genre, 0) * 2 for genre in genres if genre)
+        )
+
+    ordered_tracks = sorted(
+        tracks,
+        key=lambda track: (
+            _text(track.get("id")) in recent_track_ids,
+            -affinity(track),
+            _text(track.get("artist") or track.get("album_artist")).casefold(),
+            _text(track.get("album")).casefold(),
+            _as_int(track.get("disc_number"), 0, 0, 1000),
+            _as_int(track.get("track_number"), 0, 0, 10000),
+            _text(track.get("title")).casefold(),
+        ),
+    )
+
+    albums: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    for track in tracks:
+        artist = _text(track.get("album_artist") or track.get("artist"))
+        album = _text(track.get("album"))
+        if not album:
+            continue
+        albums.setdefault((artist.casefold(), album.casefold()), []).append(track)
+
+    ranked_albums = sorted(
+        albums.items(),
+        key=lambda entry: (
+            entry[0][1] in recent_albums,
+            -max(affinity(track) for track in entry[1]),
+            entry[0],
+        ),
+    )
+    candidates: List[Dict[str, Any]] = []
+    candidate_map: Dict[str, Dict[str, Any]] = {}
+    album_limit = min(80, max(1, limit // 2))
+    for (_artist_key, _album_key), album_tracks in ranked_albums[:album_limit]:
+        album_tracks = sorted(
+            album_tracks,
+            key=lambda track: (
+                _as_int(track.get("disc_number"), 0, 0, 1000),
+                _as_int(track.get("track_number"), 0, 0, 10000),
+                _text(track.get("title")).casefold(),
+            ),
+        )
+        hero = next(
+            (track for track in album_tracks if _as_bool(track.get("has_artwork"), False)),
+            album_tracks[0],
+        )
+        artist = _text(hero.get("album_artist") or hero.get("artist"))
+        album = _text(hero.get("album")) or "Untitled album"
+        candidate_id = "album:" + hashlib.sha256(
+            f"{_provider_id(hero.get('provider'))}\x00{artist.casefold()}\x00{album.casefold()}".encode("utf-8")
+        ).hexdigest()[:18]
+        candidate = {
+            "id": candidate_id,
+            "type": "album",
+            "title": album,
+            "artist": artist,
+            "album": album,
+            "genres": sorted(
+                {
+                    _text(genre)
+                    for track in album_tracks
+                    for genre in track.get("genres") or []
+                    if _text(genre)
+                }
+            )[:8],
+            "track_count": len(album_tracks),
+            "track_ids": [_text(track.get("id")) for track in album_tracks if _text(track.get("id"))],
+            "image_track_id": _text(hero.get("id")),
+        }
+        candidates.append({key: value for key, value in candidate.items() if key not in {"track_ids", "image_track_id"}})
+        candidate_map[candidate_id] = candidate
+
+    song_limit = max(0, limit - len(candidates))
+    for track in ordered_tracks[:song_limit]:
+        track_id = _text(track.get("id"))
+        if not track_id:
+            continue
+        candidate_id = f"song:{track_id}"
+        artist = _text(track.get("artist") or track.get("album_artist"))
+        candidate = {
+            "id": candidate_id,
+            "type": "song",
+            "title": _text(track.get("title")) or "Untitled",
+            "artist": artist,
+            "album": _text(track.get("album")),
+            "genres": [_text(value) for value in track.get("genres") or [] if _text(value)][:8],
+            "track_count": 1,
+            "track_ids": [track_id],
+            "image_track_id": track_id,
+        }
+        candidates.append({key: value for key, value in candidate.items() if key not in {"track_ids", "image_track_id"}})
+        candidate_map[candidate_id] = candidate
+    return candidates[:limit], candidate_map
+
+
+def _music_llm_json(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    system_prompt: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    if llm_client is None:
+        raise RuntimeError("No primary LLM is configured for Tater.")
+    response = loop.run_until_complete(
+        llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            max_tokens=None,
+            temperature=0.4,
+        )
+    )
+    raw = _text(((response or {}).get("message") or {}).get("content"))
+    blob = extract_json(raw) or raw
+    try:
+        parsed = json.loads(blob)
+    except Exception as exc:
+        raise RuntimeError("The music recommendation model did not return valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("The music recommendation model returned an unsupported response.")
+    return parsed
+
+
+def _generate_recommendations_impl(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    client: Any = None,
+) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    cfg = _settings(store)
+    provider_id = _provider_id(cfg.get("provider"))
+    if provider_id not in CATALOG_PROVIDER_IDS:
+        raise ValueError("Tater Recommendations require a catalog-based music provider.")
+    if not _paired(cfg, provider_id):
+        raise ValueError(f"Connect {PROVIDER_LABELS[provider_id]} before making recommendations.")
+    history = [
+        row
+        for row in _listening_history(store)
+        if _provider_id(row.get("provider")) == provider_id
+    ]
+    if not history:
+        raise ValueError("Play at least one song before asking Tater for recommendations.")
+    catalog = _catalog(store, provider_id)
+    if not (catalog.get("tracks") or []):
+        catalog = _sync_catalog(store, provider_id)
+    candidates, candidate_map = _recommendation_candidates(catalog, history)
+    if not candidates:
+        raise ValueError("The active music library has no recommendation candidates.")
+
+    playlist_count = _as_int(cfg.get("recommendation_playlist_count"), 3, 1, 6)
+    item_count = _as_int(cfg.get("recommendation_items_per_playlist"), 6, 3, 12)
+    artist_counts: Dict[str, int] = {}
+    genre_counts: Dict[str, int] = {}
+    for event in history[-120:]:
+        artist = _text(event.get("album_artist") or event.get("artist"))
+        if artist:
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        for genre in event.get("genres") or []:
+            token = _text(genre)
+            if token:
+                genre_counts[token] = genre_counts.get(token, 0) + 1
+    recent = [
+        {
+            "title": _text(event.get("title")),
+            "artist": _text(event.get("artist") or event.get("album_artist")),
+            "album": _text(event.get("album")),
+            "genres": list(event.get("genres") or [])[:6],
+        }
+        for event in reversed(history[-40:])
+    ]
+    result = _music_llm_json(
+        loop,
+        llm_client,
+        (
+            "You are Tater, a warm, imaginative personal music curator. Build named playlists from the "
+            "listener's recent history and the supplied catalog candidates. Choose only exact candidate IDs "
+            "from the catalog. Mix familiar taste with useful discovery, avoid filling every playlist with "
+            "the same artist or album, and let playlists mix albums and individual songs when that makes sense. "
+            "Give every playlist a short memorable name and a one-sentence description. Give every selection "
+            "a short reason. Return JSON only in this exact shape: "
+            '{"summary":"one friendly sentence","playlists":[{"name":"playlist name",'
+            '"description":"one sentence","items":[{"candidate_id":"exact id","reason":"short reason"}]}]}. '
+            f"Return up to {playlist_count} playlists with up to {item_count} unique selections in each."
+        ),
+        {
+            "listening_patterns": {
+                "top_artists": sorted(artist_counts.items(), key=lambda row: (-row[1], row[0]))[:20],
+                "top_genres": sorted(genre_counts.items(), key=lambda row: (-row[1], row[0]))[:20],
+            },
+            "recent_listening": recent,
+            "catalog_candidates": candidates,
+        },
+    )
+
+    playlists: List[Dict[str, Any]] = []
+    for position, raw_playlist in enumerate(result.get("playlists") or []):
+        if not isinstance(raw_playlist, dict) or len(playlists) >= playlist_count:
+            continue
+        selections: List[Dict[str, Any]] = []
+        flattened_track_ids: List[str] = []
+        seen_candidates = set()
+        seen_tracks = set()
+        for raw_item in raw_playlist.get("items") or []:
+            if isinstance(raw_item, str):
+                raw_item = {"candidate_id": raw_item}
+            if not isinstance(raw_item, dict) or len(selections) >= item_count:
+                continue
+            candidate_id = _text(raw_item.get("candidate_id"))
+            candidate = candidate_map.get(candidate_id)
+            if not candidate or candidate_id in seen_candidates:
+                continue
+            seen_candidates.add(candidate_id)
+            track_ids = [
+                track_id
+                for track_id in candidate.get("track_ids") or []
+                if track_id and track_id not in seen_tracks
+            ]
+            if not track_ids:
+                continue
+            seen_tracks.update(track_ids)
+            flattened_track_ids.extend(track_ids)
+            selections.append(
+                {
+                    "candidate_id": candidate_id,
+                    "type": candidate["type"],
+                    "title": candidate["title"],
+                    "artist": candidate["artist"],
+                    "album": candidate["album"],
+                    "track_count": candidate["track_count"],
+                    "track_ids": track_ids,
+                    "image_track_id": candidate.get("image_track_id"),
+                    "reason": _text(raw_item.get("reason"))[:240]
+                    or "Tater thinks this fits the mood of this mix.",
+                }
+            )
+        if not selections:
+            continue
+        playlists.append(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "name": _text(raw_playlist.get("name"))[:80] or f"Tater Mix {position + 1}",
+                "description": _text(raw_playlist.get("description"))[:300]
+                or "A fresh mix shaped by what has been playing lately.",
+                "items": selections,
+                "track_ids": flattened_track_ids,
+            }
+        )
+    if not playlists:
+        raise RuntimeError("The music recommendation model did not select any valid catalog items.")
+
+    now = time.time()
+    published = {
+        "provider": provider_id,
+        "generated_at": now,
+        "summary": _text(result.get("summary"))[:500]
+        or "Tater made a few fresh mixes from what has been playing lately.",
+        "history_event_count": len(history),
+        "playlists": playlists,
+    }
+    _save_json(store, RECOMMENDATIONS_KEY, published)
+    _save_hash(
+        store,
+        RUNTIME_KEY,
+        {
+            "last_recommendation_at": now,
+            "last_recommendation_attempt_at": now,
+            "last_recommendation_error": "",
+            "last_recommendation_error_at": "",
+        },
+    )
+    return published
+
+
+def _generate_recommendations(
+    client: Any = None,
+    *,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    llm_client: Any = None,
+) -> Dict[str, Any]:
+    global _recommendation_started_at
+    if not _recommendation_lock.acquire(blocking=False):
+        raise RuntimeError("Tater music recommendations are already being refreshed.")
+    _recommendation_started_at = time.time()
+    owns_loop = loop is None
+    active_loop = loop or asyncio.new_event_loop()
+    if owns_loop:
+        asyncio.set_event_loop(active_loop)
+    try:
+        model = llm_client if llm_client is not None else _get_primary_llm_client_from_env()
+        return _generate_recommendations_impl(active_loop, model, client)
+    except Exception as exc:
+        now = time.time()
+        _save_hash(
+            client or globals().get("redis_client"),
+            RUNTIME_KEY,
+            {
+                "last_recommendation_attempt_at": now,
+                "last_recommendation_error": _text(exc)[:500],
+                "last_recommendation_error_at": now,
+            },
+        )
+        raise
+    finally:
+        if owns_loop:
+            active_loop.close()
+            asyncio.set_event_loop(None)
+        _recommendation_started_at = 0.0
+        _recommendation_lock.release()
+
+
+def _schedule_recommendation_refresh(client: Any = None) -> bool:
+    """Start one detached refresh so model latency never pauses queue advancement."""
+    global _recommendation_thread
+    with _state_lock:
+        if _recommendation_thread is not None and _recommendation_thread.is_alive():
+            return False
+
+        def worker() -> None:
+            try:
+                _generate_recommendations(client)
+            except Exception as exc:
+                logger.warning("[Music] recommendation refresh failed: %s", exc)
+
+        _recommendation_thread = threading.Thread(
+            target=worker,
+            name="music-recommendations",
+            daemon=True,
+        )
+        _recommendation_thread.start()
+        return True
+
+
 def _origin_value(origin: Dict[str, Any], *keys: str) -> str:
     nested = origin.get("origin") if isinstance(origin.get("origin"), dict) else {}
     for key in keys:
@@ -1762,6 +2227,7 @@ def _start_player_index(index: int, *, client: Any = None) -> Dict[str, Any]:
             }
         )
         _save_player(player, store)
+        _record_listening_history(track, targets, client=store)
         return player
 
 
@@ -2128,6 +2594,7 @@ def _roon_play_request(
         },
     }
     _save_player(player, client)
+    _record_listening_history(player["current"], targets, client=client)
     return {
         "ok": True,
         "provider": "roon",
@@ -3270,6 +3737,121 @@ def _provider_cards(
     return cards
 
 
+def _recommendation_ui_items(
+    cfg: Dict[str, Any],
+    catalog: Dict[str, Any],
+    runtime: Dict[str, Any],
+    active_provider: str,
+    client: Any = None,
+) -> List[Dict[str, Any]]:
+    history = [
+        row
+        for row in _listening_history(client)
+        if _provider_id(row.get("provider")) == active_provider
+    ]
+    enabled = _as_bool(cfg.get("recommendations_enabled"), True)
+    catalog_provider = active_provider in CATALOG_PROVIDER_IDS
+    published = _recommendations(client)
+    if _provider_id(published.get("provider"), "") != active_provider:
+        published = {}
+    generated_at = _as_float(published.get("generated_at"))
+    last_error = _text(runtime.get("last_recommendation_error"))
+    if not enabled:
+        detail = "Turn on Tater Recommendations in Settings to create AI-named music mixes."
+    elif not catalog_provider:
+        detail = "Roon resolves music dynamically, so recommendations require a catalog-based provider."
+    elif not history:
+        detail = "Start playing music and Tater will learn enough to prepare your first mixes."
+    elif last_error and not published:
+        detail = last_error
+    elif generated_at:
+        detail = (
+            f"Built from {len(history)} listening event{'' if len(history) == 1 else 's'} · "
+            f"updated {_format_time(generated_at)}"
+        )
+    else:
+        detail = "Tater has listening history and is ready to prepare your first mixes."
+
+    items: List[Dict[str, Any]] = [
+        {
+            "id": "recommendations:overview",
+            "group": "recommendations",
+            "card_variant": "recommendations_intro",
+            "title": "Tater Recommendations",
+            "subtitle": _text(published.get("summary"))
+            or "Named playlists made from what you actually listen to.",
+            "detail": detail,
+            "generated_at": generated_at,
+            "history_event_count": len(history),
+            "recommendations_enabled": enabled,
+            "refresh_available": bool(enabled and catalog_provider and history),
+            "refresh_running": bool(
+                _recommendation_lock.locked()
+                or (_recommendation_thread is not None and _recommendation_thread.is_alive())
+            ),
+            "run_action": "music_recommendations_refresh",
+            "run_label": "Refresh Recommendations",
+        }
+    ]
+    track_by_id = {
+        _text(track.get("id")): track
+        for track in catalog.get("tracks") or []
+        if isinstance(track, dict) and _text(track.get("id"))
+    }
+    for playlist in published.get("playlists") or []:
+        if not isinstance(playlist, dict) or not _text(playlist.get("id")):
+            continue
+        recommendation_items = []
+        album_count = 0
+        song_count = 0
+        for selection in playlist.get("items") or []:
+            if not isinstance(selection, dict):
+                continue
+            selection_type = _text(selection.get("type")) or "song"
+            if selection_type == "album":
+                album_count += 1
+            else:
+                song_count += 1
+            art_track = track_by_id.get(_text(selection.get("image_track_id"))) or {}
+            recommendation_items.append(
+                {
+                    "id": _text(selection.get("candidate_id")),
+                    "type": selection_type,
+                    "title": _text(selection.get("title")) or "Untitled",
+                    "artist": _text(selection.get("artist")),
+                    "album": _text(selection.get("album")),
+                    "reason": _text(selection.get("reason")),
+                    "track_count": _as_int(selection.get("track_count"), 1, 1, 10000),
+                    "image_src": _artwork_display_url(art_track) if art_track else "",
+                    "image_alt": f"{_text(selection.get('title')) or 'Music'} artwork",
+                }
+            )
+        if not recommendation_items:
+            continue
+        hero_src = _text(recommendation_items[0].get("image_src"))
+        items.append(
+            {
+                "id": f"recommendation:{_text(playlist.get('id'))}",
+                "group": "recommendations",
+                "card_variant": "recommendation_playlist",
+                "title": _text(playlist.get("name")) or "Tater Mix",
+                "subtitle": _text(playlist.get("description")),
+                "hero_image_src": hero_src,
+                "hero_image_alt": f"{_text(playlist.get('name')) or 'Tater Mix'} artwork",
+                "hero_badges": [
+                    {"label": "AI PLAYLIST", "tone": "good"},
+                    {"label": f"{album_count} ALBUM{'' if album_count == 1 else 'S'}", "tone": "muted"},
+                    {"label": f"{song_count} SONG{'' if song_count == 1 else 'S'}", "tone": "muted"},
+                    {"label": f"{len(playlist.get('track_ids') or [])} TRACKS", "tone": "muted"},
+                ],
+                "recommendation_items": recommendation_items,
+                "run_action": "music_recommendation_play",
+                "run_label": "Play Playlist",
+            }
+        )
+    return items
+
+
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
     cfg = _settings(store)
@@ -3296,6 +3878,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             known_targets.add(saved)
 
     item_forms = [_player_item(player, target_options, active_provider), _search_item()]
+    item_forms.extend(
+        _recommendation_ui_items(cfg, catalog, runtime, active_provider, store)
+    )
     item_forms.extend(_facet_items(catalog, "genres", "Genre"))
     item_forms.extend(_facet_items(catalog, "artists", "Artist"))
     item_forms.extend(_facet_items(catalog, "albums", "Album"))
@@ -3343,6 +3928,33 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "label": "Maximum Queue Tracks",
                         "type": "number",
                         "value": _as_int(cfg.get("maximum_queue_tracks"), 200, 1, 1000),
+                    },
+                    {
+                        "key": "recommendations_enabled",
+                        "label": "Tater Recommendations",
+                        "type": "checkbox",
+                        "value": _as_bool(cfg.get("recommendations_enabled"), True),
+                        "description": (
+                            "Uses listening metadata and Tater's primary AI model to make named playlists."
+                        ),
+                    },
+                    {
+                        "key": "recommendation_interval_hours",
+                        "label": "Recommendation Refresh (hours)",
+                        "type": "number",
+                        "value": _as_int(cfg.get("recommendation_interval_hours"), 12, 1, 168),
+                    },
+                    {
+                        "key": "recommendation_playlist_count",
+                        "label": "Recommendation Playlists",
+                        "type": "number",
+                        "value": _as_int(cfg.get("recommendation_playlist_count"), 3, 1, 6),
+                    },
+                    {
+                        "key": "recommendation_items_per_playlist",
+                        "label": "Albums & Songs Per Playlist",
+                        "type": "number",
+                        "value": _as_int(cfg.get("recommendation_items_per_playlist"), 6, 3, 12),
                     },
                 ],
                 "save_action": "music_save_settings",
@@ -3428,6 +4040,13 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                             "empty_message": "No albums are available in the active library.",
                         },
                     ],
+                },
+                {
+                    "key": "recommendations",
+                    "label": "Tater Recommendations",
+                    "source": "items",
+                    "item_group": "recommendations",
+                    "empty_message": "Play some music to help Tater build recommendations.",
                 },
                 {"key": "providers", "label": "Providers", "source": "items", "item_group": "providers"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
@@ -3599,6 +4218,67 @@ def _disconnect_provider(provider_id: str, client: Any) -> Dict[str, Any]:
     return {"ok": True, "message": f"{PROVIDER_LABELS[provider_id]} disconnected locally."}
 
 
+def _play_recommendation(item_id: Any, client: Any = None) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    recommendation_id = _text(item_id)
+    if recommendation_id.startswith("recommendation:"):
+        recommendation_id = recommendation_id.split(":", 1)[1]
+    published = _recommendations(store)
+    cfg = _settings(store)
+    provider_id = _provider_id(cfg.get("provider"))
+    if _provider_id(published.get("provider"), "") != provider_id:
+        raise ValueError("Refresh Tater Recommendations for the active music provider first.")
+    playlist = next(
+        (
+            row
+            for row in published.get("playlists") or []
+            if isinstance(row, dict) and _text(row.get("id")) == recommendation_id
+        ),
+        None,
+    )
+    if not isinstance(playlist, dict):
+        raise ValueError("That Tater recommendation is no longer available.")
+    catalog = _catalog(store, provider_id)
+    track_by_id = {
+        _text(track.get("id")): track
+        for track in catalog.get("tracks") or []
+        if isinstance(track, dict) and _text(track.get("id"))
+    }
+    tracks = [
+        dict(track_by_id[track_id])
+        for track_id in playlist.get("track_ids") or []
+        if _text(track_id) in track_by_id
+    ]
+    if not tracks:
+        raise ValueError("Those recommended tracks are no longer in the active library. Refresh recommendations.")
+
+    current = _player(store)
+    requested_targets = _list(current.get("targets") or current.get("target")) or _list(
+        cfg.get("default_targets") or cfg.get("default_target")
+    )
+    targets = _resolve_targets(
+        requested_targets,
+        client=store,
+        provider_id=provider_id,
+    )
+    if not targets:
+        raise ValueError("Choose one or more players in the Music Player before starting this playlist.")
+    _validate_catalog_provider_targets(targets)
+    volume = _as_int(
+        current.get("volume_percent"),
+        _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
+        0,
+        100,
+    )
+    return _create_and_start_queue(
+        tracks,
+        targets=targets,
+        shuffle=False,
+        volume_percent=volume,
+        client=store,
+    )
+
+
 def handle_htmlui_tab_action(
     *,
     action: str,
@@ -3662,6 +4342,10 @@ def handle_htmlui_tab_action(
             "default_volume_percent",
             "default_shuffle",
             "maximum_queue_tracks",
+            "recommendations_enabled",
+            "recommendation_interval_hours",
+            "recommendation_playlist_count",
+            "recommendation_items_per_playlist",
         }
         updates = {key: values.get(key) for key in allowed if key in values}
         if "default_targets" in updates:
@@ -3670,6 +4354,24 @@ def handle_htmlui_tab_action(
             )
         _save_hash(store, SETTINGS_KEY, updates)
         return {"ok": True, "message": "Music Core settings saved."}
+
+    if action_name == "music_recommendations_refresh":
+        started = _schedule_recommendation_refresh(store)
+        return {
+            "ok": True,
+            "message": (
+                "Tater is preparing fresh recommendation playlists in the background."
+                if started
+                else "Tater is already refreshing music recommendations."
+            ),
+        }
+
+    if action_name == "music_recommendation_play":
+        player = _play_recommendation(body.get("id"), store)
+        return {
+            "ok": True,
+            "message": f"Playing {_track_label(player.get('current') or {})} from Tater Recommendations.",
+        }
 
     if action_name == "music_ui_play":
         existing = _player(store)
@@ -3994,7 +4696,29 @@ def run(stop_event: Optional[object] = None) -> None:
                     and now - _as_float(runtime.get("last_sync_at")) >= interval
                 ):
                     _sync_catalog(provider_id=active_provider)
+                    runtime = _runtime()
                 _advance_finished_player()
+                recommendation_interval = (
+                    _as_int(cfg.get("recommendation_interval_hours"), 12, 1, 168) * 3600
+                )
+                published = _recommendations()
+                last_recommendation_cycle = max(
+                    _as_float(runtime.get("last_recommendation_at")),
+                    _as_float(runtime.get("last_recommendation_attempt_at")),
+                )
+                if _provider_id(published.get("provider"), "") != active_provider:
+                    last_recommendation_cycle = 0.0
+                has_history = any(
+                    _provider_id(row.get("provider")) == active_provider
+                    for row in _listening_history()
+                )
+                if (
+                    _as_bool(cfg.get("recommendations_enabled"), True)
+                    and active_provider in CATALOG_PROVIDER_IDS
+                    and has_history
+                    and now - last_recommendation_cycle >= recommendation_interval
+                ):
+                    _schedule_recommendation_refresh()
             except PermissionError as exc:
                 logger.warning("[Music] provider authorization was revoked: %s", exc)
                 authorization_fields = {
