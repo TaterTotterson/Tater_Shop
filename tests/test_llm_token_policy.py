@@ -137,11 +137,11 @@ class CoreTokenPolicyTests(unittest.TestCase):
         expected_versions = {
             "ai_task": "1.2.0",
             "awareness": "3.4.12",
-            "guardian": "1.3.11",
-            "memory": "1.0.28",
-            "personal": "1.0.55",
-            "rss": "1.0.11",
-            "tater_tube": "1.2.2",
+            "guardian": "1.3.12",
+            "memory": "1.0.29",
+            "personal": "1.0.56",
+            "rss": "1.0.12",
+            "tater_tube": "1.2.3",
         }
         manifest = json.loads((ROOT / "core_manifest.json").read_text(encoding="utf-8"))
         entries = {entry["id"]: entry for entry in manifest["cores"]}

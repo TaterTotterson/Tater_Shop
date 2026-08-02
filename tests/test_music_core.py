@@ -60,6 +60,7 @@ class MusicCoreTests(unittest.TestCase):
 
     def setUp(self):
         self.core._recommendation_thread = None
+        self.core._profile_thread = None
         self.core._continuation_thread = None
         self.redis = FakeRedis()
         self.redis.hset(
@@ -147,7 +148,12 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(payload["label"], "Music Core")
         self.assertEqual(
             set(tasks),
-            {"catalog_sync", "recommendation_refresh", "continuous_radio_refill"},
+            {
+                "catalog_sync",
+                "recommendation_refresh",
+                "music_profile_refresh",
+                "continuous_radio_refill",
+            },
         )
         self.assertTrue(tasks["catalog_sync"]["available"])
         self.assertTrue(tasks["recommendation_refresh"]["available"])
@@ -179,6 +185,21 @@ class MusicCoreTests(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": True, "playlist_count": 1})
         refresh_recommendations.assert_called_once_with(self.redis)
+
+        with patch.object(
+            self.core,
+            "_generate_music_prompt_profile",
+            return_value={"person_id": "person-1", "history_event_count": 4},
+        ) as refresh_profile:
+            result = self.core.run_core_system_task(
+                task_id="music_profile_refresh",
+                redis_client=self.redis,
+            )
+        self.assertEqual(
+            result,
+            {"ok": True, "person_id": "person-1", "history_event_count": 4},
+        )
+        refresh_profile.assert_called_once_with(self.redis)
 
         with self.assertRaises(KeyError):
             self.core.run_core_system_task(
@@ -768,6 +789,61 @@ class MusicCoreTests(unittest.TestCase):
                 "voice_core:native:kitchen",
             )
 
+    def test_explicit_room_overrides_a_speaking_satellite_or_supplied_target(self):
+        options = [
+            {
+                "value": "voice_core:native:office",
+                "label": "Tater Satellite: Office",
+            },
+            {
+                "value": "sonos:family-room",
+                "label": "Sonos: Family Room",
+            },
+        ]
+        with patch.object(self.core, "_target_options", return_value=options), patch.object(
+            self.core,
+            "_preferred_room_target",
+            return_value="sonos:family-room",
+        ):
+            targets = self.core._resolve_targets(
+                requested="voice_core:native:office",
+                room="Family Room",
+                origin={
+                    "room_name": "Office",
+                    "satellite_selector": "native:office",
+                },
+                client=self.redis,
+            )
+            room_passed_as_target = self.core._resolve_targets(
+                requested="Family Room",
+                origin={"satellite_selector": "native:office"},
+                client=self.redis,
+            )
+        self.assertEqual(targets, ["sonos:family-room"])
+        self.assertEqual(room_passed_as_target, ["sonos:family-room"])
+
+    def test_automatic_room_resolution_prefers_sonos_when_room_has_multiple_players(self):
+        options = [
+            {
+                "value": "voice_core:native:family-room",
+                "label": "Tater Satellite: Family Room",
+            },
+            {
+                "value": "sonos:family-room",
+                "label": "Sonos: Family Room",
+            },
+        ]
+        with patch.object(self.core, "_target_options", return_value=options), patch.object(
+            self.core,
+            "_preferred_room_target",
+            return_value="",
+        ):
+            targets = self.core._resolve_targets(
+                room="Family Room",
+                client=self.redis,
+            )
+        self.assertEqual(targets, ["sonos:family-room"])
+
     def test_target_resolution_supports_multiple_rooms_and_saved_defaults(self):
         with patch.object(self.core, "_target_options", return_value=[]), patch.object(
             self.core,
@@ -924,6 +1000,64 @@ class MusicCoreTests(unittest.TestCase):
             self.core._recommendations(self.redis)["summary"],
             "A mellow roots-and-jazz detour made for you.",
         )
+
+    def test_music_prompt_profile_is_ai_generated_and_only_injected_for_selected_person(self):
+        self.redis.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "prompt_context_enabled": "true",
+                "prompt_person_id": "person-1",
+                "prompt_profile_interval_hours": "12",
+            },
+        )
+        self.core._record_listening_history(
+            self.tracks[0],
+            ["sonos:family-room"],
+            person_id="person-1",
+            client=self.redis,
+        )
+
+        class FakeLlm:
+            async def chat(self, **_kwargs):
+                return {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "taste_summary": "Roots reggae is a reliable favorite.",
+                                "favorite_artists": ["Bob Marley & The Wailers", "Invented Artist"],
+                                "favorite_genres": ["Reggae", "Invented Genre"],
+                            }
+                        )
+                    }
+                }
+
+        with patch.object(self.core, "_people_person_name", return_value="Spud Lord"):
+            profile = self.core._generate_music_prompt_profile(
+                self.redis,
+                llm_client=FakeLlm(),
+            )
+            matching = self.core.get_hydra_system_prompt_fragments(
+                role="chat",
+                redis_client=self.redis,
+                origin={"person_id": "person-1"},
+            )
+            different = self.core.get_hydra_system_prompt_fragments(
+                role="chat",
+                redis_client=self.redis,
+                origin={"person_id": "person-2"},
+            )
+            tasks = {
+                row["id"]: row
+                for row in self.core.get_core_system_tasks(redis_client=self.redis)["tasks"]
+            }
+
+        self.assertEqual(profile["person_id"], "person-1")
+        self.assertEqual(profile["favorite_artists"], ["Bob Marley & The Wailers"])
+        self.assertEqual(profile["favorite_genres"], ["Reggae"])
+        self.assertIn("Roots reggae is a reliable favorite", matching["music_context"][0])
+        self.assertIn("Three Little Birds by Bob Marley", matching["music_context"][0])
+        self.assertEqual(different, {})
+        self.assertTrue(tasks["music_profile_refresh"]["available"])
 
     def test_recommendation_playlist_plays_on_current_player_destinations(self):
         self.redis.set(
@@ -1261,6 +1395,10 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(settings_fields["catalog_sync_interval_seconds"]["compact"])
         self.assertEqual(settings_fields["mixed_sync_default_adjustment_ms"]["value"], 0)
         self.assertTrue(settings_fields["recommendations_enabled"]["value"])
+        self.assertTrue(settings_fields["prompt_context_enabled"]["value"])
+        self.assertEqual(settings_fields["prompt_person_id"]["type"], "select")
+        self.assertEqual(settings_fields["prompt_person_id"]["options"][0]["label"], "Choose a person")
+        self.assertEqual(settings_fields["prompt_profile_interval_hours"]["value"], 12)
         recommendation_intro = next(
             row
             for row in payload["ui"]["item_forms"]

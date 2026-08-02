@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
 import random
@@ -25,7 +26,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 MIN_TATER_VERSION = "98.7"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; "
@@ -132,6 +133,18 @@ CORE_SETTINGS = {
             "default": 6,
             "description": "Maximum recommended albums and songs in each playlist.",
         },
+        "prompt_context_enabled": {
+            "label": "Music Prompt Context",
+            "type": "checkbox",
+            "default": True,
+            "description": "Share the selected Person's compact music profile with Tater when that Person is speaking.",
+        },
+        "prompt_profile_interval_hours": {
+            "label": "Music Profile Refresh (hours)",
+            "type": "number",
+            "default": 12,
+            "description": "How often Music Core refreshes the selected Person's prompt-ready listening profile.",
+        },
     },
     "tags": TAGS,
 }
@@ -148,12 +161,14 @@ CATALOG_KEY = "music_core_catalog_v1"
 PLAYER_KEY = "music_core_player_v1"
 HISTORY_KEY = "music_core_listening_history_v1"
 RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
+PROMPT_PROFILE_KEY = "music_core_prompt_profile_v1"
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_SYNC_INTERVAL_SECONDS = 900
 MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
 MAX_HISTORY_EVENTS = 300
 MAX_RECOMMENDATION_CANDIDATES = 200
+MAX_PROMPT_CONTEXT_CHARS = 1400
 CATALOG_ARTWORK_SCHEMA = 2
 CONTINUATION_TRIGGER_REMAINING_TRACKS = 2
 CONTINUATION_BATCH_TRACKS = 12
@@ -191,6 +206,9 @@ _catalog_sync_started_at = 0.0
 _recommendation_lock = threading.Lock()
 _recommendation_started_at = 0.0
 _recommendation_thread: Optional[threading.Thread] = None
+_profile_lock = threading.Lock()
+_profile_started_at = 0.0
+_profile_thread: Optional[threading.Thread] = None
 _continuation_lock = threading.Lock()
 _continuation_started_at = 0.0
 _continuation_thread: Optional[threading.Thread] = None
@@ -256,6 +274,86 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+_PEOPLE_API_MODULE: Any = None
+_PEOPLE_API_UNAVAILABLE = False
+
+
+def _people_api_module() -> Any:
+    global _PEOPLE_API_MODULE, _PEOPLE_API_UNAVAILABLE
+    if _PEOPLE_API_MODULE is not None:
+        return _PEOPLE_API_MODULE
+    if _PEOPLE_API_UNAVAILABLE:
+        return None
+    try:
+        import people as people_module  # type: ignore
+
+        _PEOPLE_API_MODULE = people_module
+        return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "Tater" / "people.py"
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location("tater_people_api", candidate)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                _PEOPLE_API_MODULE = module
+                return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+    _PEOPLE_API_UNAVAILABLE = True
+    return None
+
+
+def _people_person_rows(client: Any = None) -> List[Dict[str, Any]]:
+    module = _people_api_module()
+    load_store = getattr(module, "load_store", None) if module is not None else None
+    if not callable(load_store):
+        return []
+    try:
+        store = load_store(client or globals().get("redis_client"))
+    except Exception:
+        return []
+    people = list(store.get("people") or []) if isinstance(store, dict) else []
+    rows = [dict(row) for row in people if isinstance(row, dict)]
+    rows.sort(key=lambda row: (_text(row.get("display_name")).casefold(), _text(row.get("id"))))
+    return rows
+
+
+def _people_person_name(person_id: Any, client: Any = None) -> str:
+    wanted = _text(person_id)
+    if not wanted:
+        return ""
+    for person in _people_person_rows(client):
+        if _text(person.get("id")) == wanted:
+            return _text(person.get("display_name")) or wanted
+    return ""
+
+
+def _people_person_options(client: Any = None) -> List[Dict[str, str]]:
+    options = [{"value": "", "label": "Choose a person"}]
+    for person in _people_person_rows(client):
+        person_id = _text(person.get("id"))
+        display_name = _text(person.get("display_name"))
+        if person_id and display_name:
+            options.append({"value": person_id, "label": display_name})
+    return options
+
+
+def _context_person_id(*sources: Any) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for candidate in (source, source.get("people_resolution")):
+            if not isinstance(candidate, dict):
+                continue
+            person_id = _text(candidate.get("master_user_id") or candidate.get("person_id"))
+            if person_id:
+                return person_id
+    return ""
 
 
 def _provider_id(value: Any, default: str = "tater_tube") -> str:
@@ -1558,6 +1656,7 @@ def _record_listening_history(
     track: Dict[str, Any],
     targets: Any = None,
     *,
+    person_id: Any = "",
     client: Any = None,
 ) -> None:
     """Record successful starts without retaining credentials or stream URLs."""
@@ -1566,12 +1665,14 @@ def _record_listening_history(
     title = _text(track.get("title"))
     if store is None or not (track_id or title):
         return
+    selected_person_id = _text(person_id) or _text(_settings(store).get("prompt_person_id"))
     now = time.time()
     history = _listening_history(store)
     if history:
         latest = history[-1]
         if (
             _text(latest.get("track_id")) == track_id
+            and _text(latest.get("person_id")) == selected_person_id
             and now - _as_float(latest.get("played_at")) < 30.0
         ):
             return
@@ -1585,6 +1686,8 @@ def _record_listening_history(
             "genres": [_text(value) for value in track.get("genres") or [] if _text(value)],
             "provider": _provider_id(track.get("provider")),
             "targets": _list(targets),
+            "person_id": selected_person_id,
+            "person_name": _people_person_name(selected_person_id, store) if selected_person_id else "",
             "played_at": now,
         }
     )
@@ -1595,6 +1698,28 @@ def _recommendations(client: Any = None) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     payload = _load_json(store, RECOMMENDATIONS_KEY, {})
     return payload if isinstance(payload, dict) else {}
+
+
+def _music_prompt_profile(client: Any = None) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    payload = _load_json(store, PROMPT_PROFILE_KEY, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _profile_history(
+    client: Any,
+    *,
+    person_id: Any,
+    provider_id: Any,
+) -> List[Dict[str, Any]]:
+    selected_person = _text(person_id)
+    selected_provider = _provider_id(provider_id)
+    return [
+        row
+        for row in _listening_history(client)
+        if _provider_id(row.get("provider")) == selected_provider
+        and (not _text(row.get("person_id")) or _text(row.get("person_id")) == selected_person)
+    ]
 
 
 def _recommendation_candidates(
@@ -1762,6 +1887,279 @@ def _music_llm_json(
     if not isinstance(parsed, dict):
         raise RuntimeError("The music recommendation model returned an unsupported response.")
     return parsed
+
+
+def _profile_ranked_values(
+    history: List[Dict[str, Any]],
+    *,
+    field: str,
+    limit: int,
+) -> List[tuple[str, int]]:
+    counts: Dict[str, tuple[str, int]] = {}
+    for event in history:
+        raw_values = event.get(field)
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        for raw_value in values:
+            value = _text(raw_value)
+            key = value.casefold()
+            if not value or not key:
+                continue
+            original, count = counts.get(key, (value, 0))
+            counts[key] = (original, count + 1)
+    ranked = sorted(counts.values(), key=lambda row: (-row[1], row[0].casefold()))
+    return ranked[: max(1, limit)]
+
+
+def _generate_music_prompt_profile_impl(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    client: Any = None,
+) -> Dict[str, Any]:
+    store = client or globals().get("redis_client")
+    cfg = _settings(store)
+    person_id = _text(cfg.get("prompt_person_id"))
+    if not person_id:
+        raise ValueError("Choose a Person in Music Core Settings before building music prompt context.")
+    person_name = _people_person_name(person_id, store)
+    if not person_name:
+        raise ValueError("The selected Music Core Person no longer exists.")
+    provider_id = _provider_id(cfg.get("provider"))
+    history = _profile_history(store, person_id=person_id, provider_id=provider_id)
+    if not history:
+        raise ValueError(f"Play some music for {person_name} before building a music profile.")
+
+    artists = _profile_ranked_values(history, field="album_artist", limit=20)
+    if not artists:
+        artists = _profile_ranked_values(history, field="artist", limit=20)
+    genres = _profile_ranked_values(history, field="genres", limit=20)
+    recent_tracks: List[Dict[str, Any]] = []
+    seen_tracks = set()
+    for event in reversed(history):
+        title = _text(event.get("title"))
+        artist = _text(event.get("artist") or event.get("album_artist"))
+        identity = (_text(event.get("track_id")) or title.casefold(), artist.casefold())
+        if not title or identity in seen_tracks:
+            continue
+        seen_tracks.add(identity)
+        recent_tracks.append(
+            {
+                "title": title,
+                "artist": artist,
+                "album": _text(event.get("album")),
+                "played_at": _as_float(event.get("played_at")),
+            }
+        )
+        if len(recent_tracks) >= 6:
+            break
+
+    result = _music_llm_json(
+        loop,
+        llm_client,
+        (
+            "Build a compact factual music taste profile for one person from listening counts and recent tracks. "
+            "Do not infer demographic, emotional, medical, political, or other sensitive traits. Use only artist "
+            "and genre names supplied in the input. Return JSON only in this exact shape: "
+            '{"taste_summary":"one short sentence","favorite_artists":["name"],'
+            '"favorite_genres":["name"]}.'
+        ),
+        {
+            "person_name": person_name,
+            "artist_counts": [{"name": name, "plays": count} for name, count in artists],
+            "genre_counts": [{"name": name, "plays": count} for name, count in genres],
+            "recent_tracks": recent_tracks,
+        },
+    )
+    allowed_artists = {name.casefold(): name for name, _count in artists}
+    allowed_genres = {name.casefold(): name for name, _count in genres}
+    favorite_artists = [
+        allowed_artists[value.casefold()]
+        for value in _list(result.get("favorite_artists"))
+        if value.casefold() in allowed_artists
+    ][:8]
+    favorite_genres = [
+        allowed_genres[value.casefold()]
+        for value in _list(result.get("favorite_genres"))
+        if value.casefold() in allowed_genres
+    ][:8]
+    if not favorite_artists:
+        favorite_artists = [name for name, _count in artists[:6]]
+    if not favorite_genres:
+        favorite_genres = [name for name, _count in genres[:6]]
+
+    profile = {
+        "person_id": person_id,
+        "person_name": person_name,
+        "provider": provider_id,
+        "generated_at": time.time(),
+        "history_event_count": len(history),
+        "taste_summary": _text(result.get("taste_summary"))[:320],
+        "favorite_artists": favorite_artists,
+        "favorite_genres": favorite_genres,
+        "recent_tracks": recent_tracks,
+    }
+    _save_json(store, PROMPT_PROFILE_KEY, profile)
+    return profile
+
+
+def _generate_music_prompt_profile(
+    client: Any = None,
+    *,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+    llm_client: Any = None,
+) -> Dict[str, Any]:
+    global _profile_started_at
+    if not _profile_lock.acquire(blocking=False):
+        raise RuntimeError("The Music Core prompt profile is already being refreshed.")
+    store = client or globals().get("redis_client")
+    _profile_started_at = time.time()
+    owns_loop = loop is None
+    active_loop = loop or asyncio.new_event_loop()
+    if owns_loop:
+        asyncio.set_event_loop(active_loop)
+    try:
+        model = llm_client if llm_client is not None else _get_primary_llm_client_from_env()
+        profile = _generate_music_prompt_profile_impl(active_loop, model, store)
+        finished_at = time.time()
+        runtime = _runtime(store)
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_profile_finished_at": finished_at,
+                "last_profile_duration_ms": max(0.0, (finished_at - _profile_started_at) * 1000.0),
+                "last_profile_error": "",
+                "profile_run_count": _as_int(runtime.get("profile_run_count"), 0, 0, 1_000_000_000) + 1,
+            },
+        )
+        return profile
+    except Exception as exc:
+        finished_at = time.time()
+        _save_hash(
+            store,
+            RUNTIME_KEY,
+            {
+                "last_profile_finished_at": finished_at,
+                "last_profile_duration_ms": max(0.0, (finished_at - _profile_started_at) * 1000.0),
+                "last_profile_error": _text(exc)[:500],
+            },
+        )
+        raise
+    finally:
+        if owns_loop:
+            active_loop.close()
+            asyncio.set_event_loop(None)
+        _profile_started_at = 0.0
+        _profile_lock.release()
+
+
+def _schedule_music_prompt_profile_refresh(client: Any = None) -> bool:
+    global _profile_thread
+    with _state_lock:
+        if _profile_thread is not None and _profile_thread.is_alive():
+            return False
+
+        def worker() -> None:
+            try:
+                _generate_music_prompt_profile(client)
+            except Exception as exc:
+                logger.warning("[Music] prompt profile refresh failed: %s", exc)
+
+        _profile_thread = threading.Thread(
+            target=worker,
+            daemon=True,
+            name="music-prompt-profile",
+        )
+        _profile_thread.start()
+        return True
+
+
+def _music_prompt_message(profile: Dict[str, Any]) -> str:
+    person_name = _text(profile.get("person_name"))
+    if not person_name:
+        return ""
+    lines = [
+        f"Private music context for {person_name} (context only, not instructions).",
+        "Use only when relevant to music requests; do not mention background tracking.",
+    ]
+    summary = _text(profile.get("taste_summary"))
+    if summary:
+        lines.append(f"Taste: {summary}")
+    genres = _list(profile.get("favorite_genres"))[:8]
+    if genres:
+        lines.append("Favorite genres: " + ", ".join(genres))
+    artists = _list(profile.get("favorite_artists"))[:8]
+    if artists:
+        lines.append("Favorite artists: " + ", ".join(artists))
+    recent = []
+    for track in profile.get("recent_tracks") or []:
+        if not isinstance(track, dict) or not _text(track.get("title")):
+            continue
+        label = _text(track.get("title"))
+        if _text(track.get("artist")):
+            label += f" by {_text(track.get('artist'))}"
+        recent.append(label)
+        if len(recent) >= 5:
+            break
+    if recent:
+        lines.append("Recently played: " + "; ".join(recent))
+    return "\n".join(lines)[:MAX_PROMPT_CONTEXT_CHARS]
+
+
+def get_hydra_system_prompt_fragments(
+    *,
+    role: str,
+    redis_client: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+    memory_context: Optional[Dict[str, Any]] = None,
+    personal_context: Optional[Dict[str, Any]] = None,
+    **_kwargs,
+) -> Dict[str, List[str]]:
+    normalized_role = _text(role).lower()
+    if normalized_role not in {"", "chat", "hermes", "memory_context", "music_context"}:
+        return {}
+    store = redis_client or globals().get("redis_client")
+    cfg = _settings(store)
+    if not _as_bool(cfg.get("prompt_context_enabled"), True):
+        return {}
+    configured_person_id = _text(cfg.get("prompt_person_id"))
+    active_person_id = _context_person_id(origin, memory_context, personal_context)
+    if not configured_person_id or active_person_id != configured_person_id:
+        return {}
+    profile = _music_prompt_profile(store)
+    if (
+        _text(profile.get("person_id")) != configured_person_id
+        or _provider_id(profile.get("provider")) != _provider_id(cfg.get("provider"))
+    ):
+        return {}
+    live_recent_tracks = []
+    seen_tracks = set()
+    for event in reversed(
+        _profile_history(
+            store,
+            person_id=configured_person_id,
+            provider_id=cfg.get("provider"),
+        )
+    ):
+        title = _text(event.get("title"))
+        artist = _text(event.get("artist") or event.get("album_artist"))
+        identity = (_text(event.get("track_id")) or title.casefold(), artist.casefold())
+        if not title or identity in seen_tracks:
+            continue
+        seen_tracks.add(identity)
+        live_recent_tracks.append({"title": title, "artist": artist})
+        if len(live_recent_tracks) >= 5:
+            break
+    if live_recent_tracks:
+        profile = {**profile, "recent_tracks": live_recent_tracks}
+    message = _music_prompt_message(profile)
+    if not message:
+        return {}
+    return {
+        "chat": [message],
+        "hermes": [message],
+        "memory_context": [message],
+        "music_context": [message],
+    }
 
 
 def _generate_recommendations_impl(
@@ -2587,6 +2985,39 @@ def _target_from_query(value: Any, options: Optional[List[Dict[str, str]]] = Non
     return partial[0] if len(partial) == 1 else ""
 
 
+def _room_target_from_query(value: Any, options: List[Dict[str, str]]) -> str:
+    """Resolve an automatic room destination, preferring Sonos over room satellites."""
+    room_name = _text(value).casefold()
+    if not room_name:
+        return ""
+    if room_name.startswith(("voice_core:", "ha:", "sonos:", "integration:")):
+        return _text(value)
+    matches = [
+        row
+        for row in options
+        if isinstance(row, dict)
+        and _text(row.get("value"))
+        and room_name in f"{_text(row.get('label'))} {_text(row.get('value'))}".casefold()
+    ]
+    if not matches:
+        return ""
+
+    def rank(row: Dict[str, Any]) -> tuple[int, str]:
+        target = _text(row.get("value")).casefold()
+        label = _text(row.get("label")).casefold()
+        if target.startswith(("sonos:", "integration:sonos:")) or "sonos" in label:
+            priority = 0
+        elif target.startswith("integration:"):
+            priority = 1
+        elif target.startswith("voice_core:"):
+            priority = 2
+        else:
+            priority = 3
+        return priority, label
+
+    return _text(sorted(matches, key=rank)[0].get("value"))
+
+
 def _preferred_room_target(room_names: Iterable[str], client: Any = None) -> str:
     names = [_text(value) for value in room_names if _text(value)]
     if not names:
@@ -2610,36 +3041,56 @@ def _resolve_targets(
 ) -> List[str]:
     store = client or globals().get("redis_client")
     requested_values = _list(requested)
+    context = origin if isinstance(origin, dict) else {}
+    explicit_room_names = _list(room)
+    origin_room_names = (
+        []
+        if explicit_room_names or requested_values
+        else _list(_origin_value(context, "room_name", "area_name", "room_id", "area_id"))
+    )
+    room_names = explicit_room_names or origin_room_names
+    preferred_by_room = {
+        room_name: _preferred_room_target([room_name], store)
+        for room_name in room_names
+    }
     options = _target_options(
-        current_values=requested_values,
+        current_values=[*requested_values, *preferred_by_room.values()],
         provider_id=provider_id,
         include_stereo_members=True,
     )
+    if explicit_room_names:
+        resolved_rooms = [
+            preferred_by_room.get(room_name) or _room_target_from_query(room_name, options)
+            for room_name in explicit_room_names
+        ]
+        if any(not target for target in resolved_rooms):
+            return []
+        return _normalize_stereo_targets(resolved_rooms)
+
     if requested_values:
-        explicit = [_target_from_query(value, options) for value in requested_values]
+        explicit = []
+        for value in requested_values:
+            direct_value = _text(value)
+            if direct_value.casefold().startswith(("voice_core:", "ha:", "sonos:", "integration:")):
+                target = direct_value
+            else:
+                target = (
+                    _preferred_room_target([direct_value], store)
+                    or _target_from_query(direct_value, options)
+                    or _room_target_from_query(direct_value, options)
+                )
+            explicit.append(target)
         if any(not target for target in explicit):
             return []
         return _normalize_stereo_targets(explicit)
 
-    context = origin if isinstance(origin, dict) else {}
-    room_names = _list(room)
-    if not room_names:
-        room_names = _list(_origin_value(context, "room_name", "area_name", "room_id", "area_id"))
     if room_names:
-        resolved_rooms: List[str] = []
-        option_values = {
-            _text(row.get("value")).casefold()
-            for row in options
-            if _text(row.get("value"))
-        }
-        for room_name in room_names:
-            preferred = _preferred_room_target([room_name], store)
-            if preferred and option_values and preferred.casefold() not in option_values:
-                preferred = ""
-            target = preferred or _target_from_query(room_name, options)
-            if not target:
-                return []
-            resolved_rooms.append(target)
+        resolved_rooms = [
+            preferred_by_room.get(room_name) or _room_target_from_query(room_name, options)
+            for room_name in room_names
+        ]
+        if any(not target for target in resolved_rooms):
+            return []
         return _normalize_stereo_targets(resolved_rooms)
 
     selector = _origin_value(
@@ -3076,7 +3527,12 @@ def _start_player_index(
         )
         _save_player(player, store)
         if record_history:
-            _record_listening_history(track, targets, client=store)
+            _record_listening_history(
+                track,
+                targets,
+                person_id=player.get("person_id"),
+                client=store,
+            )
         return player
 
 
@@ -3106,12 +3562,14 @@ def _create_and_start_queue(
     targets: List[str],
     shuffle: bool,
     volume_percent: int,
+    person_id: Any = "",
     client: Any = None,
 ) -> Dict[str, Any]:
     if not tracks:
         raise ValueError("No matching music was found.")
     store = client or globals().get("redis_client")
     cfg = _settings(store)
+    selected_person_id = _text(person_id) or _text(cfg.get("prompt_person_id"))
     maximum = _as_int(cfg.get("maximum_queue_tracks"), 200, 1, 1000)
     original_queue = [dict(track) for track in tracks[:maximum]]
     queue = [dict(track) for track in original_queue]
@@ -3130,6 +3588,7 @@ def _create_and_start_queue(
             "index": 0,
             "current": queue[0],
             "targets": _list(targets),
+            "person_id": selected_person_id,
             "shuffle": bool(shuffle),
             "repeat": _text(previous.get("repeat") or "off"),
             "volume_percent": volume_percent,
@@ -3416,6 +3875,7 @@ def _play_request(args: Dict[str, Any], origin: Optional[Dict[str, Any]], client
         targets=targets,
         shuffle=shuffle,
         volume_percent=volume,
+        person_id=_context_person_id(origin) or _text(cfg.get("prompt_person_id")),
         client=client,
     )
     return {
@@ -3441,14 +3901,14 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
         {
             "id": "music_play",
             "description": (
-                "Play music from Music Core by song, artist, album, genre, or natural-language query. "
-                "Use the speaking room automatically unless the user names one or more destinations. "
-                "Pass multiple rooms or players as JSON arrays."
+                "Use when the user asks to play music by song, artist, album, genre, or description. "
+                "Put user-named rooms in rooms, specific user-named speakers in targets, and leave both "
+                "empty when playback should follow the speaking room."
             ),
             "usage": (
                 '{"function":"music_play","arguments":{"query":"reggae music","genre":"reggae",'
-                '"artist":"","album":"","title":"","targets":["Kitchen","Living Room"],'
-                '"rooms":[],"provider":"tater_tube|plex|emby|jellyfin|navidrome",'
+                '"artist":"","album":"","title":"","targets":[],'
+                '"rooms":["Family Room"],"provider":"tater_tube|plex|emby|jellyfin|navidrome",'
                 '"shuffle":true,"volume_percent":75}}'
             ),
         },
@@ -4541,6 +5001,12 @@ def _recommendation_ui_items(
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
     cfg = _settings(store)
+    prompt_person_id = _text(cfg.get("prompt_person_id"))
+    people_options = _people_person_options(store)
+    if prompt_person_id and not any(
+        _text(option.get("value")) == prompt_person_id for option in people_options
+    ):
+        people_options.append({"value": prompt_person_id, "label": f"Saved Person: {prompt_person_id}"})
     active_provider = _provider_id(cfg.get("provider"))
     runtime = _runtime(store)
     catalog = _catalog(store, active_provider)
@@ -4655,6 +5121,32 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "label": "Albums & Songs Per Playlist",
                         "type": "number",
                         "value": _as_int(cfg.get("recommendation_items_per_playlist"), 6, 3, 12),
+                    },
+                    {
+                        "key": "prompt_context_enabled",
+                        "label": "Music Prompt Context",
+                        "type": "checkbox",
+                        "value": _as_bool(cfg.get("prompt_context_enabled"), True),
+                        "description": (
+                            "Gives Tater a small music profile only when the selected Person is speaking."
+                        ),
+                    },
+                    {
+                        "key": "prompt_person_id",
+                        "label": "Music Profile Person",
+                        "type": "select",
+                        "value": prompt_person_id,
+                        "options": people_options,
+                        "description": (
+                            "Links listening history, favorite genres and artists, recent tracks, and prompt context "
+                            "to one Person from Tater's People settings."
+                        ),
+                    },
+                    {
+                        "key": "prompt_profile_interval_hours",
+                        "label": "Music Profile Refresh (hours)",
+                        "type": "number",
+                        "value": _as_int(cfg.get("prompt_profile_interval_hours"), 12, 1, 168),
                     },
                 ],
                 "save_action": "music_save_settings",
@@ -5017,6 +5509,7 @@ def handle_htmlui_tab_action(
         return {"ok": True, "message": f"Music library updated with {len(catalog.get('tracks') or [])} tracks."}
 
     if action_name == "music_save_settings":
+        current_settings = _settings(store)
         allowed = {
             "catalog_sync_interval_seconds",
             "default_targets",
@@ -5028,13 +5521,47 @@ def handle_htmlui_tab_action(
             "recommendation_interval_hours",
             "recommendation_playlist_count",
             "recommendation_items_per_playlist",
+            "prompt_context_enabled",
+            "prompt_person_id",
+            "prompt_profile_interval_hours",
         }
         updates = {key: values.get(key) for key in allowed if key in values}
         if "default_targets" in updates:
             updates["default_targets"] = json.dumps(
                 _normalize_stereo_targets(updates["default_targets"])
             )
+        if "prompt_person_id" in updates:
+            updates["prompt_person_id"] = _text(updates.get("prompt_person_id"))
+            if updates["prompt_person_id"] and not _people_person_name(
+                updates["prompt_person_id"], store
+            ):
+                raise ValueError("Choose an existing Person for Music Prompt Context.")
+        person_changed = (
+            "prompt_person_id" in updates
+            and _text(updates.get("prompt_person_id")) != _text(current_settings.get("prompt_person_id"))
+        )
         _save_hash(store, SETTINGS_KEY, updates)
+        if person_changed:
+            store.delete(PROMPT_PROFILE_KEY)
+            store.hdel(
+                RUNTIME_KEY,
+                "last_profile_finished_at",
+                "last_profile_duration_ms",
+                "last_profile_error",
+            )
+        next_settings = {**current_settings, **updates}
+        selected_person_id = _text(next_settings.get("prompt_person_id"))
+        if (
+            person_changed
+            and _as_bool(next_settings.get("prompt_context_enabled"), True)
+            and selected_person_id
+            and _profile_history(
+                store,
+                person_id=selected_person_id,
+                provider_id=next_settings.get("provider"),
+            )
+        ):
+            _schedule_music_prompt_profile_refresh(store)
         return {"ok": True, "message": "Music Core settings saved."}
 
     if action_name == "music_recommendations_refresh":
@@ -5392,7 +5919,13 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     recommendation_interval = (
         _as_int(cfg.get("recommendation_interval_hours"), 12, 1, 168) * 3600
     )
+    profile_interval = (
+        _as_int(cfg.get("prompt_profile_interval_hours"), 12, 1, 168) * 3600
+    )
     recommendations_enabled = _as_bool(cfg.get("recommendations_enabled"), True)
+    prompt_context_enabled = _as_bool(cfg.get("prompt_context_enabled"), True)
+    prompt_person_id = _text(cfg.get("prompt_person_id"))
+    prompt_person_name = _people_person_name(prompt_person_id, store) if prompt_person_id else ""
     has_history = any(
         _provider_id(row.get("provider")) == provider_id
         for row in _listening_history(store)
@@ -5410,6 +5943,7 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         _as_float(runtime.get("last_continuation_finished_at")),
         _as_float(runtime.get("last_continuation_at")),
     )
+    last_profile = _as_float(runtime.get("last_profile_finished_at"))
     recommendation_running = bool(
         _recommendation_lock.locked()
         or (_recommendation_thread is not None and _recommendation_thread.is_alive())
@@ -5417,6 +5951,25 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     continuation_running = bool(
         _continuation_lock.locked()
         or (_continuation_thread is not None and _continuation_thread.is_alive())
+    )
+    profile_running = bool(
+        _profile_lock.locked()
+        or (_profile_thread is not None and _profile_thread.is_alive())
+    )
+    has_profile_history = bool(
+        prompt_person_id
+        and _profile_history(
+            store,
+            person_id=prompt_person_id,
+            provider_id=provider_id,
+        )
+    )
+    profile_available = bool(
+        connected
+        and prompt_context_enabled
+        and prompt_person_id
+        and prompt_person_name
+        and has_profile_history
     )
     return {
         "label": "Music Core",
@@ -5473,6 +6026,42 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 "order": 20,
             },
             {
+                "id": "music_profile_refresh",
+                "label": "Music Prompt Profile",
+                "description": "Builds compact favorite genre, favorite artist, and recent-track context for the selected Person.",
+                "interval_seconds": profile_interval,
+                "enabled": prompt_context_enabled,
+                "running": profile_running,
+                "started_at": _profile_started_at,
+                "finished_at": last_profile,
+                "duration_ms": _as_float(runtime.get("last_profile_duration_ms")),
+                "next_run_at": (
+                    last_profile + profile_interval
+                    if last_profile and prompt_context_enabled
+                    else 0.0
+                ),
+                "last_error": _text(runtime.get("last_profile_error")),
+                "run_count": _as_int(
+                    runtime.get("profile_run_count"),
+                    0,
+                    0,
+                    1_000_000_000,
+                ),
+                "available": profile_available,
+                "unavailable_reason": (
+                    f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before building a music profile."
+                    if not connected
+                    else "Turn on Music Prompt Context in Music Core Settings."
+                    if not prompt_context_enabled
+                    else "Choose an existing Person in Music Core Settings."
+                    if not prompt_person_id or not prompt_person_name
+                    else f"Play some music for {prompt_person_name} first."
+                ),
+                "status": "idle" if profile_available else "waiting",
+                "requires_running": True,
+                "order": 30,
+            },
+            {
                 "id": "continuous_radio_refill",
                 "label": "Continuous-Radio Refill",
                 "description": "Automatically extends an active queue when playback nears its final tracks.",
@@ -5496,7 +6085,7 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 "unavailable_reason": f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before starting continuous radio.",
                 "status": "idle" if connected else "waiting",
                 "requires_running": True,
-                "order": 30,
+                "order": 40,
             },
         ],
     }
@@ -5514,6 +6103,13 @@ def run_core_system_task(*, task_id: str, redis_client=None, **_kwargs) -> Dict[
         return {
             "ok": True,
             "playlist_count": len(recommendations.get("playlists") or []),
+        }
+    if task == "music_profile_refresh":
+        profile = _generate_music_prompt_profile(store)
+        return {
+            "ok": True,
+            "person_id": _text(profile.get("person_id")),
+            "history_event_count": _as_int(profile.get("history_event_count"), 0, 0, 1_000_000_000),
         }
     raise KeyError(f"Unknown Music Core task: {task_id}")
 
@@ -5569,6 +6165,32 @@ def run(stop_event: Optional[object] = None) -> None:
                     and now - last_recommendation_cycle >= recommendation_interval
                 ):
                     _schedule_recommendation_refresh()
+                profile_interval = (
+                    _as_int(cfg.get("prompt_profile_interval_hours"), 12, 1, 168) * 3600
+                )
+                prompt_person_id = _text(cfg.get("prompt_person_id"))
+                prompt_profile = _music_prompt_profile()
+                last_profile_cycle = max(
+                    _as_float(runtime.get("last_profile_finished_at")),
+                    _as_float(prompt_profile.get("generated_at")),
+                )
+                if (
+                    _text(prompt_profile.get("person_id")) != prompt_person_id
+                    or _provider_id(prompt_profile.get("provider")) != active_provider
+                ):
+                    last_profile_cycle = 0.0
+                if (
+                    _as_bool(cfg.get("prompt_context_enabled"), True)
+                    and prompt_person_id
+                    and _people_person_name(prompt_person_id)
+                    and _profile_history(
+                        None,
+                        person_id=prompt_person_id,
+                        provider_id=active_provider,
+                    )
+                    and now - last_profile_cycle >= profile_interval
+                ):
+                    _schedule_music_prompt_profile_refresh()
             except PermissionError as exc:
                 logger.warning("[Music] provider authorization was revoked: %s", exc)
                 authorization_fields = {
