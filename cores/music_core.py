@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.7.0"
+__version__ = "2.7.2"
 MIN_TATER_VERSION = "98.7"
 CORE_DESCRIPTION = (
     "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; "
@@ -212,6 +212,7 @@ _profile_thread: Optional[threading.Thread] = None
 _continuation_lock = threading.Lock()
 _continuation_started_at = 0.0
 _continuation_thread: Optional[threading.Thread] = None
+_client_continuation_lock = threading.Lock()
 
 
 def _text(value: Any) -> str:
@@ -2618,13 +2619,12 @@ def _fallback_continuation_tracks(
     return tracks[: max(1, count)]
 
 
-def _generate_continuation_impl(
+def _select_continuation_tracks(
     loop: asyncio.AbstractEventLoop,
     llm_client: Any,
     player: Dict[str, Any],
-    session_token: str,
     client: Any = None,
-) -> int:
+) -> tuple[List[Dict[str, Any]], str]:
     store = client or globals().get("redis_client")
     candidates, candidate_map, ordered = _continuation_candidate_tracks(player, store)
     if not candidates:
@@ -2695,12 +2695,31 @@ def _generate_continuation_impl(
             selections.append(dict(track))
     if not selections:
         raise RuntimeError("The continuous-radio model did not select any playable tracks.")
+    return (
+        selections,
+        _text(result.get("station_name")) or "Tater Continuous Radio",
+    )
+
+
+def _generate_continuation_impl(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    player: Dict[str, Any],
+    session_token: str,
+    client: Any = None,
+) -> int:
+    selections, station_name = _select_continuation_tracks(
+        loop,
+        llm_client,
+        player,
+        client,
+    )
     return _append_continuation_tracks(
         session_token,
         selections,
-        station_name=_text(result.get("station_name")) or "Tater Continuous Radio",
+        station_name=station_name,
         source="ai",
-        client=store,
+        client=client,
     )
 
 
@@ -4505,6 +4524,50 @@ def get_client_music_state(
         for provider_id, label in PROVIDER_LABELS.items()
     ]
     player_targets = _list(player.get("targets") or player.get("target"))
+    queue = [
+        _public_track(track)
+        for track in list(player.get("queue") or [])[:200]
+        if isinstance(track, dict)
+    ]
+    duration_seconds = max(
+        0.0,
+        _as_float(
+            player.get("duration_seconds")
+            or (player.get("current") or {}).get("duration_seconds")
+        ),
+    )
+    position_seconds = _player_position_seconds(player)
+    if duration_seconds > 0:
+        position_seconds = min(duration_seconds, position_seconds)
+
+    published = _recommendations(store)
+    recommendations: List[Dict[str, Any]] = []
+    if _provider_id(published.get("provider"), "") == active_provider:
+        catalog_tracks = {
+            _text(track.get("id")): track
+            for track in catalog.get("tracks") or []
+            if isinstance(track, dict) and _text(track.get("id"))
+        }
+        for playlist in published.get("playlists") or []:
+            if not isinstance(playlist, dict) or not _text(playlist.get("id")):
+                continue
+            playlist_tracks = [
+                _public_track(catalog_tracks[track_id])
+                for track_id in (_text(value) for value in playlist.get("track_ids") or [])
+                if track_id in catalog_tracks
+            ]
+            if not playlist_tracks:
+                continue
+            recommendations.append(
+                {
+                    "id": _text(playlist.get("id")),
+                    "name": _text(playlist.get("name")) or "Tater Mix",
+                    "description": _text(playlist.get("description")),
+                    "tracks": playlist_tracks,
+                    "track_count": len(playlist_tracks),
+                    "artwork_url": _text(playlist_tracks[0].get("artwork_url")),
+                }
+            )
     return {
         "ok": True,
         "available": True,
@@ -4521,6 +4584,9 @@ def get_client_music_state(
         "artists": list(catalog.get("artists") or [])[:200],
         "albums": list(catalog.get("albums") or [])[:200],
         "genres": list(catalog.get("genres") or [])[:200],
+        "recommendations": recommendations,
+        "recommendation_summary": _text(published.get("summary")),
+        "recommendation_generated_at": _as_float(published.get("generated_at")),
         "targets": targets,
         "player": {
             "status": _text(player.get("status") or "idle"),
@@ -4530,11 +4596,15 @@ def get_client_music_state(
             "target": player_targets[0] if player_targets else "",
             "queue_count": len(player.get("queue") or []),
             "queue_index": _as_int(player.get("index"), -1, -1, 100000),
+            "queue": queue,
             "shuffle": bool(player.get("shuffle")),
             "repeat": _text(player.get("repeat") or "off"),
             "continuous_radio": bool(player.get("continuous_radio")),
             "radio_name": _text(player.get("radio_name")),
             "continuation_pending": bool(player.get("continuation_pending")),
+            "position_seconds": position_seconds,
+            "duration_seconds": duration_seconds,
+            "seekable": bool(player.get("current") and duration_seconds > 0),
             "volume_percent": _as_int(
                 player.get("volume_percent"),
                 _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
@@ -4557,6 +4627,103 @@ def _client_track(track_id: Any, provider_id: str, client: Any) -> Dict[str, Any
         if isinstance(track, dict) and _text(track.get("id")) == wanted:
             return dict(track)
     raise ValueError("That track is no longer in the active music library.")
+
+
+def _client_local_continuation(
+    values: Dict[str, Any],
+    provider_id: str,
+    client: Any,
+) -> Dict[str, Any]:
+    """Choose the next continuous-radio batch without starting a Tater player."""
+    catalog = _catalog(client, provider_id)
+    if not (catalog.get("tracks") or []):
+        catalog = _sync_catalog(client, provider_id)
+    track_by_id = {
+        _text(track.get("id")): track
+        for track in catalog.get("tracks") or []
+        if isinstance(track, dict) and _text(track.get("id"))
+    }
+    requested_ids = _list(values.get("track_ids"))[:200]
+    current_track_id = _text(values.get("track_id"))
+    queue = [
+        dict(track_by_id[track_id])
+        for track_id in requested_ids
+        if track_id in track_by_id
+    ]
+    if not queue and current_track_id in track_by_id:
+        queue = [dict(track_by_id[current_track_id])]
+    if not queue:
+        raise ValueError("Little Spud's current music queue is no longer in the active library.")
+    index = _as_int(
+        values.get("queue_index"),
+        next(
+            (
+                position
+                for position, track in enumerate(queue)
+                if _text(track.get("id")) == current_track_id
+            ),
+            0,
+        ),
+        0,
+        max(0, len(queue) - 1),
+    )
+    current = queue[index]
+    _record_listening_history(
+        current,
+        ["little_spud:local"],
+        client=client,
+    )
+    player = {
+        "status": "playing",
+        "provider": provider_id,
+        "queue": queue,
+        "queue_original": queue,
+        "index": index,
+        "current": current,
+        "targets": ["little_spud:local"],
+        "queue_session_id": _text(values.get("queue_session_id")) or uuid.uuid4().hex,
+        "continuous_radio": True,
+    }
+    selections: List[Dict[str, Any]] = []
+    station_name = "Little Spud Continuous Radio"
+    source = "smart_fallback"
+    acquired = _client_continuation_lock.acquire(blocking=False)
+    loop: Optional[asyncio.AbstractEventLoop] = None
+    try:
+        if acquired:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            model = _get_primary_llm_client_from_env()
+            selections, station_name = _select_continuation_tracks(
+                loop,
+                model,
+                player,
+                client,
+            )
+            source = "ai"
+    except Exception as exc:
+        logger.warning("[Music] Little Spud AI continuation failed; using smart fallback: %s", exc)
+    finally:
+        if loop is not None:
+            loop.close()
+            asyncio.set_event_loop(None)
+        if acquired:
+            _client_continuation_lock.release()
+    if not selections:
+        selections = _fallback_continuation_tracks(
+            player,
+            client,
+            count=CONTINUATION_BATCH_TRACKS,
+        )
+    if not selections:
+        raise ValueError("The active music library has no tracks for continuous radio.")
+    return {
+        "ok": True,
+        "tracks": [_public_track(track) for track in selections[:CONTINUATION_BATCH_TRACKS]],
+        "station_name": station_name,
+        "source": source,
+        "continuous_radio": True,
+    }
 
 
 def run_client_music_action(
@@ -4584,6 +4751,31 @@ def run_client_music_action(
         if selected_provider in CATALOG_PROVIDER_IDS:
             _sync_catalog(store, selected_provider)
         return get_client_music_state(client=store)
+    if command == "local_play_started":
+        track = _client_track(values.get("track_id"), selected_provider, store)
+        _record_listening_history(
+            track,
+            ["little_spud:local"],
+            client=store,
+        )
+        return {"ok": True}
+    if command in {"continue_local", "local_continuation"}:
+        return _client_local_continuation(values, selected_provider, store)
+    if command in {"play_recommendation", "recommendation"}:
+        player = _play_recommendation(
+            values.get("recommendation_id"),
+            store,
+            requested_targets=values.get("targets") or values.get("target"),
+            volume_percent=values.get("volume_percent"),
+        )
+        return {
+            "ok": True,
+            "summary_for_user": (
+                f"Playing a Tater recommendation on "
+                f"{_target_summary(player.get('targets'))}."
+            ),
+            "state": get_client_music_state(client=store),
+        }
     if command == "play":
         track_id = _text(values.get("track_id"))
         if track_id:
@@ -4624,6 +4816,47 @@ def run_client_music_action(
         }
 
     player = _reconcile_native_playback(_player(store), store)
+    if command == "set_volume":
+        volume = _as_int(
+            values.get("volume_percent"),
+            _as_int(player.get("volume_percent"), 75, 0, 100),
+            0,
+            100,
+        )
+        live_result = {"sent_count": 0, "warnings": []}
+        if _text(player.get("status")).lower() == "playing":
+            live_result = _set_target_volume(player, volume)
+            if _as_int(live_result.get("sent_count"), 0, 0, 10000) <= 0:
+                warning = "; ".join(
+                    _text(value)
+                    for value in list(live_result.get("warnings") or [])
+                    if _text(value)
+                )
+                raise ValueError(warning or "The active players could not change volume.")
+        player["volume_percent"] = volume
+        player["warnings"] = [
+            _text(value)
+            for value in list(live_result.get("warnings") or [])
+            if _text(value)
+        ]
+        _save_player(player, store)
+        return {
+            "ok": True,
+            "state": get_client_music_state(client=store),
+        }
+    if command == "seek":
+        updated = _seek_player(
+            _as_float(values.get("position_seconds")),
+            client=store,
+        )
+        return {
+            "ok": True,
+            "player": {
+                "status": _text(updated.get("status")),
+                "current": _public_track(updated.get("current") or {}),
+            },
+            "state": get_client_music_state(client=store),
+        }
     if command in {"next", "previous", "stop", "replay", "play", "resume", "pause"}:
         if command == "next":
             updated = _advance_player(1, client=store)
@@ -4646,7 +4879,10 @@ def run_client_music_action(
             },
             "state": get_client_music_state(client=store),
         }
-    raise ValueError("Music action must be play, next, previous, stop, replay, refresh, or set_provider.")
+    raise ValueError(
+        "Music action must be play, play_recommendation, next, previous, stop, "
+        "replay, seek, set_volume, continue_local, refresh, or set_provider."
+    )
 
 
 def get_client_music_stream_source(
@@ -5400,7 +5636,13 @@ def _disconnect_provider(provider_id: str, client: Any) -> Dict[str, Any]:
     return {"ok": True, "message": f"{PROVIDER_LABELS[provider_id]} disconnected locally."}
 
 
-def _play_recommendation(item_id: Any, client: Any = None) -> Dict[str, Any]:
+def _play_recommendation(
+    item_id: Any,
+    client: Any = None,
+    *,
+    requested_targets: Any = None,
+    volume_percent: Any = None,
+) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     recommendation_id = _text(item_id)
     if recommendation_id.startswith("recommendation:"):
@@ -5435,11 +5677,11 @@ def _play_recommendation(item_id: Any, client: Any = None) -> Dict[str, Any]:
         raise ValueError("Those recommended tracks are no longer in the active library. Refresh recommendations.")
 
     current = _player(store)
-    requested_targets = _list(current.get("targets") or current.get("target")) or _list(
-        cfg.get("default_targets") or cfg.get("default_target")
-    )
+    selected_targets = _list(requested_targets) or _list(
+        current.get("targets") or current.get("target")
+    ) or _list(cfg.get("default_targets") or cfg.get("default_target"))
     targets = _resolve_targets(
-        requested_targets,
+        selected_targets,
         client=store,
         provider_id=provider_id,
     )
@@ -5447,7 +5689,7 @@ def _play_recommendation(item_id: Any, client: Any = None) -> Dict[str, Any]:
         raise ValueError("Choose one or more players in the Music Player before starting this playlist.")
     _validate_catalog_provider_targets(targets)
     volume = _as_int(
-        current.get("volume_percent"),
+        current.get("volume_percent") if volume_percent is None else volume_percent,
         _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
         0,
         100,

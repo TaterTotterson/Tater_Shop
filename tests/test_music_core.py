@@ -721,6 +721,180 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(payload["targets"][0]["kind"], "satellite")
         self.assertNotIn("player-token", json.dumps(payload))
 
+    def test_native_client_state_exposes_live_queue_progress_and_recommendations(self):
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "paused",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "index": 0,
+                    "current": self.tracks[0],
+                    "targets": ["voice_core:native:kitchen"],
+                    "position_offset_seconds": 42,
+                    "duration_seconds": 180,
+                    "continuous_radio": True,
+                    "radio_name": "Morning Roots",
+                    "volume_percent": 63,
+                }
+            ),
+        )
+        self.redis.set(
+            self.core.RECOMMENDATIONS_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "generated_at": 456,
+                    "summary": "Built from your recent reggae plays.",
+                    "playlists": [
+                        {
+                            "id": "morning-roots",
+                            "name": "Morning Roots",
+                            "description": "Easy reggae for the morning.",
+                            "track_ids": ["track:one", "track:two"],
+                        }
+                    ],
+                }
+            ),
+        )
+        with patch.object(self.core, "_target_options", return_value=[]):
+            payload = self.core.get_client_music_state(client=self.redis)
+
+        self.assertEqual([row["id"] for row in payload["player"]["queue"]], ["track:one", "track:two"])
+        self.assertEqual(payload["player"]["position_seconds"], 42)
+        self.assertEqual(payload["player"]["duration_seconds"], 180)
+        self.assertTrue(payload["player"]["seekable"])
+        self.assertEqual(payload["recommendations"][0]["id"], "morning-roots")
+        self.assertEqual(
+            [row["id"] for row in payload["recommendations"][0]["tracks"]],
+            ["track:one", "track:two"],
+        )
+
+    def test_native_client_recommendation_honors_selected_targets_and_volume(self):
+        self.redis.set(
+            self.core.RECOMMENDATIONS_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "playlists": [
+                        {
+                            "id": "morning-roots",
+                            "name": "Morning Roots",
+                            "track_ids": ["track:one", "track:two"],
+                        }
+                    ],
+                }
+            ),
+        )
+        selected_targets = [
+            "voice_core:stereo:bedroom",
+            "integration:sonos:kitchen",
+        ]
+        with patch.object(
+            self.core,
+            "_resolve_targets",
+            return_value=selected_targets,
+        ) as resolve_targets, patch.object(
+            self.core,
+            "_validate_catalog_provider_targets",
+        ), patch.object(
+            self.core,
+            "_create_and_start_queue",
+            return_value={"status": "playing", "targets": selected_targets},
+        ) as create_queue:
+            result = self.core._play_recommendation(
+                "morning-roots",
+                self.redis,
+                requested_targets=selected_targets,
+                volume_percent=38,
+            )
+
+        self.assertEqual(result["status"], "playing")
+        self.assertEqual(resolve_targets.call_args.args[0], selected_targets)
+        self.assertEqual(create_queue.call_args.kwargs["targets"], selected_targets)
+        self.assertEqual(create_queue.call_args.kwargs["volume_percent"], 38)
+        self.assertEqual(
+            [row["id"] for row in create_queue.call_args.args[0]],
+            ["track:one", "track:two"],
+        )
+
+    def test_native_client_live_volume_action_updates_active_players(self):
+        player = {
+            "status": "playing",
+            "provider": "tater_tube",
+            "queue": self.tracks,
+            "index": 0,
+            "current": self.tracks[0],
+            "targets": ["voice_core:native:kitchen"],
+            "volume_percent": 70,
+        }
+        self.redis.set(self.core.PLAYER_KEY, json.dumps(player))
+        with patch.object(
+            self.core,
+            "_reconcile_native_playback",
+            return_value=player,
+        ), patch.object(
+            self.core,
+            "_set_target_volume",
+            return_value={"sent_count": 1, "warnings": []},
+        ) as set_volume, patch.object(self.core, "_target_options", return_value=[]):
+            result = self.core.run_client_music_action(
+                "set_volume",
+                {"volume_percent": 31},
+                client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.core._player(self.redis)["volume_percent"], 31)
+        set_volume.assert_called_once_with(player, 31)
+
+    def test_little_spud_continuation_returns_ai_tracks_without_starting_remote_player(self):
+        with patch.object(
+            self.core,
+            "_get_primary_llm_client_from_env",
+            return_value=object(),
+        ), patch.object(
+            self.core,
+            "_select_continuation_tracks",
+            return_value=([self.tracks[1]], "Pocket Roots"),
+        ) as select_tracks:
+            result = self.core.run_client_music_action(
+                "continue_local",
+                {
+                    "provider": "tater_tube",
+                    "track_id": "track:one",
+                    "track_ids": ["track:one"],
+                    "queue_index": 0,
+                    "queue_session_id": "little-spud-session",
+                },
+                client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["continuous_radio"])
+        self.assertEqual(result["station_name"], "Pocket Roots")
+        self.assertEqual([row["id"] for row in result["tracks"]], ["track:two"])
+        self.assertIsNone(self.redis.get(self.core.PLAYER_KEY))
+        synthetic_player = select_tracks.call_args.args[2]
+        self.assertEqual(synthetic_player["current"]["id"], "track:one")
+        self.assertEqual(synthetic_player["targets"], ["little_spud:local"])
+
+    def test_little_spud_playback_is_recorded_in_shared_listening_history(self):
+        result = self.core.run_client_music_action(
+            "local_play_started",
+            {
+                "provider": "tater_tube",
+                "track_id": "track:one",
+            },
+            client=self.redis,
+        )
+
+        self.assertTrue(result["ok"])
+        history = self.core._listening_history(self.redis)
+        self.assertEqual(history[-1]["track_id"], "track:one")
+        self.assertEqual(history[-1]["targets"], ["little_spud:local"])
+
     def test_native_client_can_play_an_exact_track_and_resolve_local_stream(self):
         with patch.object(
             self.core,
