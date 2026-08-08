@@ -1,9 +1,13 @@
 import asyncio
+import io
 import importlib.util
 import json
 import sys
+import threading
+import time
 import types
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -62,6 +66,10 @@ class MusicCoreTests(unittest.TestCase):
         self.core._recommendation_thread = None
         self.core._profile_thread = None
         self.core._continuation_thread = None
+        with self.core._artwork_cache_lock:
+            self.core._artwork_cache.clear()
+            self.core._artwork_inflight.clear()
+            self.core._artwork_failure_until.clear()
         self.redis = FakeRedis()
         self.redis.hset(
             self.core.SETTINGS_KEY,
@@ -215,6 +223,46 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual([row["id"] for row in matches], ["track:one"])
 
+    def test_major_genre_families_expand_specific_tags(self):
+        self.assertEqual(
+            self.core._genres(["Dancehall", "Alternative Rock", "R&B", "House"]),
+            [
+                "Dancehall",
+                "Reggae",
+                "Alternative Rock",
+                "Alternative",
+                "Rock",
+                "R&B/Soul",
+                "House",
+                "Electronic",
+            ],
+        )
+
+    def test_reggae_request_matches_specific_reggae_family_tag(self):
+        self.tracks[0]["genres"] = ["Dancehall"]
+        self.tracks[0]["genre"] = "Dancehall"
+        self.redis.set(
+            self.core.CATALOG_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "tracks": self.tracks,
+                    "genres": ["Dancehall"],
+                    "synced_at": 100,
+                }
+            ),
+        )
+        with self.core._catalog_memory_cache_lock:
+            self.core._catalog_memory_cache["loaded_at"] = -1000.0
+
+        matches = self.core._search_tracks(
+            query="play reggae music",
+            genre="reggae",
+            client=self.redis,
+        )
+        self.assertEqual([row["id"] for row in matches], ["track:one"])
+        self.assertIn("Reggae", self.core._catalog(self.redis)["genres"])
+
     def test_stream_url_is_derived_without_storing_provider_token_in_catalog(self):
         provider = self.core.TaterTubeMusicProvider.from_settings(
             self.redis.hgetall(self.core.SETTINGS_KEY)
@@ -225,28 +273,76 @@ class MusicCoreTests(unittest.TestCase):
         self.assertNotIn("player-token", json.dumps(self.tracks))
         self.assertEqual(self.core._track_media_type(self.tracks[0]), "audio/flac")
 
+        sync_url = provider.stream_url(self.tracks[0], audio_sync=True)
+        self.assertIn("transcode=1", sync_url)
+        self.assertIn("profile=audio_sync", sync_url)
+
         artwork_url = provider.artwork_url(self.tracks[0])
         self.assertEqual(artwork_url, "")
 
-    def test_tater_tube_uses_generated_artwork_instead_of_embedded_tag_extraction(self):
+    def test_tater_tube_proxies_catalog_artwork_without_storing_player_token(self):
         track = self.core._normalize_track(
             {
                 "ratingKey": "track:art",
                 "title": "Covered Song",
                 "categoryId": "local:music",
                 "path": "Artist/Album/song.flac",
-                "poster": "http://tube.local/artwork?player_token=secret",
+                "poster": (
+                    "http://tube.local:8080/api/tater/music/artwork?"
+                    "album_id=album%3Acovered&v=42&player_token=secret"
+                ),
+                "hasArtwork": True,
             }
         )
-        self.assertFalse(track["has_artwork"])
+        self.assertTrue(track["has_artwork"])
+        self.assertEqual(
+            track["artwork_path"],
+            "/api/tater/music/artwork?album_id=album%3Acovered&v=42",
+        )
+        self.assertEqual(track["artwork_version"], "42")
         self.assertNotIn("secret", json.dumps(track))
         public = self.core._public_track(track)
-        self.assertTrue(public["artwork_url"].startswith("data:image/svg+xml"))
+        self.assertTrue(public["artwork_url"].startswith("/api/cores/music_core/webhook/artwork?"))
         provider = self.core.TaterTubeMusicProvider(
             server_url="http://tube.local:8080",
             token="player-token",
         )
-        self.assertEqual(provider.artwork_url(track), "")
+        artwork_url = provider.artwork_url(track)
+        self.assertTrue(artwork_url.startswith("http://tube.local:8080/api/tater/music/artwork?"))
+        self.assertIn("album_id=album%3Acovered", artwork_url)
+        self.assertIn("v=42", artwork_url)
+        self.assertIn("player_token=player-token", artwork_url)
+
+    def test_tater_tube_rejects_non_artwork_provider_urls(self):
+        provider = self.core.TaterTubeMusicProvider(
+            server_url="http://tube.local:8080",
+            token="player-token",
+        )
+        self.assertEqual(
+            provider.artwork_url({"artwork_path": "https://example.com/not-an-artwork-route"}),
+            "",
+        )
+
+    def test_catalog_artwork_schema_forces_one_refresh_after_upgrade(self):
+        self.redis.set(
+            self.core.CATALOG_KEY,
+            json.dumps({"provider": "tater_tube", "artwork_schema": 2, "tracks": []}),
+        )
+        self.assertTrue(self.core._catalog_needs_artwork_refresh(client=self.redis))
+
+        self.redis.set(
+            self.core.CATALOG_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "artwork_schema": self.core.CATALOG_ARTWORK_SCHEMA,
+                    "tracks": [],
+                }
+            ),
+        )
+        with self.core._catalog_memory_cache_lock:
+            self.core._catalog_memory_cache["loaded_at"] = -1000.0
+        self.assertFalse(self.core._catalog_needs_artwork_refresh(client=self.redis))
 
     def test_artwork_webhook_proxies_provider_image_and_caches_it(self):
         response = Mock()
@@ -289,6 +385,100 @@ class MusicCoreTests(unittest.TestCase):
             )
         self.assertEqual(first.body, b"\xff\xd8album-cover\xff\xd9")
         self.assertEqual(first.media_type, "image/jpeg")
+        self.assertEqual(second.body, first.body)
+        fetch.assert_called_once()
+        self.assertEqual(
+            fetch.call_args.kwargs["timeout"],
+            (
+                self.core.ARTWORK_CONNECT_TIMEOUT_SECONDS,
+                self.core.ARTWORK_READ_TIMEOUT_SECONDS,
+            ),
+        )
+
+    def test_artwork_fetch_deduplicates_simultaneous_provider_requests(self):
+        response = Mock()
+        response.content = b"\xff\xd8album-cover\xff\xd9"
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.raise_for_status.return_value = None
+        provider = types.SimpleNamespace(
+            artwork_url=lambda _track: "http://provider.local/native-cover.jpg?token=secret"
+        )
+        fetch_started = threading.Event()
+        release_fetch = threading.Event()
+        results = []
+        errors = []
+
+        def slow_fetch(*_args, **_kwargs):
+            fetch_started.set()
+            release_fetch.wait(2.0)
+            return response
+
+        def load_artwork():
+            try:
+                results.append(self.core._fetch_track_artwork(self.tracks[0], self.redis))
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        with patch.object(self.core, "_provider", return_value=provider), patch.object(
+            self.core.requests,
+            "get",
+            side_effect=slow_fetch,
+        ) as fetch:
+            first = threading.Thread(target=load_artwork)
+            second = threading.Thread(target=load_artwork)
+            first.start()
+            self.assertTrue(fetch_started.wait(1.0))
+            second.start()
+            time.sleep(0.05)
+            release_fetch.set()
+            first.join(2.0)
+            second.join(2.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["body"], results[1]["body"])
+        fetch.assert_called_once()
+
+    def test_artwork_webhook_returns_cached_placeholder_after_provider_failure(self):
+        provider = types.SimpleNamespace(
+            artwork_url=lambda _track: "http://provider.local/missing-cover.jpg?token=secret"
+        )
+        starlette = types.ModuleType("starlette")
+        starlette_responses = types.ModuleType("starlette.responses")
+
+        class FakeResponse:
+            def __init__(self, content=b"", media_type=None, headers=None, status_code=200):
+                self.body = bytes(content)
+                self.media_type = media_type
+                self.headers = dict(headers or {})
+                self.status_code = status_code
+
+        starlette_responses.Response = FakeResponse
+        starlette.responses = starlette_responses
+        with patch.dict(
+            sys.modules,
+            {"starlette": starlette, "starlette.responses": starlette_responses},
+        ), patch.object(self.core, "_provider", return_value=provider), patch.object(
+            self.core.requests,
+            "get",
+            side_effect=TimeoutError("provider timed out"),
+        ) as fetch:
+            first = self.core.handle_core_webhook(
+                webhook="artwork",
+                query={"track_id": "track:one", "provider": "tater_tube"},
+                redis_client=self.redis,
+            )
+            second = self.core.handle_core_webhook(
+                webhook="artwork",
+                query={"track_id": "track:one", "provider": "tater_tube"},
+                redis_client=self.redis,
+            )
+
+        self.assertEqual(first.media_type, "image/svg+xml")
+        self.assertTrue(first.body.startswith(b"<svg"))
+        self.assertEqual(first.headers["X-Tater-Artwork-Fallback"], "1")
         self.assertEqual(second.body, first.body)
         fetch.assert_called_once()
 
@@ -371,192 +561,28 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(reconciled["status"], "playing")
         self.assertTrue(reconciled["warnings"])
 
-    def test_plex_catalog_and_stream_url(self):
-        provider = self.core.PlexMusicProvider(
-            server_url="http://plex.local:32400",
-            token="plex-secret",
-            library_ids=[],
-        )
-        with patch.object(
-            provider,
-            "request",
-            side_effect=[
-                {
-                    "MediaContainer": {
-                        "Directory": [
-                            {"key": "3", "title": "Music", "type": "artist"}
-                        ]
-                    }
-                },
-                {
-                    "MediaContainer": {
-                        "totalSize": 1,
-                        "Metadata": [
-                            {
-                                "ratingKey": "44",
-                                "title": "Three Little Birds",
-                                "grandparentTitle": "Bob Marley",
-                                "parentTitle": "Exodus",
-                                "parentThumb": "/library/metadata/album-9/thumb/1234",
-                                "updatedAt": 1234,
-                                "duration": 180000,
-                                "Genre": [{"tag": "Reggae"}],
-                                "Media": [
-                                    {
-                                        "container": "flac",
-                                        "Part": [
-                                            {
-                                                "key": "/library/parts/44/file.flac",
-                                                "size": 1234,
-                                            }
-                                        ],
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                },
-            ],
-        ):
-            catalog = provider.catalog()
-        track = self.core._normalize_track(catalog["tracks"][0])
-        self.assertEqual(track["provider"], "plex")
-        self.assertEqual(track["artist"], "Bob Marley")
-        self.assertEqual(track["duration_seconds"], 180)
-        stream_url = provider.stream_url(track)
-        self.assertIn("/library/parts/44/file.flac?", stream_url)
-        self.assertIn("X-Plex-Token=plex-secret", stream_url)
-        self.assertNotIn("plex-secret", json.dumps(catalog))
-        self.assertTrue(track["has_artwork"])
-        artwork_url = provider.artwork_url(track)
-        self.assertIn("/library/metadata/album-9/thumb/1234?", artwork_url)
-        self.assertIn("X-Plex-Token=plex-secret", artwork_url)
-        self.assertNotIn("plex-secret", self.core._public_track(track)["artwork_url"])
-
-    def test_emby_and_jellyfin_catalog_paths_and_stream_urls(self):
-        for provider_id, expected_prefix in (("emby", "/emby/"), ("jellyfin", "/")):
-            with self.subTest(provider=provider_id):
-                provider = self.core.MediaBrowserMusicProvider(
-                    server_url=f"http://{provider_id}.local:8096",
-                    api_key=f"{provider_id}-secret",
-                    user_id="user-1",
-                    provider_id=provider_id,
-                )
-                with patch.object(
-                    provider,
-                    "request",
-                    return_value={
-                        "TotalRecordCount": 1,
-                        "Items": [
-                            {
-                                "Id": "song-1",
-                                "Name": "Blue in Green",
-                                "Artists": ["Miles Davis"],
-                                "AlbumArtist": "Miles Davis",
-                                "Album": "Kind of Blue",
-                                "AlbumId": "album-1",
-                                "AlbumPrimaryImageTag": "album-image-tag",
-                                "Genres": ["Jazz"],
-                                "RunTimeTicks": 2_200_000_000,
-                                "MediaSources": [
-                                    {
-                                        "Container": "flac",
-                                        "Path": "/music/blue.flac",
-                                        "Size": 4321,
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                ) as request:
-                    catalog = provider.catalog()
-                track = self.core._normalize_track(catalog["tracks"][0])
-                self.assertEqual(track["provider"], provider_id)
-                self.assertEqual(track["artist"], "Miles Davis")
-                self.assertEqual(request.call_args.args[0], "Users/user-1/Items")
-                stream_url = provider.stream_url(track)
-                self.assertIn(expected_prefix, stream_url)
-                self.assertIn("Audio/song-1/stream.flac", stream_url)
-                self.assertIn(f"api_key={provider_id}-secret", stream_url)
-                self.assertNotIn(f"{provider_id}-secret", json.dumps(catalog))
-                self.assertTrue(track["has_artwork"])
-                artwork_url = provider.artwork_url(track)
-                self.assertIn("/Items/album-1/Images/Primary?", artwork_url)
-                self.assertIn(f"api_key={provider_id}-secret", artwork_url)
-                self.assertIn("tag=album-image-tag", artwork_url)
-                self.assertNotIn(
-                    f"{provider_id}-secret",
-                    self.core._public_track(track)["artwork_url"],
-                )
-
-    def test_navidrome_open_subsonic_catalog_and_salted_stream_auth(self):
-        provider = self.core.NavidromeMusicProvider(
-            server_url="http://navidrome.local:4533",
-            username="tater",
-            password="super-secret",
-            api_key="",
-        )
-        with patch.object(
-            provider,
-            "request",
-            return_value={
-                "searchResult3": {
-                    "song": [
-                        {
-                            "id": "song-9",
-                            "title": "Pressure Drop",
-                            "artist": "Toots & The Maytals",
-                            "album": "Funky Kingston",
-                            "genre": "Reggae",
-                            "duration": 185,
-                            "suffix": "mp3",
-                            "contentType": "audio/mpeg",
-                            "coverArt": "cover-9",
-                        }
-                    ]
-                }
-            },
-        ):
-            catalog = provider.catalog()
-        track = self.core._normalize_track(catalog["tracks"][0])
-        self.assertEqual(track["provider"], "navidrome")
-        stream_url = provider.stream_url(track)
-        self.assertIn("/rest/stream.view?", stream_url)
-        self.assertIn("u=tater", stream_url)
-        self.assertIn("id=song-9", stream_url)
-        self.assertIn("&s=", stream_url)
-        self.assertIn("&t=", stream_url)
-        self.assertNotIn("super-secret", stream_url)
-        self.assertNotIn("super-secret", json.dumps(catalog))
-        self.assertTrue(track["has_artwork"])
-        artwork_url = provider.artwork_url(track)
-        self.assertIn("/rest/getCoverArt.view?", artwork_url)
-        self.assertIn("id=cover-9", artwork_url)
-        self.assertNotIn("super-secret", artwork_url)
-        self.assertNotIn("super-secret", self.core._public_track(track)["artwork_url"])
-
-    def test_removed_roon_provider_migrates_to_tater_tube_and_clears_stale_player(self):
-        self.redis.hset(self.core.SETTINGS_KEY, mapping={"provider": "roon"})
+    def test_removed_provider_migrates_to_tater_tube_and_clears_stale_player(self):
+        self.redis.hset(self.core.SETTINGS_KEY, mapping={"provider": "plex"})
         self.redis.set(
             self.core.PLAYER_KEY,
             json.dumps(
                 {
                     "status": "playing",
-                    "provider": "roon",
+                    "provider": "plex",
                     "queue": [],
                     "index": -1,
-                    "current": {"id": "roon:dynamic", "title": "Jazz", "provider": "roon"},
-                    "targets": ["integration:roon:zone-kitchen"],
+                    "current": {"id": "plex:legacy", "title": "Jazz", "provider": "plex"},
+                    "targets": ["voice_core:native:kitchen"],
                 }
             ),
         )
         player = self.core._player(self.redis)
-        self.assertEqual(self.core._provider_id("roon"), "tater_tube")
+        self.assertEqual(self.core._provider_id("plex"), "tater_tube")
         self.assertEqual(player["provider"], "tater_tube")
         self.assertEqual(player["status"], "stopped")
         self.assertEqual(player["queue"], [])
         self.assertEqual(player["current"], {})
-        self.assertEqual(player["targets"], [])
+        self.assertEqual(player["targets"], ["voice_core:native:kitchen"])
 
     def test_target_picker_hides_roon_zones_from_music_core(self):
         announcement_targets = types.ModuleType("announcement_targets")
@@ -576,7 +602,7 @@ class MusicCoreTests(unittest.TestCase):
             sys.modules,
             {"announcement_targets": announcement_targets},
         ):
-            stream_options = self.core._target_options(provider_id="plex")
+            stream_options = self.core._target_options(provider_id="tater_tube")
         self.assertEqual(
             [row["value"] for row in stream_options],
             ["voice_core:native:kitchen"],
@@ -585,6 +611,12 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(
             all(
                 call.kwargs.get("include_homeassistant") is True
+                for call in announcement_targets.build_announcement_target_options.call_args_list
+            )
+        )
+        self.assertTrue(
+            all(
+                call.kwargs.get("include_airplay") is True
                 for call in announcement_targets.build_announcement_target_options.call_args_list
             )
         )
@@ -717,9 +749,129 @@ class MusicCoreTests(unittest.TestCase):
             )
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["provider"]["id"], "tater_tube")
+        self.assertEqual(
+            [provider["id"] for provider in payload["providers"]],
+            ["tater_tube"],
+        )
         self.assertEqual(payload["tracks"][0]["id"], "track:one")
         self.assertEqual(payload["targets"][0]["kind"], "satellite")
         self.assertNotIn("player-token", json.dumps(payload))
+
+    def test_native_client_library_returns_80_personalized_tracks_from_history_and_ai_picks(self):
+        tracks = [
+            {
+                "id": f"track:{index}",
+                "title": f"Song {index:03d}",
+                "artist": "Favorite Artist" if index < 50 else f"Artist {index}",
+                "album_artist": "Favorite Artist" if index < 50 else f"Artist {index}",
+                "album": "Favorite Album" if index < 20 else f"Album {index}",
+                "genres": ["Reggae"] if index < 50 else ["Jazz"],
+                "provider": "tater_tube",
+            }
+            for index in range(100)
+        ]
+        self.redis.set(
+            self.core.CATALOG_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "tracks": tracks,
+                    "artists": [],
+                    "albums": [],
+                    "genres": [],
+                }
+            ),
+        )
+        self.redis.set(
+            self.core.HISTORY_KEY,
+            json.dumps(
+                [
+                    {
+                        "track_id": "track:0",
+                        "artist": "Favorite Artist",
+                        "album_artist": "Favorite Artist",
+                        "album": "Favorite Album",
+                        "genres": ["Reggae"],
+                        "provider": "tater_tube",
+                        "played_at": 123,
+                    }
+                ]
+            ),
+        )
+        self.redis.set(
+            self.core.RECOMMENDATIONS_KEY,
+            json.dumps(
+                {
+                    "provider": "tater_tube",
+                    "generated_at": 456,
+                    "playlists": [{"id": "ai-mix", "track_ids": ["track:90"]}],
+                }
+            ),
+        )
+
+        with patch.object(self.core, "_target_options", return_value=[]):
+            payload = self.core.get_client_music_state(limit=80, client=self.redis)
+
+        self.assertEqual(len(payload["tracks"]), 80)
+        self.assertEqual(payload["tracks"][0]["id"], "track:90")
+        self.assertNotIn("track:0", [row["id"] for row in payload["tracks"][:20]])
+        self.assertEqual(payload["track_feed"]["kind"], "personalized")
+        self.assertEqual(payload["track_feed"]["title"], "For You")
+        self.assertEqual(payload["track_feed"]["history_event_count"], 1)
+        self.assertEqual(payload["track_feed"]["ai_seed_count"], 1)
+
+    def test_native_client_library_falls_back_until_listening_history_exists(self):
+        with patch.object(self.core, "_target_options", return_value=[]):
+            payload = self.core.get_client_music_state(limit=80, client=self.redis)
+
+        self.assertEqual(
+            [row["id"] for row in payload["tracks"]],
+            ["track:one", "track:two"],
+        )
+        self.assertEqual(payload["track_feed"]["kind"], "library")
+        self.assertEqual(payload["track_feed"]["title"], "Library")
+        self.assertIn("personalize", payload["track_feed"]["summary"])
+
+    def test_native_client_state_exposes_unified_sonos_airplay_route_metadata(self):
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "paused",
+                    "provider": "tater_tube",
+                    "targets": ["airplay:804af2c57d78"],
+                    "position_offset_seconds": 42,
+                }
+            ),
+        )
+        options = [
+            {
+                "value": "sonos:RINCON_KITCHEN",
+                "label": "Sonos: Kitchen",
+                "description": "Automatic uses AirPlay Bridge with Tater sats.",
+                "target_aliases": ["airplay:804af2c57d78"],
+                "airplay_bridge_target": "airplay:804af2c57d78",
+                "transport_options": [
+                    {"value": "auto", "label": "Automatic"},
+                    {"value": "native", "label": "Native Sonos"},
+                    {"value": "airplay", "label": "AirPlay Bridge"},
+                ],
+            }
+        ]
+
+        with patch.object(self.core, "_target_options", return_value=options):
+            payload = self.core.get_client_music_state(client=self.redis)
+
+        target = payload["targets"][0]
+        self.assertEqual(target["id"], "sonos:RINCON_KITCHEN")
+        self.assertEqual(target["kind"], "media_player")
+        self.assertEqual(target["airplay_bridge_target"], "airplay:804af2c57d78")
+        self.assertEqual(target["transport_mode"], "auto")
+        self.assertEqual(
+            [row["value"] for row in target["transport_options"]],
+            ["auto", "native", "airplay"],
+        )
+        self.assertEqual(payload["player"]["targets"], ["sonos:RINCON_KITCHEN"])
 
     def test_native_client_state_exposes_live_queue_progress_and_recommendations(self):
         self.redis.set(
@@ -931,6 +1083,42 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual(source["track"]["id"], "track:two")
         self.assertIn("player_token=player-token", source["source_url"])
+
+    def test_native_client_can_replace_queue_with_ordered_track_ids(self):
+        selected_target = "voice_core:native:kitchen"
+        with patch.object(
+            self.core,
+            "_target_options",
+            return_value=[
+                {
+                    "value": selected_target,
+                    "label": "Tater Satellite: Kitchen",
+                }
+            ],
+        ), patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ):
+            result = self.core.run_client_music_action(
+                "play_queue",
+                {
+                    "track_ids": ["track:two", "track:one"],
+                    "target": selected_target,
+                    "volume_percent": 44,
+                },
+                client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["now_playing"]["id"], "track:two")
+        player = self.core._player(self.redis)
+        self.assertEqual(
+            [track["id"] for track in player["queue"]],
+            ["track:two", "track:one"],
+        )
+        self.assertEqual(player["index"], 0)
+        self.assertEqual(player["volume_percent"], 44)
 
     def test_target_resolution_prefers_room_then_speaking_satellite_then_default(self):
         with patch.object(self.core, "_target_options", return_value=[]), patch.object(
@@ -1440,6 +1628,10 @@ class MusicCoreTests(unittest.TestCase):
                 volume_percent=55,
                 start_position_seconds=37,
                 mixed_sync_adjustment_ms=125,
+                player_settings={
+                    targets[0]: {"volume_percent": 45, "sync_offset_ms": -20},
+                    targets[1]: {"volume_percent": 65, "sync_offset_ms": 80},
+                },
                 client=self.redis,
             )
         self.assertTrue(result["ok"])
@@ -1456,6 +1648,82 @@ class MusicCoreTests(unittest.TestCase):
             playback.play_media_url_targets.call_args.kwargs["mixed_sync_adjustment_ms"],
             125,
         )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["target_volume_percent"],
+            {targets[0]: 45, targets[1]: 65},
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["target_sync_offset_ms"],
+            {targets[0]: -20, targets[1]: 80},
+        )
+        self.assertFalse(result["audio_sync_transcode_used"])
+
+    def test_play_track_uses_audio_sync_transcode_for_native_and_airplay(self):
+        playback = types.ModuleType("media_playback")
+        playback.play_media_url_targets = Mock(
+            return_value={"ok": True, "sent_count": 2}
+        )
+        targets = [
+            "voice_core:native:kitchen",
+            "sonos:RINCON_LIVING",
+        ]
+        with patch.dict(sys.modules, {"media_playback": playback}):
+            result = self.core._play_track(
+                self.tracks[0],
+                targets,
+                volume_percent=55,
+                player_settings={
+                    targets[0]: {"volume_percent": 55, "sync_offset_ms": 0},
+                    targets[1]: {
+                        "volume_percent": 55,
+                        "sync_offset_ms": 0,
+                        "transport_mode": "auto",
+                    },
+                },
+                client=self.redis,
+            )
+
+        kwargs = playback.play_media_url_targets.call_args.kwargs
+        source_url = playback.play_media_url_targets.call_args.args[1]
+        self.assertIn("transcode=1", source_url)
+        self.assertIn("profile=audio_sync", source_url)
+        self.assertEqual(kwargs["media_type"], "audio/wav")
+        self.assertEqual(kwargs["filename"], "09 Three Little Birds.sync.wav")
+        self.assertTrue(result["audio_sync_transcode_used"])
+        self.assertEqual(result["audio_sync_transcode_profile"], "audio_sync")
+
+    def test_play_track_keeps_direct_stream_for_native_sonos_transport(self):
+        playback = types.ModuleType("media_playback")
+        playback.play_media_url_targets = Mock(
+            return_value={"ok": True, "sent_count": 2}
+        )
+        targets = [
+            "voice_core:native:kitchen",
+            "sonos:RINCON_LIVING",
+        ]
+        with patch.dict(sys.modules, {"media_playback": playback}):
+            result = self.core._play_track(
+                self.tracks[0],
+                targets,
+                volume_percent=55,
+                player_settings={
+                    targets[0]: {"volume_percent": 55, "sync_offset_ms": 0},
+                    targets[1]: {
+                        "volume_percent": 55,
+                        "sync_offset_ms": 0,
+                        "transport_mode": "native",
+                    },
+                },
+                client=self.redis,
+            )
+
+        source_url = playback.play_media_url_targets.call_args.args[1]
+        self.assertNotIn("profile=audio_sync", source_url)
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["media_type"],
+            "audio/flac",
+        )
+        self.assertFalse(result["audio_sync_transcode_used"])
 
     def test_hydra_exposes_play_search_control_status_and_browse(self):
         self.assertTrue(self.core.CORE_SETTINGS["hydra_tools_require_running"])
@@ -1489,7 +1757,12 @@ class MusicCoreTests(unittest.TestCase):
                 {
                     "value": "voice_core:native:kitchen",
                     "label": "Tater Satellite: Kitchen",
-                }
+                },
+                {
+                    "value": "airplay:804af2c57d78",
+                    "label": "AirPlay Bridge: Kitchen (Sonos • Era 100)",
+                    "description": "Wall-clock scheduled through Tater AirPlay Bridge",
+                },
             ],
         ):
             payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
@@ -1528,8 +1801,16 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(player["popup_fields"][0]["key"], "targets")
         self.assertEqual(player["popup_fields"][0]["label"], "Play On")
         self.assertEqual(player["popup_fields"][0]["type"], "multiselect")
-        self.assertEqual(player["popup_fields"][1]["key"], "mixed_sync_adjustment_ms")
-        self.assertEqual(player["popup_fields"][1]["type"], "range")
+        self.assertEqual(len(player["popup_fields"]), 1)
+        self.assertEqual(player["test_sync_action"], "music_ui_test_sync")
+        self.assertEqual(len(player["player_rows"]), 2)
+        self.assertEqual(player["player_rows"][0]["target"], "voice_core:native:kitchen")
+        self.assertEqual(player["player_rows"][0]["sync_quality"], "precise")
+        self.assertEqual(player["player_rows"][0]["volume_percent"], 75)
+        self.assertEqual(player["player_rows"][0]["sync_offset_ms"], 0)
+        self.assertEqual(player["player_rows"][1]["target"], "airplay:804af2c57d78")
+        self.assertEqual(player["player_rows"][1]["kind"], "airplay_bridge")
+        self.assertEqual(player["player_rows"][1]["sync_quality"], "bridge")
         self.assertEqual(payload["ui"]["appearance"], "music_library")
         self.assertTrue(payload["ui"]["live_updates"])
         self.assertEqual(payload["ui"]["poll_interval_ms"], 3000)
@@ -1587,15 +1868,50 @@ class MusicCoreTests(unittest.TestCase):
         }
         self.assertEqual(
             set(providers),
-            {
-                "provider:tater_tube",
-                "provider:plex",
-                "provider:emby",
-                "provider:jellyfin",
-                "provider:navidrome",
-            },
+            {"provider:tater_tube"},
         )
-        self.assertEqual(providers["provider:plex"]["fields"][1]["type"], "password")
+        self.assertEqual(tabs["providers"]["label"], "Tater Tube")
+        self.assertEqual(providers["provider:tater_tube"]["fields"][2]["type"], "password")
+
+    def test_recommendations_use_configured_assistant_name(self):
+        self.redis.set("tater:first_name", "Totty")
+
+        with patch.object(self.core, "_target_options", return_value=[]):
+            payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
+
+        tabs = {row["key"]: row for row in payload["ui"]["manager_tabs"]}
+        overview = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "recommendations:overview"
+        )
+        settings = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "settings:music"
+        )
+        settings_fields = {row["key"]: row for row in settings["fields"]}
+        tasks = {
+            row["id"]: row
+            for row in self.core.get_core_system_tasks(redis_client=self.redis)["tasks"]
+        }
+
+        self.assertEqual(tabs["recommendations"]["label"], "Totty's Recommendations")
+        self.assertEqual(overview["title"], "Totty's Recommendations")
+        self.assertEqual(overview["assistant_name"], "Totty")
+        self.assertIn("Totty will learn", overview["detail"])
+        self.assertEqual(
+            settings_fields["recommendations_enabled"]["label"],
+            "Totty's Recommendations",
+        )
+        self.assertEqual(
+            tasks["recommendation_refresh"]["label"],
+            "Totty's Recommendations",
+        )
+
+    def test_recommendations_use_natural_possessive_for_s_ending_name(self):
+        self.redis.set("tater:first_name", "Jules")
+        self.assertEqual(self.core._recommendations_label(self.redis), "Jules' Recommendations")
 
     def test_player_ui_upgrades_saved_stereo_members_without_readding_them(self):
         member_routes = {
@@ -1868,6 +2184,115 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual(position, 52.5)
 
+    def test_pause_stops_playback_and_persists_the_elapsed_position(self):
+        target = "voice_core:native:kitchen"
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "index": 0,
+                    "current": self.tracks[0],
+                    "targets": [target],
+                    "started_at": 100.0,
+                    "position_offset_seconds": 35.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+
+        with patch.object(self.core.time, "time", return_value=112.5), patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ) as stop:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_pause",
+                payload={"values": {}},
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        stop.assert_called_once_with([target])
+        paused = self.core._player(self.redis)
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["started_at"], 0.0)
+        self.assertEqual(paused["position_offset_seconds"], 47.5)
+
+    def test_paused_player_reloads_with_resume_action_and_resumes_at_saved_position(self):
+        target = "voice_core:native:kitchen"
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "paused",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "index": 1,
+                    "current": self.tracks[1],
+                    "targets": [target],
+                    "volume_percent": 58,
+                    "started_at": 0.0,
+                    "position_offset_seconds": 67.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+        reloaded = self.core._player(self.redis)
+        item = self.core._player_item(
+            reloaded,
+            [{"value": target, "label": "Tater Sat: Kitchen"}],
+            "tater_tube",
+            {},
+        )
+        toggle = item["actions"][1]
+        self.assertEqual(toggle["action"], "music_ui_play")
+        self.assertEqual(toggle["aria_label"], "Resume music")
+        self.assertEqual(item["playback"]["position_seconds"], 67.0)
+
+        with patch.object(
+            self.core,
+            "_resolve_targets",
+            return_value=[target],
+        ), patch.object(self.core, "_validate_catalog_provider_targets"), patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play, patch.object(self.core, "_record_listening_history") as history:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_play",
+                payload={"values": {"volume_percent": 58}},
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(play.call_args.kwargs["start_position_seconds"], 67.0)
+        history.assert_not_called()
+        resumed = self.core._player(self.redis)
+        self.assertEqual(resumed["status"], "playing")
+        self.assertEqual(resumed["position_offset_seconds"], 67.0)
+
+    def test_playing_player_exposes_pause_as_the_primary_transport_action(self):
+        item = self.core._player_item(
+            {
+                "status": "playing",
+                "current": self.tracks[0],
+                "queue": self.tracks,
+                "index": 0,
+                "started_at": 100.0,
+            },
+            [],
+            "tater_tube",
+            {},
+        )
+
+        toggle = item["actions"][1]
+        self.assertEqual(toggle["action"], "music_ui_pause")
+        self.assertEqual(toggle["aria_label"], "Pause music")
+        self.assertEqual(toggle["label"], "⏸")
+
     def test_mixed_sync_adjustment_is_saved_per_exact_player_group(self):
         first_group = ["voice_core:native:kitchen", "sonos:RINCON_LIVING"]
         second_group = ["voice_core:native:office", "sonos:RINCON_LIVING"]
@@ -1878,6 +2303,139 @@ class MusicCoreTests(unittest.TestCase):
         cfg = self.core._settings(self.redis)
         self.assertEqual(self.core._mixed_sync_adjustment(first_group, cfg), 225)
         self.assertEqual(self.core._mixed_sync_adjustment(second_group, cfg), 0)
+
+    def test_player_calibrations_are_saved_per_destination(self):
+        saved = self.core._save_player_calibrations(
+            self.redis,
+            {
+                "voice_core:native:kitchen": {
+                    "volume_percent": 46,
+                    "sync_offset_ms": -120,
+                },
+                "sonos:RINCON_LIVING": {
+                    "volume_percent": 61,
+                    "sync_offset_ms": 80,
+                },
+            },
+        )
+
+        self.assertEqual(saved["voice_core:native:kitchen"]["volume_percent"], 46)
+        self.assertEqual(saved["voice_core:native:kitchen"]["sync_offset_ms"], -120)
+        cfg = self.core._settings(self.redis)
+        self.assertEqual(
+            self.core._target_calibration("sonos:RINCON_LIVING", cfg),
+            {"volume_percent": 61, "sync_offset_ms": 80, "transport_mode": "auto"},
+        )
+
+    def test_sonos_player_row_exposes_automatic_transport_selection(self):
+        target = "sonos:RINCON_KITCHEN"
+        item = self.core._player_item(
+            {"status": "stopped", "targets": [target], "volume_percent": 70},
+            [
+                {
+                    "value": target,
+                    "label": "Sonos: Kitchen",
+                    "airplay_bridge_target": "airplay:804af2c57d78",
+                    "transport_options": [
+                        {"value": "auto", "label": "Automatic"},
+                        {"value": "native", "label": "Native Sonos"},
+                        {"value": "airplay", "label": "AirPlay Bridge"},
+                    ],
+                }
+            ],
+            "tater_tube",
+            {},
+        )
+
+        row = item["player_rows"][0]
+        self.assertEqual(row["target"], target)
+        self.assertEqual(row["sync_quality"], "automatic")
+        self.assertEqual(row["transport_mode"], "auto")
+        self.assertEqual(row["airplay_bridge_target"], "airplay:804af2c57d78")
+
+    def test_saved_sonos_airplay_target_migrates_to_the_unified_sonos_row(self):
+        options = [
+            {
+                "value": "sonos:RINCON_KITCHEN",
+                "label": "Sonos: Kitchen",
+                "target_aliases": ["airplay:804af2c57d78"],
+            }
+        ]
+
+        self.assertEqual(
+            self.core._canonical_option_targets(["airplay:804af2c57d78"], options),
+            ["sonos:RINCON_KITCHEN"],
+        )
+        with patch.object(self.core, "_target_options", return_value=options):
+            self.assertEqual(
+                self.core._resolve_targets("airplay:804af2c57d78", client=self.redis),
+                ["sonos:RINCON_KITCHEN"],
+            )
+
+    def test_per_player_offsets_extend_existing_mixed_group_calibration(self):
+        targets = ["voice_core:native:kitchen", "sonos:RINCON_LIVING"]
+        settings = {
+            targets[0]: {"volume_percent": 50, "sync_offset_ms": 100},
+            targets[1]: {"volume_percent": 50, "sync_offset_ms": -50},
+        }
+
+        adjustment = self.core._mixed_sync_from_player_settings(targets, settings, 225)
+
+        self.assertEqual(adjustment, 375)
+
+    def test_sync_test_wav_contains_six_seconds_of_mono_click_audio(self):
+        payload = self.core._sync_test_wav()
+
+        with wave.open(io.BytesIO(payload), "rb") as wav_file:
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getframerate(), 16000)
+            self.assertEqual(wav_file.getnframes(), 96000)
+
+    def test_sync_test_uses_unsaved_row_settings_and_stops_current_music(self):
+        targets = ["voice_core:native:kitchen", "sonos:RINCON_LIVING"]
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "targets": targets,
+                    "provider": "tater_tube",
+                    "volume_percent": 70,
+                }
+            ),
+        )
+        playback = types.ModuleType("media_playback")
+        playback.play_media_url_targets = Mock(return_value={"ok": True, "sent_count": 2})
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_resolve_targets",
+            return_value=targets,
+        ), patch.object(self.core, "_validate_catalog_provider_targets"), patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ) as stop:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_test_sync",
+                payload={
+                    "values": {
+                        "targets": targets,
+                        "player_settings": {
+                            targets[0]: {"volume_percent": 44, "sync_offset_ms": -80},
+                            targets[1]: {"volume_percent": 63, "sync_offset_ms": 120},
+                        },
+                    }
+                },
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        stop.assert_called_once_with(targets)
+        kwargs = playback.play_media_url_targets.call_args.kwargs
+        self.assertGreater(len(kwargs["audio_bytes"]), 1000)
+        self.assertEqual(kwargs["target_volume_percent"], {targets[0]: 44, targets[1]: 63})
+        self.assertEqual(kwargs["target_sync_offset_ms"], {targets[0]: -80, targets[1]: 120})
+        self.assertEqual(self.core._player(self.redis)["status"], "stopped")
 
     def test_live_volume_is_sent_to_the_active_native_media_session(self):
         calls = []

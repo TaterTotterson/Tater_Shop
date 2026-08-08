@@ -1,20 +1,24 @@
-"""Provider-neutral music library, voice playback, queue, and built-in player for Tater."""
+"""Tater Tube music library, voice playback, queue, and built-in player for Tater."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import importlib.util
+import io
 import json
 import logging
+import math
 import random
+import struct
 import threading
 import time
 import uuid
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -26,11 +30,10 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "2.7.2"
-MIN_TATER_VERSION = "98.7"
+__version__ = "3.0.2"
+MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
-    "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; "
-    "browse music with provider-native album art, build AI-named recommendations from listening history, and keep "
+    "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
     "voice-controlled queues playing with a smart continuous-radio refill across "
     "clock-synchronized satellites, native Sonos groups, stereo pairs, and media players."
 )
@@ -38,10 +41,6 @@ TAGS = [
     "music",
     "player",
     "tater-tube",
-    "plex",
-    "emby",
-    "jellyfin",
-    "navidrome",
     "satellite",
     "stereo",
     "multi-room",
@@ -57,19 +56,6 @@ CORE_SETTINGS = {
     "category": "Music Core Settings",
     "hydra_tools_require_running": True,
     "required": {
-        "provider": {
-            "label": "Music Provider",
-            "type": "select",
-            "default": "tater_tube",
-            "options": [
-                {"value": "tater_tube", "label": "Tater Tube Server"},
-                {"value": "plex", "label": "Plex"},
-                {"value": "emby", "label": "Emby"},
-                {"value": "jellyfin", "label": "Jellyfin"},
-                {"value": "navidrome", "label": "Navidrome"},
-            ],
-            "description": "Music source used by Music Core. More providers can be added without changing the player.",
-        },
         "catalog_sync_interval_seconds": {
             "label": "Catalog Sync Interval (sec)",
             "type": "number",
@@ -163,24 +149,24 @@ HISTORY_KEY = "music_core_listening_history_v1"
 RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 PROMPT_PROFILE_KEY = "music_core_prompt_profile_v1"
 REQUEST_TIMEOUT_SECONDS = 30
+ARTWORK_CONNECT_TIMEOUT_SECONDS = 2.0
+ARTWORK_READ_TIMEOUT_SECONDS = 5.0
+ARTWORK_INFLIGHT_WAIT_TIMEOUT_SECONDS = 6.0
+ARTWORK_FAILURE_CACHE_SECONDS = 15.0
+ARTWORK_MAX_CONCURRENT_FETCHES = 4
 DEFAULT_SYNC_INTERVAL_SECONDS = 900
 MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
 MAX_HISTORY_EVENTS = 300
 MAX_RECOMMENDATION_CANDIDATES = 200
 MAX_PROMPT_CONTEXT_CHARS = 1400
-CATALOG_ARTWORK_SCHEMA = 2
+CATALOG_ARTWORK_SCHEMA = 4
+CATALOG_MEMORY_CACHE_TTL_SECONDS = 15.0
 CONTINUATION_TRIGGER_REMAINING_TRACKS = 2
 CONTINUATION_BATCH_TRACKS = 12
 MAX_CONTINUATION_CANDIDATES = 200
-PROVIDER_LABELS = {
-    "tater_tube": "Tater Tube Server",
-    "plex": "Plex",
-    "emby": "Emby",
-    "jellyfin": "Jellyfin",
-    "navidrome": "Navidrome",
-}
-CATALOG_PROVIDER_IDS = {"tater_tube", "plex", "emby", "jellyfin", "navidrome"}
+PROVIDER_LABELS = {"tater_tube": "Tater Tube Server"}
+CATALOG_PROVIDER_IDS = {"tater_tube"}
 GENERIC_SEARCH_WORDS = {
     "a",
     "an",
@@ -199,8 +185,93 @@ GENERIC_SEARCH_WORDS = {
     "the",
 }
 
+# Broad browse/search families. Specific source tags remain visible, while a
+# track such as "Roots Reggae" is also discoverable through "Reggae".
+GENRE_FAMILIES = (
+    ("Alternative", ("alternative", "indie")),
+    ("Blues", ("blues",)),
+    ("Children's", ("children s music", "kids music", "nursery rhyme")),
+    ("Classical", ("classical", "baroque", "opera", "orchestral", "chamber music")),
+    ("Country", ("country", "bluegrass", "americana", "honky tonk")),
+    ("Dance", ("dance", "disco")),
+    (
+        "Electronic",
+        (
+            "electronic",
+            "electronica",
+            "edm",
+            "house",
+            "techno",
+            "trance",
+            "ambient",
+            "dubstep",
+            "drum and bass",
+            "dnb",
+        ),
+    ),
+    ("Folk", ("folk", "singer songwriter")),
+    ("Gospel", ("gospel", "worship", "christian music")),
+    ("Hip-Hop/Rap", ("hip hop", "hiphop", "rap", "trap", "boom bap")),
+    ("Holiday", ("holiday", "christmas music")),
+    ("Jazz", ("jazz", "bebop", "swing")),
+    ("Latin", ("latin", "salsa", "reggaeton", "bachata", "merengue", "bossa nova")),
+    ("Metal", ("metal",)),
+    ("New Age", ("new age",)),
+    ("Pop", ("pop", "kpop")),
+    ("Punk", ("punk",)),
+    ("R&B/Soul", ("r b", "rnb", "rhythm and blues", "soul", "funk", "motown")),
+    ("Reggae", ("reggae", "dub", "dancehall", "ska", "rocksteady")),
+    ("Rock", ("rock", "grunge")),
+    ("Soundtrack", ("soundtrack", "film score", "video game music")),
+    ("Spoken Word", ("spoken word", "audiobook")),
+    ("World", ("world music", "afrobeat", "highlife")),
+)
+GENRE_CANONICAL_NAMES = {
+    "alternative": "Alternative",
+    "blues": "Blues",
+    "children s": "Children's",
+    "children s music": "Children's",
+    "kids music": "Children's",
+    "classical": "Classical",
+    "country": "Country",
+    "dance": "Dance",
+    "electronic": "Electronic",
+    "folk": "Folk",
+    "gospel": "Gospel",
+    "hip hop": "Hip-Hop/Rap",
+    "hiphop": "Hip-Hop/Rap",
+    "hip hop rap": "Hip-Hop/Rap",
+    "holiday": "Holiday",
+    "jazz": "Jazz",
+    "latin": "Latin",
+    "metal": "Metal",
+    "new age": "New Age",
+    "pop": "Pop",
+    "punk": "Punk",
+    "r b": "R&B/Soul",
+    "r b soul": "R&B/Soul",
+    "rnb": "R&B/Soul",
+    "rhythm and blues": "R&B/Soul",
+    "reggae": "Reggae",
+    "rock": "Rock",
+    "soundtrack": "Soundtrack",
+    "spoken word": "Spoken Word",
+    "world": "World",
+    "world music": "World",
+}
+
 _state_lock = threading.RLock()
+_artwork_cache_lock = threading.RLock()
 _artwork_cache: Dict[str, Dict[str, Any]] = {}
+_artwork_inflight: Dict[str, threading.Event] = {}
+_artwork_failure_until: Dict[str, float] = {}
+_artwork_fetch_slots = threading.BoundedSemaphore(ARTWORK_MAX_CONCURRENT_FETCHES)
+_catalog_memory_cache_lock = threading.RLock()
+_catalog_memory_cache: Dict[str, Any] = {
+    "store": None,
+    "loaded_at": 0.0,
+    "payload": {},
+}
 _catalog_sync_lock = threading.Lock()
 _catalog_sync_started_at = 0.0
 _recommendation_lock = threading.Lock()
@@ -221,6 +292,25 @@ def _text(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace").strip()
     return str(value).strip()
+
+
+def _assistant_first_name(client: Any = None) -> str:
+    store = client or globals().get("redis_client")
+    try:
+        value = _text(store.get("tater:first_name")) if store is not None else ""
+    except Exception:
+        value = ""
+    first_name = value.split()[0] if value else ""
+    return first_name[:48] or "Tater"
+
+
+def _assistant_possessive(client: Any = None) -> str:
+    name = _assistant_first_name(client)
+    return f"{name}'" if name.casefold().endswith("s") else f"{name}'s"
+
+
+def _recommendations_label(client: Any = None) -> str:
+    return f"{_assistant_possessive(client)} Recommendations"
 
 
 def _list(value: Any) -> List[str]:
@@ -359,14 +449,9 @@ def _context_person_id(*sources: Any) -> str:
 
 def _provider_id(value: Any, default: str = "tater_tube") -> str:
     token = _text(value).lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "tatertube": "tater_tube",
-        "tater_tube_server": "tater_tube",
-        "jelly_fin": "jellyfin",
-        "navidrome_server": "navidrome",
-    }
-    token = aliases.get(token, token)
-    return token if token in PROVIDER_LABELS else default
+    if token in {"tater_tube", "tatertube", "tater_tube_server"}:
+        return "tater_tube"
+    return "tater_tube" if _text(default) == "tater_tube" else _text(default)
 
 
 def _decode_hash(raw: Any) -> Dict[str, str]:
@@ -380,7 +465,9 @@ def _settings(client: Any = None) -> Dict[str, str]:
     if store is None:
         return {}
     try:
-        return _decode_hash(store.hgetall(SETTINGS_KEY) or {})
+        settings = _decode_hash(store.hgetall(SETTINGS_KEY) or {})
+        settings.pop("provider", None)
+        return settings
     except Exception:
         return {}
 
@@ -406,6 +493,196 @@ def _mixed_sync_calibrations(cfg: Dict[str, Any]) -> Dict[str, int]:
         for key, value in raw.items()
         if _text(key)
     }
+
+
+def _player_transport_mode(value: Any) -> str:
+    mode = _text(value).casefold()
+    return mode if mode in {"auto", "native", "airplay"} else "auto"
+
+
+def _player_calibrations(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return per-destination volume and timeline calibration settings."""
+    raw = cfg.get("player_calibrations")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    calibrations: Dict[str, Dict[str, Any]] = {}
+    for raw_target, raw_values in raw.items():
+        target = _text(raw_target)
+        if not target or not isinstance(raw_values, dict):
+            continue
+        calibration: Dict[str, Any] = {
+            "volume_percent": _as_int(raw_values.get("volume_percent"), 75, 0, 100),
+            "sync_offset_ms": _as_int(raw_values.get("sync_offset_ms"), 0, -1000, 1000),
+        }
+        if target.casefold().startswith(("sonos:", "integration:sonos:")):
+            calibration["transport_mode"] = _player_transport_mode(
+                raw_values.get("transport_mode")
+            )
+        calibrations[target] = calibration
+    return calibrations
+
+
+def _target_calibration(
+    target: Any,
+    cfg: Dict[str, Any],
+    *,
+    default_volume: int = 75,
+) -> Dict[str, Any]:
+    target_id = _text(target)
+    saved = _player_calibrations(cfg).get(target_id, {})
+    calibration: Dict[str, Any] = {
+        "volume_percent": _as_int(saved.get("volume_percent"), default_volume, 0, 100),
+        "sync_offset_ms": _as_int(saved.get("sync_offset_ms"), 0, -1000, 1000),
+    }
+    if target_id.casefold().startswith(("sonos:", "integration:sonos:")):
+        calibration["transport_mode"] = _player_transport_mode(saved.get("transport_mode"))
+    return calibration
+
+
+def _normalize_player_settings(
+    raw: Any,
+    *,
+    targets: Any = None,
+    cfg: Optional[Dict[str, Any]] = None,
+    default_volume: int = 75,
+) -> Dict[str, Dict[str, Any]]:
+    source = raw
+    if isinstance(source, str):
+        try:
+            source = json.loads(source)
+        except Exception:
+            source = {}
+    source = source if isinstance(source, dict) else {}
+    target_ids = _list(targets) if targets is not None else _list(list(source.keys()))
+    settings: Dict[str, Dict[str, Any]] = {}
+    current_cfg = cfg if isinstance(cfg, dict) else {}
+    for target in target_ids:
+        fallback = _target_calibration(target, current_cfg, default_volume=default_volume)
+        values = source.get(target) if isinstance(source.get(target), dict) else {}
+        setting: Dict[str, Any] = {
+            "volume_percent": _as_int(
+                values.get("volume_percent"),
+                fallback["volume_percent"],
+                0,
+                100,
+            ),
+            "sync_offset_ms": _as_int(
+                values.get("sync_offset_ms"),
+                fallback["sync_offset_ms"],
+                -1000,
+                1000,
+            ),
+        }
+        if target.casefold().startswith(("sonos:", "integration:sonos:")):
+            setting["transport_mode"] = _player_transport_mode(
+                values.get("transport_mode", fallback.get("transport_mode"))
+            )
+        settings[target] = setting
+    return settings
+
+
+def _save_player_calibrations(client: Any, raw: Any) -> Dict[str, Dict[str, Any]]:
+    cfg = _settings(client)
+    calibrations = _player_calibrations(cfg)
+    updates = _normalize_player_settings(raw, cfg=cfg)
+    calibrations.update(updates)
+    _save_hash(
+        client,
+        SETTINGS_KEY,
+        {"player_calibrations": json.dumps(calibrations, sort_keys=True)},
+    )
+    return calibrations
+
+
+def _selected_player_settings(
+    targets: Any,
+    cfg: Dict[str, Any],
+    *,
+    default_volume: int = 75,
+) -> Dict[str, Dict[str, Any]]:
+    return {
+        target: _target_calibration(target, cfg, default_volume=default_volume)
+        for target in _list(targets)
+    }
+
+
+def _is_native_target(value: Any) -> bool:
+    target = _text(value).casefold()
+    return target.startswith(("voice_core:native:", "voice_core:stereo:", "native:", "stereo:"))
+
+
+def _uses_mixed_airplay_native_sync(
+    targets: Any,
+    player_settings: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bool:
+    target_ids = _list(targets)
+    if not any(_is_native_target(target) for target in target_ids):
+        return False
+    settings = player_settings if isinstance(player_settings, dict) else {}
+    for target in target_ids:
+        normalized = target.casefold()
+        if normalized.startswith("airplay:"):
+            return True
+        if normalized.startswith(("sonos:", "integration:sonos:")):
+            values = settings.get(target) if isinstance(settings.get(target), dict) else {}
+            if _player_transport_mode(values.get("transport_mode")) != "native":
+                return True
+    return False
+
+
+def _mixed_sync_from_player_settings(
+    targets: Any,
+    settings: Dict[str, Dict[str, Any]],
+    fallback: int,
+) -> int:
+    native_offsets = [
+        _as_int(settings.get(target, {}).get("sync_offset_ms"), 0, -1000, 1000)
+        for target in _list(targets)
+        if _is_native_target(target)
+    ]
+    external_offsets = [
+        _as_int(settings.get(target, {}).get("sync_offset_ms"), 0, -1000, 1000)
+        for target in _list(targets)
+        if not _is_native_target(target)
+    ]
+    if not native_offsets or not external_offsets:
+        return _as_int(fallback, 0, -750, 3000)
+    native_average = round(sum(native_offsets) / len(native_offsets))
+    external_average = round(sum(external_offsets) / len(external_offsets))
+    return _as_int(
+        _as_int(fallback, 0, -750, 3000) + native_average - external_average,
+        fallback,
+        -750,
+        3000,
+    )
+
+
+def _sync_test_wav(*, duration_seconds: float = 6.0) -> bytes:
+    sample_rate = 16000
+    frame_count = int(sample_rate * max(2.0, min(10.0, duration_seconds)))
+    click_frames = int(sample_rate * 0.025)
+    interval_frames = int(sample_rate * 0.5)
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        frames = bytearray()
+        for frame_index in range(frame_count):
+            click_index = frame_index % interval_frames
+            if click_index < click_frames:
+                envelope = math.exp(-8.0 * click_index / max(1, click_frames))
+                sample = int(26000 * envelope * math.sin(2.0 * math.pi * 1400.0 * click_index / sample_rate))
+            else:
+                sample = 0
+            frames.extend(struct.pack("<h", sample))
+        wav_file.writeframes(bytes(frames))
+    return output.getvalue()
 
 
 def _mixed_sync_adjustment(targets: Any, cfg: Dict[str, Any]) -> int:
@@ -475,6 +752,45 @@ def _normalize_server_url(value: Any) -> str:
 
 def _api_url(server_url: str, path: str) -> str:
     return f"{server_url.rstrip('/')}/api/{path.lstrip('/')}"
+
+
+def _sanitize_tater_artwork_reference(value: Any) -> tuple[str, str]:
+    """Keep only Tater's artwork route and remove the paired-player secret."""
+    raw = _text(value)
+    if not raw:
+        return "", ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        return "", ""
+    if not parsed.scheme and parsed.netloc:
+        return "", ""
+    if parsed.path != "/api/tater/music/artwork":
+        return "", ""
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() != "player_token"
+    ]
+    version = next((item for key, item in query if key.casefold() == "v"), "")
+    clean_query = urlencode(query)
+    reference = parsed.path
+    if clean_query:
+        reference = f"{reference}?{clean_query}"
+    return reference, version
+
+
+def _normalize_cached_tater_artwork(track: Dict[str, Any]) -> None:
+    reference, version = _sanitize_tater_artwork_reference(track.get("artwork_path"))
+    track["provider"] = "tater_tube"
+    track["artwork_path"] = reference
+    track["artwork_item_id"] = ""
+    if reference:
+        track["has_artwork"] = True
+        if version and not _text(track.get("artwork_version")):
+            track["artwork_version"] = version
+    else:
+        track["has_artwork"] = False
+        track["artwork_version"] = ""
 
 
 def _unwrap_response(response: Any) -> Any:
@@ -552,27 +868,47 @@ class TaterTubeMusicProvider:
             authenticated=False,
         )
 
-    def stream_url(self, track: Dict[str, Any]) -> str:
+    def stream_url(self, track: Dict[str, Any], *, audio_sync: bool = False) -> str:
         category_id = _text(track.get("category_id"))
         if category_id.startswith("local:"):
             category_id = category_id[len("local:") :]
         path = _text(track.get("path"))
         if not category_id or not path:
             return _text(track.get("stream_url"))
-        query = urlencode(
-            {
-                "category_id": category_id,
-                "source": _as_int(track.get("source_index"), 0, 0, 10000),
-                "path": path,
-                "player_token": self.token,
-            }
-        )
+        values = {
+            "category_id": category_id,
+            "source": _as_int(track.get("source_index"), 0, 0, 10000),
+            "path": path,
+            "player_token": self.token,
+        }
+        if audio_sync:
+            values.update({"transcode": "1", "profile": "audio_sync"})
+        query = urlencode(values)
         return f"{self.server_url}/api/tater/local/stream?{query}"
 
     def artwork_url(self, track: Dict[str, Any]) -> str:
-        # Tater Tube does not expose provider-managed album art yet. Music Core
-        # deliberately uses its generated cover rather than extracting file tags.
-        return ""
+        reference, _version = _sanitize_tater_artwork_reference(track.get("artwork_path"))
+        if not reference:
+            return ""
+        parsed = urlparse(reference)
+        query = [
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() != "player_token"
+        ]
+        if self.token:
+            query.append(("player_token", self.token))
+        server = urlparse(self.server_url)
+        return urlunparse(
+            (
+                server.scheme,
+                server.netloc,
+                parsed.path,
+                "",
+                urlencode(query),
+                "",
+            )
+        )
 
     def catalog(self) -> Dict[str, Any]:
         try:
@@ -626,6 +962,9 @@ class TaterTubeMusicProvider:
                     item.setdefault("artist", album.get("artist"))
                     item.setdefault("albumArtist", album.get("albumArtist"))
                     item.setdefault("genres", album.get("genres"))
+                    if _text(album.get("poster")) and _as_bool(album.get("hasArtwork"), False):
+                        item["poster"] = album.get("poster")
+                        item["hasArtwork"] = True
                     tracks.append(item)
         return {
             "catalog_id": "",
@@ -638,554 +977,9 @@ class TaterTubeMusicProvider:
             "legacy": True,
         }
 
-
-def _catalog_fingerprint(provider_id: str, rows: Iterable[Dict[str, Any]]) -> str:
-    digest = hashlib.sha256()
-    digest.update(_text(provider_id).encode("utf-8"))
-    for row in rows:
-        digest.update(
-            "\x00".join(
-                [
-                    _text(row.get("id") or row.get("ratingKey") or row.get("key")),
-                    _text(row.get("title")),
-                    _text(row.get("artist")),
-                    _text(row.get("album")),
-                    _text(row.get("duration_seconds") or row.get("duration")),
-                    _text(row.get("size_bytes") or row.get("size")),
-                ]
-            ).encode("utf-8")
-        )
-        digest.update(b"\n")
-    return digest.hexdigest()[:24]
-
-
-@dataclass
-class PlexMusicProvider:
-    server_url: str
-    token: str
-    library_ids: List[str]
-    provider_id = "plex"
-
-    @classmethod
-    def from_settings(cls, settings: Dict[str, Any]) -> "PlexMusicProvider":
-        return cls(
-            server_url=_normalize_server_url(settings.get("plex_server_url")),
-            token=_text(settings.get("plex_token")),
-            library_ids=_list(settings.get("plex_library_ids")),
-        )
-
-    @property
-    def connected(self) -> bool:
-        return bool(self.server_url and self.token)
-
-    def request(
-        self,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: int = REQUEST_TIMEOUT_SECONDS,
-    ) -> Any:
-        if not self.server_url:
-            raise ValueError("Plex Server URL is not configured.")
-        response = requests.get(
-            f"{self.server_url}/{path.lstrip('/')}",
-            headers={
-                "Accept": "application/json",
-                "X-Plex-Token": self.token,
-                "X-Plex-Client-Identifier": "tater-music-core",
-                "X-Plex-Product": "Tater Music Core",
-                "X-Plex-Version": __version__,
-            },
-            params=params or {},
-            timeout=max(5, int(timeout)),
-        )
-        return _unwrap_response(response)
-
-    def stream_url(self, track: Dict[str, Any]) -> str:
-        path = _text(track.get("stream_path"))
-        if not path:
-            return ""
-        separator = "&" if "?" in path else "?"
-        return f"{self.server_url}/{path.lstrip('/')}{separator}{urlencode({'X-Plex-Token': self.token})}"
-
-    def artwork_url(self, track: Dict[str, Any]) -> str:
-        path = _text(track.get("artwork_path"))
-        if not path:
-            return ""
-        if path.startswith(("http://", "https://")):
-            if urlparse(path).netloc.casefold() != urlparse(self.server_url).netloc.casefold():
-                return ""
-            base = path
-        else:
-            base = f"{self.server_url}/{path.lstrip('/')}"
-        separator = "&" if "?" in base else "?"
-        return f"{base}{separator}{urlencode({'X-Plex-Token': self.token})}"
-
-    def catalog(self) -> Dict[str, Any]:
-        payload = self.request("library/sections", timeout=60)
-        container = payload.get("MediaContainer") if isinstance(payload, dict) else {}
-        directories = container.get("Directory") if isinstance(container, dict) else []
-        libraries: Dict[str, str] = {}
-        tracks: List[Dict[str, Any]] = []
-        selected = {value.casefold() for value in self.library_ids}
-        for section in directories if isinstance(directories, list) else []:
-            if not isinstance(section, dict) or _text(section.get("type")).lower() != "artist":
-                continue
-            section_id = _text(section.get("key"))
-            title = _text(section.get("title")) or f"Plex Music {section_id}"
-            if not section_id:
-                continue
-            if selected and section_id.casefold() not in selected and title.casefold() not in selected:
-                continue
-            libraries[section_id] = title
-            offset = 0
-            page_size = 1000
-            while len(tracks) < MAX_CATALOG_TRACKS:
-                page = self.request(
-                    f"library/sections/{quote(section_id, safe='')}/all",
-                    params={
-                        "type": 10,
-                        "includeMeta": 1,
-                        "X-Plex-Container-Start": offset,
-                        "X-Plex-Container-Size": min(
-                            page_size,
-                            MAX_CATALOG_TRACKS - len(tracks),
-                        ),
-                    },
-                    timeout=180,
-                )
-                page_container = page.get("MediaContainer") if isinstance(page, dict) else {}
-                metadata = (
-                    page_container.get("Metadata")
-                    if isinstance(page_container, dict)
-                    else []
-                )
-                rows = metadata if isinstance(metadata, list) else []
-                for item in rows:
-                    if not isinstance(item, dict):
-                        continue
-                    media = item.get("Media") if isinstance(item.get("Media"), list) else []
-                    first_media = media[0] if media and isinstance(media[0], dict) else {}
-                    parts = (
-                        first_media.get("Part")
-                        if isinstance(first_media.get("Part"), list)
-                        else []
-                    )
-                    part = parts[0] if parts and isinstance(parts[0], dict) else {}
-                    genres = [
-                        _text(value.get("tag"))
-                        for value in (
-                            item.get("Genre")
-                            if isinstance(item.get("Genre"), list)
-                            else []
-                        )
-                        if isinstance(value, dict) and _text(value.get("tag"))
-                    ]
-                    tracks.append(
-                        {
-                            "id": f"plex:{_text(item.get('ratingKey'))}",
-                            "title": item.get("title"),
-                            "artist": item.get("grandparentTitle") or item.get("originalTitle"),
-                            "album_artist": item.get("grandparentTitle"),
-                            "album": item.get("parentTitle"),
-                            "genres": genres,
-                            "year": item.get("year"),
-                            "track_number": item.get("index"),
-                            "disc_number": item.get("parentIndex"),
-                            "duration_seconds": _as_float(item.get("duration")) / 1000.0,
-                            "size_bytes": part.get("size"),
-                            "stream_path": part.get("key"),
-                            "container": part.get("container") or first_media.get("container"),
-                            "artwork_path": (
-                                item.get("parentThumb")
-                                or item.get("thumb")
-                                or item.get("squareArt")
-                                or item.get("grandparentThumb")
-                            ),
-                            "artwork_version": item.get("updatedAt") or item.get("parentKey"),
-                            "has_artwork": bool(
-                                item.get("parentThumb")
-                                or item.get("thumb")
-                                or item.get("squareArt")
-                                or item.get("grandparentThumb")
-                            ),
-                            "provider": self.provider_id,
-                        }
-                    )
-                    if len(tracks) >= MAX_CATALOG_TRACKS:
-                        break
-                total = _as_int(
-                    page_container.get("totalSize")
-                    if isinstance(page_container, dict)
-                    else len(rows),
-                    len(rows),
-                    0,
-                    10**9,
-                )
-                offset += len(rows)
-                if not rows or offset >= total:
-                    break
-        return {
-            "catalog_id": _catalog_fingerprint(self.provider_id, tracks),
-            "tracks": tracks,
-            "total": len(tracks),
-            "libraries": libraries,
-        }
-
-
-@dataclass
-class MediaBrowserMusicProvider:
-    server_url: str
-    api_key: str
-    user_id: str
-    provider_id: str
-
-    @classmethod
-    def from_settings(
-        cls,
-        settings: Dict[str, Any],
-        provider_id: str,
-    ) -> "MediaBrowserMusicProvider":
-        return cls(
-            server_url=_normalize_server_url(settings.get(f"{provider_id}_server_url")),
-            api_key=_text(settings.get(f"{provider_id}_api_key")),
-            user_id=_text(settings.get(f"{provider_id}_user_id")),
-            provider_id=provider_id,
-        )
-
-    @property
-    def connected(self) -> bool:
-        return bool(self.server_url and self.api_key)
-
-    @property
-    def api_prefix(self) -> str:
-        if self.provider_id != "emby":
-            return ""
-        return "" if self.server_url.lower().endswith("/emby") else "/emby"
-
-    def api_url(self, path: str) -> str:
-        return f"{self.server_url}{self.api_prefix}/{path.lstrip('/')}"
-
-    def request(
-        self,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: int = REQUEST_TIMEOUT_SECONDS,
-    ) -> Any:
-        if not self.server_url:
-            raise ValueError(f"{PROVIDER_LABELS[self.provider_id]} Server URL is not configured.")
-        response = requests.get(
-            self.api_url(path),
-            headers={
-                "Accept": "application/json",
-                "X-Emby-Token": self.api_key,
-                "X-MediaBrowser-Token": self.api_key,
-            },
-            params=params or {},
-            timeout=max(5, int(timeout)),
-        )
-        return _unwrap_response(response)
-
-    def resolved_user_id(self) -> str:
-        if self.user_id:
-            return self.user_id
-        users = self.request("Users", timeout=60)
-        for user in users if isinstance(users, list) else []:
-            if isinstance(user, dict) and _text(user.get("Id")):
-                self.user_id = _text(user.get("Id"))
-                return self.user_id
-        raise ValueError(
-            f"{PROVIDER_LABELS[self.provider_id]} did not return a user. Enter the User ID explicitly."
-        )
-
-    def stream_url(self, track: Dict[str, Any]) -> str:
-        item_id = _text(track.get("provider_track_id"))
-        if not item_id:
-            return ""
-        container = "".join(
-            char
-            for char in _text(track.get("container") or "mp3").lower()
-            if char.isalnum()
-        ) or "mp3"
-        query = urlencode({"static": "true", "api_key": self.api_key})
-        stream_path = f"Audio/{quote(item_id, safe='')}/stream.{container}"
-        return f"{self.api_url(stream_path)}?{query}"
-
-    def artwork_url(self, track: Dict[str, Any]) -> str:
-        item_id = _text(track.get("artwork_item_id"))
-        if not item_id:
-            return ""
-        query = {
-            "maxWidth": 1200,
-            "quality": 90,
-            "api_key": self.api_key,
-        }
-        tag = _text(track.get("artwork_version"))
-        if tag:
-            query["tag"] = tag
-        image_path = f"Items/{quote(item_id, safe='')}/Images/Primary"
-        return f"{self.api_url(image_path)}?{urlencode(query)}"
-
-    def catalog(self) -> Dict[str, Any]:
-        user_id = self.resolved_user_id()
-        tracks: List[Dict[str, Any]] = []
-        offset = 0
-        page_size = 1000
-        while len(tracks) < MAX_CATALOG_TRACKS:
-            payload = self.request(
-                f"Users/{quote(user_id, safe='')}/Items",
-                params={
-                    "IncludeItemTypes": "Audio",
-                    "Recursive": "true",
-                    "Fields": (
-                        "Genres,MediaSources,Path,Album,AlbumArtist,Artists,"
-                        "ProductionYear,IndexNumber,ParentIndexNumber,AlbumId,"
-                        "AlbumPrimaryImageTag,ImageTags"
-                    ),
-                    "SortBy": "AlbumArtist,Album,SortName",
-                    "SortOrder": "Ascending",
-                    "StartIndex": offset,
-                    "Limit": min(page_size, MAX_CATALOG_TRACKS - len(tracks)),
-                },
-                timeout=180,
-            )
-            items = payload.get("Items") if isinstance(payload, dict) else []
-            rows = items if isinstance(items, list) else []
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                sources = (
-                    item.get("MediaSources")
-                    if isinstance(item.get("MediaSources"), list)
-                    else []
-                )
-                source = sources[0] if sources and isinstance(sources[0], dict) else {}
-                path = _text(source.get("Path") or item.get("Path"))
-                container = _text(source.get("Container")) or Path(path).suffix.lstrip(".")
-                artists = item.get("Artists") if isinstance(item.get("Artists"), list) else []
-                album_artists = (
-                    item.get("AlbumArtists")
-                    if isinstance(item.get("AlbumArtists"), list)
-                    else []
-                )
-                album_artist = _text(item.get("AlbumArtist"))
-                if not album_artist and album_artists:
-                    first = album_artists[0]
-                    album_artist = _text(
-                        first.get("Name") if isinstance(first, dict) else first
-                    )
-                first_artist = artists[0] if artists else ""
-                artist = _text(
-                    first_artist.get("Name")
-                    if isinstance(first_artist, dict)
-                    else first_artist
-                )
-                image_tags = item.get("ImageTags") if isinstance(item.get("ImageTags"), dict) else {}
-                item_image_tag = _text(image_tags.get("Primary"))
-                album_image_tag = _text(item.get("AlbumPrimaryImageTag"))
-                artwork_item_id = (
-                    _text(item.get("Id"))
-                    if item_image_tag
-                    else (_text(item.get("AlbumId")) if album_image_tag else "")
-                )
-                artwork_tag = item_image_tag or album_image_tag
-                tracks.append(
-                    {
-                        "id": f"{self.provider_id}:{_text(item.get('Id'))}",
-                        "provider_track_id": item.get("Id"),
-                        "title": item.get("Name"),
-                        "artist": artist or album_artist,
-                        "album_artist": album_artist,
-                        "album": item.get("Album"),
-                        "genres": item.get("Genres"),
-                        "year": item.get("ProductionYear"),
-                        "track_number": item.get("IndexNumber"),
-                        "disc_number": item.get("ParentIndexNumber"),
-                        "duration_seconds": _as_float(
-                            source.get("RunTimeTicks") or item.get("RunTimeTicks")
-                        )
-                        / 10_000_000.0,
-                        "size_bytes": source.get("Size"),
-                        "path": path,
-                        "container": container,
-                        "artwork_item_id": artwork_item_id,
-                        "artwork_version": artwork_tag,
-                        "has_artwork": bool(artwork_item_id and artwork_tag),
-                        "provider": self.provider_id,
-                    }
-                )
-                if len(tracks) >= MAX_CATALOG_TRACKS:
-                    break
-            total = _as_int(
-                payload.get("TotalRecordCount") if isinstance(payload, dict) else len(rows),
-                len(rows),
-                0,
-                10**9,
-            )
-            offset += len(rows)
-            if not rows or offset >= total:
-                break
-        return {
-            "catalog_id": _catalog_fingerprint(self.provider_id, tracks),
-            "tracks": tracks,
-            "total": len(tracks),
-            "libraries": {},
-            "resolved_user_id": user_id,
-        }
-
-
-@dataclass
-class NavidromeMusicProvider:
-    server_url: str
-    username: str
-    password: str
-    api_key: str
-    provider_id = "navidrome"
-
-    @classmethod
-    def from_settings(cls, settings: Dict[str, Any]) -> "NavidromeMusicProvider":
-        return cls(
-            server_url=_normalize_server_url(settings.get("navidrome_server_url")),
-            username=_text(settings.get("navidrome_username")),
-            password=_text(settings.get("navidrome_password")),
-            api_key=_text(settings.get("navidrome_api_key")),
-        )
-
-    @property
-    def connected(self) -> bool:
-        return bool(
-            self.server_url
-            and (self.api_key or (self.username and self.password))
-        )
-
-    def auth_params(self) -> Dict[str, str]:
-        base = {"v": "1.16.1", "c": "TaterMusicCore", "f": "json"}
-        if self.api_key:
-            return {**base, "apiKey": self.api_key}
-        salt = uuid.uuid4().hex[:16]
-        token = hashlib.md5(f"{self.password}{salt}".encode("utf-8")).hexdigest()
-        return {**base, "u": self.username, "s": salt, "t": token}
-
-    def request(
-        self,
-        endpoint: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: int = REQUEST_TIMEOUT_SECONDS,
-    ) -> Dict[str, Any]:
-        if not self.server_url:
-            raise ValueError("Navidrome Server URL is not configured.")
-        response = requests.get(
-            f"{self.server_url}/rest/{endpoint.lstrip('/')}",
-            params={**self.auth_params(), **(params or {})},
-            headers={"Accept": "application/json"},
-            timeout=max(5, int(timeout)),
-        )
-        body = _unwrap_response(response)
-        envelope = body.get("subsonic-response") if isinstance(body, dict) else {}
-        if not isinstance(envelope, dict):
-            raise RuntimeError("Navidrome returned an invalid Subsonic response.")
-        if _text(envelope.get("status")).lower() != "ok":
-            error = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
-            raise PermissionError(_text(error.get("message")) or "Navidrome authentication failed.")
-        return envelope
-
-    def stream_url(self, track: Dict[str, Any]) -> str:
-        item_id = _text(track.get("provider_track_id"))
-        if not item_id:
-            return ""
-        query = urlencode({**self.auth_params(), "id": item_id, "format": "raw"})
-        return f"{self.server_url}/rest/stream.view?{query}"
-
-    def artwork_url(self, track: Dict[str, Any]) -> str:
-        artwork_id = _text(track.get("artwork_item_id"))
-        if not artwork_id:
-            return ""
-        query = urlencode({**self.auth_params(), "id": artwork_id, "size": 1200})
-        return f"{self.server_url}/rest/getCoverArt.view?{query}"
-
-    def catalog(self) -> Dict[str, Any]:
-        tracks: List[Dict[str, Any]] = []
-        offset = 0
-        page_size = 500
-        while len(tracks) < MAX_CATALOG_TRACKS:
-            envelope = self.request(
-                "search3.view",
-                params={
-                    "query": "",
-                    "artistCount": 0,
-                    "albumCount": 0,
-                    "songCount": min(page_size, MAX_CATALOG_TRACKS - len(tracks)),
-                    "songOffset": offset,
-                },
-                timeout=180,
-            )
-            search = (
-                envelope.get("searchResult3")
-                if isinstance(envelope.get("searchResult3"), dict)
-                else {}
-            )
-            songs = search.get("song") if isinstance(search.get("song"), list) else []
-            for song in songs:
-                if not isinstance(song, dict):
-                    continue
-                genre_rows = song.get("genres") if isinstance(song.get("genres"), list) else []
-                genres = [
-                    _text(row.get("name") or row.get("value"))
-                    for row in genre_rows
-                    if isinstance(row, dict)
-                ]
-                if not genres and _text(song.get("genre")):
-                    genres = [_text(song.get("genre"))]
-                tracks.append(
-                    {
-                        "id": f"navidrome:{_text(song.get('id'))}",
-                        "provider_track_id": song.get("id"),
-                        "title": song.get("title"),
-                        "artist": song.get("artist"),
-                        "album_artist": song.get("displayAlbumArtist") or song.get("artist"),
-                        "album": song.get("album"),
-                        "genres": genres,
-                        "year": song.get("year"),
-                        "track_number": song.get("track"),
-                        "disc_number": song.get("discNumber"),
-                        "duration_seconds": song.get("duration"),
-                        "size_bytes": song.get("size"),
-                        "path": song.get("path"),
-                        "container": song.get("suffix"),
-                        "media_type": song.get("contentType"),
-                        "artwork_item_id": song.get("coverArt"),
-                        "artwork_version": song.get("coverArt"),
-                        "has_artwork": bool(_text(song.get("coverArt"))),
-                        "provider": self.provider_id,
-                    }
-                )
-                if len(tracks) >= MAX_CATALOG_TRACKS:
-                    break
-            offset += len(songs)
-            if len(songs) < page_size:
-                break
-        return {
-            "catalog_id": _catalog_fingerprint(self.provider_id, tracks),
-            "tracks": tracks,
-            "total": len(tracks),
-            "libraries": {},
-        }
-
-
 def _provider(client: Any = None, provider_id: Any = "") -> Any:
-    cfg = _settings(client)
-    selected = _text(provider_id or cfg.get("provider") or "tater_tube").lower()
-    if selected == "tater_tube":
-        return TaterTubeMusicProvider.from_settings(cfg)
-    if selected == "plex":
-        return PlexMusicProvider.from_settings(cfg)
-    if selected in {"emby", "jellyfin"}:
-        return MediaBrowserMusicProvider.from_settings(cfg, selected)
-    if selected == "navidrome":
-        return NavidromeMusicProvider.from_settings(cfg)
-    raise ValueError(f"Unsupported music provider: {selected}")
+    del provider_id
+    return TaterTubeMusicProvider.from_settings(_settings(client))
 
 
 def _paired(
@@ -1193,29 +987,26 @@ def _paired(
     provider_id: Any = "",
 ) -> bool:
     cfg = settings if isinstance(settings, dict) else _settings()
-    selected = _text(provider_id or cfg.get("provider") or "tater_tube").lower()
+    del provider_id
     try:
-        return bool(_provider_from_settings(cfg, selected).connected)
+        return bool(TaterTubeMusicProvider.from_settings(cfg).connected)
     except Exception:
         return False
 
 
-def _provider_from_settings(settings: Dict[str, Any], provider_id: str) -> Any:
-    selected = _text(provider_id or "tater_tube").lower()
-    if selected == "tater_tube":
-        return TaterTubeMusicProvider.from_settings(settings)
-    if selected == "plex":
-        return PlexMusicProvider.from_settings(settings)
-    if selected in {"emby", "jellyfin"}:
-        return MediaBrowserMusicProvider.from_settings(settings, selected)
-    if selected == "navidrome":
-        return NavidromeMusicProvider.from_settings(settings)
-    raise ValueError(f"Unsupported music provider: {selected}")
+def _genre_key(value: Any) -> str:
+    return " ".join(
+        "".join(char.lower() if char.isalnum() else " " for char in _text(value)).split()
+    )
+
+
+def _genre_marker_matches(key: str, marker: str) -> bool:
+    return key == marker or f" {marker} " in f" {key} "
 
 
 def _genres(value: Any, fallback: Any = "") -> List[str]:
     raw: List[Any]
-    if isinstance(value, list):
+    if isinstance(value, list) and any(_text(item) for item in value):
         raw = value
     else:
         text = _text(value or fallback)
@@ -1226,11 +1017,21 @@ def _genres(value: Any, fallback: Any = "") -> List[str]:
     seen = set()
     for item in raw:
         genre = _text(item)
-        key = genre.casefold()
-        if not genre or key in seen:
+        source_key = _genre_key(genre)
+        if not source_key:
             continue
-        seen.add(key)
-        result.append(genre)
+        expanded = [GENRE_CANONICAL_NAMES.get(source_key, genre)]
+        expanded.extend(
+            name
+            for name, markers in GENRE_FAMILIES
+            if any(_genre_marker_matches(source_key, marker) for marker in markers)
+        )
+        for candidate in expanded:
+            key = candidate.casefold()
+            if not candidate or key in seen:
+                continue
+            seen.add(key)
+            result.append(candidate)
     return result
 
 
@@ -1246,19 +1047,10 @@ def _normalize_track(row: Dict[str, Any]) -> Dict[str, Any]:
         duration /= 1000.0
     source_index = _as_int(row.get("sourceIndex") or row.get("source_index"), 0, 0, 10000)
     path = _text(row.get("path") or row.get("partKey") or row.get("part_key"))
-    provider_id = _text(row.get("provider") or "tater_tube").lower()
-    artwork_path = _text(row.get("artwork_path"))
-    artwork_item_id = _text(row.get("artwork_item_id"))
-    artwork_version = _text(row.get("artwork_version"))
-    declared_artwork = (
-        _as_bool(row.get("hasArtwork"), False)
-        if row.get("hasArtwork") is not None
-        else _as_bool(row.get("has_artwork"), False)
+    artwork_path, artwork_query_version = _sanitize_tater_artwork_reference(
+        row.get("poster") or row.get("artwork_url") or row.get("artwork_path")
     )
-    has_artwork = bool(
-        provider_id != "tater_tube"
-        and (declared_artwork or artwork_path or artwork_item_id)
-    )
+    artwork_version = _text(row.get("artwork_version")) or artwork_query_version
     if not track_id:
         identity = "\x00".join(
             [
@@ -1304,10 +1096,10 @@ def _normalize_track(row: Dict[str, Any]) -> Dict[str, Any]:
         "size_bytes": _as_int(row.get("sizeBytes") or row.get("size_bytes"), 0, 0, 10**15),
         "modified_unix": _as_int(row.get("modifiedUnix") or row.get("modified_unix"), 0, 0, 10**12),
         "artwork_path": artwork_path,
-        "artwork_item_id": artwork_item_id,
+        "artwork_item_id": "",
         "artwork_version": artwork_version,
-        "has_artwork": has_artwork,
-        "provider": provider_id,
+        "has_artwork": bool(artwork_path),
+        "provider": "tater_tube",
     }
 
 
@@ -1327,43 +1119,56 @@ def _facet_values(tracks: Iterable[Dict[str, Any]], key: str) -> List[str]:
 
 
 def _catalog(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
+    del provider_id
     store = client or globals().get("redis_client")
-    payload = _load_json(store, CATALOG_KEY, {})
-    if not isinstance(payload, dict):
-        return {}
-    selected = _text(provider_id or _settings(store).get("provider") or "tater_tube").lower()
-    cached_provider = _text(payload.get("provider") or "tater_tube").lower()
-    if cached_provider != selected:
-        return {}
-    if selected == "tater_tube":
+    now = time.monotonic()
+    with _catalog_memory_cache_lock:
+        cached = _catalog_memory_cache.get("payload")
+        if (
+            _catalog_memory_cache.get("store") is store
+            and isinstance(cached, dict)
+            and now - float(_catalog_memory_cache.get("loaded_at") or 0.0)
+            < CATALOG_MEMORY_CACHE_TTL_SECONDS
+        ):
+            return cached
+
+        payload = _load_json(store, CATALOG_KEY, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if _text(payload.get("provider") or "tater_tube").lower() != "tater_tube":
+            payload = {}
         for track in payload.get("tracks") or []:
             if isinstance(track, dict):
-                track["has_artwork"] = False
-                track["artwork_path"] = ""
-                track["artwork_item_id"] = ""
+                _normalize_cached_tater_artwork(track)
+                genres = _genres(track.get("genres"), track.get("genre"))
+                track["genres"] = genres
+                track["genre"] = ", ".join(genres)
+        if isinstance(payload.get("tracks"), list):
+            payload["genres"] = _facet_values(payload["tracks"], "genres")
+        _catalog_memory_cache.update(
+            {"store": store, "loaded_at": now, "payload": payload}
+        )
         return payload
-    if _as_int(payload.get("artwork_schema"), 0, 0, 100) < CATALOG_ARTWORK_SCHEMA:
-        return {}
-    return payload
 
 
 def _catalog_needs_artwork_refresh(client: Any = None, provider_id: Any = "") -> bool:
     store = client or globals().get("redis_client")
-    selected = _provider_id(provider_id, _provider_id(_settings(store).get("provider")))
-    payload = _load_json(store, CATALOG_KEY, {})
+    # The core loop checks this every second. Reuse the in-process catalog so a
+    # multi-megabyte library is not decoded from Redis on every heartbeat.
+    payload = _catalog(store, provider_id)
     if not isinstance(payload, dict) or not payload:
         return True
-    if _provider_id(payload.get("provider")) != selected:
-        return True
-    if selected == "tater_tube":
-        return False
-    return _as_int(payload.get("artwork_schema"), 0, 0, 100) < CATALOG_ARTWORK_SCHEMA
+    return (
+        _text(payload.get("provider") or "tater_tube").lower() != "tater_tube"
+        or _as_int(payload.get("artwork_schema"), 0, 0, 100) < CATALOG_ARTWORK_SCHEMA
+    )
 
 
 def _sync_catalog_impl(client: Any = None, provider_id: Any = "") -> Dict[str, Any]:
+    del provider_id
     store = client or globals().get("redis_client")
-    selected = _text(provider_id or _settings(store).get("provider") or "tater_tube").lower()
-    provider = _provider(store, selected)
+    selected = "tater_tube"
+    provider = _provider(store)
     if not provider.connected:
         raise ValueError(
             f"Connect {PROVIDER_LABELS.get(selected, selected)} before syncing its music library."
@@ -1397,10 +1202,15 @@ def _sync_catalog_impl(client: Any = None, provider_id: Any = "") -> Dict[str, A
         "synced_at": time.time(),
         "legacy_provider_api": bool(raw.get("legacy")) if isinstance(raw, dict) else False,
     }
-    resolved_user_id = _text(raw.get("resolved_user_id")) if isinstance(raw, dict) else ""
-    if resolved_user_id and selected in {"emby", "jellyfin"}:
-        _save_hash(store, SETTINGS_KEY, {f"{selected}_user_id": resolved_user_id})
     _save_json(store, CATALOG_KEY, payload)
+    with _catalog_memory_cache_lock:
+        _catalog_memory_cache.update(
+            {
+                "store": store,
+                "loaded_at": time.monotonic(),
+                "payload": payload,
+            }
+        )
     _save_hash(
         store,
         RUNTIME_KEY,
@@ -1482,8 +1292,14 @@ def _matches_filter(track: Dict[str, Any], key: str, value: Any) -> bool:
     if not wanted:
         return True
     if key == "genre":
-        values = [_text(item).casefold() for item in track.get("genres") or []]
-        return any(wanted in item for item in values)
+        wanted_values = {_text(item).casefold() for item in _genres([value])}
+        values = {
+            _text(item).casefold()
+            for item in _genres(track.get("genres"), track.get("genre"))
+        }
+        return bool(wanted_values & values) or any(
+            wanted in item for item in values
+        )
     if key == "artist":
         value = f"{_text(track.get('artist'))} {_text(track.get('album_artist'))}".casefold()
         return wanted in value
@@ -1497,7 +1313,10 @@ def _score_track(track: Dict[str, Any], filters: Dict[str, Any]) -> int:
         if not wanted:
             continue
         if key == "genre":
-            values = [_text(item).casefold() for item in track.get("genres") or []]
+            values = [
+                _text(item).casefold()
+                for item in _genres(track.get("genres"), track.get("genre"))
+            ]
         elif key == "artist":
             values = [_text(track.get("artist")).casefold(), _text(track.get("album_artist")).casefold()]
         else:
@@ -1591,12 +1410,11 @@ def _player(client: Any = None) -> Dict[str, Any]:
     payload = _load_json(store, PLAYER_KEY, {})
     if not isinstance(payload, dict):
         payload = {}
-    configured_provider = _provider_id(_settings(store).get("provider"))
-    removed_provider = _text(payload.get("provider")).casefold() == "roon"
+    stale_provider = _text(payload.get("provider")).casefold() not in {"", "tater_tube"}
     payload.setdefault("status", "idle")
-    payload["provider"] = _provider_id(payload.get("provider"), configured_provider)
+    payload["provider"] = "tater_tube"
     payload.setdefault("queue", [])
-    if removed_provider:
+    if stale_provider:
         payload.update(
             {
                 "status": "stopped",
@@ -1608,18 +1426,13 @@ def _player(client: Any = None) -> Dict[str, Any]:
                 "continuation_pending": False,
             }
         )
-    if _provider_id(payload.get("provider")) == "tater_tube":
-        for collection_key in ("queue", "queue_original"):
-            for track in payload.get(collection_key) or []:
-                if isinstance(track, dict):
-                    track["has_artwork"] = False
-                    track["artwork_path"] = ""
-                    track["artwork_item_id"] = ""
-        current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
-        if current:
-            current["has_artwork"] = False
-            current["artwork_path"] = ""
-            current["artwork_item_id"] = ""
+    for collection_key in ("queue", "queue_original"):
+        for track in payload.get(collection_key) or []:
+            if isinstance(track, dict):
+                _normalize_cached_tater_artwork(track)
+    current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+    if current:
+        _normalize_cached_tater_artwork(current)
     payload.setdefault("index", -1)
     targets = _normalize_stereo_targets(payload.get("targets") or payload.get("target"))
     payload["targets"] = targets
@@ -2169,10 +1982,12 @@ def _generate_recommendations_impl(
     client: Any = None,
 ) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
+    assistant_name = _assistant_first_name(store)
+    recommendations_label = _recommendations_label(store)
     cfg = _settings(store)
     provider_id = _provider_id(cfg.get("provider"))
     if provider_id not in CATALOG_PROVIDER_IDS:
-        raise ValueError("Tater Recommendations require a catalog-based music provider.")
+        raise ValueError(f"{recommendations_label} require a catalog-based music provider.")
     if not _paired(cfg, provider_id):
         raise ValueError(f"Connect {PROVIDER_LABELS[provider_id]} before making recommendations.")
     history = [
@@ -2181,7 +1996,7 @@ def _generate_recommendations_impl(
         if _provider_id(row.get("provider")) == provider_id
     ]
     if not history:
-        raise ValueError("Play at least one song before asking Tater for recommendations.")
+        raise ValueError(f"Play at least one song before asking {assistant_name} for recommendations.")
     catalog = _catalog(store, provider_id)
     if not (catalog.get("tracks") or []):
         catalog = _sync_catalog(store, provider_id)
@@ -2214,7 +2029,7 @@ def _generate_recommendations_impl(
         loop,
         llm_client,
         (
-            "You are Tater, a warm, imaginative personal music curator. Build named playlists from the "
+            f"You are {assistant_name}, a warm, imaginative personal music curator. Build named playlists from the "
             "listener's recent history and the supplied catalog candidates. Choose only exact candidate IDs "
             "from the catalog. Mix familiar taste with useful discovery, avoid filling every playlist with "
             "the same artist or album, and let playlists mix albums and individual songs when that makes sense. "
@@ -2272,7 +2087,7 @@ def _generate_recommendations_impl(
                     "track_ids": track_ids,
                     "image_track_id": candidate.get("image_track_id"),
                     "reason": _text(raw_item.get("reason"))[:240]
-                    or "Tater thinks this fits the mood of this mix.",
+                    or f"{assistant_name} thinks this fits the mood of this mix.",
                 }
             )
         if not selections:
@@ -2280,7 +2095,7 @@ def _generate_recommendations_impl(
         playlists.append(
             {
                 "id": uuid.uuid4().hex[:12],
-                "name": _text(raw_playlist.get("name"))[:80] or f"Tater Mix {position + 1}",
+                "name": _text(raw_playlist.get("name"))[:80] or f"{assistant_name} Mix {position + 1}",
                 "description": _text(raw_playlist.get("description"))[:300]
                 or "A fresh mix shaped by what has been playing lately.",
                 "items": selections,
@@ -2295,7 +2110,7 @@ def _generate_recommendations_impl(
         "provider": provider_id,
         "generated_at": now,
         "summary": _text(result.get("summary"))[:500]
-        or "Tater made a few fresh mixes from what has been playing lately.",
+        or f"{assistant_name} made a few fresh mixes from what has been playing lately.",
         "history_event_count": len(history),
         "playlists": playlists,
     }
@@ -2955,6 +2770,7 @@ def _target_options(
             homeassistant_token="",
             include_homeassistant=True,
             include_sonos=True,
+            include_airplay=True,
             include_voice_core=True,
             include_integrations=True,
             current_values=current_values,
@@ -2981,14 +2797,33 @@ def _target_options(
         return []
 
 
+def _target_alias_map(options: List[Dict[str, Any]]) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for row in options:
+        if not isinstance(row, dict):
+            continue
+        target = _text(row.get("value"))
+        if not target:
+            continue
+        aliases[target.casefold()] = target
+        for alias in _list(row.get("target_aliases")):
+            aliases[alias.casefold()] = target
+    return aliases
+
+
+def _canonical_option_targets(targets: Any, options: List[Dict[str, Any]]) -> List[str]:
+    aliases = _target_alias_map(options)
+    return _list([aliases.get(target.casefold(), target) for target in _list(targets)])
+
+
 def _target_from_query(value: Any, options: Optional[List[Dict[str, str]]] = None) -> str:
     token = _text(value)
     if not token:
         return ""
     lower = token.casefold()
-    if lower.startswith(("voice_core:", "ha:", "sonos:", "integration:")):
-        return token
     candidates = options if isinstance(options, list) else _target_options()
+    if lower.startswith(("voice_core:", "ha:", "sonos:", "airplay:", "integration:")):
+        return _target_alias_map(candidates).get(lower, token)
     exact = [
         _text(row.get("value"))
         for row in candidates
@@ -3009,7 +2844,7 @@ def _room_target_from_query(value: Any, options: List[Dict[str, str]]) -> str:
     room_name = _text(value).casefold()
     if not room_name:
         return ""
-    if room_name.startswith(("voice_core:", "ha:", "sonos:", "integration:")):
+    if room_name.startswith(("voice_core:", "ha:", "sonos:", "airplay:", "integration:")):
         return _text(value)
     matches = [
         row
@@ -3090,8 +2925,8 @@ def _resolve_targets(
         explicit = []
         for value in requested_values:
             direct_value = _text(value)
-            if direct_value.casefold().startswith(("voice_core:", "ha:", "sonos:", "integration:")):
-                target = direct_value
+            if direct_value.casefold().startswith(("voice_core:", "ha:", "sonos:", "airplay:", "integration:")):
+                target = _target_alias_map(options).get(direct_value.casefold(), direct_value)
             else:
                 target = (
                     _preferred_room_target([direct_value], store)
@@ -3190,30 +3025,72 @@ def _play_track(
     volume_percent: int,
     start_position_seconds: float = 0.0,
     mixed_sync_adjustment_ms: int = 0,
+    player_settings: Optional[Dict[str, Dict[str, Any]]] = None,
+    airplay_group_id: str = "",
     client: Any = None,
 ) -> Dict[str, Any]:
     provider = _provider(client, track.get("provider"))
-    source_url = provider.stream_url(track)
+    target_ids = _list(targets)
+    selected_player_settings = (
+        player_settings if isinstance(player_settings, dict) else {}
+    )
+    audio_sync_transcode = _uses_mixed_airplay_native_sync(
+        target_ids,
+        selected_player_settings,
+    )
+    source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
     if not source_url:
         raise RuntimeError(f"No stream is available for {_track_label(track)}.")
     from media_playback import play_media_url_targets
 
     duration = max(0.0, _as_float(track.get("duration_seconds")))
+    source_path = Path(_text(track.get("path")) or "music-track")
+    playback_media_type = "audio/wav" if audio_sync_transcode else _track_media_type(track)
+    playback_filename = (
+        f"{source_path.stem}.sync.wav"
+        if audio_sync_transcode
+        else source_path.name
+    )
     result = play_media_url_targets(
-        _list(targets),
+        target_ids,
         source_url,
-        media_type=_track_media_type(track),
+        media_type=playback_media_type,
         media_content_type="music",
-        filename=Path(_text(track.get("path")) or "music-track").name,
+        filename=playback_filename,
         text=f"Playing {_track_label(track)}.",
+        title=_text(track.get("title")) or Path(_text(track.get("path")) or "music-track").stem,
+        artist=_text(track.get("artist") or track.get("album_artist")),
+        album=_text(track.get("album")),
+        duration_seconds=duration,
         volume_percent=volume_percent,
         start_position_seconds=max(0.0, _as_float(start_position_seconds)),
         mixed_sync_adjustment_ms=_as_int(mixed_sync_adjustment_ms, 0, -750, 3000),
+        target_volume_percent={
+            target: _as_int(values.get("volume_percent"), volume_percent, 0, 100)
+            for target, values in dict(player_settings or {}).items()
+            if _text(target) and isinstance(values, dict)
+        },
+        target_sync_offset_ms={
+            target: _as_int(values.get("sync_offset_ms"), 0, -1000, 1000)
+            for target, values in dict(player_settings or {}).items()
+            if _text(target) and isinstance(values, dict)
+        },
+        target_transport_mode={
+            target: _player_transport_mode(values.get("transport_mode"))
+            for target, values in dict(player_settings or {}).items()
+            if _text(target)
+            and isinstance(values, dict)
+            and target.casefold().startswith(("sonos:", "integration:sonos:"))
+        },
+        airplay_group_id=_text(airplay_group_id),
         timeout_s=max(180.0, duration + 120.0),
         respect_reply_playback=False,
     )
     if not isinstance(result, dict) or result.get("ok") is False:
         raise RuntimeError(_text((result or {}).get("error")) or "Music playback failed.")
+    result["audio_sync_transcode_used"] = audio_sync_transcode
+    if audio_sync_transcode:
+        result["audio_sync_transcode_profile"] = "audio_sync"
     return result
 
 
@@ -3255,6 +3132,30 @@ def _stop_target(targets: Any) -> List[str]:
                         warnings.append(f"{member}: {exc}")
         except Exception as exc:
             warnings.append(_text(exc))
+
+    airplay_players = list(grouped.get("airplay_players") or [])
+    try:
+        from announcement_targets import resolve_sonos_airplay_target
+
+        for speaker in grouped.get("sonos_speakers") or []:
+            bridge_target = _text(resolve_sonos_airplay_target(f"sonos:{speaker}"))
+            bridge_id = bridge_target.removeprefix("airplay:")
+            if bridge_id and bridge_id not in airplay_players:
+                airplay_players.append(bridge_id)
+    except Exception:
+        pass
+    if airplay_players:
+        try:
+            from airplay_bridge import stop_airplay_targets
+
+            result = stop_airplay_targets(airplay_players)
+            warnings.extend(
+                _text(value)
+                for value in list(result.get("warnings") or [])
+                if _text(value)
+            )
+        except Exception as exc:
+            warnings.append(f"AirPlay Bridge: {exc}")
 
     integration_targets = list(grouped.get("integration_devices") or [])
     integration_targets.extend(
@@ -3374,6 +3275,37 @@ def _set_target_volume(player: Dict[str, Any], volume_percent: int) -> Dict[str,
 
     sent_count = 0
     warnings: List[str] = []
+    airplay_players = list(grouped.get("airplay_players") or [])
+    if airplay_players:
+        try:
+            from airplay_bridge import set_airplay_target_volumes
+
+            result = set_airplay_target_volumes(
+                {f"airplay:{player}": volume_percent for player in airplay_players}
+            )
+            sent_count += _as_int(result.get("sent_count"), 0, 0, len(airplay_players))
+            warnings.extend(
+                _text(value)
+                for value in list(result.get("warnings") or [])
+                if _text(value)
+            )
+        except Exception as exc:
+            warnings.append(f"AirPlay Bridge: {exc}")
+    bridged_sonos_speakers = set()
+    try:
+        from airplay_bridge import set_airplay_target_volumes
+        from announcement_targets import resolve_sonos_airplay_target
+
+        for speaker in grouped.get("sonos_speakers") or []:
+            bridge_target = _text(resolve_sonos_airplay_target(f"sonos:{speaker}"))
+            if not bridge_target:
+                continue
+            result = set_airplay_target_volumes({bridge_target: volume_percent})
+            if _as_int(result.get("sent_count"), 0, 0, 1) > 0:
+                sent_count += 1
+                bridged_sonos_speakers.add(_text(speaker))
+    except Exception:
+        pass
     native_members = _native_session_members(player)
     if grouped.get("voice_core_selectors") and not native_members:
         warnings.append("The current satellite playback session is unavailable; start the track again.")
@@ -3428,6 +3360,7 @@ def _set_target_volume(player: Dict[str, Any], volume_percent: int) -> Dict[str,
     integration_targets.extend(
         {"integration_id": "sonos", "device_id": speaker}
         for speaker in grouped.get("sonos_speakers") or []
+        if _text(speaker) not in bridged_sonos_speakers
     )
     if integration_targets:
         try:
@@ -3485,7 +3418,17 @@ def _start_player_index(
             0,
             100,
         )
-        if _text(player.get("status")).lower() == "playing":
+        playback_result = (
+            player.get("playback_result")
+            if isinstance(player.get("playback_result"), dict)
+            else {}
+        )
+        reusable_airplay_group_id = (
+            _text(playback_result.get("airplay_bridge_group_id"))
+            if _text(player.get("status")).lower() == "playing"
+            else ""
+        )
+        if _text(player.get("status")).lower() == "playing" and not reusable_airplay_group_id:
             _stop_target(targets)
         duration = max(0.0, _as_float(track.get("duration_seconds")))
         start_position = max(0.0, _as_float(start_position_seconds))
@@ -3496,7 +3439,17 @@ def _start_player_index(
             targets,
             volume_percent=volume,
             start_position_seconds=start_position,
-            mixed_sync_adjustment_ms=_mixed_sync_adjustment(targets, cfg),
+            mixed_sync_adjustment_ms=_mixed_sync_from_player_settings(
+                targets,
+                _selected_player_settings(targets, cfg, default_volume=volume),
+                _mixed_sync_adjustment(targets, cfg),
+            ),
+            player_settings=_selected_player_settings(
+                targets,
+                cfg,
+                default_volume=volume,
+            ),
+            airplay_group_id=reusable_airplay_group_id,
             client=store,
         )
         playback_result = {
@@ -3507,12 +3460,28 @@ def _start_player_index(
                 "homeassistant_target_count",
                 "voice_core_sent_count",
                 "sonos_sent_count",
+                "sonos_airplay_target_count",
+                "sonos_airplay_routes",
+                "airplay_bridge_target_count",
+                "airplay_bridge_prepared_count",
+                "airplay_bridge_primed_count",
+                "airplay_bridge_sent_count",
+                "airplay_bridge_group_id",
+                "airplay_bridge_start_unix_ms",
+                "airplay_native_start_lead_ms",
+                "airplay_minimum_start_unix_ms",
+                "airplay_bridge_reused",
+                "airplay_bridge_reuse_fallback",
+                "airplay_prepare_retried",
+                "resume_fallback_used",
                 "integration_sent_count",
                 "media_session_sent_count",
                 "media_session_fallback_count",
                 "mixed_sync_adjustment_ms",
                 "mixed_native_start_lead_ms",
                 "sonos_proxy_used",
+                "audio_sync_transcode_used",
+                "audio_sync_transcode_profile",
             )
             if result.get(key) is not None
         }
@@ -3534,7 +3503,11 @@ def _start_player_index(
                 "position_offset_seconds": start_position,
                 "duration_seconds": duration,
                 "volume_percent": volume,
-                "mixed_sync_adjustment_ms": _mixed_sync_adjustment(targets, cfg),
+                "mixed_sync_adjustment_ms": _mixed_sync_from_player_settings(
+                    targets,
+                    _selected_player_settings(targets, cfg, default_volume=volume),
+                    _mixed_sync_adjustment(targets, cfg),
+                ),
                 "last_error": "",
                 "playback_result": playback_result,
                 "warnings": [
@@ -3715,6 +3688,54 @@ def _set_player_shuffle(enabled: bool, *, client: Any = None) -> Dict[str, Any]:
         return player
 
 
+def _pause_player(*, client: Any = None) -> Dict[str, Any]:
+    """Stop active transports while preserving the current track position."""
+    store = client or globals().get("redis_client")
+    with _state_lock:
+        player = _player(store)
+        if _text(player.get("status")).lower() != "playing":
+            return player
+        position = _player_position_seconds(player)
+        duration = max(0.0, _as_float(player.get("duration_seconds")))
+        if duration > 0:
+            position = min(duration, position)
+        targets = _list(player.get("targets") or player.get("target"))
+        warnings = _stop_target(targets) if targets else []
+        player.update(
+            {
+                "status": "paused",
+                "started_at": 0.0,
+                "position_offset_seconds": position,
+            }
+        )
+        if warnings:
+            player["warnings"] = warnings
+        _save_player(player, store)
+        return player
+
+
+def _resume_player(*, client: Any = None) -> Dict[str, Any]:
+    """Resume a paused queue from its persisted position, or start it normally."""
+    store = client or globals().get("redis_client")
+    player = _player(store)
+    queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+    if not queue:
+        raise ValueError("The music queue is empty.")
+    status = _text(player.get("status")).lower()
+    if status == "playing":
+        return player
+    return _start_player_index(
+        _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1)),
+        start_position_seconds=(
+            _player_position_seconds(player)
+            if status == "paused"
+            else 0.0
+        ),
+        record_history=status != "paused",
+        client=store,
+    )
+
+
 def _stop_player(*, client: Any = None) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     with _state_lock:
@@ -3740,7 +3761,7 @@ def _advance_finished_player(client: Any = None) -> None:
     if _text(player.get("status")).lower() != "playing":
         return
     duration = _as_float(player.get("duration_seconds"))
-    if duration <= 0 or _player_position_seconds(player) < duration + 1.0:
+    if duration <= 0 or _player_position_seconds(player) < duration + 0.15:
         return
     try:
         if _text(player.get("repeat")).lower() == "one":
@@ -3839,9 +3860,6 @@ def _validate_catalog_provider_targets(targets: Any) -> None:
 def _play_request(args: Dict[str, Any], origin: Optional[Dict[str, Any]], client: Any) -> Dict[str, Any]:
     cfg = _settings(client)
     selected_provider = _provider_id(args.get("provider"), _provider_id(cfg.get("provider")))
-    if _text(args.get("provider")) and selected_provider != _provider_id(cfg.get("provider")):
-        _save_hash(client, SETTINGS_KEY, {"provider": selected_provider})
-        cfg["provider"] = selected_provider
     catalog = _catalog(client, selected_provider)
     if not isinstance(catalog.get("tracks"), list) or not catalog.get("tracks"):
         catalog = _sync_catalog(client, selected_provider)
@@ -3927,8 +3945,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
             "usage": (
                 '{"function":"music_play","arguments":{"query":"reggae music","genre":"reggae",'
                 '"artist":"","album":"","title":"","targets":[],'
-                '"rooms":["Family Room"],"provider":"tater_tube|plex|emby|jellyfin|navidrome",'
-                '"shuffle":true,"volume_percent":75}}'
+                '"rooms":["Family Room"],"shuffle":true,"volume_percent":75}}'
             ),
         },
         {
@@ -3936,7 +3953,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
             "description": "Search Music Core without starting playback.",
             "usage": (
                 '{"function":"music_search","arguments":{"query":"","genre":"","artist":"","album":"","title":"",'
-                '"provider":"tater_tube|plex|emby|jellyfin|navidrome","limit":10}}'
+                '"limit":10}}'
             ),
         },
         {
@@ -3958,10 +3975,10 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
         },
         {
             "id": "music_browse",
-            "description": "Browse artists, albums, genres, or tracks from a catalog-based Music Core provider.",
+            "description": "Browse artists, albums, genres, or tracks from Tater Tube Server.",
             "usage": (
                 '{"function":"music_browse","arguments":{"category":"artists|albums|genres|tracks",'
-                '"provider":"tater_tube|plex|emby|jellyfin|navidrome","limit":50}}'
+                '"limit":50}}'
             ),
         },
     ]
@@ -4024,13 +4041,17 @@ async def run_hydra_kernel_tool(
                 player = await asyncio.to_thread(_advance_player, -1, client=store)
             elif action == "stop":
                 player = await asyncio.to_thread(_stop_player, client=store)
-            elif action in {"replay", "play", "resume"}:
+            elif action == "replay":
                 current = _player(store)
                 player = await asyncio.to_thread(
                     _start_player_index,
                     _as_int(current.get("index"), 0, 0, 100000),
                     client=store,
                 )
+            elif action in {"play", "resume"}:
+                player = await asyncio.to_thread(_resume_player, client=store)
+            elif action == "pause":
+                player = await asyncio.to_thread(_pause_player, client=store)
             elif action == "shuffle":
                 player = _player(store)
                 queue = player.get("queue") if isinstance(player.get("queue"), list) else []
@@ -4227,17 +4248,11 @@ def _facet_art_track(catalog: Dict[str, Any], singular: str, value: Any) -> Dict
     return fallback
 
 
-def _provider_options() -> List[Dict[str, str]]:
-    return [
-        {"value": provider_id, "label": label}
-        for provider_id, label in PROVIDER_LABELS.items()
-    ]
-
-
 def _player_item(
     player: Dict[str, Any],
     target_options: List[Dict[str, str]],
     active_provider: str,
+    cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     current = player.get("current") if isinstance(player.get("current"), dict) else {}
     status = _text(player.get("status") or "idle").upper()
@@ -4276,6 +4291,65 @@ def _player_item(
         "options": target_options or [{"value": "", "label": "No players discovered"}],
         "description": "Choose any mix of satellites, stereo pairs, and supported media players.",
     }
+    default_volume = _as_int(player.get("volume_percent"), 75, 0, 100)
+    player_rows = []
+    for option in target_options:
+        if not isinstance(option, dict):
+            continue
+        target = _text(option.get("value"))
+        if not target:
+            continue
+        calibration = _target_calibration(target, cfg, default_volume=default_volume)
+        transport_options = [
+            dict(value)
+            for value in list(option.get("transport_options") or [])
+            if isinstance(value, dict) and _text(value.get("value"))
+        ]
+        player_rows.append(
+            {
+                "target": target,
+                "label": _text(option.get("label")) or target,
+                "meta": _text(
+                    option.get("description")
+                    or option.get("meta")
+                    or option.get("room")
+                    or option.get("area")
+                ),
+                "selected": target in targets,
+                "kind": _client_target_kind(target),
+                "sync_quality": (
+                    "precise"
+                    if _is_native_target(target)
+                    else "automatic"
+                    if transport_options
+                    else "bridge"
+                    if target.casefold().startswith("airplay:")
+                    else "best_effort"
+                ),
+                "transport_options": transport_options,
+                "airplay_bridge_target": _text(option.get("airplay_bridge_target")),
+                **calibration,
+            }
+        )
+    if status == "PLAYING":
+        transport_toggle = {
+            "action": "music_ui_pause",
+            "label": "⏸",
+            "aria_label": "Pause music",
+            "tooltip": "Pause music",
+            "working_text": "Pausing music...",
+            "success_text": "Music paused.",
+        }
+    else:
+        resume = status == "PAUSED" and bool(current)
+        transport_toggle = {
+            "action": "music_ui_play",
+            "label": "▶",
+            "aria_label": "Resume music" if resume else "Play music",
+            "tooltip": "Resume music" if resume else "Play music",
+            "working_text": "Resuming music..." if resume else "Finding and starting music...",
+            "success_text": "Music resumed." if resume else "Music started.",
+        }
     return {
         "id": "player:main",
         "group": "player",
@@ -4334,23 +4408,9 @@ def _player_item(
         ],
         "fields_popup": False,
         "fields_dropdown": False,
-        "popup_fields": [
-            dict(targets_field),
-            {
-                "key": "mixed_sync_adjustment_ms",
-                "label": "Mixed Sonos / Sat Sync",
-                "type": "range",
-                "value": _as_int(player.get("mixed_sync_adjustment_ms"), 0, -750, 3000),
-                "min": -750,
-                "max": 3000,
-                "step": 25,
-                "suffix": " ms",
-                "description": (
-                    "Fine-tunes this exact player group. Positive values delay Tater sats; "
-                    "negative values start them earlier."
-                ),
-            },
-        ],
+        "popup_fields": [dict(targets_field)],
+        "player_rows": player_rows,
+        "test_sync_action": "music_ui_test_sync",
         "settings_title": "Choose Speakers & Players",
         "settings_label": "🔊",
         "settings_aria_label": "Choose speakers and players",
@@ -4385,14 +4445,7 @@ def _player_item(
                 "working_text": "Loading previous track...",
                 "success_text": "Previous track started.",
             },
-            {
-                "action": "music_ui_play",
-                "label": "▶",
-                "aria_label": "Play music",
-                "tooltip": "Play music",
-                "working_text": "Finding and starting music...",
-                "success_text": "Music started.",
-            },
+            transport_toggle,
             {
                 "action": "music_ui_stop",
                 "label": "■",
@@ -4465,9 +4518,165 @@ def _client_target_kind(value: Any) -> str:
     token = _text(value).lower()
     if token.startswith("voice_core:"):
         return "satellite"
+    if token.startswith("airplay:"):
+        return "airplay_bridge"
     if token.startswith(("ha:", "sonos:", "integration:")):
         return "media_player"
     return "player"
+
+
+def _personalized_client_tracks(
+    catalog: Dict[str, Any],
+    *,
+    provider_id: str,
+    limit: int,
+    client: Any = None,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build a fast For You feed from AI picks and recent listening affinity."""
+    store = client or globals().get("redis_client")
+    tracks = [dict(row) for row in catalog.get("tracks") or [] if isinstance(row, dict)]
+    clean_limit = max(1, min(200, int(limit)))
+    history = [
+        row
+        for row in _listening_history(store)
+        if _provider_id(row.get("provider")) == provider_id
+    ][-MAX_HISTORY_EVENTS:]
+    if not history:
+        return tracks[:clean_limit], {
+            "kind": "library",
+            "title": "Library",
+            "summary": "Play some music and Tater will personalize this list for you.",
+            "history_event_count": 0,
+            "ai_seed_count": 0,
+        }
+
+    artist_affinity: Dict[str, float] = {}
+    album_affinity: Dict[str, float] = {}
+    genre_affinity: Dict[str, float] = {}
+    track_plays: Dict[str, int] = {}
+    history_count = len(history)
+    for position, event in enumerate(history):
+        # Recent plays carry more weight, while older plays still preserve long-term taste.
+        recency = 1.0 + (4.0 * (position + 1) / history_count)
+        artist = _text(event.get("album_artist") or event.get("artist")).casefold()
+        album = _text(event.get("album")).casefold()
+        track_id = _text(event.get("track_id"))
+        if artist:
+            artist_affinity[artist] = artist_affinity.get(artist, 0.0) + (12.0 * recency)
+        if album:
+            album_affinity[album] = album_affinity.get(album, 0.0) + (8.0 * recency)
+        for raw_genre in event.get("genres") or []:
+            genre = _text(raw_genre).casefold()
+            if genre:
+                genre_affinity[genre] = genre_affinity.get(genre, 0.0) + (5.0 * recency)
+        if track_id:
+            track_plays[track_id] = track_plays.get(track_id, 0) + 1
+
+    catalog_track_ids = {
+        _text(track.get("id"))
+        for track in tracks
+        if _text(track.get("id"))
+    }
+    published = _recommendations(store)
+    ai_seed_ids: List[str] = []
+    seen_ai_ids = set()
+    if _provider_id(published.get("provider"), "") == provider_id:
+        for playlist in published.get("playlists") or []:
+            if not isinstance(playlist, dict):
+                continue
+            for raw_track_id in playlist.get("track_ids") or []:
+                track_id = _text(raw_track_id)
+                if track_id in catalog_track_ids and track_id not in seen_ai_ids:
+                    seen_ai_ids.add(track_id)
+                    ai_seed_ids.append(track_id)
+    ai_rank = {track_id: position for position, track_id in enumerate(ai_seed_ids)}
+
+    recent_window = min(32, max(8, history_count // 3))
+    recently_played_ids = {
+        _text(event.get("track_id"))
+        for event in history[-recent_window:]
+        if _text(event.get("track_id"))
+    }
+    mix_token = _text(published.get("generated_at")) or _text(history[-1].get("played_at"))
+
+    def rank(track: Dict[str, Any]) -> tuple[Any, ...]:
+        track_id = _text(track.get("id"))
+        artist = _text(track.get("album_artist") or track.get("artist")).casefold()
+        album = _text(track.get("album")).casefold()
+        genres = {
+            _text(value).casefold()
+            for value in track.get("genres") or []
+            if _text(value)
+        }
+        score = (
+            artist_affinity.get(artist, 0.0)
+            + album_affinity.get(album, 0.0)
+            + sum(genre_affinity.get(genre, 0.0) for genre in genres)
+            + min(60.0, track_plays.get(track_id, 0) * 6.0)
+        )
+        if track_id in ai_rank:
+            score += max(1000.0, 10000.0 - (ai_rank[track_id] * 40.0))
+        if track_id in recently_played_ids:
+            score -= 12000.0
+        dispersion = hashlib.sha256(
+            f"{provider_id}\x00{mix_token}\x00{track_id}".encode("utf-8")
+        ).hexdigest()
+        return (
+            -score,
+            dispersion,
+            _text(track.get("title")).casefold(),
+        )
+
+    ranked = sorted(tracks, key=rank)
+
+    # Reorder only within small relevance bands so the feed stays varied without
+    # allowing low-affinity catalog tracks to jump ahead of strong matches.
+    selected: List[Dict[str, Any]] = []
+    artist_counts: Dict[str, int] = {}
+    album_counts: Dict[tuple[str, str], int] = {}
+    band_size = 24
+    for offset in range(0, len(ranked), band_size):
+        band = list(enumerate(ranked[offset : offset + band_size]))
+        while band and len(selected) < clean_limit:
+            position, track = min(
+                band,
+                key=lambda item: (
+                    artist_counts.get(
+                        _text(item[1].get("album_artist") or item[1].get("artist")).casefold(),
+                        0,
+                    ),
+                    album_counts.get(
+                        (
+                            _text(item[1].get("album_artist") or item[1].get("artist")).casefold(),
+                            _text(item[1].get("album")).casefold(),
+                        ),
+                        0,
+                    ),
+                    item[0],
+                ),
+            )
+            band.remove((position, track))
+            selected.append(track)
+            artist = _text(track.get("album_artist") or track.get("artist")).casefold()
+            album_key = (artist, _text(track.get("album")).casefold())
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+            album_counts[album_key] = album_counts.get(album_key, 0) + 1
+        if len(selected) >= clean_limit:
+            break
+
+    ai_seed_count = len(ai_seed_ids)
+    summary = (
+        "Tater blended your AI picks with the artists, albums, and genres you play."
+        if ai_seed_count
+        else "Tater shaped these songs from the artists, albums, and genres you play."
+    )
+    return selected, {
+        "kind": "personalized",
+        "title": "For You",
+        "summary": summary,
+        "history_event_count": history_count,
+        "ai_seed_count": ai_seed_count,
+    }
 
 
 def get_client_music_state(
@@ -4491,28 +4700,71 @@ def get_client_music_state(
     player = _reconcile_native_playback(_player(store), store)
     clean_limit = _as_int(limit, 60, 1, 200)
     clean_query = _text(query)
-    tracks = (
-        _search_tracks(
+    if clean_query and active_provider in CATALOG_PROVIDER_IDS:
+        tracks = _search_tracks(
             query=clean_query,
             limit=clean_limit,
             client=store,
             provider_id=active_provider,
         )
-        if clean_query and active_provider in CATALOG_PROVIDER_IDS
-        else list(catalog.get("tracks") or [])[:clean_limit]
-    )
-    targets = [
-        {
-            "id": _text(row.get("value")),
-            "label": _text(row.get("label")) or _text(row.get("value")),
-            "kind": _client_target_kind(row.get("value")),
+        track_feed = {
+            "kind": "search",
+            "title": "Results",
+            "summary": "",
+            "history_event_count": 0,
+            "ai_seed_count": 0,
         }
-        for row in _target_options(
-            current_values=player.get("targets"),
+    else:
+        tracks, track_feed = _personalized_client_tracks(
+            catalog,
             provider_id=active_provider,
+            limit=clean_limit,
+            client=store,
         )
-        if isinstance(row, dict) and _text(row.get("value"))
-    ]
+    target_options = _target_options(
+        current_values=player.get("targets"),
+        provider_id=active_provider,
+    )
+    saved_player_targets = _list(player.get("targets") or player.get("target"))
+    player_targets = _canonical_option_targets(saved_player_targets, target_options)
+    if player_targets != saved_player_targets:
+        player["targets"] = player_targets
+        _save_player(player, store)
+    targets: List[Dict[str, Any]] = []
+    for row in target_options:
+        if not isinstance(row, dict):
+            continue
+        target_id = _text(row.get("value"))
+        if not target_id:
+            continue
+        transport_options = [
+            {
+                "value": _text(option.get("value")),
+                "label": _text(option.get("label")) or _text(option.get("value")),
+            }
+            for option in list(row.get("transport_options") or [])
+            if isinstance(option, dict) and _text(option.get("value"))
+        ]
+        calibration = _target_calibration(
+            target_id,
+            cfg,
+            default_volume=_as_int(player.get("volume_percent"), 75, 0, 100),
+        )
+        targets.append(
+            {
+                "id": target_id,
+                "label": _text(row.get("label")) or target_id,
+                "kind": _client_target_kind(target_id),
+                "description": _text(row.get("description") or row.get("meta")),
+                "airplay_bridge_target": _text(row.get("airplay_bridge_target")),
+                "transport_options": transport_options,
+                "transport_mode": (
+                    _player_transport_mode(calibration.get("transport_mode"))
+                    if transport_options
+                    else ""
+                ),
+            }
+        )
     providers = [
         {
             "id": provider_id,
@@ -4523,7 +4775,6 @@ def get_client_music_state(
         }
         for provider_id, label in PROVIDER_LABELS.items()
     ]
-    player_targets = _list(player.get("targets") or player.get("target"))
     queue = [
         _public_track(track)
         for track in list(player.get("queue") or [])[:200]
@@ -4580,6 +4831,7 @@ def get_client_music_state(
         },
         "providers": providers,
         "tracks": [_public_track(track) for track in tracks],
+        "track_feed": track_feed,
         "track_count": len(catalog.get("tracks") or []),
         "artists": list(catalog.get("artists") or [])[:200],
         "albums": list(catalog.get("albums") or [])[:200],
@@ -4627,6 +4879,31 @@ def _client_track(track_id: Any, provider_id: str, client: Any) -> Dict[str, Any
         if isinstance(track, dict) and _text(track.get("id")) == wanted:
             return dict(track)
     raise ValueError("That track is no longer in the active music library.")
+
+
+def _client_tracks(track_ids: Any, provider_id: str, client: Any) -> List[Dict[str, Any]]:
+    requested_ids = _list(track_ids)[:200]
+    if not requested_ids:
+        raise ValueError("Choose at least one track first.")
+    catalog = _catalog(client, provider_id)
+    if not (catalog.get("tracks") or []):
+        catalog = _sync_catalog(client, provider_id)
+    track_by_id = {
+        _text(track.get("id")): track
+        for track in catalog.get("tracks") or []
+        if isinstance(track, dict) and _text(track.get("id"))
+    }
+    tracks: List[Dict[str, Any]] = []
+    seen = set()
+    for track_id in requested_ids:
+        if track_id in seen:
+            continue
+        track = track_by_id.get(track_id)
+        if track is None:
+            raise ValueError("One or more tracks are no longer in the active music library.")
+        seen.add(track_id)
+        tracks.append(dict(track))
+    return tracks
 
 
 def _client_local_continuation(
@@ -4744,13 +5021,6 @@ def run_client_music_action(
     if command in {"refresh", "sync"}:
         _sync_catalog(store, selected_provider)
         return get_client_music_state(client=store)
-    if command in {"set_provider", "provider"}:
-        if not _paired(cfg, selected_provider):
-            raise ValueError(f"Connect {PROVIDER_LABELS[selected_provider]} first.")
-        _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
-        if selected_provider in CATALOG_PROVIDER_IDS:
-            _sync_catalog(store, selected_provider)
-        return get_client_music_state(client=store)
     if command == "local_play_started":
         track = _client_track(values.get("track_id"), selected_provider, store)
         _record_listening_history(
@@ -4774,6 +5044,36 @@ def run_client_music_action(
                 f"Playing a Tater recommendation on "
                 f"{_target_summary(player.get('targets'))}."
             ),
+            "state": get_client_music_state(client=store),
+        }
+    if command in {"play_queue", "replace_queue", "play_album"}:
+        tracks = _client_tracks(values.get("track_ids"), selected_provider, store)
+        targets = _resolve_targets(
+            values.get("targets") or values.get("target"),
+            client=store,
+            provider_id=selected_provider,
+        )
+        if not targets:
+            raise ValueError("Choose a satellite or media player.")
+        _validate_catalog_provider_targets(targets)
+        player = _create_and_start_queue(
+            tracks,
+            targets=targets,
+            shuffle=False,
+            volume_percent=_as_int(
+                values.get("volume_percent"),
+                _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
+                0,
+                100,
+            ),
+            client=store,
+        )
+        return {
+            "ok": True,
+            "summary_for_user": (
+                f"Playing {len(tracks)} tracks on {_target_summary(targets)}."
+            ),
+            "now_playing": _public_track(player.get("current") or {}),
             "state": get_client_music_state(client=store),
         }
     if command == "play":
@@ -4800,7 +5100,6 @@ def run_client_music_action(
                 ),
                 client=store,
             )
-            _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
             result = {
                 "ok": True,
                 "summary_for_user": (
@@ -4864,13 +5163,15 @@ def run_client_music_action(
             updated = _advance_player(-1, client=store)
         elif command == "stop":
             updated = _stop_player(client=store)
-        elif command in {"replay", "play", "resume"}:
+        elif command == "replay":
             updated = _start_player_index(
                 _as_int(player.get("index"), 0, 0, 100000),
                 client=store,
             )
+        elif command in {"play", "resume"}:
+            updated = _resume_player(client=store)
         else:
-            raise ValueError("Pause is not available for streamed Music Core playback.")
+            updated = _pause_player(client=store)
         return {
             "ok": True,
             "player": {
@@ -4880,8 +5181,8 @@ def run_client_music_action(
             "state": get_client_music_state(client=store),
         }
     raise ValueError(
-        "Music action must be play, play_recommendation, next, previous, stop, "
-        "replay, seek, set_volume, continue_local, refresh, or set_provider."
+        "Music action must be play, play_queue, play_recommendation, next, previous, stop, "
+        "pause, resume, replay, seek, set_volume, continue_local, or refresh."
     )
 
 
@@ -4891,7 +5192,7 @@ def get_client_music_stream_source(
     provider_id: Any = "",
     client: Any = None,
 ) -> Dict[str, Any]:
-    """Resolve one configured-provider stream for Tater's authenticated client proxy."""
+    """Resolve one Tater Tube stream for Tater's authenticated client proxy."""
     store = client or globals().get("redis_client")
     selected_provider = _provider_id(
         provider_id,
@@ -4914,138 +5215,44 @@ def _provider_connection_detail(
     cfg: Dict[str, Any],
     provider_id: str,
 ) -> str:
-    if provider_id == "tater_tube":
-        return _text(
-            cfg.get("tater_tube_server_url") or cfg.get("server_url")
-        ) or "Pair with a Player PIN from Tater Tube Server."
-    return _text(cfg.get(f"{provider_id}_server_url")) or (
-        f"Enter the {PROVIDER_LABELS[provider_id]} server connection below."
-    )
+    del provider_id
+    return _text(
+        cfg.get("tater_tube_server_url") or cfg.get("server_url")
+    ) or "Pair with a Player PIN from Tater Tube Server."
 
 
 def _provider_fields(cfg: Dict[str, Any], provider_id: str) -> List[Dict[str, Any]]:
-    if provider_id == "tater_tube":
-        return [
-            {
-                "key": "server_url",
-                "label": "Tater Tube Server URL",
-                "type": "text",
-                "required": True,
-                "value": _text(
-                    cfg.get("tater_tube_server_url") or cfg.get("server_url")
-                ),
-                "placeholder": "http://tater-tube-server:8080",
-            },
-            {
-                "key": "name",
-                "label": "Music Player Name",
-                "type": "text",
-                "value": _text(
-                    cfg.get("tater_tube_player_name") or cfg.get("player_name")
-                )
-                or "Tater Music Core",
-            },
-            {
-                "key": "pin",
-                "label": "6-digit Player Pairing PIN",
-                "type": "password",
-                "value": "",
-                "description": (
-                    "Required for first connection. Leave blank to keep the existing pairing."
-                ),
-            },
-        ]
-    if provider_id == "plex":
-        return [
-            {
-                "key": "server_url",
-                "label": "Plex Media Server URL",
-                "type": "text",
-                "required": True,
-                "value": _text(cfg.get("plex_server_url")),
-                "placeholder": "http://plex-server:32400",
-            },
-            {
-                "key": "token",
-                "label": "Plex Token",
-                "type": "password",
-                "value": "",
-                "description": "Leave blank to keep the saved token.",
-            },
-            {
-                "key": "library_ids",
-                "label": "Music Libraries (optional)",
-                "type": "text",
-                "value": _text(cfg.get("plex_library_ids")),
-                "placeholder": "Music, 3",
-                "description": (
-                    "Comma-separated Plex library names or section IDs. "
-                    "Blank includes every music library."
-                ),
-            },
-        ]
-    if provider_id in {"emby", "jellyfin"}:
-        label = PROVIDER_LABELS[provider_id]
-        return [
-            {
-                "key": "server_url",
-                "label": f"{label} Server URL",
-                "type": "text",
-                "required": True,
-                "value": _text(cfg.get(f"{provider_id}_server_url")),
-                "placeholder": (
-                    "http://emby-server:8096"
-                    if provider_id == "emby"
-                    else "http://jellyfin-server:8096"
-                ),
-            },
-            {
-                "key": "api_key",
-                "label": f"{label} API Key",
-                "type": "password",
-                "value": "",
-                "description": "Leave blank to keep the saved API key.",
-            },
-            {
-                "key": "user_id",
-                "label": "User ID (optional)",
-                "type": "text",
-                "value": _text(cfg.get(f"{provider_id}_user_id")),
-                "description": "Blank automatically uses the first user returned by the server.",
-            },
-        ]
-    if provider_id == "navidrome":
-        return [
-            {
-                "key": "server_url",
-                "label": "Navidrome Server URL",
-                "type": "text",
-                "required": True,
-                "value": _text(cfg.get("navidrome_server_url")),
-                "placeholder": "http://navidrome-server:4533",
-            },
-            {
-                "key": "username",
-                "label": "Username",
-                "type": "text",
-                "value": _text(cfg.get("navidrome_username")),
-            },
-            {
-                "key": "password",
-                "label": "Password",
-                "type": "password",
-                "value": "",
-                "description": "Leave blank to keep the saved password.",
-            },
-            {
-                "key": "api_key",
-                "label": "OpenSubsonic API Key (optional)",
-                "type": "password",
-                "value": "",
-                "description": "If set, this is used instead of username and password.",
-            },
-        ]
-    return []
+    del provider_id
+    return [
+        {
+            "key": "server_url",
+            "label": "Tater Tube Server URL",
+            "type": "text",
+            "required": True,
+            "value": _text(
+                cfg.get("tater_tube_server_url") or cfg.get("server_url")
+            ),
+            "placeholder": "http://tater-tube-server:8080",
+        },
+        {
+            "key": "name",
+            "label": "Music Player Name",
+            "type": "text",
+            "value": _text(
+                cfg.get("tater_tube_player_name") or cfg.get("player_name")
+            )
+            or "Tater Music Core",
+        },
+        {
+            "key": "pin",
+            "label": "6-digit Player Pairing PIN",
+            "type": "password",
+            "value": "",
+            "description": (
+                "Required for first connection. Leave blank to keep the existing pairing."
+            ),
+        },
+    ]
 
 
 def _provider_cards(
@@ -5053,73 +5260,55 @@ def _provider_cards(
     catalog: Dict[str, Any],
     active_provider: str,
 ) -> List[Dict[str, Any]]:
-    cards: List[Dict[str, Any]] = []
-    cached_provider = _provider_id(catalog.get("provider"))
-    for provider_id, label in PROVIDER_LABELS.items():
-        connected = _paired(cfg, provider_id)
-        active = provider_id == active_provider
-        track_count = (
-            len(catalog.get("tracks") or [])
-            if provider_id == cached_provider
-            else 0
-        )
-        badges = [
-            {
-                "label": "ACTIVE" if active else "AVAILABLE",
-                "tone": "good" if active else "muted",
-            },
-            {
-                "label": "CONNECTED" if connected else "SETUP NEEDED",
-                "tone": "good" if connected else "warn",
-            },
-        ]
-        badges.append({"label": f"{track_count} TRACKS", "tone": "muted"})
-
-        actions: List[Dict[str, Any]] = []
-        actions.append(
-            {
-                "action": "music_provider_connect",
-                "label": "Connect / Test",
-                "working_text": f"Connecting to {label}...",
-                "success_text": f"{label} connected.",
-            }
-        )
-        if connected:
-            actions.append(
+    del active_provider
+    provider_id = "tater_tube"
+    label = PROVIDER_LABELS[provider_id]
+    connected = _paired(cfg)
+    actions: List[Dict[str, Any]] = [
+        {
+            "action": "music_provider_connect",
+            "label": "Connect / Test",
+            "working_text": f"Connecting to {label}...",
+            "success_text": f"{label} connected.",
+        }
+    ]
+    if connected:
+        actions.extend(
+            [
                 {
                     "action": "music_provider_activate",
-                    "label": "Use Provider" if not active else "Rescan Library",
+                    "label": "Rescan Library",
                     "working_text": f"Loading the {label} library...",
                     "success_text": f"{label} library loaded.",
-                }
-            )
-            actions.append(
+                },
                 {
                     "action": "music_provider_disconnect",
                     "label": "Disconnect",
                     "tone": "danger",
                     "confirm": f"Disconnect Music Core from {label}?",
-                }
-            )
-        cards.append(
-            {
-                "id": f"provider:{provider_id}",
-                "group": "providers",
-                "title": label,
-                "subtitle": (
-                    "Active music provider"
-                    if active
-                    else ("Connected" if connected else "Not connected")
-                ),
-                "detail": _provider_connection_detail(cfg, provider_id),
-                "hero_badges": badges,
-                "fields": _provider_fields(cfg, provider_id),
-                "fields_popup": False,
-                "fields_dropdown": True,
-                "actions": actions,
-            }
+                },
+            ]
         )
-    return cards
+    return [
+        {
+            "id": "provider:tater_tube",
+            "group": "providers",
+            "title": label,
+            "subtitle": "Connected music source" if connected else "Not connected",
+            "detail": _provider_connection_detail(cfg, provider_id),
+            "hero_badges": [
+                {
+                    "label": "CONNECTED" if connected else "SETUP NEEDED",
+                    "tone": "good" if connected else "warn",
+                },
+                {"label": f"{len(catalog.get('tracks') or [])} TRACKS", "tone": "muted"},
+            ],
+            "fields": _provider_fields(cfg, provider_id),
+            "fields_popup": False,
+            "fields_dropdown": True,
+            "actions": actions,
+        }
+    ]
 
 
 def _recommendation_ui_items(
@@ -5129,6 +5318,9 @@ def _recommendation_ui_items(
     active_provider: str,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
+    assistant_name = _assistant_first_name(client)
+    recommendations_label = _recommendations_label(client)
+    default_mix_title = f"{assistant_name} Mix"
     history = [
         row
         for row in _listening_history(client)
@@ -5141,9 +5333,9 @@ def _recommendation_ui_items(
     generated_at = _as_float(published.get("generated_at"))
     last_error = _text(runtime.get("last_recommendation_error"))
     if not enabled:
-        detail = "Turn on Tater Recommendations in Settings to create AI-named music mixes."
+        detail = f"Turn on {recommendations_label} in Settings to create AI-named music mixes."
     elif not history:
-        detail = "Start playing music and Tater will learn enough to prepare your first mixes."
+        detail = f"Start playing music and {assistant_name} will learn enough to prepare your first mixes."
     elif last_error and not published:
         detail = last_error
     elif generated_at:
@@ -5152,14 +5344,15 @@ def _recommendation_ui_items(
             f"updated {_format_time(generated_at)}"
         )
     else:
-        detail = "Tater has listening history and is ready to prepare your first mixes."
+        detail = f"{assistant_name} has listening history and is ready to prepare your first mixes."
 
     items: List[Dict[str, Any]] = [
         {
             "id": "recommendations:overview",
             "group": "recommendations",
             "card_variant": "recommendations_intro",
-            "title": "Tater Recommendations",
+            "title": recommendations_label,
+            "assistant_name": assistant_name,
             "subtitle": _text(published.get("summary"))
             or "Named playlists made from what you actually listen to.",
             "detail": detail,
@@ -5216,10 +5409,10 @@ def _recommendation_ui_items(
                 "id": f"recommendation:{_text(playlist.get('id'))}",
                 "group": "recommendations",
                 "card_variant": "recommendation_playlist",
-                "title": _text(playlist.get("name")) or "Tater Mix",
+                "title": _text(playlist.get("name")) or default_mix_title,
                 "subtitle": _text(playlist.get("description")),
                 "hero_image_src": hero_src,
-                "hero_image_alt": f"{_text(playlist.get('name')) or 'Tater Mix'} artwork",
+                "hero_image_alt": f"{_text(playlist.get('name')) or default_mix_title} artwork",
                 "hero_badges": [
                     {"label": "AI PLAYLIST", "tone": "good"},
                     {"label": f"{album_count} ALBUM{'' if album_count == 1 else 'S'}", "tone": "muted"},
@@ -5236,6 +5429,9 @@ def _recommendation_ui_items(
 
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
+    assistant_name = _assistant_first_name(store)
+    assistant_possessive = _assistant_possessive(store)
+    recommendations_label = _recommendations_label(store)
     cfg = _settings(store)
     prompt_person_id = _text(cfg.get("prompt_person_id"))
     people_options = _people_person_options(store)
@@ -5259,13 +5455,18 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         current_values=saved_targets,
         provider_id=active_provider,
     )
-    known_targets = {_text(row.get("value")) for row in target_options}
+    saved_player_targets = _canonical_option_targets(saved_player_targets, target_options)
+    saved_default_targets = _canonical_option_targets(saved_default_targets, target_options)
+    saved_targets = _list([*saved_player_targets, *saved_default_targets])
+    player = dict(player)
+    player["targets"] = saved_player_targets
+    known_targets = set(_target_alias_map(target_options))
     for saved in saved_targets:
-        if saved and saved not in known_targets:
+        if saved and saved.casefold() not in known_targets:
             target_options.append({"value": saved, "label": f"Saved player: {saved}"})
-            known_targets.add(saved)
+            known_targets.add(saved.casefold())
 
-    item_forms = [_player_item(player, target_options, active_provider), _search_item()]
+    item_forms = [_player_item(player, target_options, active_provider, cfg), _search_item()]
     item_forms.extend(
         _recommendation_ui_items(cfg, catalog, runtime, active_provider, store)
     )
@@ -5333,11 +5534,11 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     },
                     {
                         "key": "recommendations_enabled",
-                        "label": "Tater Recommendations",
+                        "label": recommendations_label,
                         "type": "checkbox",
                         "value": _as_bool(cfg.get("recommendations_enabled"), True),
                         "description": (
-                            "Uses listening metadata and Tater's primary AI model to make named playlists."
+                            f"Uses listening metadata and {assistant_possessive} primary AI model to make named playlists."
                         ),
                     },
                     {
@@ -5391,10 +5592,10 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         ]
     )
     return {
-        "summary": "Voice-controlled music libraries and a built-in player for Tater.",
+        "summary": "Tater Tube music with voice control, personalized recommendations, and multi-room playback.",
         "stats": [
             {
-                "label": "Provider",
+                "label": "Music Source",
                 "value": (
                     PROVIDER_LABELS[active_provider]
                     if connected
@@ -5413,7 +5614,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             },
         ],
         "items": [],
-        "empty_message": "Connect a music provider to load its library.",
+        "empty_message": "Connect Tater Tube Server to load your music library.",
         "ui": {
             "kind": "settings_manager",
             "title": "Music Core",
@@ -5463,12 +5664,12 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 },
                 {
                     "key": "recommendations",
-                    "label": "Tater Recommendations",
+                    "label": recommendations_label,
                     "source": "items",
                     "item_group": "recommendations",
-                    "empty_message": "Play some music to help Tater build recommendations.",
+                    "empty_message": f"Play some music to help {assistant_name} build recommendations.",
                 },
-                {"key": "providers", "label": "Providers", "source": "items", "item_group": "providers"},
+                {"key": "providers", "label": "Tater Tube", "source": "items", "item_group": "providers"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
             ],
             "item_fields_dropdown": True,
@@ -5485,14 +5686,12 @@ def _payload_values(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _provider_from_card(payload: Dict[str, Any], fallback: Any = "") -> str:
     item_id = _text(payload.get("id"))
-    if item_id.startswith("provider:"):
-        candidate = item_id.split(":", 1)[1]
-        if candidate in PROVIDER_LABELS:
-            return candidate
-    candidate = _text(payload.get("provider") or fallback)
-    if candidate and _provider_id(candidate, "") in PROVIDER_LABELS:
-        return _provider_id(candidate, "")
-    raise ValueError("Music provider is invalid.")
+    if item_id and item_id != "provider:tater_tube":
+        raise ValueError("Music Core only supports Tater Tube Server.")
+    candidate = _text(payload.get("provider") or fallback).lower().replace("-", "_")
+    if candidate and candidate not in {"tater_tube", "tatertube", "tater_tube_server"}:
+        raise ValueError("Music Core only supports Tater Tube Server.")
+    return "tater_tube"
 
 
 def _connect_provider(
@@ -5500,96 +5699,46 @@ def _connect_provider(
     values: Dict[str, Any],
     client: Any,
 ) -> Dict[str, Any]:
+    if provider_id != "tater_tube":
+        raise ValueError("Music Core only supports Tater Tube Server.")
     cfg = _settings(client)
-    updates: Dict[str, Any] = {"provider": provider_id}
-    if provider_id == "tater_tube":
-        server_url = _normalize_server_url(
-            values.get("server_url")
-            or cfg.get("tater_tube_server_url")
-            or cfg.get("server_url")
-        )
-        name = _text(
-            values.get("name")
-            or cfg.get("tater_tube_player_name")
-            or cfg.get("player_name")
-        ) or "Tater Music Core"
-        pin = "".join(char for char in _text(values.get("pin")) if char.isdigit())
-        token = _text(cfg.get("tater_tube_token") or cfg.get("token"))
-        player_id = _text(cfg.get("tater_tube_player_id") or cfg.get("player_id"))
-        if pin:
-            if len(pin) != 6:
-                raise ValueError("Enter the 6-digit Player PIN created by Tater Tube Server.")
-            paired = TaterTubeMusicProvider.pair(server_url, pin, name)
-            if not isinstance(paired, dict) or not _text(paired.get("token")):
-                raise RuntimeError("Tater Tube Server did not return a music player token.")
-            token = _text(paired.get("token"))
-            player_id = _text(paired.get("player_id"))
-            name = _text(paired.get("player_name")) or name
-        if not token:
-            raise ValueError("Enter a 6-digit Player PIN to pair Tater Tube Server.")
-        updates.update(
-            {
-                "tater_tube_server_url": server_url,
-                "tater_tube_player_name": name,
-                "tater_tube_player_id": player_id,
-                "tater_tube_token": token,
-                # Keep the original keys so upgrades from Music Core 1.x remain reversible.
-                "server_url": server_url,
-                "player_name": name,
-                "player_id": player_id,
-                "token": token,
-            }
-        )
-    elif provider_id == "plex":
-        server_url = _normalize_server_url(
-            values.get("server_url") or cfg.get("plex_server_url")
-        )
-        token = _text(values.get("token") or cfg.get("plex_token"))
-        if not token:
-            raise ValueError("Enter a Plex token.")
-        updates.update(
-            {
-                "plex_server_url": server_url,
-                "plex_token": token,
-                "plex_library_ids": ",".join(_list(values.get("library_ids"))),
-            }
-        )
-    elif provider_id in {"emby", "jellyfin"}:
-        label = PROVIDER_LABELS[provider_id]
-        server_url = _normalize_server_url(
-            values.get("server_url") or cfg.get(f"{provider_id}_server_url")
-        )
-        api_key = _text(values.get("api_key") or cfg.get(f"{provider_id}_api_key"))
-        if not api_key:
-            raise ValueError(f"Enter a {label} API key.")
-        updates.update(
-            {
-                f"{provider_id}_server_url": server_url,
-                f"{provider_id}_api_key": api_key,
-                f"{provider_id}_user_id": _text(
-                    values.get("user_id") or cfg.get(f"{provider_id}_user_id")
-                ),
-            }
-        )
-    elif provider_id == "navidrome":
-        server_url = _normalize_server_url(
-            values.get("server_url") or cfg.get("navidrome_server_url")
-        )
-        username = _text(values.get("username") or cfg.get("navidrome_username"))
-        password = _text(values.get("password") or cfg.get("navidrome_password"))
-        api_key = _text(values.get("api_key") or cfg.get("navidrome_api_key"))
-        if not api_key and not (username and password):
-            raise ValueError("Enter a Navidrome API key or a username and password.")
-        updates.update(
-            {
-                "navidrome_server_url": server_url,
-                "navidrome_username": username,
-                "navidrome_password": password,
-                "navidrome_api_key": api_key,
-            }
-        )
-    else:
-        raise ValueError(f"{PROVIDER_LABELS.get(provider_id, provider_id)} is not a catalog provider.")
+    updates: Dict[str, Any] = {}
+    server_url = _normalize_server_url(
+        values.get("server_url")
+        or cfg.get("tater_tube_server_url")
+        or cfg.get("server_url")
+    )
+    name = _text(
+        values.get("name")
+        or cfg.get("tater_tube_player_name")
+        or cfg.get("player_name")
+    ) or "Tater Music Core"
+    pin = "".join(char for char in _text(values.get("pin")) if char.isdigit())
+    token = _text(cfg.get("tater_tube_token") or cfg.get("token"))
+    player_id = _text(cfg.get("tater_tube_player_id") or cfg.get("player_id"))
+    if pin:
+        if len(pin) != 6:
+            raise ValueError("Enter the 6-digit Player PIN created by Tater Tube Server.")
+        paired = TaterTubeMusicProvider.pair(server_url, pin, name)
+        if not isinstance(paired, dict) or not _text(paired.get("token")):
+            raise RuntimeError("Tater Tube Server did not return a music player token.")
+        token = _text(paired.get("token"))
+        player_id = _text(paired.get("player_id"))
+        name = _text(paired.get("player_name")) or name
+    if not token:
+        raise ValueError("Enter a 6-digit Player PIN to pair Tater Tube Server.")
+    updates.update(
+        {
+            "tater_tube_server_url": server_url,
+            "tater_tube_player_name": name,
+            "tater_tube_player_id": player_id,
+            "tater_tube_token": token,
+            "server_url": server_url,
+            "player_name": name,
+            "player_id": player_id,
+            "token": token,
+        }
+    )
 
     _save_hash(client, SETTINGS_KEY, updates)
     catalog = _sync_catalog(client, provider_id)
@@ -5603,27 +5752,18 @@ def _connect_provider(
 
 
 def _disconnect_provider(provider_id: str, client: Any) -> Dict[str, Any]:
-    fields = {
-        "tater_tube": (
-            "tater_tube_server_url",
-            "tater_tube_player_name",
-            "tater_tube_player_id",
-            "tater_tube_token",
-            "server_url",
-            "player_name",
-            "player_id",
-            "token",
-        ),
-        "plex": ("plex_server_url", "plex_token", "plex_library_ids"),
-        "emby": ("emby_server_url", "emby_api_key", "emby_user_id"),
-        "jellyfin": ("jellyfin_server_url", "jellyfin_api_key", "jellyfin_user_id"),
-        "navidrome": (
-            "navidrome_server_url",
-            "navidrome_username",
-            "navidrome_password",
-            "navidrome_api_key",
-        ),
-    }[provider_id]
+    if provider_id != "tater_tube":
+        raise ValueError("Music Core only supports Tater Tube Server.")
+    fields = (
+        "tater_tube_server_url",
+        "tater_tube_player_name",
+        "tater_tube_player_id",
+        "tater_tube_token",
+        "server_url",
+        "player_name",
+        "player_id",
+        "token",
+    )
     player = _player(client)
     if _provider_id(player.get("provider")) == provider_id:
         _stop_player(client=client)
@@ -5632,6 +5772,10 @@ def _disconnect_provider(provider_id: str, client: Any) -> Dict[str, Any]:
         cached = _load_json(client, CATALOG_KEY, {})
         if _provider_id(cached.get("provider")) == provider_id:
             client.delete(CATALOG_KEY)
+            with _catalog_memory_cache_lock:
+                _catalog_memory_cache.update(
+                    {"store": client, "loaded_at": time.monotonic(), "payload": {}}
+                )
     _save_hash(client, RUNTIME_KEY, {"status": "disconnected", "last_error": ""})
     return {"ok": True, "message": f"{PROVIDER_LABELS[provider_id]} disconnected locally."}
 
@@ -5644,6 +5788,7 @@ def _play_recommendation(
     volume_percent: Any = None,
 ) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
+    recommendations_label = _recommendations_label(store)
     recommendation_id = _text(item_id)
     if recommendation_id.startswith("recommendation:"):
         recommendation_id = recommendation_id.split(":", 1)[1]
@@ -5651,7 +5796,7 @@ def _play_recommendation(
     cfg = _settings(store)
     provider_id = _provider_id(cfg.get("provider"))
     if _provider_id(published.get("provider"), "") != provider_id:
-        raise ValueError("Refresh Tater Recommendations for the active music provider first.")
+        raise ValueError(f"Refresh {recommendations_label} for the active music provider first.")
     playlist = next(
         (
             row
@@ -5711,6 +5856,8 @@ def handle_htmlui_tab_action(
     **_kwargs,
 ) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
+    assistant_name = _assistant_first_name(store)
+    recommendations_label = _recommendations_label(store)
     action_name = _text(action).lower()
     body = payload if isinstance(payload, dict) else {}
     values = _payload_values(body)
@@ -5727,12 +5874,11 @@ def handle_htmlui_tab_action(
         provider_id = _provider_from_card(body)
         if not _paired(_settings(store), provider_id):
             raise ValueError(f"Connect {PROVIDER_LABELS[provider_id]} first.")
-        _save_hash(store, SETTINGS_KEY, {"provider": provider_id})
         catalog = _sync_catalog(store, provider_id)
         return {
             "ok": True,
             "message": (
-                f"{PROVIDER_LABELS[provider_id]} is active with "
+                f"{PROVIDER_LABELS[provider_id]} loaded "
                 f"{len(catalog.get('tracks') or [])} tracks."
             ),
         }
@@ -5811,9 +5957,9 @@ def handle_htmlui_tab_action(
         return {
             "ok": True,
             "message": (
-                "Tater is preparing fresh recommendation playlists in the background."
+                f"{assistant_name} is preparing fresh recommendation playlists in the background."
                 if started
-                else "Tater is already refreshing music recommendations."
+                else f"{assistant_name} is already refreshing music recommendations."
             ),
         }
 
@@ -5821,7 +5967,7 @@ def handle_htmlui_tab_action(
         player = _play_recommendation(body.get("id"), store)
         return {
             "ok": True,
-            "message": f"Playing {_track_label(player.get('current') or {})} from Tater Recommendations.",
+            "message": f"Playing {_track_label(player.get('current') or {})} from {recommendations_label}.",
         }
 
     if action_name == "music_ui_play":
@@ -5840,6 +5986,8 @@ def handle_htmlui_tab_action(
             and queue
             and selected_provider == existing_provider
         ):
+            resume_existing = _text(existing.get("status")).lower() == "paused"
+            resume_position = _player_position_seconds(existing) if resume_existing else 0.0
             old_targets = _list(existing.get("targets") or existing.get("target"))
             requested_targets = values.get("targets")
             if not _list(requested_targets):
@@ -5855,6 +6003,8 @@ def handle_htmlui_tab_action(
             if old_targets and old_targets != targets:
                 _stop_target(old_targets)
                 existing["status"] = "stopped"
+                resume_existing = False
+                resume_position = 0.0
             existing["targets"] = targets
             existing["shuffle"] = _as_bool(values.get("shuffle"), bool(existing.get("shuffle")))
             existing["volume_percent"] = _as_int(
@@ -5866,9 +6016,18 @@ def handle_htmlui_tab_action(
             _save_player(existing, store)
             player = _start_player_index(
                 _as_int(existing.get("index"), 0, 0, max(0, len(queue) - 1)),
+                start_position_seconds=resume_position,
+                record_history=not resume_existing,
                 client=store,
             )
-            return {"ok": True, "message": f"Playing {_track_label(player.get('current') or {})}."}
+            return {
+                "ok": True,
+                "message": (
+                    f"Resumed {_track_label(player.get('current') or {})}."
+                    if resume_existing
+                    else f"Playing {_track_label(player.get('current') or {})}."
+                ),
+            }
         requested_targets = values.get("targets")
         if not _list(requested_targets):
             requested_targets = _list(existing.get("targets") or existing.get("target"))
@@ -5895,11 +6054,14 @@ def handle_htmlui_tab_action(
 
     if action_name == "music_ui_save_player":
         player = _player(store)
-        selected_provider = _provider_id(
-            values.get("provider"),
-            _provider_id(_settings(store).get("provider")),
-        )
+        current_settings = _settings(store)
+        selected_provider = "tater_tube"
         old_targets = _list(player.get("targets") or player.get("target"))
+        old_player_settings = _selected_player_settings(
+            old_targets,
+            current_settings,
+            default_volume=_as_int(player.get("volume_percent"), 75, 0, 100),
+        )
         targets = _resolve_targets(
             values.get("targets") or values.get("target"),
             client=store,
@@ -5908,54 +6070,61 @@ def handle_htmlui_tab_action(
         if not targets:
             raise ValueError("Choose one or more valid satellites, stereo pairs, or media players.")
         _validate_catalog_provider_targets(targets)
-        if "mixed_sync_adjustment_ms" in values:
-            mixed_sync_adjustment = _save_mixed_sync_adjustment(
-                store,
-                targets,
-                values.get("mixed_sync_adjustment_ms"),
-            )
-        else:
-            mixed_sync_adjustment = _mixed_sync_adjustment(targets, _settings(store))
-        was_playing = _text(player.get("status")).lower() == "playing"
-        resume_position = _player_position_seconds(player) if was_playing else 0.0
-        old_mixed_sync_adjustment = _as_int(
-            player.get("mixed_sync_adjustment_ms"),
-            0,
-            -750,
-            3000,
-        )
-        mixed_sync_changed = old_mixed_sync_adjustment != mixed_sync_adjustment
-        old_provider = _provider_id(
-            player.get("provider"),
-            _provider_id(_settings(store).get("provider")),
-        )
-        provider_changed = old_provider != selected_provider
-        if was_playing and old_targets and (old_targets != targets or provider_changed or mixed_sync_changed):
-            _stop_target(old_targets)
-            player["status"] = "stopped"
-        _save_hash(store, SETTINGS_KEY, {"provider": selected_provider})
-        player["provider"] = selected_provider
-        player["targets"] = targets
-        player["mixed_sync_adjustment_ms"] = mixed_sync_adjustment
-        player["shuffle"] = _as_bool(values.get("shuffle"), bool(player.get("shuffle")))
-        player["volume_percent"] = _as_int(
+        requested_volume = _as_int(
             values.get("volume_percent"),
             _as_int(player.get("volume_percent"), 75, 0, 100),
             0,
             100,
         )
-        if provider_changed:
+        submitted_player_settings = _normalize_player_settings(
+            values.get("player_settings"),
+            targets=targets,
+            cfg=current_settings,
+            default_volume=requested_volume,
+        )
+        if "player_settings" in values:
+            _save_player_calibrations(store, submitted_player_settings)
+        next_settings = _settings(store)
+        if "mixed_sync_adjustment_ms" in values:
+            base_mixed_sync_adjustment = _save_mixed_sync_adjustment(
+                store,
+                targets,
+                values.get("mixed_sync_adjustment_ms"),
+            )
+        else:
+            base_mixed_sync_adjustment = _mixed_sync_adjustment(targets, next_settings)
+        mixed_sync_adjustment = _mixed_sync_from_player_settings(
+            targets,
+            submitted_player_settings,
+            base_mixed_sync_adjustment,
+        )
+        was_playing = _text(player.get("status")).lower() == "playing"
+        resume_position = _player_position_seconds(player) if was_playing else 0.0
+        old_mixed_sync_adjustment = _mixed_sync_from_player_settings(
+            old_targets,
+            old_player_settings,
+            _mixed_sync_adjustment(old_targets, current_settings),
+        )
+        mixed_sync_changed = old_mixed_sync_adjustment != mixed_sync_adjustment
+        player_settings_changed = old_player_settings != {
+            target: submitted_player_settings[target]
+            for target in targets
+            if target in submitted_player_settings
+        }
+        if was_playing and old_targets and (
+            old_targets != targets
+            or mixed_sync_changed
+            or player_settings_changed
+        ):
+            _stop_target(old_targets)
             player["status"] = "stopped"
+        player["provider"] = selected_provider
+        player["targets"] = targets
+        player["mixed_sync_adjustment_ms"] = mixed_sync_adjustment
+        player["shuffle"] = _as_bool(values.get("shuffle"), bool(player.get("shuffle")))
+        player["volume_percent"] = requested_volume
         _save_player(player, store)
-        if provider_changed:
-            return {
-                "ok": True,
-                "message": (
-                    f"Music provider set to {PROVIDER_LABELS[selected_provider]}. "
-                    "Enter music to start playback."
-                ),
-            }
-        if was_playing and (old_targets != targets or mixed_sync_changed):
+        if was_playing and (old_targets != targets or mixed_sync_changed or player_settings_changed):
             player = _start_player_index(
                 _as_int(player.get("index"), 0, 0, 100000),
                 start_position_seconds=resume_position,
@@ -5964,12 +6133,85 @@ def handle_htmlui_tab_action(
             return {
                 "ok": True,
                 "message": (
-                    f"Updated mixed playback sync for {_target_summary(targets)}."
-                    if mixed_sync_changed and old_targets == targets
+                    f"Updated player calibration for {_target_summary(targets)}."
+                    if (mixed_sync_changed or player_settings_changed) and old_targets == targets
                     else f"Moved music to {_target_summary(targets)}."
                 ),
             }
         return {"ok": True, "message": f"Music player set to {_target_summary(targets)}."}
+
+    if action_name == "music_ui_test_sync":
+        player = _player(store)
+        cfg = _settings(store)
+        selected_provider = _provider_id(
+            values.get("provider"),
+            _provider_id(cfg.get("provider")),
+        )
+        targets = _resolve_targets(
+            values.get("targets") or values.get("target"),
+            client=store,
+            provider_id=selected_provider,
+        )
+        if not targets:
+            raise ValueError("Choose one or more players before testing sync.")
+        _validate_catalog_provider_targets(targets)
+        volume = _as_int(
+            values.get("volume_percent"),
+            _as_int(player.get("volume_percent"), 75, 0, 100),
+            0,
+            100,
+        )
+        player_settings = _normalize_player_settings(
+            values.get("player_settings"),
+            targets=targets,
+            cfg=cfg,
+            default_volume=volume,
+        )
+        active_targets = _list(player.get("targets") or player.get("target"))
+        if _text(player.get("status")).lower() == "playing" and active_targets:
+            _stop_target(active_targets)
+            player["status"] = "stopped"
+            player["started_at"] = 0.0
+            _save_player(player, store)
+
+        from media_playback import play_media_url_targets
+
+        result = play_media_url_targets(
+            targets,
+            "",
+            audio_bytes=_sync_test_wav(),
+            media_type="audio/wav",
+            media_content_type="music",
+            filename="tater-sync-test.wav",
+            text="Tater player sync test",
+            volume_percent=volume,
+            mixed_sync_adjustment_ms=_mixed_sync_from_player_settings(
+                targets,
+                player_settings,
+                _mixed_sync_adjustment(targets, cfg),
+            ),
+            target_volume_percent={
+                target: setting["volume_percent"]
+                for target, setting in player_settings.items()
+            },
+            target_sync_offset_ms={
+                target: setting["sync_offset_ms"]
+                for target, setting in player_settings.items()
+            },
+            target_transport_mode={
+                target: _player_transport_mode(setting.get("transport_mode"))
+                for target, setting in player_settings.items()
+                if target.casefold().startswith(("sonos:", "integration:sonos:"))
+            },
+            timeout_s=30.0,
+            respect_reply_playback=False,
+        )
+        if not isinstance(result, dict) or result.get("ok") is False:
+            raise ValueError(_text((result or {}).get("error")) or "The sync test could not start.")
+        return {
+            "ok": True,
+            "message": "Playing sync clicks. Adjust any player that sounds early or late, then save.",
+        }
 
     if action_name == "music_ui_set_volume":
         player = _player(store)
@@ -5990,6 +6232,19 @@ def handle_htmlui_tab_action(
                 )
                 raise ValueError(warning or "The active players could not change volume.")
         player["volume_percent"] = volume
+        calibrated_targets = _list(player.get("targets") or player.get("target"))
+        if calibrated_targets:
+            cfg = _settings(store)
+            _save_player_calibrations(
+                store,
+                {
+                    target: {
+                        **_target_calibration(target, cfg, default_volume=volume),
+                        "volume_percent": volume,
+                    }
+                    for target in calibrated_targets
+                },
+            )
         warnings = [
             _text(value)
             for value in list(live_result.get("warnings") or [])
@@ -6038,6 +6293,13 @@ def handle_htmlui_tab_action(
     if action_name == "music_ui_stop":
         _stop_player(client=store)
         return {"ok": True, "message": "Music stopped."}
+
+    if action_name == "music_ui_pause":
+        player = _pause_player(client=store)
+        return {
+            "ok": True,
+            "message": f"Paused {_track_label(player.get('current') or {})}.",
+        }
 
     if action_name == "music_ui_next":
         player = _advance_player(1, client=store)
@@ -6095,30 +6357,86 @@ def _fetch_track_artwork(track: Dict[str, Any], client: Any = None) -> Dict[str,
         raise KeyError("This provider does not have artwork for the track.")
 
     cache_key = hashlib.sha256(source_url.encode("utf-8")).hexdigest()
-    with _state_lock:
+    with _artwork_cache_lock:
         cached = _artwork_cache.get(cache_key)
         if isinstance(cached, dict) and cached.get("body"):
             return dict(cached)
+        if _artwork_failure_until.get(cache_key, 0.0) > time.monotonic():
+            raise RuntimeError("Provider artwork is temporarily unavailable.")
+        inflight = _artwork_inflight.get(cache_key)
+        fetch_owner = inflight is None
+        if fetch_owner:
+            inflight = threading.Event()
+            _artwork_inflight[cache_key] = inflight
 
-    response = requests.get(
-        source_url,
-        headers={"Accept": "image/jpeg,image/png,image/webp,image/*"},
-        timeout=30,
-    )
-    response.raise_for_status()
-    body = bytes(response.content or b"")
-    content_type = _text(response.headers.get("Content-Type")).split(";", 1)[0].lower()
-    if not content_type.startswith("image/"):
-        raise ValueError("The music provider did not return an image.")
-    if not body or len(body) > 12 * 1024 * 1024:
-        raise ValueError("The provider artwork is empty or too large.")
+    if not fetch_owner:
+        if not inflight.wait(ARTWORK_INFLIGHT_WAIT_TIMEOUT_SECONDS):
+            raise TimeoutError("Timed out waiting for provider artwork.")
+        with _artwork_cache_lock:
+            cached = _artwork_cache.get(cache_key)
+            if isinstance(cached, dict) and cached.get("body"):
+                return dict(cached)
+        raise RuntimeError("Provider artwork is temporarily unavailable.")
 
-    cached = {"body": body, "content_type": content_type}
-    with _state_lock:
-        if len(_artwork_cache) >= 256:
-            _artwork_cache.clear()
-        _artwork_cache[cache_key] = cached
-    return dict(cached)
+    slot_acquired = False
+    try:
+        slot_acquired = _artwork_fetch_slots.acquire(
+            timeout=ARTWORK_INFLIGHT_WAIT_TIMEOUT_SECONDS,
+        )
+        if not slot_acquired:
+            raise TimeoutError("Provider artwork queue is busy.")
+        response = requests.get(
+            source_url,
+            headers={"Accept": "image/jpeg,image/png,image/webp,image/*"},
+            timeout=(ARTWORK_CONNECT_TIMEOUT_SECONDS, ARTWORK_READ_TIMEOUT_SECONDS),
+        )
+        response.raise_for_status()
+        body = bytes(response.content or b"")
+        content_type = _text(response.headers.get("Content-Type")).split(";", 1)[0].lower()
+        if not content_type.startswith("image/"):
+            raise ValueError("The music provider did not return an image.")
+        if not body or len(body) > 12 * 1024 * 1024:
+            raise ValueError("The provider artwork is empty or too large.")
+
+        cached = {"body": body, "content_type": content_type}
+        with _artwork_cache_lock:
+            if len(_artwork_cache) >= 256:
+                _artwork_cache.clear()
+            _artwork_cache[cache_key] = cached
+            _artwork_failure_until.pop(cache_key, None)
+        return dict(cached)
+    except Exception as exc:
+        with _artwork_cache_lock:
+            _artwork_failure_until[cache_key] = (
+                time.monotonic() + ARTWORK_FAILURE_CACHE_SECONDS
+            )
+        logger.warning(
+            "[Music] artwork fetch failed track=%s error=%s",
+            _text(track.get("id")) or "-",
+            _text(exc) or type(exc).__name__,
+        )
+        raise
+    finally:
+        if slot_acquired:
+            _artwork_fetch_slots.release()
+        with _artwork_cache_lock:
+            completed = _artwork_inflight.pop(cache_key, None)
+        if completed is not None:
+            completed.set()
+
+
+def _fallback_track_artwork(track: Dict[str, Any]) -> Dict[str, Any]:
+    label = _text(track.get("album") or track.get("artist") or track.get("title") or "Music")
+    digest = hashlib.sha256(label.encode("utf-8")).hexdigest()
+    color_a = f"#{digest[:6]}"
+    color_b = f"#{digest[6:12]}"
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360" viewBox="0 0 360 360">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{color_a}"/><stop offset="1" stop-color="{color_b}"/></linearGradient></defs>
+<rect width="360" height="360" rx="28" fill="#15111f"/><circle cx="180" cy="165" r="118" fill="url(#g)" opacity=".92"/>
+<circle cx="180" cy="165" r="48" fill="#15111f"/><circle cx="180" cy="165" r="13" fill="#ffbd59"/>
+<path d="M254 77v142c0 24-20 43-45 43-20 0-36-13-36-30s16-30 36-30c9 0 18 3 24 7V96l-88 19v124c0 24-20 43-45 43-20 0-36-13-36-30s16-30 36-30c9 0 18 3 24 7V95z" fill="#fff" opacity=".9"/>
+</svg>"""
+    return {"body": svg.encode("utf-8"), "content_type": "image/svg+xml"}
 
 
 def handle_core_webhook(
@@ -6136,18 +6454,30 @@ def handle_core_webhook(
         _provider_id(_settings(redis_client).get("provider")),
     )
     track = _client_track(params.get("track_id"), provider_id, redis_client)
-    artwork = _fetch_track_artwork(track, redis_client)
+    fallback = False
+    try:
+        artwork = _fetch_track_artwork(track, redis_client)
+    except Exception:
+        artwork = _fallback_track_artwork(track)
+        fallback = True
     from starlette.responses import Response
 
+    headers = {
+        "Cache-Control": "private, max-age=30" if fallback else "private, max-age=86400"
+    }
+    if fallback:
+        headers["X-Tater-Artwork-Fallback"] = "1"
     return Response(
         content=artwork["body"],
         media_type=artwork["content_type"],
-        headers={"Cache-Control": "private, max-age=86400"},
+        headers=headers,
     )
 
 
 def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
+    assistant_name = _assistant_first_name(store)
+    recommendations_label = _recommendations_label(store)
     cfg = _settings(store)
     runtime = _runtime(store)
     provider_id = _provider_id(cfg.get("provider"))
@@ -6237,7 +6567,7 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             },
             {
                 "id": "recommendation_refresh",
-                "label": "Tater Recommendations",
+                "label": recommendations_label,
                 "description": "Builds fresh AI-named playlists from listening history.",
                 "interval_seconds": recommendation_interval,
                 "enabled": recommendations_enabled,
@@ -6261,7 +6591,7 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 "unavailable_reason": (
                     f"Connect {PROVIDER_LABELS.get(provider_id, provider_id)} before refreshing recommendations."
                     if not connected
-                    else "Play some music first so Tater has listening history to use."
+                    else f"Play some music first so {assistant_name} has listening history to use."
                 ),
                 "status": "idle" if connected and has_history else "waiting",
                 "requires_running": True,
@@ -6435,15 +6765,7 @@ def run(stop_event: Optional[object] = None) -> None:
                     _schedule_music_prompt_profile_refresh()
             except PermissionError as exc:
                 logger.warning("[Music] provider authorization was revoked: %s", exc)
-                authorization_fields = {
-                    "tater_tube": ("tater_tube_token", "token"),
-                    "plex": ("plex_token",),
-                    "emby": ("emby_api_key",),
-                    "jellyfin": ("jellyfin_api_key",),
-                    "navidrome": ("navidrome_api_key", "navidrome_password"),
-                }.get(active_provider, ())
-                if authorization_fields:
-                    redis_client.hdel(SETTINGS_KEY, *authorization_fields)
+                redis_client.hdel(SETTINGS_KEY, "tater_tube_token", "token")
                 _save_hash(
                     redis_client,
                     RUNTIME_KEY,

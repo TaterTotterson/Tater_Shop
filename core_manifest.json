@@ -19,7 +19,7 @@
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "59",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, and announcement targets.",
       "settings_category": "Automation Core Settings",
@@ -33,13 +33,13 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "e3d52e2423238b34c1634e181f6be2d92110b482fcbc7bf44ba646bb389293c0"
+      "sha256": "09faceabf2d2e9f9fffefa2d66a1bc0cf9e55717abdf710dae2b10da6461b8db"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.4.12",
+      "version": "3.4.13",
       "min_tater_version": "59",
       "description": "Awareness Core integration core for Tater.",
       "settings_category": "Awareness Core Settings",
@@ -47,7 +47,7 @@
       "autostart_key": "awareness_core_running",
       "tags": [],
       "entry": "cores/awareness_core.py",
-      "sha256": "2baa791af4b803b8b58f7419cd0bafede244e03df31072aacc39739acae71104"
+      "sha256": "6edf078be948d378a0811c33f056f440162f2d31e14bbf93d38aaeabbc6013eb"
     },
     {
       "id": "environment",
@@ -106,20 +106,16 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "2.7.2",
-      "min_tater_version": "98.7",
-      "description": "Connect Tater Tube, Plex, Emby, Jellyfin, or Navidrome to Tater; browse music with provider-native album art, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
+      "version": "3.0.2",
+      "min_tater_version": "99.5",
+      "description": "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
-      "required_settings_count": 13,
+      "required_settings_count": 12,
       "autostart_key": "music_core_running",
       "tags": [
         "music",
         "player",
         "tater-tube",
-        "plex",
-        "emby",
-        "jellyfin",
-        "navidrome",
         "satellite",
         "stereo",
         "multi-room",
@@ -128,7 +124,7 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "94b0f9ea2fa4a719300cb49412e7bd7ead33543226ce2d22acb5d6c0da547f49"
+      "sha256": "d348f4247ecc84d1b0d2a62f375671af3c6980fc317333358056d89161580892"
     },
     {
       "id": "personal",

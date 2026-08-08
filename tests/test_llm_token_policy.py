@@ -136,9 +136,11 @@ class CoreTokenPolicyTests(unittest.TestCase):
     def test_edited_core_versions_and_manifest_match(self):
         expected_versions = {
             "ai_task": "1.2.0",
-            "awareness": "3.4.12",
+            "automation": "1.1.1",
+            "awareness": "3.4.13",
             "guardian": "1.3.12",
             "memory": "1.0.29",
+            "music": "3.0.2",
             "personal": "1.0.56",
             "rss": "1.0.12",
             "tater_tube": "1.2.3",

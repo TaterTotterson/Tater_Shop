@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.12"
+__version__ = "3.4.13"
 
 load_dotenv()
 
@@ -562,21 +562,31 @@ def _integration_runtime_events(client: Any, *, after_seq: int, limit: int = 100
     if redis_obj is None:
         return []
     max_rows = max(1, min(1000, int(limit or 100)))
+    events: List[Dict[str, Any]] = []
+    page_size = min(50, max_rows)
     try:
-        raw_rows = redis_obj.lrange(_INTEGRATION_RUNTIME_EVENTS_KEY, 0, 999) or []
+        for start in range(0, 1000, page_size):
+            raw_rows = redis_obj.lrange(
+                _INTEGRATION_RUNTIME_EVENTS_KEY,
+                start,
+                min(999, start + page_size - 1),
+            ) or []
+            reached_cursor = False
+            for raw in raw_rows:
+                event = _redis_json_object(raw)
+                if not event:
+                    continue
+                seq = _as_int(event.get("seq"), 0, minimum=0)
+                if seq <= after_seq:
+                    reached_cursor = True
+                    continue
+                event["seq"] = seq
+                events.append(event)
+            if reached_cursor or len(raw_rows) < page_size:
+                break
     except Exception:
         logger.debug("[awareness] failed to read integration runtime events", exc_info=True)
         return []
-    events: List[Dict[str, Any]] = []
-    for raw in raw_rows:
-        event = _redis_json_object(raw)
-        if not event:
-            continue
-        seq = _as_int(event.get("seq"), 0, minimum=0)
-        if seq <= after_seq:
-            continue
-        event["seq"] = seq
-        events.append(event)
     events.sort(key=lambda item: _as_int(item.get("seq"), 0, minimum=0))
     return events[:max_rows]
 

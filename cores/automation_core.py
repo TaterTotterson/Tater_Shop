@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -852,17 +852,29 @@ def _history(client: Any, limit: int = 50) -> List[Dict[str, Any]]:
 
 def _integration_events(client: Any, after_seq: int, limit: int = 200) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for raw in client.lrange(_INTEGRATION_EVENTS_KEY, 0, 999) or []:
-        event = _json_record(raw)
-        if not event:
-            continue
-        seq = _int(event.get("seq"), 0, minimum=0)
-        if seq <= after_seq:
-            continue
-        event["seq"] = seq
-        rows.append(event)
+    max_rows = max(1, min(1000, int(limit or 200)))
+    page_size = min(50, max_rows)
+    for start in range(0, 1000, page_size):
+        raw_rows = client.lrange(
+            _INTEGRATION_EVENTS_KEY,
+            start,
+            min(999, start + page_size - 1),
+        ) or []
+        reached_cursor = False
+        for raw in raw_rows:
+            event = _json_record(raw)
+            if not event:
+                continue
+            seq = _int(event.get("seq"), 0, minimum=0)
+            if seq <= after_seq:
+                reached_cursor = True
+                continue
+            event["seq"] = seq
+            rows.append(event)
+        if reached_cursor or len(raw_rows) < page_size:
+            break
     rows.sort(key=lambda item: _int(item.get("seq"), 0))
-    return rows[: max(1, limit)]
+    return rows[:max_rows]
 
 
 def _walk_values(value: Any, *, depth: int = 0) -> Iterable[Tuple[str, Any]]:
