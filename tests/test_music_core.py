@@ -2242,6 +2242,185 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(paused["started_at"], 0.0)
         self.assertEqual(paused["position_offset_seconds"], 47.5)
 
+    def test_routing_paused_player_preserves_one_global_queue_and_position(self):
+        old_target = "voice_core:native:kitchen"
+        new_targets = [
+            "voice_core:native:office",
+            "voice_core:native:bedroom",
+        ]
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "paused",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "queue_original": self.tracks,
+                    "index": 1,
+                    "current": self.tracks[1],
+                    "targets": [old_target],
+                    "queue_session_id": "global-session",
+                    "started_at": 0.0,
+                    "position_offset_seconds": 67.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+
+        with patch.object(self.core, "_stop_target") as stop, patch.object(
+            self.core,
+            "_play_track",
+        ) as play:
+            routed = self.core._route_player_targets(new_targets, client=self.redis)
+
+        stop.assert_not_called()
+        play.assert_not_called()
+        self.assertEqual(routed["status"], "paused")
+        self.assertEqual(routed["targets"], new_targets)
+        self.assertEqual(routed["queue_session_id"], "global-session")
+        self.assertEqual(routed["index"], 1)
+        self.assertEqual(routed["current"]["id"], "track:two")
+        self.assertEqual(routed["position_offset_seconds"], 67.0)
+        self.assertEqual(
+            [track["id"] for track in routed["queue"]],
+            ["track:one", "track:two"],
+        )
+
+    def test_routing_playing_player_moves_same_global_session_at_current_position(self):
+        old_target = "voice_core:native:kitchen"
+        new_targets = ["voice_core:native:office"]
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "queue_original": self.tracks,
+                    "index": 1,
+                    "current": self.tracks[1],
+                    "targets": [old_target],
+                    "queue_session_id": "global-session",
+                    "started_at": 100.0,
+                    "position_offset_seconds": 35.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+
+        with patch.object(self.core.time, "time", return_value=112.5), patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ) as stop, patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play, patch.object(self.core, "_record_listening_history") as history:
+            routed = self.core._route_player_targets(new_targets, client=self.redis)
+
+        stop.assert_called_once_with([old_target])
+        self.assertEqual(play.call_args.args[1], new_targets)
+        self.assertEqual(play.call_args.kwargs["start_position_seconds"], 47.5)
+        history.assert_not_called()
+        self.assertEqual(routed["status"], "playing")
+        self.assertEqual(routed["targets"], new_targets)
+        self.assertEqual(routed["queue_session_id"], "global-session")
+        self.assertEqual(routed["index"], 1)
+        self.assertEqual(routed["current"]["id"], "track:two")
+
+    def test_client_pause_updates_selected_outputs_after_pausing_global_session(self):
+        old_target = "voice_core:native:kitchen"
+        new_target = "voice_core:native:office"
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "playing",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "queue_original": self.tracks,
+                    "index": 0,
+                    "current": self.tracks[0],
+                    "targets": [old_target],
+                    "queue_session_id": "global-session",
+                    "started_at": 100.0,
+                    "position_offset_seconds": 20.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+
+        with patch.object(self.core.time, "time", return_value=105.0), patch.object(
+            self.core,
+            "_resolve_targets",
+            return_value=[new_target],
+        ), patch.object(self.core, "_validate_catalog_provider_targets"), patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ) as stop:
+            result = self.core.run_client_music_action(
+                "pause",
+                {"targets": [new_target]},
+                client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        stop.assert_called_once_with([old_target])
+        paused = self.core._player(self.redis)
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["targets"], [new_target])
+        self.assertEqual(paused["queue_session_id"], "global-session")
+        self.assertEqual(paused["position_offset_seconds"], 25.0)
+
+    def test_client_resume_uses_selected_outputs_without_replacing_global_queue(self):
+        old_target = "voice_core:native:kitchen"
+        new_target = "voice_core:native:office"
+        self.redis.set(
+            self.core.PLAYER_KEY,
+            json.dumps(
+                {
+                    "status": "paused",
+                    "provider": "tater_tube",
+                    "queue": self.tracks,
+                    "queue_original": self.tracks,
+                    "index": 1,
+                    "current": self.tracks[1],
+                    "targets": [old_target],
+                    "queue_session_id": "global-session",
+                    "started_at": 0.0,
+                    "position_offset_seconds": 67.0,
+                    "duration_seconds": 180.0,
+                }
+            ),
+        )
+
+        with patch.object(
+            self.core,
+            "_resolve_targets",
+            return_value=[new_target],
+        ), patch.object(self.core, "_validate_catalog_provider_targets"), patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play, patch.object(self.core, "_record_listening_history") as history:
+            result = self.core.run_client_music_action(
+                "resume",
+                {"targets": [new_target]},
+                client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(play.call_args.args[1], [new_target])
+        self.assertEqual(play.call_args.kwargs["start_position_seconds"], 67.0)
+        history.assert_not_called()
+        resumed = self.core._player(self.redis)
+        self.assertEqual(resumed["status"], "playing")
+        self.assertEqual(resumed["targets"], [new_target])
+        self.assertEqual(resumed["queue_session_id"], "global-session")
+        self.assertEqual(resumed["index"], 1)
+
     def test_paused_player_reloads_with_resume_action_and_resumes_at_saved_position(self):
         target = "voice_core:native:kitchen"
         self.redis.set(

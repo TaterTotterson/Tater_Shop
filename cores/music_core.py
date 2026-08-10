@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -3578,6 +3578,58 @@ def _start_player_index(
         return player
 
 
+def _route_player_targets(
+    targets: Any,
+    *,
+    restart_playing: bool = True,
+    force_restart: bool = False,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Move the one global player session without replacing its queue or state."""
+    store = client or globals().get("redis_client")
+    next_targets = _normalize_stereo_targets(targets)
+    if not next_targets:
+        raise ValueError("Choose one or more valid music destinations.")
+    with _state_lock:
+        player = _player(store)
+        old_targets = _list(player.get("targets") or player.get("target"))
+        targets_changed = old_targets != next_targets
+        was_playing = _text(player.get("status")).lower() == "playing"
+        restart_required = was_playing and (targets_changed or force_restart)
+        if not targets_changed and not restart_required:
+            return player
+
+        position = _player_position_seconds(player) if was_playing else max(
+            0.0,
+            _as_float(player.get("position_offset_seconds")),
+        )
+        warnings: List[str] = []
+        if restart_required and old_targets:
+            warnings = _stop_target(old_targets)
+        player["targets"] = next_targets
+        if restart_required:
+            player.update(
+                {
+                    "status": "stopped",
+                    "started_at": 0.0,
+                    "position_offset_seconds": position,
+                }
+            )
+        if warnings:
+            player["warnings"] = warnings
+        _save_player(player, store)
+
+        queue = player.get("queue") if isinstance(player.get("queue"), list) else []
+        if restart_required and restart_playing and queue:
+            return _start_player_index(
+                _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1)),
+                start_position_seconds=position,
+                record_history=False,
+                client=store,
+            )
+        return player
+
+
 def _seek_player(position_seconds: float, *, client: Any = None) -> Dict[str, Any]:
     store = client or globals().get("redis_client")
     player = _player(store)
@@ -4133,18 +4185,11 @@ async def run_hydra_kernel_tool(
                 if not targets:
                     raise ValueError("Choose one or more valid music destinations.")
                 _validate_catalog_provider_targets(targets)
-                old_targets = _list(player.get("targets") or player.get("target"))
-                was_playing = _text(player.get("status")).lower() == "playing"
-                if was_playing and old_targets and old_targets != targets:
-                    _stop_target(old_targets)
-                player["targets"] = targets
-                _save_player(player, store)
-                if was_playing and old_targets != targets:
-                    player = await asyncio.to_thread(
-                        _start_player_index,
-                        _as_int(player.get("index"), 0, 0, 100000),
-                        client=store,
-                    )
+                player = await asyncio.to_thread(
+                    _route_player_targets,
+                    targets,
+                    client=store,
+                )
             else:
                 raise ValueError(
                     "Music control action must be next, previous, stop, replay, shuffle, repeat, or set_targets."
@@ -5165,7 +5210,30 @@ def run_client_music_action(
         }
 
     player = _reconcile_native_playback(_player(store), store)
+    requested_targets = values.get("targets") or values.get("target")
+    routed_targets: List[str] = []
+    if _list(requested_targets):
+        routed_targets = _resolve_targets(
+            requested_targets,
+            client=store,
+            provider_id=_provider_id(player.get("provider"), selected_provider),
+        )
+        if not routed_targets:
+            raise ValueError("Choose one or more valid music destinations.")
+        _validate_catalog_provider_targets(routed_targets)
+    if command in {"set_target", "set_targets"}:
+        updated = _route_player_targets(routed_targets, client=store)
+        return {
+            "ok": True,
+            "player": {
+                "status": _text(updated.get("status")),
+                "current": _public_track(updated.get("current") or {}),
+            },
+            "state": get_client_music_state(client=store),
+        }
     if command == "set_volume":
+        if routed_targets:
+            player = _route_player_targets(routed_targets, client=store)
         volume = _as_int(
             values.get("volume_percent"),
             _as_int(player.get("volume_percent"), 75, 0, 100),
@@ -5194,6 +5262,12 @@ def run_client_music_action(
             "state": get_client_music_state(client=store),
         }
     if command == "seek":
+        if routed_targets:
+            player = _route_player_targets(
+                routed_targets,
+                restart_playing=False,
+                client=store,
+            )
         updated = _seek_player(
             _as_float(values.get("position_seconds")),
             client=store,
@@ -5207,6 +5281,13 @@ def run_client_music_action(
             "state": get_client_music_state(client=store),
         }
     if command in {"next", "previous", "stop", "replay", "play", "resume", "pause"}:
+        route_before_action = command in {"next", "previous", "replay", "play", "resume"}
+        if routed_targets and route_before_action:
+            player = _route_player_targets(
+                routed_targets,
+                restart_playing=command in {"play", "resume"},
+                client=store,
+            )
         if command == "next":
             updated = _advance_player(1, client=store)
         elif command == "previous":
@@ -5222,6 +5303,8 @@ def run_client_music_action(
             updated = _resume_player(client=store)
         else:
             updated = _pause_player(client=store)
+        if routed_targets and command in {"stop", "pause"}:
+            updated = _route_player_targets(routed_targets, client=store)
         return {
             "ok": True,
             "player": {
@@ -6037,7 +6120,6 @@ def handle_htmlui_tab_action(
             and selected_provider == existing_provider
         ):
             resume_existing = _text(existing.get("status")).lower() == "paused"
-            resume_position = _player_position_seconds(existing) if resume_existing else 0.0
             old_targets = _list(existing.get("targets") or existing.get("target"))
             requested_targets = values.get("targets")
             if not _list(requested_targets):
@@ -6050,12 +6132,6 @@ def handle_htmlui_tab_action(
             if not targets:
                 raise ValueError("Choose one or more valid satellites, stereo pairs, or media players.")
             _validate_catalog_provider_targets(targets)
-            if old_targets and old_targets != targets:
-                _stop_target(old_targets)
-                existing["status"] = "stopped"
-                resume_existing = False
-                resume_position = 0.0
-            existing["targets"] = targets
             existing["shuffle"] = _as_bool(values.get("shuffle"), bool(existing.get("shuffle")))
             existing["volume_percent"] = _as_int(
                 values.get("volume_percent"),
@@ -6064,12 +6140,8 @@ def handle_htmlui_tab_action(
                 100,
             )
             _save_player(existing, store)
-            player = _start_player_index(
-                _as_int(existing.get("index"), 0, 0, max(0, len(queue) - 1)),
-                start_position_seconds=resume_position,
-                record_history=not resume_existing,
-                client=store,
-            )
+            _route_player_targets(targets, client=store)
+            player = _resume_player(client=store)
             return {
                 "ok": True,
                 "message": (
@@ -6149,7 +6221,6 @@ def handle_htmlui_tab_action(
             base_mixed_sync_adjustment,
         )
         was_playing = _text(player.get("status")).lower() == "playing"
-        resume_position = _player_position_seconds(player) if was_playing else 0.0
         old_mixed_sync_adjustment = _mixed_sync_from_player_settings(
             old_targets,
             old_player_settings,
@@ -6161,30 +6232,23 @@ def handle_htmlui_tab_action(
             for target in targets
             if target in submitted_player_settings
         }
-        if was_playing and old_targets and (
-            old_targets != targets
-            or mixed_sync_changed
-            or player_settings_changed
-        ):
-            _stop_target(old_targets)
-            player["status"] = "stopped"
         player["provider"] = selected_provider
-        player["targets"] = targets
         player["mixed_sync_adjustment_ms"] = mixed_sync_adjustment
         player["shuffle"] = _as_bool(values.get("shuffle"), bool(player.get("shuffle")))
         player["volume_percent"] = requested_volume
         _save_player(player, store)
-        if was_playing and (old_targets != targets or mixed_sync_changed or player_settings_changed):
-            player = _start_player_index(
-                _as_int(player.get("index"), 0, 0, 100000),
-                start_position_seconds=resume_position,
-                client=store,
-            )
+        targets_changed = old_targets != targets
+        player = _route_player_targets(
+            targets,
+            force_restart=mixed_sync_changed or player_settings_changed,
+            client=store,
+        )
+        if was_playing and (targets_changed or mixed_sync_changed or player_settings_changed):
             return {
                 "ok": True,
                 "message": (
                     f"Updated player calibration for {_target_summary(targets)}."
-                    if (mixed_sync_changed or player_settings_changed) and old_targets == targets
+                    if (mixed_sync_changed or player_settings_changed) and not targets_changed
                     else f"Moved music to {_target_summary(targets)}."
                 ),
             }
