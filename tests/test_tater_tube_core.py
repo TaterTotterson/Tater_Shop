@@ -154,7 +154,23 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
             [{"id": "com.240mp.retro", "name": "Game Center", "configured": True}],
         )
 
-    def test_recommendation_publish_includes_dedicated_boot_summary(self):
+    def test_main_menu_fallback_prefers_global_activity_over_tater_picks(self):
+        message, suggestion = self.core._main_menu_fallback(
+            [
+                {
+                    "source": "game_center",
+                    "media_type": "game",
+                    "title": "Super Mario 64",
+                }
+            ],
+            [{"title": "Server Movie", "media_type": "movie"}],
+            [],
+        )
+        self.assertEqual(suggestion["title"], "Super Mario 64")
+        self.assertEqual(suggestion["kind"], "play")
+        self.assertIn("Super Mario 64", message)
+
+    def test_global_main_menu_message_is_separate_from_server_picks(self):
         client = FakeRedis()
         client.hset(
             self.core.SETTINGS_KEY,
@@ -165,6 +181,14 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
             json.dumps(
                 {
                     "events": [
+                        {
+                            "source": "local_media",
+                            "media_id": "movie-history-1",
+                            "media_type": "movie",
+                            "title": "Server Movie",
+                            "state": "completed",
+                            "occurred_at": "2026-08-09T12:00:00Z",
+                        },
                         {
                             "source": "game_center",
                             "media_id": "game-1",
@@ -180,21 +204,34 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
         )
 
         class FakeLLM:
-            async def chat(self, **_kwargs):
+            def __init__(self):
+                self.payloads = []
+
+            async def chat(self, **kwargs):
+                payload = json.loads(kwargs["messages"][1]["content"])
+                self.payloads.append(payload)
+                if "server_catalog_candidates" in payload:
+                    body = {
+                        "summary": "I made a fresh server-library mix.",
+                        "items": [
+                            {"candidate_id": "movie-1", "reason": "A good next watch."}
+                        ],
+                    }
+                else:
+                    body = {
+                        "message": (
+                            "You have been enjoying Super Mario 64. "
+                            "My global suggestion is to play Super Mario 64 again."
+                        ),
+                        "suggestion": {
+                            "title": "Super Mario 64",
+                            "kind": "play",
+                            "source": "game_center",
+                        },
+                    }
                 return {
                     "message": {
-                        "content": json.dumps(
-                            {
-                                "summary": "I made a fresh screen-time mix.",
-                                "boot_summary": (
-                                    "You have been enjoying Super Mario 64. "
-                                    "A Movie could be a fun change of pace next."
-                                ),
-                                "items": [
-                                    {"candidate_id": "movie-1", "reason": "A good next watch."}
-                                ],
-                            }
-                        )
+                        "content": json.dumps(body)
                     }
                 }
 
@@ -218,14 +255,47 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
             raise AssertionError((method, path))
 
         loop = asyncio.new_event_loop()
+        llm = FakeLLM()
         try:
             with patch.object(self.core, "_api_request", side_effect=fake_api):
-                result = self.core._generate_recommendations_impl(loop, FakeLLM(), client)
+                result = self.core._generate_recommendations_impl(loop, llm, client)
         finally:
             loop.close()
 
         self.assertIn("Super Mario 64", result["boot_summary"])
         self.assertEqual(published_payload["boot_summary"], result["boot_summary"])
+        self.assertEqual(len(llm.payloads), 2)
+        pick_titles = [row["title"] for row in llm.payloads[0]["recent_server_viewing"]]
+        global_titles = [row["title"] for row in llm.payloads[1]["recent_global_activity"]]
+        self.assertEqual(pick_titles, ["Server Movie"])
+        self.assertIn("Super Mario 64", global_titles)
+        self.assertIn("Server Movie", global_titles)
+        saved_main_menu = json.loads(client.get(self.core.MAIN_MENU_MESSAGE_KEY))
+        self.assertEqual(saved_main_menu["suggestion"]["kind"], "play")
+
+    def test_core_ui_has_a_dedicated_main_menu_message_section(self):
+        client = FakeRedis(
+            {
+                self.core.MAIN_MENU_MESSAGE_KEY: json.dumps(
+                    {
+                        "generated_at": 100,
+                        "message": "Try Super Mario 64 next.",
+                        "suggestion": {
+                            "title": "Super Mario 64",
+                            "kind": "play",
+                            "source": "game_center",
+                        },
+                    }
+                )
+            }
+        )
+        data = self.core.get_htmlui_tab_data(redis_client=client)
+        tabs = data["ui"]["manager_tabs"]
+        self.assertIn("main_menu", [row["key"] for row in tabs])
+        forms = data["ui"]["item_forms"]
+        message = next(row for row in forms if row["id"] == "main_menu:current")
+        self.assertEqual(message["detail"], "Try Super Mario 64 next.")
+        self.assertTrue(any(row["id"] == "main_menu:context" for row in forms))
 
 
 if __name__ == "__main__":

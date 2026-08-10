@@ -1,4 +1,4 @@
-"""Connect Tater to Tater Tube Server for viewing context and recommendations."""
+"""Connect Tater to Tater Tube Server for global guidance and server recommendations."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import requests
@@ -22,12 +22,12 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
-    "Connect Tater to Tater Tube Server, combine viewing, gaming, module, and music "
-    "activity, publish AI-selected recommendations and one-time boot briefings, and "
-    "voice them with the user's TTS settings."
+    "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
+    "catalog, create a separate global Main Menu Message from cross-module activity, "
+    "and voice both with the user's TTS settings."
 )
 TAGS = ["tater-tube", "media", "games", "music", "recommendations", "context", "tts"]
 
@@ -95,7 +95,7 @@ CORE_SETTINGS = {
             "label": "Tater Tube Voice",
             "type": "checkbox",
             "default": True,
-            "description": "Voice Tater's Picks and the one-time Tater Tube boot greeting.",
+            "description": "Voice Tater's Picks and the one-time global Main Menu Message.",
         },
     },
     "tags": TAGS,
@@ -111,12 +111,24 @@ SETTINGS_KEY = "tater_tube_core_settings"
 RUNTIME_KEY = "tater_tube_core_runtime"
 CONTEXT_KEY = "tater_tube_core_context"
 RECOMMENDATIONS_KEY = "tater_tube_core_recommendations"
+MAIN_MENU_MESSAGE_KEY = "tater_tube_core_main_menu_message_v1"
 SHARED_ACTIVITY_KEY = "tater_tube_activity_feed_v1"
 LEGACY_MUSIC_HISTORY_KEY = "music_core_listening_history_v1"
 MUSIC_RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 DEFAULT_PROFILE_ID = "household"
 REQUEST_TIMEOUT_SECONDS = 25
 TTS_MAX_TEXT_CHARS = 800
+GENERATION_SCHEMA_VERSION = 2
+TATER_PICKS_ACTIVITY_SOURCES = {
+    "local",
+    "local_media",
+    "over_the_air",
+    "stream",
+    "tater_tube_server",
+    "the_tube",
+    "tube_tv",
+    "usenet",
+}
 
 
 def _text(value: Any) -> str:
@@ -561,40 +573,27 @@ def _llm_json(loop: asyncio.AbstractEventLoop, llm_client: Any, system_prompt: s
     return parsed
 
 
-def _generate_recommendations_impl(
-    loop: asyncio.AbstractEventLoop,
-    llm_client: Any,
-    client: Any = None,
-) -> Dict[str, Any]:
-    redis_obj = client or globals().get("redis_client")
-    cfg = _settings(redis_obj)
-    if not _paired(cfg):
-        raise ValueError("Pair Tater Tube Core before generating recommendations.")
-    context = _load_json(redis_obj, CONTEXT_KEY, {})
-    if not isinstance(context, dict) or not isinstance(context.get("events"), list):
-        context = _sync_context(redis_obj)
-    events = _combined_activity(context, redis_obj)
-    if not events:
-        raise ValueError("Tater needs at least one activity event before making picks.")
+def _server_pick_activity(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Keep Tater's Picks tied to viewing supplied by Tater Tube Server."""
+    rows = context.get("events") if isinstance(context, dict) else []
+    return [
+        dict(row)
+        for row in rows or []
+        if isinstance(row, dict)
+        and _text(row.get("source")).lower() in TATER_PICKS_ACTIVITY_SOURCES
+        and _text(row.get("media_type")).lower()
+        not in {"game", "game_port", "module", "music", "pc_app", "session"}
+    ][:100]
 
-    candidate_limit = _as_int(cfg.get("candidate_limit"), 200, 20, 500)
-    candidate_data = _api_request(
-        "GET",
-        f"tater/core/candidates?limit={candidate_limit}&profile_id={_profile_id(cfg)}",
-        settings=cfg,
-        redis_obj=redis_obj,
-    )
-    candidates = candidate_data.get("candidates") if isinstance(candidate_data, dict) else []
-    candidates = [row for row in candidates if isinstance(row, dict) and _text(row.get("id"))]
-    if not candidates:
-        raise ValueError("Tater Tube Server has no launchable recommendation candidates.")
 
-    count = _as_int(cfg.get("recommendation_count"), 8, 1, 12)
-    compact_events = []
+def _compact_activity_events(
+    events: List[Dict[str, Any]], *, limit: int = 60
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, int]]]:
+    compact: List[Dict[str, Any]] = []
     source_counts: Dict[str, int] = {}
     media_type_counts: Dict[str, int] = {}
     action_counts: Dict[str, int] = {}
-    for event in events[:60]:
+    for event in events[:limit]:
         if not isinstance(event, dict):
             continue
         source = _text(event.get("source")) or "unknown"
@@ -604,7 +603,7 @@ def _generate_recommendations_impl(
         source_counts[source] = source_counts.get(source, 0) + 1
         media_type_counts[media_type] = media_type_counts.get(media_type, 0) + 1
         action_counts[action] = action_counts.get(action, 0) + 1
-        compact_events.append(
+        compact.append(
             {
                 "title": _text(event.get("title")),
                 "series_title": _text(event.get("series_title")),
@@ -626,54 +625,239 @@ def _generate_recommendations_impl(
                 ),
             }
         )
-    compact_candidates = []
-    for candidate in candidates:
-        compact_candidates.append(
-            {
-                "id": _text(candidate.get("id")),
-                "title": _text(candidate.get("title")),
-                "media_type": _text(candidate.get("media_type")),
-                "source": _text(candidate.get("source")),
-                "year": _text(candidate.get("year")),
-                "description": _text(candidate.get("description"))[:300],
-            }
+    return compact, {
+        "events_by_source": source_counts,
+        "events_by_media_type": media_type_counts,
+        "events_by_action": action_counts,
+    }
+
+
+def _compact_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return [
+        {
+            "id": _text(candidate.get("id")),
+            "title": _text(candidate.get("title")),
+            "media_type": _text(candidate.get("media_type")),
+            "source": _text(candidate.get("source")),
+            "year": _text(candidate.get("year")),
+            "description": _text(candidate.get("description"))[:300],
+        }
+        for candidate in candidates
+    ]
+
+
+def _main_menu_fallback(
+    compact_activity: List[Dict[str, Any]],
+    picks: List[Dict[str, str]],
+    music_mixes: List[Dict[str, str]],
+) -> Tuple[str, Dict[str, str]]:
+    recent = next(
+        (
+            row
+            for row in compact_activity
+            if _text(row.get("title")) != "Tater Tube"
+            and _text(row.get("media_type")) not in {"module", "session"}
+        ),
+        {},
+    )
+    recent_global = next(
+        (
+            row
+            for row in compact_activity
+            if _text(row.get("title")) != "Tater Tube"
+            and _text(row.get("media_type")) not in {"module", "session"}
+            and _text(row.get("source")).lower() not in TATER_PICKS_ACTIVITY_SOURCES
+        ),
+        {},
+    )
+    if recent_global:
+        media_type = _text(recent_global.get("media_type")).lower()
+        suggestion = {
+            "title": _text(recent_global.get("title")),
+            "kind": (
+                "play"
+                if media_type in {"game", "game_port"}
+                else "listen"
+                if media_type == "music"
+                else "resume"
+            ),
+            "source": _text(recent_global.get("source")),
+        }
+    elif music_mixes:
+        suggestion = {
+            "title": _text(music_mixes[0].get("name")),
+            "kind": "listen",
+            "source": "music_core",
+        }
+    elif picks:
+        suggestion = {
+            "title": _text(picks[0].get("title")),
+            "kind": "watch",
+            "source": "tater_picks",
+        }
+    elif recent:
+        suggestion = {
+            "title": _text(recent.get("title")),
+            "kind": "resume",
+            "source": _text(recent.get("source")),
+        }
+    else:
+        suggestion = {"title": "Tater Tube", "kind": "open", "source": "tater_tube"}
+
+    recent_title = _text(recent.get("title"))
+    suggested_title = _text(suggestion.get("title"))
+    if recent_title and suggested_title and recent_title != suggested_title:
+        message = (
+            f"You were spending some time with {recent_title} lately. "
+            f"My suggestion for next is {suggested_title}."
         )
+    elif suggested_title and suggested_title != "Tater Tube":
+        message = f"I've got everything ready. My suggestion for next is {suggested_title}."
+    else:
+        message = "Everything is ready whenever you are. Pick a module and we'll find something good."
+    return message, suggestion
+
+
+def _generate_main_menu_message(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    *,
+    global_events: List[Dict[str, Any]],
+    picks: List[Dict[str, str]],
+    client: Any = None,
+) -> Dict[str, Any]:
+    redis_obj = client or globals().get("redis_client")
+    compact_activity, activity_patterns = _compact_activity_events(global_events)
+    music_mixes = _music_recommendation_context(redis_obj)
+    available_modules = _available_modules(global_events)
+    fallback_message, fallback_suggestion = _main_menu_fallback(
+        compact_activity, picks, music_mixes
+    )
+    try:
+        result = _llm_json(
+            loop,
+            llm_client,
+            (
+                f"You are {_assistant_first_name(redis_obj)}, the warm personal guide on Tater Tube's "
+                "main menu. This message is separate from Tater's Picks. Use the supplied privacy-safe "
+                "activity from every Tater Tube module to briefly comment on one meaningful recent action "
+                "and recommend exactly one useful next activity. The recommendation may be a current Tater "
+                "Pick, replaying a recently used game, a Music Core mix, returning to a PC app, or opening "
+                "a configured module. Never invent a title, module, or preference. Do not list several "
+                "choices, mention tracking or data collection, or mention paths, URLs, credentials, and "
+                "technical internals. Keep message under 65 words and do not add a morning, afternoon, or "
+                "evening greeting because the player adds it. Return JSON only in this exact shape: "
+                '{"message":"two or three short spoken sentences","suggestion":'
+                '{"title":"exact supplied title or module","kind":"watch, play, listen, resume, or open",'
+                '"source":"supplied source"}}.'
+            ),
+            {
+                "profile_id": _profile_id(_settings(redis_obj)),
+                "activity_patterns": activity_patterns,
+                "recent_global_activity": compact_activity,
+                "available_modules": available_modules,
+                "current_tater_picks": [
+                    {
+                        "title": _text(row.get("title")),
+                        "media_type": _text(row.get("media_type")),
+                        "reason": _text(row.get("reason")),
+                    }
+                    for row in picks[:8]
+                ],
+                "music_mixes": music_mixes,
+            },
+        )
+    except Exception as exc:
+        logger.warning("[Tater Tube] Main Menu Message generation failed: %s", exc)
+        result = {}
+
+    message = _text(result.get("message"))[:650] or fallback_message
+    raw_suggestion = result.get("suggestion")
+    allowed_titles = {
+        _text(title).casefold(): _text(title)
+        for title in [
+            *(_text(row.get("title")) for row in compact_activity),
+            *(_text(row.get("title")) for row in picks),
+            *(_text(row.get("name")) for row in music_mixes),
+            *(_text(row.get("name")) for row in available_modules),
+        ]
+        if _text(title)
+    }
+    raw_title = _text(raw_suggestion.get("title")) if isinstance(raw_suggestion, dict) else ""
+    canonical_title = allowed_titles.get(raw_title.casefold())
+    if canonical_title:
+        suggestion = {
+            "title": canonical_title[:240],
+            "kind": _text(raw_suggestion.get("kind"))[:40],
+            "source": _text(raw_suggestion.get("source"))[:80],
+        }
+    else:
+        if raw_title:
+            message = fallback_message
+        suggestion = fallback_suggestion
+    payload = {
+        "generated_at": time.time(),
+        "message": message,
+        "suggestion": suggestion,
+        "activity_patterns": activity_patterns,
+        "available_modules": available_modules,
+    }
+    _save_json(redis_obj, MAIN_MENU_MESSAGE_KEY, payload)
+    return payload
+
+
+def _generate_recommendations_impl(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    client: Any = None,
+) -> Dict[str, Any]:
+    redis_obj = client or globals().get("redis_client")
+    cfg = _settings(redis_obj)
+    if not _paired(cfg):
+        raise ValueError("Pair Tater Tube Core before generating recommendations.")
+    context = _load_json(redis_obj, CONTEXT_KEY, {})
+    if not isinstance(context, dict) or not isinstance(context.get("events"), list):
+        context = _sync_context(redis_obj)
+    server_events = _server_pick_activity(context)
+    global_events = _combined_activity(context, redis_obj)
+
+    candidate_limit = _as_int(cfg.get("candidate_limit"), 200, 20, 500)
+    candidate_data = _api_request(
+        "GET",
+        f"tater/core/candidates?limit={candidate_limit}&profile_id={_profile_id(cfg)}",
+        settings=cfg,
+        redis_obj=redis_obj,
+    )
+    candidates = candidate_data.get("candidates") if isinstance(candidate_data, dict) else []
+    candidates = [row for row in candidates if isinstance(row, dict) and _text(row.get("id"))]
+    if not candidates:
+        raise ValueError("Tater Tube Server has no launchable recommendation candidates.")
+
+    count = _as_int(cfg.get("recommendation_count"), 8, 1, 12)
+    compact_server_events, server_patterns = _compact_activity_events(server_events)
+    compact_candidates = _compact_candidates(candidates)
 
     assistant_name = _assistant_first_name(redis_obj)
     result = _llm_json(
         loop,
         llm_client,
         (
-            f"You are {assistant_name}, a warm personal media curator inside a retro VCR media player. "
-            "Viewing history can span local movies and series, live over-the-air channels, "
-            "public-access video, music, and other player modules. Use all of it as taste context. "
-            "Choose only from the supplied catalog candidates. Base choices on viewing history without "
-            "overstating what the household likes. Prefer a useful mix of sources and media types when "
-            "the candidates support it, avoid recently completed titles, and keep each reason to one "
-            "friendly sentence. The summary is spoken once when the recommendations page opens. Write it "
-            "as a natural two-sentence welcome that mentions a viewing pattern and briefly describes the "
-            "mix you selected without reading every title. Also write boot_summary for a separate message "
-            "spoken once when Tater Tube starts. It should naturally mention one or two meaningful recent "
-            "actions across watching, games, PC Link, modules, or music, then suggest one specific thing to "
-            "watch or play next. Use only supplied activity, candidates, available modules, and music mixes. "
-            "Never mention tracking, data collection, file paths, or credentials. Keep boot_summary under "
-            "65 words and do not include a time-of-day greeting because the player adds it. Return JSON only "
-            "in this exact shape: "
-            '{"summary":"two short spoken sentences","boot_summary":"two or three short spoken sentences",'
-            '"items":[{"candidate_id":"exact id","reason":"one sentence"}]}. '
+            f"You are {assistant_name}, a warm media curator for Tater's Picks. This section belongs only "
+            "to Tater Tube Server: use the supplied server viewing context and choose only from the supplied "
+            "launchable server catalog. Do not use or mention games, PC Link, Music Core, other modules, or "
+            "the separate Main Menu Message. Base choices on the viewing context without overstating the "
+            "household's preferences, avoid recently completed titles, and keep each reason to one friendly "
+            "sentence. Write summary as a natural two-sentence welcome describing the server picks without "
+            "reading every title. Return JSON only in this exact shape: "
+            '{"summary":"two short spoken sentences","items":'
+            '[{"candidate_id":"exact id","reason":"one sentence"}]}. '
             f"Return up to {count} unique items."
         ),
         {
             "profile_id": _profile_id(cfg),
-            "activity_patterns": {
-                "events_by_source": source_counts,
-                "events_by_media_type": media_type_counts,
-                "events_by_action": action_counts,
-            },
-            "recent_activity": compact_events,
-            "available_modules": _available_modules(events),
-            "music_mixes": _music_recommendation_context(redis_obj),
-            "catalog_candidates": compact_candidates,
+            "server_viewing_patterns": server_patterns,
+            "recent_server_viewing": compact_server_events,
+            "server_catalog_candidates": compact_candidates,
         },
     )
     candidate_by_id = {_text(candidate.get("id")): candidate for candidate in candidates}
@@ -702,23 +886,17 @@ def _generate_recommendations_impl(
     briefing = _text(result.get("summary"))[:500]
     if not briefing:
         briefing = (
-            "I've looked across what has been playing lately and put together a fresh mix. "
-            "There should be a little something here for whatever kind of screen time you want next."
+            "I've looked through the Tater Tube Server library and put together a fresh mix. "
+            "There should be something here for your next watch."
         )
-    boot_briefing = _text(result.get("boot_summary"))[:650]
-    if not boot_briefing:
-        recent_title = next(
-            (_text(row.get("title")) for row in compact_events if _text(row.get("title")) != "Tater Tube"),
-            "",
-        )
-        suggested_title = _text(selections[0].get("title")) if selections else ""
-        if recent_title and suggested_title:
-            boot_briefing = (
-                f"You have spent some time with {recent_title} lately. "
-                f"When you are ready, {suggested_title} could be a good next pick."
-            )
-        else:
-            boot_briefing = briefing
+    main_menu = _generate_main_menu_message(
+        loop,
+        llm_client,
+        global_events=global_events,
+        picks=selections,
+        client=redis_obj,
+    )
+    main_menu_message = _text(main_menu.get("message"))[:650]
     expires = _as_int(cfg.get("recommendation_expiry_hours"), 24, 1, 168)
     published = _api_request(
         "POST",
@@ -728,7 +906,7 @@ def _generate_recommendations_impl(
             "profile_id": _profile_id(cfg),
             "assistant_name": assistant_name,
             "summary": briefing,
-            "boot_summary": boot_briefing,
+            "boot_summary": main_menu_message,
             "expires_in_hours": expires,
             "items": selections,
         },
@@ -739,7 +917,8 @@ def _generate_recommendations_impl(
         "generated_at": now,
         "assistant_name": assistant_name,
         "summary": briefing,
-        "boot_summary": boot_briefing,
+        "boot_summary": main_menu_message,
+        "main_menu_message": main_menu,
         "items": selections,
         "server_response": published if isinstance(published, dict) else {},
     }
@@ -750,8 +929,10 @@ def _generate_recommendations_impl(
         {
             "status": "connected",
             "last_recommendation_at": now,
+            "last_main_menu_message_at": _as_float(main_menu.get("generated_at"), now),
             "last_error": "",
             "recommendation_count": len(selections),
+            "generation_schema_version": GENERATION_SCHEMA_VERSION,
         },
     )
     return cache
@@ -804,8 +985,8 @@ def get_core_system_tasks(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             },
             {
                 "id": "recommendation_refresh",
-                "label": "Recommendation Refresh",
-                "description": "Creates and publishes a fresh batch of Tater's Picks from current viewing context.",
+                "label": "Picks & Main Menu Refresh",
+                "description": "Creates server-focused Tater's Picks plus a separate global Main Menu Message.",
                 "interval_seconds": recommendation_interval,
                 "running": _TATER_TUBE_RECOMMEND_LOCK.locked(),
                 "started_at": _TATER_TUBE_RECOMMEND_STARTED_AT,
@@ -949,6 +1130,69 @@ def _recommendation_forms(recommendations: Dict[str, Any]) -> List[Dict[str, Any
     return forms
 
 
+def _main_menu_message_forms(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    text = _text(message.get("message"))
+    suggestion = message.get("suggestion") if isinstance(message.get("suggestion"), dict) else {}
+    title = _text(suggestion.get("title"))
+    kind = _text(suggestion.get("kind"))
+    source = _text(suggestion.get("source"))
+    badges = []
+    if title:
+        badges.append({"label": f"SUGGESTS {title}", "tone": "good"})
+    if kind:
+        badges.append({"label": kind.upper(), "tone": "muted"})
+    if source:
+        badges.append({"label": source.replace("_", " ").upper(), "tone": "muted"})
+    patterns = message.get("activity_patterns") if isinstance(message.get("activity_patterns"), dict) else {}
+    source_counts = (
+        patterns.get("events_by_source")
+        if isinstance(patterns.get("events_by_source"), dict)
+        else {}
+    )
+    source_detail = " · ".join(
+        f"{_text(source_name).replace('_', ' ')}: {_as_int(count, 0, 0, 100000)}"
+        for source_name, count in sorted(
+            source_counts.items(), key=lambda row: (-_as_int(row[1], 0, 0, 100000), _text(row[0]))
+        )
+    )
+    available_modules = (
+        message.get("available_modules")
+        if isinstance(message.get("available_modules"), list)
+        else []
+    )
+    return [
+        {
+            "id": "main_menu:current",
+            "group": "main_menu",
+            "title": "Current Main Menu Message",
+            "subtitle": (
+                f"Generated {_format_time(_as_float(message.get('generated_at')))}"
+                if _as_float(message.get("generated_at"))
+                else "Not generated yet"
+            ),
+            "detail": text
+            or "Generate a fresh message to give Tater cross-module activity context.",
+            "hero_badges": badges,
+            "run_action": "tater_tube_recommend_now",
+            "run_label": "Refresh Message & Picks",
+        },
+        {
+            "id": "main_menu:context",
+            "group": "main_menu",
+            "title": "Global Activity Used",
+            "subtitle": f"{sum(_as_int(value, 0, 0, 100000) for value in source_counts.values())} recent events across {len(source_counts)} sources",
+            "detail": source_detail
+            or "Activity from Tater Tube modules, Game Center, PC Link, and Music Core will appear here.",
+            "hero_badges": [
+                {
+                    "label": f"{len(available_modules)} MODULES AVAILABLE",
+                    "tone": "muted",
+                }
+            ],
+        },
+    ]
+
+
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
     cfg = _settings(client)
@@ -957,6 +1201,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     if isinstance(context, dict):
         context = {**context, "events": _combined_activity(context, client)}
     recommendations = _load_json(client, RECOMMENDATIONS_KEY, {})
+    main_menu_message = _load_json(client, MAIN_MENU_MESSAGE_KEY, {})
+    if not isinstance(main_menu_message, dict):
+        main_menu_message = {}
     events = context.get("events") if isinstance(context, dict) and isinstance(context.get("events"), list) else []
     picks = (
         recommendations.get("items")
@@ -979,6 +1226,16 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             ],
             "run_action": "tater_tube_sync_now",
             "run_label": "Sync Now",
+        },
+        {
+            "id": "overview:main-menu",
+            "group": "overview",
+            "title": "Main Menu Message",
+            "subtitle": "Global Tater suggestion across every module",
+            "detail": _text(main_menu_message.get("message"))
+            or "No global Main Menu Message has been generated yet.",
+            "run_action": "tater_tube_recommend_now",
+            "run_label": "Refresh Message & Picks",
         },
         {
             "id": "overview:recommend",
@@ -1059,14 +1316,23 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "run_confirm": "Disconnect Tater Tube Core from the server?",
         },
     ]
+    item_forms.extend(
+        _main_menu_message_forms(
+            main_menu_message if isinstance(main_menu_message, dict) else {}
+        )
+    )
     item_forms.extend(_history_forms(context if isinstance(context, dict) else {}))
     item_forms.extend(_recommendation_forms(recommendations if isinstance(recommendations, dict) else {}))
     return {
-        "summary": "Cross-module activity, boot briefings, and AI recommendations shared with Tater Tube Server.",
+        "summary": "Global Main Menu guidance plus server-focused Tater's Picks and narration.",
         "stats": [
             {"label": "Status", "value": "Connected" if connected else "Not Paired"},
             {"label": "Activity Events", "value": len(events)},
             {"label": "Current Picks", "value": len(picks)},
+            {
+                "label": "Main Menu Message",
+                "value": "Ready" if _text(main_menu_message.get("message")) else "Not Generated",
+            },
             {"label": "Last Sync", "value": _format_time(_as_float(runtime.get("last_sync_at")))},
             {"label": "Last Picks", "value": _format_time(_as_float(runtime.get("last_recommendation_at")))},
         ],
@@ -1078,6 +1344,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "default_tab": "overview",
             "manager_tabs": [
                 {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
+                {"key": "main_menu", "label": "Main Menu Message", "source": "items", "item_group": "main_menu"},
                 {"key": "history", "label": "Activity Context", "source": "items", "item_group": "history"},
                 {"key": "picks", "label": "Tater's Picks", "source": "items", "item_group": "picks"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
@@ -1175,7 +1442,7 @@ def handle_htmlui_tab_action(
     if action_name == "tater_tube_disconnect":
         if client is not None:
             client.hdel(SETTINGS_KEY, "token", "core_id")
-            client.delete(CONTEXT_KEY, RECOMMENDATIONS_KEY)
+            client.delete(CONTEXT_KEY, RECOMMENDATIONS_KEY, MAIN_MENU_MESSAGE_KEY)
             _save_hash(client, RUNTIME_KEY, {"status": "disconnected", "last_error": ""})
         return {"ok": True, "message": "Tater Tube Core disconnected locally."}
 
@@ -1205,7 +1472,13 @@ def handle_htmlui_tab_action(
             recommendations = _generate_recommendations(loop, _get_primary_llm_client_from_env(), client)
         finally:
             loop.close()
-        return {"ok": True, "message": f"Published {len(recommendations.get('items') or [])} fresh picks."}
+        return {
+            "ok": True,
+            "message": (
+                f"Published {len(recommendations.get('items') or [])} fresh picks "
+                "and a new Main Menu Message."
+            ),
+        }
 
     raise ValueError(f"Unknown action: {action_name}")
 
@@ -1234,6 +1507,10 @@ def run(stop_event: Optional[object] = None) -> None:
             recommendation_interval = (
                 _as_int(cfg.get("recommendation_interval_hours"), 6, 1, 168) * 3600
             )
+            generation_schema_outdated = (
+                _as_int(runtime.get("generation_schema_version"), 0, 0, 100000)
+                != GENERATION_SCHEMA_VERSION
+            )
             try:
                 try:
                     _process_tts_request(loop)
@@ -1249,14 +1526,17 @@ def run(stop_event: Optional[object] = None) -> None:
                 if now - _as_float(runtime.get("last_sync_at")) >= poll_interval:
                     _sync_context()
                     runtime = _runtime()
-                if now - _as_float(runtime.get("last_recommendation_at")) >= recommendation_interval:
+                if generation_schema_outdated or (
+                    now - _as_float(runtime.get("last_recommendation_at"))
+                    >= recommendation_interval
+                ):
                     if llm_client is None:
                         llm_client = _get_primary_llm_client_from_env()
                     _generate_recommendations(loop, llm_client)
             except PermissionError as exc:
                 logger.warning("[Tater Tube] Server authorization was revoked: %s", exc)
                 redis_client.hdel(SETTINGS_KEY, "token", "core_id")
-                redis_client.delete(CONTEXT_KEY, RECOMMENDATIONS_KEY)
+                redis_client.delete(CONTEXT_KEY, RECOMMENDATIONS_KEY, MAIN_MENU_MESSAGE_KEY)
                 _save_hash(
                     redis_client,
                     RUNTIME_KEY,
