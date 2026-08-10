@@ -169,6 +169,27 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(tasks["continuous_radio_refill"]["schedule_label"], "Event driven")
         self.assertEqual(tasks["continuous_radio_refill"]["next_run_label"], "Near queue end")
 
+    def test_listening_history_publishes_privacy_safe_tater_tube_activity(self):
+        track = {
+            **self.tracks[0],
+            "stream_url": "http://tube.local/private?token=secret",
+            "path": "/private/music/song.flac",
+        }
+        self.core._record_listening_history(
+            track,
+            ["voice_core:native:kitchen"],
+            person_id="person-secret",
+            client=self.redis,
+        )
+        rows = self.core.get_tater_tube_activity_events(redis_client=self.redis)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Three Little Birds")
+        encoded = json.dumps(rows[0])
+        self.assertNotIn("token=secret", encoded)
+        self.assertNotIn("/private/music", encoded)
+        self.assertNotIn("person-secret", encoded)
+        self.assertNotIn("kitchen", encoded)
+
     def test_core_system_task_runner_dispatches_manual_music_jobs(self):
         with patch.object(
             self.core,

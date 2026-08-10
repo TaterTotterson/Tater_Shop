@@ -106,7 +106,7 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "3.0.2",
+      "version": "3.1.0",
       "min_tater_version": "99.5",
       "description": "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
@@ -124,7 +124,7 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "d348f4247ecc84d1b0d2a62f375671af3c6980fc317333358056d89161580892"
+      "sha256": "d309d99fb97b47eaa3796d1249c65f9a7333e27e6093747113b0208423b58923"
     },
     {
       "id": "personal",
@@ -158,21 +158,23 @@
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.2.3",
+      "version": "1.3.0",
       "min_tater_version": "59",
-      "description": "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, publish AI-selected movie and series recommendations, and voice Tater's Picks with the user's TTS settings.",
+      "description": "Connect Tater to Tater Tube Server, combine viewing, gaming, module, and music activity, publish AI-selected recommendations and one-time boot briefings, and voice them with the user's TTS settings.",
       "settings_category": "Tater Tube Core Settings",
       "required_settings_count": 9,
       "autostart_key": "tater_tube_core_running",
       "tags": [
         "tater-tube",
         "media",
+        "games",
+        "music",
         "recommendations",
         "context",
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "5159b17771c7e9fadbcd7853fab553619b64df3fe022c24035cef3582cbafad7"
+      "sha256": "f2887dfd3067c080aba92bb57648a008a73d70b8b297a93f09a23606b58db034"
     }
   ]
 }

@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.0.2"
+__version__ = "3.1.0"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -148,6 +148,8 @@ PLAYER_KEY = "music_core_player_v1"
 HISTORY_KEY = "music_core_listening_history_v1"
 RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 PROMPT_PROFILE_KEY = "music_core_prompt_profile_v1"
+TATER_TUBE_ACTIVITY_KEY = "tater_tube_activity_feed_v1"
+MAX_TATER_TUBE_ACTIVITY_EVENTS = 200
 REQUEST_TIMEOUT_SECONDS = 30
 ARTWORK_CONNECT_TIMEOUT_SECONDS = 2.0
 ARTWORK_READ_TIMEOUT_SECONDS = 5.0
@@ -1466,6 +1468,53 @@ def _listening_history(client: Any = None) -> List[Dict[str, Any]]:
     return [dict(row) for row in payload if isinstance(row, dict)]
 
 
+def get_tater_tube_activity_events(
+    *, redis_client=None, limit: int = 100, **_kwargs
+) -> List[Dict[str, Any]]:
+    """Expose privacy-safe listening activity to Tater Tube Core."""
+    store = redis_client or globals().get("redis_client")
+    payload = _load_json(store, TATER_TUBE_ACTIVITY_KEY, [])
+    rows = [dict(row) for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+    return rows[-_as_int(limit, 100, 1, MAX_TATER_TUBE_ACTIVITY_EVENTS):]
+
+
+def _publish_tater_tube_activity(track: Dict[str, Any], *, client: Any = None) -> None:
+    store = client or globals().get("redis_client")
+    title = _text(track.get("title"))
+    if store is None or not title:
+        return
+    now = time.time()
+    rows = get_tater_tube_activity_events(
+        redis_client=store, limit=MAX_TATER_TUBE_ACTIVITY_EVENTS
+    )
+    track_id = _text(track.get("id"))
+    if rows:
+        latest = rows[-1]
+        if (
+            _text(latest.get("media_id")) == track_id
+            and now - _as_float(latest.get("occurred_at")) < 30.0
+        ):
+            return
+    rows.append(
+        {
+            "source": "music_core",
+            "media_id": track_id or title,
+            "media_type": "music",
+            "title": title,
+            "state": "started",
+            "occurred_at": now,
+            "metadata": {
+                "action": "played",
+                "artist": _text(track.get("artist") or track.get("album_artist")),
+                "album": _text(track.get("album")),
+                "genres": [_text(value) for value in track.get("genres") or [] if _text(value)],
+                "provider": _provider_id(track.get("provider")),
+            },
+        }
+    )
+    _save_json(store, TATER_TUBE_ACTIVITY_KEY, rows[-MAX_TATER_TUBE_ACTIVITY_EVENTS:])
+
+
 def _record_listening_history(
     track: Dict[str, Any],
     targets: Any = None,
@@ -1506,6 +1555,7 @@ def _record_listening_history(
         }
     )
     _save_json(store, HISTORY_KEY, history[-MAX_HISTORY_EVENTS:])
+    _publish_tater_tube_activity(track, client=store)
 
 
 def _recommendations(client: Any = None) -> Dict[str, Any]:

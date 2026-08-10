@@ -140,10 +140,10 @@ class CoreTokenPolicyTests(unittest.TestCase):
             "awareness": "3.4.13",
             "guardian": "1.3.12",
             "memory": "1.0.29",
-            "music": "3.0.2",
+            "music": "3.1.0",
             "personal": "1.0.56",
             "rss": "1.0.12",
-            "tater_tube": "1.2.3",
+            "tater_tube": "1.3.0",
         }
         manifest = json.loads((ROOT / "core_manifest.json").read_text(encoding="utf-8"))
         entries = {entry["id"]: entry for entry in manifest["cores"]}

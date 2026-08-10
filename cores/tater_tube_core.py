@@ -22,14 +22,14 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.2.3"
+__version__ = "1.3.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
-    "Connect Tater to Tater Tube Server, inject recent viewing context into prompts, "
-    "publish AI-selected movie and series recommendations, and voice Tater's Picks "
-    "with the user's TTS settings."
+    "Connect Tater to Tater Tube Server, combine viewing, gaming, module, and music "
+    "activity, publish AI-selected recommendations and one-time boot briefings, and "
+    "voice them with the user's TTS settings."
 )
-TAGS = ["tater-tube", "media", "recommendations", "context", "tts"]
+TAGS = ["tater-tube", "media", "games", "music", "recommendations", "context", "tts"]
 
 logger = logging.getLogger("tater_tube_core")
 logger.setLevel(logging.INFO)
@@ -92,10 +92,10 @@ CORE_SETTINGS = {
             "description": "Maximum viewing-context text added to Hydra prompts.",
         },
         "tts_enabled": {
-            "label": "Tater's Picks Welcome",
+            "label": "Tater Tube Voice",
             "type": "checkbox",
             "default": True,
-            "description": "Play one personalized spoken briefing when Tater's Picks opens.",
+            "description": "Voice Tater's Picks and the one-time Tater Tube boot greeting.",
         },
     },
     "tags": TAGS,
@@ -111,6 +111,9 @@ SETTINGS_KEY = "tater_tube_core_settings"
 RUNTIME_KEY = "tater_tube_core_runtime"
 CONTEXT_KEY = "tater_tube_core_context"
 RECOMMENDATIONS_KEY = "tater_tube_core_recommendations"
+SHARED_ACTIVITY_KEY = "tater_tube_activity_feed_v1"
+LEGACY_MUSIC_HISTORY_KEY = "music_core_listening_history_v1"
+MUSIC_RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 DEFAULT_PROFILE_ID = "household"
 REQUEST_TIMEOUT_SECONDS = 25
 TTS_MAX_TEXT_CHARS = 800
@@ -211,6 +214,114 @@ def _save_json(client: Any, key: str, value: Any) -> None:
     if client is None:
         return
     client.set(key, json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _event_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    raw = event.get("metadata_json")
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(_text(raw))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _event_timestamp(event: Dict[str, Any]) -> float:
+    raw = event.get("occurred_at") or event.get("played_at")
+    try:
+        return float(raw)
+    except Exception:
+        pass
+    text = _text(raw)
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _shared_activity(client: Any = None) -> List[Dict[str, Any]]:
+    redis_obj = client or globals().get("redis_client")
+    rows = _load_json(redis_obj, SHARED_ACTIVITY_KEY, [])
+    if isinstance(rows, list) and rows:
+        return [dict(row) for row in rows if isinstance(row, dict)]
+
+    # Music Core versions before 3.1 already retained a safe listening history.
+    # Reading it here keeps boot briefings useful during a staggered core update.
+    legacy = _load_json(redis_obj, LEGACY_MUSIC_HISTORY_KEY, [])
+    result: List[Dict[str, Any]] = []
+    for row in legacy if isinstance(legacy, list) else []:
+        if not isinstance(row, dict) or not _text(row.get("title")):
+            continue
+        result.append(
+            {
+                "source": "music_core",
+                "media_id": _text(row.get("track_id")) or _text(row.get("title")),
+                "media_type": "music",
+                "title": _text(row.get("title")),
+                "state": "started",
+                "occurred_at": _as_float(row.get("played_at")),
+                "metadata": {
+                    "action": "played",
+                    "artist": _text(row.get("artist") or row.get("album_artist")),
+                    "album": _text(row.get("album")),
+                    "genres": list(row.get("genres") or []),
+                },
+            }
+        )
+    return result
+
+
+def _combined_activity(context: Dict[str, Any], client: Any = None) -> List[Dict[str, Any]]:
+    rows = [
+        dict(row)
+        for row in context.get("events") or []
+        if isinstance(row, dict)
+    ]
+    rows.extend(_shared_activity(client))
+    rows.sort(key=_event_timestamp, reverse=True)
+    return rows[:100]
+
+
+def _available_modules(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for event in events:
+        if _text(event.get("media_type")) != "session":
+            continue
+        modules = _event_metadata(event).get("modules")
+        if isinstance(modules, list):
+            return [
+                {
+                    "id": _text(row.get("id")),
+                    "name": _text(row.get("name")),
+                    "configured": bool(row.get("configured")),
+                }
+                for row in modules
+                if isinstance(row, dict) and _text(row.get("name"))
+            ][:20]
+    return []
+
+
+def _music_recommendation_context(client: Any = None) -> List[Dict[str, Any]]:
+    payload = _load_json(client or globals().get("redis_client"), MUSIC_RECOMMENDATIONS_KEY, {})
+    playlists = payload.get("playlists") if isinstance(payload, dict) else []
+    result = []
+    for row in playlists if isinstance(playlists, list) else []:
+        if not isinstance(row, dict) or not _text(row.get("name")):
+            continue
+        result.append(
+            {
+                "name": _text(row.get("name")),
+                "description": _text(row.get("description"))[:240],
+            }
+        )
+        if len(result) >= 4:
+            break
+    return result
 
 
 def _normalize_server_url(value: Any) -> str:
@@ -462,9 +573,9 @@ def _generate_recommendations_impl(
     context = _load_json(redis_obj, CONTEXT_KEY, {})
     if not isinstance(context, dict) or not isinstance(context.get("events"), list):
         context = _sync_context(redis_obj)
-    events = context.get("events") if isinstance(context.get("events"), list) else []
+    events = _combined_activity(context, redis_obj)
     if not events:
-        raise ValueError("Tater needs at least one viewing event before making picks.")
+        raise ValueError("Tater needs at least one activity event before making picks.")
 
     candidate_limit = _as_int(cfg.get("candidate_limit"), 200, 20, 500)
     candidate_data = _api_request(
@@ -482,13 +593,17 @@ def _generate_recommendations_impl(
     compact_events = []
     source_counts: Dict[str, int] = {}
     media_type_counts: Dict[str, int] = {}
-    for event in events[:40]:
+    action_counts: Dict[str, int] = {}
+    for event in events[:60]:
         if not isinstance(event, dict):
             continue
         source = _text(event.get("source")) or "unknown"
         media_type = _text(event.get("media_type")) or "video"
+        metadata = _event_metadata(event)
+        action = _text(metadata.get("action")) or _text(event.get("state")) or "used"
         source_counts[source] = source_counts.get(source, 0) + 1
         media_type_counts[media_type] = media_type_counts.get(media_type, 0) + 1
+        action_counts[action] = action_counts.get(action, 0) + 1
         compact_events.append(
             {
                 "title": _text(event.get("title")),
@@ -496,6 +611,10 @@ def _generate_recommendations_impl(
                 "media_type": media_type,
                 "source": source,
                 "state": _text(event.get("state")),
+                "action": action,
+                "artist": _text(metadata.get("artist")),
+                "album": _text(metadata.get("album")),
+                "system": _text(metadata.get("system_name") or metadata.get("system_id")),
                 "progress": (
                     round(
                         100
@@ -533,18 +652,27 @@ def _generate_recommendations_impl(
             "the candidates support it, avoid recently completed titles, and keep each reason to one "
             "friendly sentence. The summary is spoken once when the recommendations page opens. Write it "
             "as a natural two-sentence welcome that mentions a viewing pattern and briefly describes the "
-            "mix you selected without reading every title. Do not include a time-of-day greeting because "
-            "the player adds the correct greeting. Return JSON only in this exact shape: "
-            '{"summary":"two short spoken sentences","items":[{"candidate_id":"exact id","reason":"one sentence"}]}. '
+            "mix you selected without reading every title. Also write boot_summary for a separate message "
+            "spoken once when Tater Tube starts. It should naturally mention one or two meaningful recent "
+            "actions across watching, games, PC Link, modules, or music, then suggest one specific thing to "
+            "watch or play next. Use only supplied activity, candidates, available modules, and music mixes. "
+            "Never mention tracking, data collection, file paths, or credentials. Keep boot_summary under "
+            "65 words and do not include a time-of-day greeting because the player adds it. Return JSON only "
+            "in this exact shape: "
+            '{"summary":"two short spoken sentences","boot_summary":"two or three short spoken sentences",'
+            '"items":[{"candidate_id":"exact id","reason":"one sentence"}]}. '
             f"Return up to {count} unique items."
         ),
         {
             "profile_id": _profile_id(cfg),
-            "viewing_patterns": {
+            "activity_patterns": {
                 "events_by_source": source_counts,
                 "events_by_media_type": media_type_counts,
+                "events_by_action": action_counts,
             },
-            "recent_viewing": compact_events,
+            "recent_activity": compact_events,
+            "available_modules": _available_modules(events),
+            "music_mixes": _music_recommendation_context(redis_obj),
             "catalog_candidates": compact_candidates,
         },
     )
@@ -577,6 +705,20 @@ def _generate_recommendations_impl(
             "I've looked across what has been playing lately and put together a fresh mix. "
             "There should be a little something here for whatever kind of screen time you want next."
         )
+    boot_briefing = _text(result.get("boot_summary"))[:650]
+    if not boot_briefing:
+        recent_title = next(
+            (_text(row.get("title")) for row in compact_events if _text(row.get("title")) != "Tater Tube"),
+            "",
+        )
+        suggested_title = _text(selections[0].get("title")) if selections else ""
+        if recent_title and suggested_title:
+            boot_briefing = (
+                f"You have spent some time with {recent_title} lately. "
+                f"When you are ready, {suggested_title} could be a good next pick."
+            )
+        else:
+            boot_briefing = briefing
     expires = _as_int(cfg.get("recommendation_expiry_hours"), 24, 1, 168)
     published = _api_request(
         "POST",
@@ -586,6 +728,7 @@ def _generate_recommendations_impl(
             "profile_id": _profile_id(cfg),
             "assistant_name": assistant_name,
             "summary": briefing,
+            "boot_summary": boot_briefing,
             "expires_in_hours": expires,
             "items": selections,
         },
@@ -596,6 +739,7 @@ def _generate_recommendations_impl(
         "generated_at": now,
         "assistant_name": assistant_name,
         "summary": briefing,
+        "boot_summary": boot_briefing,
         "items": selections,
         "server_response": published if isinstance(published, dict) else {},
     }
@@ -699,12 +843,13 @@ def _prompt_context(client: Any = None) -> str:
     if not _as_bool(cfg.get("prompt_context_enabled"), True):
         return ""
     context = _load_json(redis_obj, CONTEXT_KEY, {})
-    events = context.get("events") if isinstance(context, dict) else []
+    events = _combined_activity(context if isinstance(context, dict) else {}, redis_obj)
     if not isinstance(events, list) or not events:
         return ""
     lines = [
-        "Private Tater Tube viewing context for the household. Use only when relevant; "
-        "do not claim a preference from one watch and do not mention background tracking."
+        "Private Tater Tube activity context for the household. It can include media, games, "
+        "PC apps, modules, and music. Use only when relevant; do not claim a preference from "
+        "one action and do not mention background tracking."
     ]
     seen = set()
     for event in events:
@@ -722,6 +867,8 @@ def _prompt_context(client: Any = None) -> str:
         series = _text(event.get("series_title"))
         media_type = _text(event.get("media_type")) or "video"
         source = _text(event.get("source")) or "unknown source"
+        metadata = _event_metadata(event)
+        action = _text(metadata.get("action")) or state
         progress = ""
         duration = _as_float(event.get("duration_ms"))
         if duration > 0:
@@ -730,7 +877,7 @@ def _prompt_context(client: Any = None) -> str:
         label = f"{title}"
         if series and series.lower() != title.lower():
             label += f" ({series})"
-        lines.append(f"- {label} — {media_type}, {state}{progress}, via {source}")
+        lines.append(f"- {label} — {media_type}, {action}{progress}, via {source}")
         if len(lines) >= 13:
             break
     maximum = _as_int(cfg.get("prompt_context_max_chars"), 2400, 512, 12000)
@@ -778,7 +925,7 @@ def _history_forms(context: Dict[str, Any]) -> List[Dict[str, Any]]:
                     ]
                     if part
                 ),
-                "detail": _text(event.get("occurred_at")),
+                "detail": _text(event.get("occurred_at") or event.get("played_at")),
             }
         )
     return forms
@@ -807,6 +954,8 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     cfg = _settings(client)
     runtime = _runtime(client)
     context = _load_json(client, CONTEXT_KEY, {})
+    if isinstance(context, dict):
+        context = {**context, "events": _combined_activity(context, client)}
     recommendations = _load_json(client, RECOMMENDATIONS_KEY, {})
     events = context.get("events") if isinstance(context, dict) and isinstance(context.get("events"), list) else []
     picks = (
@@ -824,9 +973,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "detail": _text(cfg.get("server_url")) or "Use the Connect tab with a server-generated PIN.",
             "hero_badges": [
                 {"label": "CONNECTED" if connected else "PAIRING NEEDED", "tone": "good" if connected else "warn"},
-                {"label": f"{len(events)} watch events", "tone": "muted"},
+                {"label": f"{len(events)} activity events", "tone": "muted"},
                 {"label": f"{len(picks)} current picks", "tone": "muted"},
-                {"label": "PICKS VOICE ON" if _as_bool(cfg.get("tts_enabled"), True) else "PICKS VOICE OFF", "tone": "good" if _as_bool(cfg.get("tts_enabled"), True) else "muted"},
+                {"label": "PLAYER VOICE ON" if _as_bool(cfg.get("tts_enabled"), True) else "PLAYER VOICE OFF", "tone": "good" if _as_bool(cfg.get("tts_enabled"), True) else "muted"},
             ],
             "run_action": "tater_tube_sync_now",
             "run_label": "Sync Now",
@@ -891,7 +1040,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 },
                 {
                     "key": "tts_enabled",
-                    "label": "Tater's Picks Welcome",
+                    "label": "Tater Tube Voice",
                     "type": "checkbox",
                     "value": _as_bool(cfg.get("tts_enabled"), True),
                 },
@@ -913,10 +1062,10 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     item_forms.extend(_history_forms(context if isinstance(context, dict) else {}))
     item_forms.extend(_recommendation_forms(recommendations if isinstance(recommendations, dict) else {}))
     return {
-        "summary": "Viewing context and AI recommendations shared with Tater Tube Server.",
+        "summary": "Cross-module activity, boot briefings, and AI recommendations shared with Tater Tube Server.",
         "stats": [
             {"label": "Status", "value": "Connected" if connected else "Not Paired"},
-            {"label": "Watch Events", "value": len(events)},
+            {"label": "Activity Events", "value": len(events)},
             {"label": "Current Picks", "value": len(picks)},
             {"label": "Last Sync", "value": _format_time(_as_float(runtime.get("last_sync_at")))},
             {"label": "Last Picks", "value": _format_time(_as_float(runtime.get("last_recommendation_at")))},
@@ -929,7 +1078,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "default_tab": "overview",
             "manager_tabs": [
                 {"key": "overview", "label": "Overview", "source": "items", "item_group": "overview"},
-                {"key": "history", "label": "Viewing Context", "source": "items", "item_group": "history"},
+                {"key": "history", "label": "Activity Context", "source": "items", "item_group": "history"},
                 {"key": "picks", "label": "Tater's Picks", "source": "items", "item_group": "picks"},
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
                 {"key": "connect", "label": "Connect", "source": "add_form"},
