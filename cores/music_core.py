@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -618,23 +618,9 @@ def _is_native_target(value: Any) -> bool:
     return target.startswith(("voice_core:native:", "voice_core:stereo:", "native:", "stereo:"))
 
 
-def _uses_mixed_airplay_native_sync(
-    targets: Any,
-    player_settings: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> bool:
-    target_ids = _list(targets)
-    if not any(_is_native_target(target) for target in target_ids):
-        return False
-    settings = player_settings if isinstance(player_settings, dict) else {}
-    for target in target_ids:
-        normalized = target.casefold()
-        if normalized.startswith("airplay:"):
-            return True
-        if normalized.startswith(("sonos:", "integration:sonos:")):
-            values = settings.get(target) if isinstance(settings.get(target), dict) else {}
-            if _player_transport_mode(values.get("transport_mode")) != "native":
-                return True
-    return False
+def _uses_audio_sync_transcode(targets: Any) -> bool:
+    """Use one normalized PCM source for every Music Core playback target."""
+    return bool(_list(targets))
 
 
 def _mixed_sync_from_player_settings(
@@ -3084,10 +3070,7 @@ def _play_track(
     selected_player_settings = (
         player_settings if isinstance(player_settings, dict) else {}
     )
-    audio_sync_transcode = _uses_mixed_airplay_native_sync(
-        target_ids,
-        selected_player_settings,
-    )
+    audio_sync_transcode = _uses_audio_sync_transcode(target_ids)
     source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
     if not source_url:
         raise RuntimeError(f"No stream is available for {_track_label(track)}.")

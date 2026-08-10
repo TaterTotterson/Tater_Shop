@@ -1633,7 +1633,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(queued["continuation_pending"])
         self.core._continuation_thread = None
 
-    def test_play_track_forwards_mixed_targets_to_tater_router(self):
+    def test_play_track_forwards_mixed_targets_with_audio_sync_transcode(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1677,7 +1677,14 @@ class MusicCoreTests(unittest.TestCase):
             playback.play_media_url_targets.call_args.kwargs["target_sync_offset_ms"],
             {targets[0]: -20, targets[1]: 80},
         )
-        self.assertFalse(result["audio_sync_transcode_used"])
+        source_url = playback.play_media_url_targets.call_args.args[1]
+        self.assertIn("transcode=1", source_url)
+        self.assertIn("profile=audio_sync", source_url)
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["media_type"],
+            "audio/wav",
+        )
+        self.assertTrue(result["audio_sync_transcode_used"])
 
     def test_play_track_uses_audio_sync_transcode_for_native_and_airplay(self):
         playback = types.ModuleType("media_playback")
@@ -1713,7 +1720,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(result["audio_sync_transcode_used"])
         self.assertEqual(result["audio_sync_transcode_profile"], "audio_sync")
 
-    def test_play_track_keeps_direct_stream_for_native_sonos_transport(self):
+    def test_play_track_uses_audio_sync_for_native_sonos_transport(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1739,12 +1746,36 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertNotIn("profile=audio_sync", source_url)
+        self.assertIn("transcode=1", source_url)
+        self.assertIn("profile=audio_sync", source_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/flac",
+            "audio/wav",
         )
-        self.assertFalse(result["audio_sync_transcode_used"])
+        self.assertTrue(result["audio_sync_transcode_used"])
+
+    def test_play_track_uses_audio_sync_for_native_stereo_pair(self):
+        playback = types.ModuleType("media_playback")
+        playback.play_media_url_targets = Mock(
+            return_value={"ok": True, "sent_count": 1}
+        )
+        targets = ["voice_core:stereo:office"]
+        with patch.dict(sys.modules, {"media_playback": playback}):
+            result = self.core._play_track(
+                self.tracks[0],
+                targets,
+                volume_percent=55,
+                client=self.redis,
+            )
+
+        source_url = playback.play_media_url_targets.call_args.args[1]
+        self.assertIn("transcode=1", source_url)
+        self.assertIn("profile=audio_sync", source_url)
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["media_type"],
+            "audio/wav",
+        )
+        self.assertTrue(result["audio_sync_transcode_used"])
 
     def test_hydra_exposes_play_search_control_status_and_browse(self):
         self.assertTrue(self.core.CORE_SETTINGS["hydra_tools_require_running"])
