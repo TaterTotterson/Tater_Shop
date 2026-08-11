@@ -40,7 +40,7 @@ from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.13"
+__version__ = "3.4.14"
 
 load_dotenv()
 
@@ -230,8 +230,39 @@ _UNIFI_SENSOR_LAST_EVENT: Dict[str, Tuple[str, float, str]] = {}
 _UNIFI_CAMERA_EVENT_LOCK = threading.Lock()
 _UNIFI_CAMERA_LAST_EVENT: Dict[str, Tuple[float, str]] = {}
 _EVENTS_QUERY_MAX_EVENTS_PER_SOURCE = 1000
-_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM = 320
-_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 180
+_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM = 120
+_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER = 40
+_EVENTS_QUERY_INPUT_TOKEN_BUDGET = 12_000
+_EVENTS_QUERY_RETRY_TOKEN_BUDGET = 6_000
+_EVENTS_QUERY_CHARS_PER_TOKEN_ESTIMATE = 3
+_EVENTS_QUERY_MAX_TITLE_CHARS = 160
+_EVENTS_QUERY_MAX_MESSAGE_CHARS = 360
+_EVENTS_QUERY_MAX_DATA_TEXT_CHARS = 160
+_EVENTS_QUERY_MAX_ROLLUP_SAMPLES = 6
+_EVENTS_QUERY_IMMEDIATE_WINDOW_MINUTES = 10
+_EVENTS_QUERY_IMMEDIATE_RE = re.compile(
+    r"\b(?:right\s+now|just\s+now|currently|at\s+the\s+moment|at\s+present)\b",
+    re.IGNORECASE,
+)
+_EVENTS_QUERY_SAFE_DATA_FIELDS = {
+    "area",
+    "camera_entity",
+    "confidence",
+    "detected_object",
+    "detected_objects",
+    "event_type",
+    "new_state",
+    "object_type",
+    "object_types",
+    "old_state",
+    "provider",
+    "reason",
+    "sensor_type",
+    "smart_detect_type",
+    "smart_detect_types",
+    "state",
+    "trigger_entity",
+}
 _INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
 _INTEGRATION_RUNTIME_EVENT_SEQ_KEY = "tater:integration_runtime:event_seq"
 _INTEGRATION_RUNTIME_STATUS_KEY = "tater:integration_runtime:status"
@@ -2561,22 +2592,206 @@ def _events_query_event_id(event: Dict[str, Any]) -> str:
     return f"ev_{digest[:16]}"
 
 
+def _events_query_compact_data(data_payload: Dict[str, Any]) -> Dict[str, Any]:
+    compact: Dict[str, Any] = {}
+    for key in sorted(_EVENTS_QUERY_SAFE_DATA_FIELDS):
+        if key not in data_payload:
+            continue
+        value = data_payload.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, str):
+            text = _compact(value, limit=_EVENTS_QUERY_MAX_DATA_TEXT_CHARS)
+            if text:
+                compact[key] = text
+            continue
+        if isinstance(value, (bool, int, float)):
+            compact[key] = value
+            continue
+        if isinstance(value, (list, tuple, set)):
+            items: List[Any] = []
+            for item in value:
+                if isinstance(item, str):
+                    text = _compact(item, limit=_EVENTS_QUERY_MAX_DATA_TEXT_CHARS)
+                    if text:
+                        items.append(text)
+                elif isinstance(item, (bool, int, float)):
+                    items.append(item)
+                if len(items) >= 8:
+                    break
+            if items:
+                compact[key] = items
+    return compact
+
+
 def _events_query_compact_event_for_llm(event: Dict[str, Any]) -> Dict[str, Any]:
     source = _text(event.get("source"))
     data_payload = event.get("data") if isinstance(event.get("data"), dict) else {}
     area = _events_query_source_to_area(source) or _text(data_payload.get("area"))
-    return {
+    compact: Dict[str, Any] = {
         "event_id": _events_query_event_id(event),
-        "source": source,
-        "area": area,
+        "source": _compact(source, limit=120),
+        "area": _compact(area, limit=120),
         "ha_time": _text(event.get("ha_time")),
-        "title": _text(event.get("title")),
-        "message": _text(event.get("message")),
-        "type": _text(event.get("type")),
-        "entity_id": _text(event.get("entity_id")),
-        "level": _text(event.get("level")),
-        "data": data_payload,
+        "title": _compact(event.get("title"), limit=_EVENTS_QUERY_MAX_TITLE_CHARS),
+        "message": _compact(event.get("message"), limit=_EVENTS_QUERY_MAX_MESSAGE_CHARS),
+        "type": _compact(event.get("type"), limit=120),
+        "entity_id": _compact(event.get("entity_id"), limit=180),
+        "level": _compact(event.get("level"), limit=40),
     }
+    compact_data = _events_query_compact_data(data_payload)
+    if compact_data:
+        compact["data"] = compact_data
+    return compact
+
+
+def _events_query_estimate_tokens(value: Any) -> int:
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        serialized = _text(value)
+    chars_per_token = max(1, int(_EVENTS_QUERY_CHARS_PER_TOKEN_ESTIMATE))
+    return max(1, (len(serialized) + chars_per_token - 1) // chars_per_token)
+
+
+def _events_query_budget_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    token_budget: int = _EVENTS_QUERY_INPUT_TOKEN_BUDGET,
+    max_rows: int = _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    if not rows:
+        return [], 0, 0
+    budget = max(256, int(token_budget))
+    limit = max(1, int(max_rows))
+    selected_reversed: List[Dict[str, Any]] = []
+    tokens_used = 0
+    for row in reversed(rows):
+        if len(selected_reversed) >= limit:
+            break
+        row_tokens = _events_query_estimate_tokens(row)
+        if selected_reversed and tokens_used + row_tokens > budget:
+            break
+        selected_reversed.append(row)
+        tokens_used += row_tokens
+        if tokens_used >= budget:
+            break
+    selected = list(reversed(selected_reversed))
+    return selected, max(0, len(rows) - len(selected)), tokens_used
+
+
+def _events_query_rollup_events(candidate_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not candidate_events:
+        return []
+    dated: List[datetime] = []
+    for item in candidate_events:
+        if not isinstance(item, dict):
+            continue
+        event_dt = _events_query_event_dt(item)
+        if event_dt is not None:
+            dated.append(event_dt)
+    span_seconds = 0.0
+    if dated:
+        span_seconds = max(0.0, (max(dated) - min(dated)).total_seconds())
+    if span_seconds <= 2 * 86400:
+        bucket_seconds = 3600
+    elif span_seconds <= 14 * 86400:
+        bucket_seconds = 6 * 3600
+    else:
+        bucket_seconds = 86400
+
+    buckets: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    for event in candidate_events:
+        if not isinstance(event, dict):
+            continue
+        event_dt = _events_query_event_dt(event)
+        if event_dt is not None:
+            bucket_epoch = int(event_dt.timestamp()) // bucket_seconds * bucket_seconds
+            bucket_token = datetime.fromtimestamp(bucket_epoch).strftime("%Y-%m-%dT%H:%M:%S")
+        else:
+            bucket_token = _text(event.get("ha_time"))[:13]
+        source = _text(event.get("source"))
+        event_type = _text(event.get("type"))
+        entity_id = _text(event.get("entity_id"))
+        key = (bucket_token, source, event_type, entity_id)
+        row = buckets.get(key)
+        if row is None:
+            row = {
+                "kind": "event_rollup",
+                "source": source,
+                "area": _text(event.get("area")),
+                "type": event_type,
+                "entity_id": entity_id,
+                "first_time": _text(event.get("ha_time")),
+                "last_time": _text(event.get("ha_time")),
+                "event_count": 0,
+                "sample_titles": [],
+                "sample_messages": [],
+            }
+            buckets[key] = row
+        row["event_count"] = int(row.get("event_count") or 0) + 1
+        row["last_time"] = _text(event.get("ha_time")) or row.get("last_time")
+        for field, sample_field in (("title", "sample_titles"), ("message", "sample_messages")):
+            value = _text(event.get(field))
+            samples = row[sample_field]
+            if value and value not in samples and len(samples) < _EVENTS_QUERY_MAX_ROLLUP_SAMPLES:
+                samples.append(value)
+
+    return list(buckets.values())
+
+
+def _events_query_is_immediate_query(user_query: Any) -> bool:
+    return bool(_EVENTS_QUERY_IMMEDIATE_RE.search(_text(user_query)))
+
+
+def _events_query_is_context_limit_error(error: Any) -> bool:
+    text = _text(error).lower()
+    return bool(
+        "context size" in text
+        or "context length" in text
+        or "maximum context" in text
+        or "too many tokens" in text
+    )
+
+
+def _events_query_deterministic_summary(
+    *,
+    interpretation: Dict[str, Any],
+    relevant_events: List[Dict[str, Any]],
+    omitted_count: int = 0,
+) -> str:
+    time_label = _text(interpretation.get("time_label")) or "the requested period"
+    if not relevant_events:
+        return f"No matching awareness events were recorded during {time_label}."
+
+    represented_count = sum(
+        max(1, int(item.get("event_count") or 1))
+        for item in relevant_events
+        if isinstance(item, dict)
+    )
+    highlights: List[str] = []
+    for item in relevant_events[-3:]:
+        if not isinstance(item, dict):
+            continue
+        count = max(1, int(item.get("event_count") or 1))
+        first_time = _text(item.get("first_time") or item.get("ha_time"))
+        last_time = _text(item.get("last_time") or item.get("ha_time"))
+        time_text = first_time[11:16] if len(first_time) >= 16 else first_time
+        if last_time and last_time != first_time and len(last_time) >= 16:
+            time_text = f"{time_text}-{last_time[11:16]}" if time_text else last_time[11:16]
+        messages = item.get("sample_messages") if isinstance(item.get("sample_messages"), list) else []
+        detail = _text(messages[-1] if messages else item.get("message") or item.get("title") or item.get("type"))
+        if not detail:
+            continue
+        count_text = f" ({count} events)" if count > 1 else ""
+        highlights.append(f"{time_text}: {detail}{count_text}" if time_text else f"{detail}{count_text}")
+
+    summary = f"Awareness recorded {represented_count} matching event{'s' if represented_count != 1 else ''} during {time_label}."
+    if highlights:
+        summary += " Latest highlights: " + "; ".join(highlights) + "."
+    if omitted_count > 0:
+        summary += " This summary is based on the latest bounded event evidence."
+    return summary
 
 
 def _events_query_query_from_args(args: Dict[str, Any], origin: Optional[Dict[str, Any]] = None) -> str:
@@ -2720,6 +2935,7 @@ async def _events_query_interpret_query(
         "- Use only source_ids from the provided source catalog.\n"
         "- If the user asks broadly (for example around the house/outside), use search_scope=all_sources.\n"
         "- time_window must always include both start_local and end_local in local naive ISO.\n"
+        f"- For right now, just now, currently, or at the moment, use only the last {_EVENTS_QUERY_IMMEDIATE_WINDOW_MINUTES} minutes ending at now; never expand those phrases to the start of today.\n"
         "- Preserve user intent including area, timeframe, and semantic details (people/clothing/vehicles/packages/animals/unusual activity).\n"
         "- Do not answer the user.\n"
         "- Do not invent sources that are not in the catalog.\n"
@@ -2743,6 +2959,7 @@ def _events_query_normalize_interpretation(
     interpretation: Dict[str, Any],
     sources_catalog: List[str],
     now_local: datetime,
+    user_query: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     catalog = set(sources_catalog)
     query_type = _text(interpretation.get("query_type")).lower()
@@ -2774,6 +2991,10 @@ def _events_query_normalize_interpretation(
         return None, "Interpreted timeframe end is earlier than start."
     if end_local > now_local and response_mode == "presence":
         end_local = now_local
+    if _events_query_is_immediate_query(user_query):
+        end_local = now_local
+        start_local = now_local - timedelta(minutes=_EVENTS_QUERY_IMMEDIATE_WINDOW_MINUTES)
+        label = f"the last {_EVENTS_QUERY_IMMEDIATE_WINDOW_MINUTES} minutes"
 
     focus_raw = interpretation.get("semantic_focus") if isinstance(interpretation.get("semantic_focus"), list) else []
     semantic_focus = [str(item).strip() for item in focus_raw if str(item).strip()][:24]
@@ -2807,8 +3028,6 @@ async def _events_query_select_relevant_event_ids(
 ) -> Tuple[Optional[List[str]], str]:
     if not candidate_events:
         return [], ""
-    if bool(interpretation.get("broad_summary")):
-        return _events_query_event_ids(candidate_events), ""
 
     system_prompt = (
         "You are selecting relevant home events for a user question.\n"
@@ -2858,33 +3077,60 @@ async def _events_query_compose_final_answer(
     interpretation: Dict[str, Any],
     relevant_events: List[Dict[str, Any]],
     candidate_count: int,
+    prior_omitted_count: int = 0,
 ) -> Tuple[Optional[str], str]:
+    bounded_events, omitted_count, estimated_tokens = _events_query_budget_rows(
+        relevant_events,
+        token_budget=_EVENTS_QUERY_INPUT_TOKEN_BUDGET,
+        max_rows=_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER,
+    )
+    omitted_count += max(0, int(prior_omitted_count or 0))
+    fallback_text = _events_query_deterministic_summary(
+        interpretation=interpretation,
+        relevant_events=bounded_events,
+        omitted_count=omitted_count,
+    )
     if llm_client is None:
-        return None, "LLM client is unavailable."
+        return fallback_text, ""
     system_prompt = (
         "You answer a homeowner's event-history question using only provided events.\n"
         "Rules:\n"
         "- Base the answer only on relevant_events.\n"
+        "- Rows with kind=event_rollup summarize repeated events; respect event_count and the first/last timestamps.\n"
         "- If evidence is missing, say so clearly and do not guess.\n"
+        "- If evidence_truncated is true, make clear that the answer is based on the supplied latest evidence.\n"
         "- Be concise and conversational.\n"
         "- Mention area/time naturally when useful.\n"
         "- For count questions, provide the count from evidence.\n"
         "- For presence questions, answer yes/no with evidence confidence from data.\n"
         "- Do not mention internal tools or prompts.\n"
     )
-    payload = {
-        "user_query": user_query,
-        "interpreted_request": {
-            "query_type": interpretation.get("query_type"),
-            "response_mode": interpretation.get("response_mode"),
-            "time_label": interpretation.get("time_label"),
-            "semantic_focus": interpretation.get("semantic_focus"),
-            "sources": interpretation.get("selected_sources"),
-        },
-        "candidate_event_count": int(candidate_count),
-        "relevant_event_count": int(len(relevant_events)),
-        "relevant_events": relevant_events,
-    }
+
+    def _payload_for(events: List[Dict[str, Any]], omitted: int, token_estimate: int) -> Dict[str, Any]:
+        represented_count = sum(
+            max(1, int(item.get("event_count") or 1))
+            for item in events
+            if isinstance(item, dict)
+        )
+        return {
+            "user_query": user_query,
+            "interpreted_request": {
+                "query_type": interpretation.get("query_type"),
+                "response_mode": interpretation.get("response_mode"),
+                "time_label": interpretation.get("time_label"),
+                "semantic_focus": interpretation.get("semantic_focus"),
+                "sources": interpretation.get("selected_sources"),
+            },
+            "candidate_event_count": int(candidate_count),
+            "represented_event_count": int(represented_count),
+            "evidence_row_count": int(len(events)),
+            "evidence_omitted_row_count": int(omitted),
+            "evidence_truncated": bool(omitted),
+            "estimated_evidence_tokens": int(token_estimate),
+            "relevant_events": events,
+        }
+
+    payload = _payload_for(bounded_events, omitted_count, estimated_tokens)
     try:
         response = await llm_client.chat(
             messages=[
@@ -2896,11 +3142,47 @@ async def _events_query_compose_final_answer(
             timeout_ms=45_000,
         )
     except Exception as exc:
-        return None, f"Final answer generation failed: {exc}"
+        if not _events_query_is_context_limit_error(exc) or len(bounded_events) <= 1:
+            logger.warning("[awareness] events_query final answer failed; using bounded fallback: %s", exc)
+            return fallback_text, ""
+        retry_events, retry_omitted, retry_tokens = _events_query_budget_rows(
+            bounded_events,
+            token_budget=_EVENTS_QUERY_RETRY_TOKEN_BUDGET,
+            max_rows=max(1, _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER // 2),
+        )
+        retry_omitted += omitted_count
+        logger.warning(
+            "[awareness] events_query final prompt exceeded context; retrying rows=%s omitted=%s estimated_tokens=%s",
+            len(retry_events),
+            retry_omitted,
+            retry_tokens,
+        )
+        payload = _payload_for(retry_events, retry_omitted, retry_tokens)
+        try:
+            response = await llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.15,
+                max_tokens=None,
+                timeout_ms=45_000,
+            )
+        except Exception as retry_exc:
+            logger.warning(
+                "[awareness] events_query smaller final-answer retry failed; using bounded fallback: %s",
+                retry_exc,
+            )
+            return _events_query_deterministic_summary(
+                interpretation=interpretation,
+                relevant_events=retry_events,
+                omitted_count=retry_omitted,
+            ), ""
 
     text = _text((response.get("message") or {}).get("content"))
     if not text:
-        return None, "Final answer generation returned empty output."
+        logger.warning("[awareness] events_query final answer was empty; using bounded fallback")
+        return fallback_text, ""
     return text, ""
 
 
@@ -2950,6 +3232,7 @@ async def _events_query_kernel(
         interpretation=interpretation_obj,
         sources_catalog=sources_catalog,
         now_local=now_local,
+        user_query=query,
     )
     if interpreted is None:
         return {
@@ -2982,49 +3265,71 @@ async def _events_query_kernel(
         limit_per_source=_EVENTS_QUERY_MAX_EVENTS_PER_SOURCE,
     )
     fetched_sorted = sorted(fetched, key=lambda item: _events_query_event_dt(item) or datetime.min)
-    compact_events = [_events_query_compact_event_for_llm(item) for item in fetched_sorted]
-    if len(compact_events) > _EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:
-        compact_events = compact_events[-_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:]
-    logger.info(
-        "[awareness] events_query fetched_events=%s candidate_events=%s",
-        len(fetched_sorted),
-        len(compact_events),
-    )
+    all_compact_events = [_events_query_compact_event_for_llm(item) for item in fetched_sorted]
+    compact_events = all_compact_events[-_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM:]
+    source_candidate_omitted = max(0, len(all_compact_events) - len(compact_events))
+    relevant_events: List[Dict[str, Any]] = []
+    evidence_omitted = 0
+    evidence_tokens = 0
 
-    relevant_ids, relevance_err = await _events_query_select_relevant_event_ids(
-        llm_client=llm_client,
-        user_query=query,
-        interpretation=interpreted,
-        candidate_events=compact_events,
-    )
-    if relevant_ids is None:
-        return {
-            "tool": "events_query",
-            "ok": False,
-            "error": "relevance_selection_failed",
-            "summary_for_user": "I couldn't determine which events were relevant. Please try that request again.",
-            "details": relevance_err or "unknown error",
-        }
-
-    if not relevant_ids and compact_events and bool(interpreted.get("broad_summary")):
-        relevant_ids = [
-            str(item.get("event_id") or "").strip()
-            for item in compact_events
-            if str(item.get("event_id") or "").strip()
-        ]
-        logger.info(
-            "[awareness] events_query relevance returned empty for broad summary; using all candidate events (%s).",
-            len(relevant_ids),
+    if bool(interpreted.get("broad_summary")):
+        rollups = _events_query_rollup_events(all_compact_events)
+        relevant_events, evidence_omitted, evidence_tokens = _events_query_budget_rows(
+            rollups,
+            token_budget=_EVENTS_QUERY_INPUT_TOKEN_BUDGET,
+            max_rows=_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER,
         )
+        logger.info(
+            "[awareness] events_query broad summary aggregated events=%s rollups=%s evidence_rows=%s omitted_rows=%s estimated_tokens=%s",
+            len(all_compact_events),
+            len(rollups),
+            len(relevant_events),
+            evidence_omitted,
+            evidence_tokens,
+        )
+    else:
+        compact_events, candidate_omitted, candidate_tokens = _events_query_budget_rows(
+            compact_events,
+            token_budget=_EVENTS_QUERY_INPUT_TOKEN_BUDGET,
+            max_rows=_EVENTS_QUERY_MAX_CANDIDATE_EVENTS_FOR_LLM,
+        )
+        candidate_omitted += source_candidate_omitted
+        logger.info(
+            "[awareness] events_query relevance candidates=%s omitted_rows=%s estimated_tokens=%s",
+            len(compact_events),
+            candidate_omitted,
+            candidate_tokens,
+        )
+        relevant_ids, relevance_err = await _events_query_select_relevant_event_ids(
+            llm_client=llm_client,
+            user_query=query,
+            interpretation=interpreted,
+            candidate_events=compact_events,
+        )
+        if relevant_ids is None:
+            return {
+                "tool": "events_query",
+                "ok": False,
+                "error": "relevance_selection_failed",
+                "summary_for_user": "I couldn't determine which events were relevant. Please try that request again.",
+                "details": relevance_err or "unknown error",
+            }
+        event_by_id = {str(item.get("event_id") or ""): item for item in compact_events}
+        selected_events = [event_by_id[event_id] for event_id in relevant_ids if event_id in event_by_id]
+        relevant_events, evidence_omitted, evidence_tokens = _events_query_budget_rows(
+            selected_events,
+            token_budget=_EVENTS_QUERY_INPUT_TOKEN_BUDGET,
+            max_rows=_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER,
+        )
+        evidence_omitted += candidate_omitted
 
-    event_by_id = {str(item.get("event_id") or ""): item for item in compact_events}
-    relevant_events = [event_by_id[event_id] for event_id in relevant_ids if event_id in event_by_id]
-    if len(relevant_events) > _EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:
-        relevant_events = relevant_events[-_EVENTS_QUERY_MAX_RELEVANT_EVENTS_FOR_ANSWER:]
     logger.info(
-        "[awareness] events_query relevant_event_ids=%s relevant_events=%s",
-        len(relevant_ids),
+        "[awareness] events_query fetched_events=%s candidate_events=%s relevant_events=%s omitted_rows=%s estimated_tokens=%s",
+        len(fetched_sorted),
+        len(all_compact_events),
         len(relevant_events),
+        evidence_omitted,
+        evidence_tokens,
     )
 
     final_text, final_err = await _events_query_compose_final_answer(
@@ -3032,7 +3337,8 @@ async def _events_query_kernel(
         user_query=query,
         interpretation=interpreted,
         relevant_events=relevant_events,
-        candidate_count=len(compact_events),
+        candidate_count=len(all_compact_events),
+        prior_omitted_count=evidence_omitted,
     )
     if final_text is None:
         return {
@@ -3051,8 +3357,12 @@ async def _events_query_kernel(
         "response_mode": interpreted.get("response_mode"),
         "timeframe": interpreted.get("time_label"),
         "sources": list(selected_sources),
-        "candidate_event_count": int(len(compact_events)),
-        "relevant_event_count": int(len(relevant_events)),
+        "candidate_event_count": int(len(all_compact_events)),
+        "relevant_event_count": int(
+            sum(max(1, int(item.get("event_count") or 1)) for item in relevant_events)
+        ),
+        "evidence_row_count": int(len(relevant_events)),
+        "evidence_omitted_row_count": int(evidence_omitted),
         "time_window": {
             "start_local": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
             "end_local": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -6843,7 +7153,12 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "events_query",
-            "description": "Look up event history for activity around your home, including doors, windows, garage, and inside and outside camera areas.",
+            "description": (
+                "Search stored Awareness event history for past activity around the home, including doors, windows, "
+                "garage, and camera-covered areas. Use it for questions such as what happened, when something happened, "
+                "counts, timelines, or summaries over a stated period. Do not use it to determine what is visibly "
+                "happening right now or for a live/current camera view; use camera_control for a fresh camera snapshot."
+            ),
             "usage": '{"function":"events_query","arguments":{"query":"what happened in the front yard today?"}}',
         },
     ]

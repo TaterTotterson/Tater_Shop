@@ -137,7 +137,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
         expected_versions = {
             "ai_task": "1.2.0",
             "automation": "1.1.1",
-            "awareness": "3.4.13",
+            "awareness": "3.4.14",
             "guardian": "1.3.12",
             "memory": "1.0.29",
             "music": "3.1.1",
