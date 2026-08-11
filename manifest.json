@@ -1191,6 +1191,27 @@
       "sha256": "a9d56a6601f7ec4234aa341664841c8469c3ef294f677d9664d3591a0db74dba"
     },
     {
+      "id": "reachy_sleep",
+      "name": "Reachy Sleep",
+      "version": "1.0.0",
+      "min_tater_version": "98.4",
+      "description": "Use only when someone explicitly tells you to go to sleep, go to bed, or take a nap. Do not use merely because the user says they are going to sleep, asks a question about sleep, or asks Reachy to be quiet",
+      "portals": [
+        "voice_core"
+      ],
+      "notifier": false,
+      "settings_category": "Reachy Sleep",
+      "tags": [
+        "reachy",
+        "robot",
+        "sleep",
+        "wake-word",
+        "motion"
+      ],
+      "entry": "verba/reachy_sleep.py",
+      "sha256": "a75febfeae2a730bb6c79bdf2eec2a310abc9d64400b425f3380443c893cda11"
+    },
+    {
       "id": "reachy_vision",
       "name": "Reachy Vision",
       "version": "1.0.0",
