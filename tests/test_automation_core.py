@@ -203,6 +203,8 @@ def sample_registry():
         "room": "Entry",
         "category_ids": ["entry_sensor"],
         "actions": [],
+        "status": "online",
+        "state": "closed",
         "event_sources": [
             {"type": "contact", "ref": "binary_sensor.front_door", "state_on": "open", "state_off": "closed"}
         ],
@@ -392,6 +394,110 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertEqual(self.core._trigger_event_values_for_device(device), ["motion"])
+
+    def test_trigger_events_use_only_integration_declared_event_sources(self):
+        device = {
+            "type": "entry_sensor",
+            "category_ids": ["entry_sensor", "motion"],
+            "capabilities": ["door", "motion", "person"],
+            "features": ["animal"],
+            "event_sources": [
+                {
+                    "type": "door",
+                    "ref": "binary_sensor.unifi_front_door",
+                    "state_on": "open",
+                    "state_off": "closed",
+                }
+            ],
+        }
+        capability_only = {**device, "event_sources": []}
+
+        self.assertEqual(
+            self.core._trigger_event_values_for_device(device),
+            ["opens", "closes"],
+        )
+        self.assertEqual(self.core._trigger_event_values_for_device(capability_only), [])
+
+    def test_homeassistant_enum_sensor_exposes_reported_state_events(self):
+        washer = {
+            "integration_id": "homeassistant",
+            "integration_name": "Home Assistant",
+            "id": "sensor.washer_state",
+            "ref": "sensor.washer_state",
+            "name": "Washer State",
+            "type": "sensor",
+            "category_ids": ["sensor"],
+            "state": "washing",
+            "event_sources": [
+                {
+                    "type": "enum",
+                    "ref": "sensor.washer_state",
+                    "trigger_events": ["changed", "equals"],
+                    "state_options": ["inactive", "washing", "rinsing", "wash_done"],
+                }
+            ],
+        }
+        registry = {
+            "devices": [washer],
+            "categories": [{"id": "sensor", "name": "Sensors", "devices": [washer]}],
+        }
+
+        options, _dependency = self.core._trigger_event_dependency(
+            registry,
+            current_device="homeassistant|sensor.washer_state",
+        )
+
+        self.assertEqual([row["value"] for row in options], ["changed", "equals"])
+        equals = next(row for row in options if row["value"] == "equals")
+        self.assertIn("wash_done", equals["description"])
+
+    def test_homeassistant_enum_sensor_matches_exact_reported_state(self):
+        washer = {
+            "integration_id": "homeassistant",
+            "id": "sensor.washer_state",
+            "ref": "sensor.washer_state",
+            "name": "Washer State",
+            "type": "sensor",
+            "category_ids": ["sensor"],
+            "event_sources": [
+                {
+                    "type": "enum",
+                    "ref": "sensor.washer_state",
+                    "trigger_events": ["changed", "equals"],
+                    "state_options": ["inactive", "washing", "wash_done"],
+                }
+            ],
+        }
+        registry = {
+            "devices": [washer],
+            "categories": [{"id": "sensor", "name": "Sensors", "devices": [washer]}],
+        }
+        rule = self._tts_rule(
+            trigger_category="sensor",
+            trigger_device="homeassistant|sensor.washer_state",
+            trigger_event="equals",
+            trigger_value="wash_done",
+        )
+        event = {
+            "provider": "homeassistant",
+            "kind": "state_changed",
+            "payload": {
+                "entity_id": "sensor.washer_state",
+                "old_state": {"state": "washing"},
+                "new_state": {"state": "wash_done"},
+            },
+        }
+
+        self.assertTrue(self.core._event_match(rule, event, registry)[0])
+
+    def test_device_card_prefers_sensor_state_over_connection_status(self):
+        entry = next(
+            device
+            for device in sample_registry()["devices"]
+            if device.get("id") == "binary_sensor.front_door"
+        )
+
+        self.assertEqual(self.core._device_option(entry)["meta"], "closed")
 
     def test_doorbell_and_sensor_expose_device_specific_trigger_events(self):
         doorbell_options, _dependency = self.core._trigger_event_dependency(

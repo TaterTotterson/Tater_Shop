@@ -128,6 +128,7 @@ def sample_registry():
         "type": "entry_sensor",
         "category_ids": ["entry_sensor"],
         "capabilities": ["entry_sensor", "door", "motion"],
+        "status": "online",
         "state": "closed",
         "event_sources": [
             {
@@ -163,8 +164,21 @@ def sample_registry():
             }
         ],
     }
+    unsupported_sensor = {
+        "integration_id": "unifi_protect",
+        "integration_name": "UniFi Protect",
+        "id": "capability-only-sensor",
+        "ref": "binary_sensor.capability_only",
+        "name": "Capability Only",
+        "room": "Lab",
+        "type": "sensor",
+        "category_ids": ["motion"],
+        "capabilities": ["motion"],
+        "state": "clear",
+        "event_sources": [],
+    }
     return {
-        "devices": [camera, doorbell, sensor, unifi_sensor, hue_sensor],
+        "devices": [camera, doorbell, sensor, unifi_sensor, hue_sensor, unsupported_sensor],
         "categories": [],
         "rooms": [],
     }
@@ -329,6 +343,35 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.core._monitor_trigger_values_for_device(device), ["motion"])
 
+    def test_capture_events_use_only_integration_declared_event_sources(self):
+        device = {
+            "type": "entry_sensor",
+            "category_ids": ["entry_sensor", "motion"],
+            "capabilities": ["door", "motion", "person"],
+            "features": ["animal"],
+            "event_sources": [
+                {
+                    "type": "door",
+                    "ref": "binary_sensor.unifi_front_door",
+                    "state_on": "open",
+                    "state_off": "closed",
+                },
+                {
+                    "type": "motion",
+                    "ref": "binary_sensor.unifi_front_door",
+                    "state_on": "motion",
+                    "state_off": "clear",
+                },
+            ],
+        }
+        capability_only = {**device, "event_sources": []}
+
+        self.assertEqual(
+            self.core._monitor_trigger_values_for_device(device),
+            ["opens", "closes", "motion"],
+        )
+        self.assertEqual(self.core._monitor_trigger_values_for_device(capability_only), [])
+
     def test_sensor_monitor_can_capture_open_without_capture_on_close(self):
         monitor = self._add_monitor(
             "sensor",
@@ -352,6 +395,33 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
                 entity_id="binary_sensor.back_door",
                 new_state={"state": "off"},
                 old_state={"state": "on"},
+            )
+        )
+
+    def test_unifi_door_source_uses_open_and_close_events(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "unifi_protect|sensor-back-door",
+            "Back Door",
+            ["opens"],
+        )
+
+        self.assertTrue(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="binary_sensor.unifi_sensor_sensor-back-door",
+                new_state={"state": "open"},
+                old_state={"state": "closed"},
+            )
+        )
+        self.assertFalse(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="binary_sensor.unifi_sensor_sensor-back-door",
+                new_state={"state": "closed"},
+                old_state={"state": "open"},
             )
         )
 
@@ -460,6 +530,13 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["value"] for row in unifi_sensors], ["unifi_protect|sensor-back-door"])
         self.assertEqual(unifi_sensors[0]["description"], "Door sensor • Back Yard • UniFi Protect")
         self.assertEqual(unifi_sensors[0]["meta"], "closed")
+        unifi_sensor_events = fields["trigger_events"]["dependent_options"]["options_by_source"][
+            "unifi_protect|sensor-back-door"
+        ]
+        self.assertEqual(
+            [row["value"] for row in unifi_sensor_events],
+            ["opens", "closes", "motion"],
+        )
         hue_sensors = fields["device"]["dependent_options"]["options_by_source"]["sensor::hue"]
         self.assertEqual([row["value"] for row in hue_sensors], ["hue|hue-motion-hall"])
         self.assertEqual(hue_sensors[0]["description"], "Motion sensor • Hall • Philips Hue")

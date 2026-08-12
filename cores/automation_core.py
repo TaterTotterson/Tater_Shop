@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -336,7 +336,12 @@ def _registry(client: Any = None, *, refresh: bool = False) -> Dict[str, Any]:
     return result if isinstance(result, dict) else {"devices": [], "categories": [], "rooms": []}
 
 
-def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -> List[Dict[str, Any]]:
+def _category_rows(
+    registry: Dict[str, Any],
+    *,
+    actionable_only: bool = False,
+    triggerable_only: bool = False,
+) -> List[Dict[str, Any]]:
     definitions = {
         _token(item.get("id")): item
         for item in registry.get("category_definitions") or []
@@ -347,6 +352,8 @@ def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -
         if not isinstance(category, dict):
             continue
         devices = [item for item in category.get("devices") or [] if isinstance(item, dict)]
+        if triggerable_only:
+            devices = [item for item in devices if _trigger_event_values_for_device(item)]
         if not devices:
             continue
         if actionable_only and not any(_device_actions(item) for item in devices):
@@ -369,7 +376,12 @@ def _category_rows(registry: Dict[str, Any], *, actionable_only: bool = False) -
     return rows
 
 
-def _category_options(registry: Dict[str, Any], *, actionable_only: bool = False) -> List[Dict[str, Any]]:
+def _category_options(
+    registry: Dict[str, Any],
+    *,
+    actionable_only: bool = False,
+    triggerable_only: bool = False,
+) -> List[Dict[str, Any]]:
     return [
         {
             "value": row["id"],
@@ -378,7 +390,11 @@ def _category_options(registry: Dict[str, Any], *, actionable_only: bool = False
             "meta": f"{len(row['devices'])} device{'s' if len(row['devices']) != 1 else ''}",
             "icon": _CATEGORY_ICONS.get(row["id"], "◆"),
         }
-        for row in _category_rows(registry, actionable_only=actionable_only)
+        for row in _category_rows(
+            registry,
+            actionable_only=actionable_only,
+            triggerable_only=triggerable_only,
+        )
     ]
 
 
@@ -395,7 +411,7 @@ def _device_option(device: Dict[str, Any]) -> Dict[str, Any]:
         "value": _encode_device(provider, device_id),
         "label": name,
         "description": details,
-        "meta": _text(device.get("status") or device.get("state")),
+        "meta": _text(device.get("state") or device.get("status")),
         "icon": _CATEGORY_ICONS.get(primary_category, "◆"),
     }
 
@@ -407,12 +423,13 @@ def _device_dependency(
     current_values: Any = None,
     multiple: bool = False,
     allow_any: bool = False,
+    triggerable_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     current = _list(current_values)
     options_by_source: Dict[str, List[Dict[str, Any]]] = {}
     all_options: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    for category in _category_rows(registry):
+    for category in _category_rows(registry, triggerable_only=triggerable_only):
         rows = [_device_option(device) for device in category["devices"]]
         if not multiple and allow_any:
             rows = [
@@ -460,70 +477,84 @@ def _trigger_event_values_for_device(device: Dict[str, Any]) -> List[str]:
     for source in device.get("event_sources") or []:
         if not isinstance(source, dict):
             continue
-        source_mapped = False
+        explicit_events = _list(source.get("trigger_events") or source.get("events"))
+        if explicit_events:
+            add(*explicit_events)
+            continue
         source_type = _token(source.get("type"))
-        source_ref = _token(source.get("ref"))
-        state_on = _token(source.get("state_on"))
-        state_off = _token(source.get("state_off"))
-        ref_hint = source_ref if source_type in {"", "event", "binary", "sensor", "value"} else ""
-        corpus = f"{source_type} {ref_hint}"
-        if "license_plate" in corpus or "licenseplate" in corpus:
-            add("license_plate")
-            source_mapped = True
-        for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
-            if event in corpus:
-                add(event)
-                source_mapped = True
-        if any(token in corpus for token in ("contact", "entry", "door_window")):
+        detected_event = source_type.removeprefix("smart_")
+        if detected_event == "licenseplate":
+            detected_event = "license_plate"
+        if detected_event in {
+            "license_plate",
+            "person",
+            "vehicle",
+            "animal",
+            "package",
+            "face",
+            "doorbell",
+            "motion",
+        }:
+            add(detected_event)
+        elif source_type in {
+            "contact",
+            "door",
+            "window",
+            "entry",
+            "entry_sensor",
+            "door_window",
+            "open_close",
+            "garage",
+            "garage_door",
+            "cover",
+        }:
             add("opens", "closes")
-            source_mapped = True
-        if any(token in corpus for token in ("connectivity", "online", "network")):
+        elif source_type in {"connectivity", "network", "network_device"}:
             add("connects", "disconnects")
-            source_mapped = True
-        if source_type in {"occupancy", "presence", "switch", "light", "input", "power", "leak", "tamper"}:
+        elif source_type in {
+            "occupancy",
+            "presence",
+            "switch",
+            "light",
+            "input",
+            "power",
+            "power_meter",
+            "relay",
+            "leak",
+            "tamper",
+        }:
             add("turns_on", "turns_off")
-            source_mapped = True
-        if source_type in {"temperature", "humidity", "illuminance", "energy", "sensor", "value"}:
+        elif source_type in {
+            "temperature",
+            "humidity",
+            "relative_humidity",
+            "illuminance",
+            "light_level",
+            "energy",
+            "battery",
+            "meter",
+            "sensor",
+            "thermostat",
+            "value",
+        }:
             add("changed", "above", "below")
-            source_mapped = True
-        if not source_mapped and (state_on or state_off):
-            add("turns_on", "turns_off")
-
-    capability_corpus = " ".join(
-        _token(value)
-        for value in [
-            *(device.get("category_ids") or []),
-            *(device.get("capabilities") or []),
-            *(device.get("features") or []),
-            device.get("type"),
-        ]
-        if _token(value)
-    )
-    if "license_plate" in capability_corpus or "licenseplate" in capability_corpus:
-        add("license_plate")
-    for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
-        if event in capability_corpus:
-            add(event)
-
-    categories = _device_categories(device)
-    if "doorbell" in categories:
-        add("doorbell")
-    if not found:
-        if "camera" in categories or "doorbell" in categories:
-            add("motion")
-        if "motion" in categories:
-            add("motion")
-        if categories.intersection({"entry_sensor", "garage_door", "cover"}):
-            add("opens", "closes")
-        if categories.intersection({"light", "switch", "plug", "fan", "lock", "leak"}):
-            add("turns_on", "turns_off")
-        if categories.intersection({"presence", "network_device"}):
-            add("connects", "disconnects")
-        if categories.intersection({"temperature", "humidity", "illuminance", "energy", "battery", "sensor"}):
-            add("changed", "above", "below")
-    if not found:
-        add("changed")
     return [row["value"] for row in _EVENT_OPTIONS if row["value"] in found]
+
+
+def _trigger_state_options_for_device(device: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for source in device.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        for value in _list(source.get("state_options") or source.get("options")):
+            token = _text(value)
+            folded = token.casefold()
+            if not token or folded in seen:
+                continue
+            seen.add(folded)
+            out.append(token)
+    return out
 
 
 def _trigger_event_dependency(
@@ -542,7 +573,18 @@ def _trigger_event_dependency(
             continue
         values = _trigger_event_values_for_device(device)
         all_values.update(values)
-        options_by_source[encoded] = [_event_option(value) for value in values]
+        state_options = _trigger_state_options_for_device(device)
+        rows: List[Dict[str, Any]] = []
+        for value in values:
+            option = _event_option(value)
+            if value == "equals":
+                option["description"] = (
+                    f"Reported states: {', '.join(state_options[:8])}"
+                    if state_options
+                    else "Enter the exact state value reported by the integration."
+                )
+            rows.append(option)
+        options_by_source[encoded] = rows
     default_options = [_event_option(row["value"]) for row in _EVENT_OPTIONS if row["value"] in all_values]
     selected = list(options_by_source.get(_text(current_device), default_options))
     saved = _token(current_event)
@@ -1975,6 +2017,7 @@ def _editor_fields(
         current_values=rule.get("trigger_device"),
         multiple=False,
         allow_any=bool(rule.get("id") and not _text(rule.get("trigger_device"))),
+        triggerable_only=True,
     )
     current_trigger_device = _text(rule.get("trigger_device"))
     if not current_trigger_device and trigger_device_options:
@@ -2061,7 +2104,7 @@ def _editor_fields(
             "label": "Device Category",
             "type": "select",
             "presentation": "cards",
-            "options": _category_options(registry),
+            "options": _category_options(registry, triggerable_only=True),
             "value": trigger_category,
             "full_width": True,
         },
@@ -2084,7 +2127,7 @@ def _editor_fields(
             "options": trigger_event_options,
             "dependent_options": trigger_event_dependency,
             "value": _token(rule.get("trigger_event") or "changed"),
-            "description": "These events come from the capabilities reported by the selected device.",
+            "description": "Only events explicitly reported by the selected device's integration are shown.",
             "full_width": True,
         },
         {
@@ -2568,7 +2611,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     success_count = sum(1 for row in history if _text(row.get("status")) == "ok")
     error_count = sum(1 for row in history if _text(row.get("status")) == "error")
     default_trigger_category = next(
-        (row["value"] for row in _category_options(registry)),
+        (row["value"] for row in _category_options(registry, triggerable_only=True)),
         "",
     )
     default_action_category = next(
@@ -2583,6 +2626,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         registry,
         current_category=default_trigger_category,
         multiple=False,
+        triggerable_only=True,
     )
     default_trigger_device = _text(default_trigger_devices[0].get("value")) if default_trigger_devices else ""
     default_trigger_events, _trigger_event_options_dependency = _trigger_event_dependency(

@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "4.1.1"
+__version__ = "4.1.2"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
@@ -999,67 +999,67 @@ def _monitor_trigger_values_for_device(device: Dict[str, Any]) -> List[str]:
     for source in device.get("event_sources") or []:
         if not isinstance(source, dict):
             continue
-        source_mapped = False
+        explicit_events = _monitor_string_list(
+            source.get("trigger_events") or source.get("events")
+        )
+        if explicit_events:
+            add(*explicit_events)
+            continue
         source_type = _category_token(source.get("type"))
-        source_ref = _text(source.get("ref")).lower().replace("-", "_")
-        state_on = _text(source.get("state_on")).lower()
-        state_off = _text(source.get("state_off")).lower()
-        ref_hint = source_ref if source_type in {"", "event", "binary", "sensor", "value"} else ""
-        corpus = f"{source_type} {ref_hint}"
-        if "license_plate" in corpus or "licenseplate" in corpus:
-            add("license_plate")
-            source_mapped = True
-        for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
-            if event in corpus:
-                add(event)
-                source_mapped = True
-        if any(token in corpus for token in ("contact", "entry", "door_window", "open_close", "window")):
+        event_type = _monitor_trigger_token(source_type)
+        if event_type in {
+            "license_plate",
+            "person",
+            "vehicle",
+            "animal",
+            "package",
+            "face",
+            "doorbell",
+            "motion",
+        }:
+            add(event_type)
+        elif source_type in {
+            "contact",
+            "door",
+            "window",
+            "entry",
+            "entry_sensor",
+            "door_window",
+            "open_close",
+            "garage",
+            "garage_door",
+            "cover",
+        }:
             add("opens", "closes")
-            source_mapped = True
-        if any(token in corpus for token in ("connectivity", "online", "network")):
+        elif source_type in {"connectivity", "network", "network_device"}:
             add("connects", "disconnects")
-            source_mapped = True
-        if source_type in {"occupancy", "presence", "switch", "light", "input", "power", "leak", "tamper"}:
+        elif source_type in {
+            "occupancy",
+            "presence",
+            "switch",
+            "light",
+            "input",
+            "power",
+            "power_meter",
+            "relay",
+            "leak",
+            "tamper",
+        }:
             add("turns_on", "turns_off")
-            source_mapped = True
-        if source_type in {"temperature", "humidity", "illuminance", "energy", "battery", "sensor", "value"}:
+        elif source_type in {
+            "temperature",
+            "humidity",
+            "relative_humidity",
+            "illuminance",
+            "light_level",
+            "energy",
+            "battery",
+            "meter",
+            "sensor",
+            "thermostat",
+            "value",
+        }:
             add("changed")
-            source_mapped = True
-        if not source_mapped and (state_on or state_off):
-            add("turns_on", "turns_off")
-
-    capability_corpus = " ".join(
-        _category_token(value)
-        for value in [
-            *(device.get("category_ids") or []),
-            *(device.get("capabilities") or []),
-            *(device.get("features") or []),
-            device.get("type"),
-        ]
-        if _category_token(value)
-    )
-    if "license_plate" in capability_corpus or "licenseplate" in capability_corpus:
-        add("license_plate")
-    for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
-        if event in capability_corpus:
-            add(event)
-
-    categories = _monitor_device_categories(device)
-    if "doorbell" in categories:
-        add("doorbell")
-    if not found:
-        if "camera" in categories or _monitor_device_kind(device) == "camera":
-            add("motion")
-        if "motion" in categories:
-            add("motion")
-        if categories.intersection({"entry_sensor", "garage_door"}):
-            add("opens", "closes")
-        if categories.intersection({"presence", "leak"}):
-            add("turns_on", "turns_off")
-        if categories.intersection({"temperature", "humidity", "illuminance", "energy", "battery", "sensor"}):
-            add("changed")
-    if not found:
-        add("changed")
     return [row["value"] for row in _MONITOR_TRIGGER_OPTIONS if row["value"] in found]
 
 
@@ -1205,7 +1205,7 @@ def _monitor_device_option(device: Dict[str, Any]) -> Dict[str, Any]:
     value = _monitor_device_value(device)
     provider_name = _text(device.get("integration_name")) or _provider_label(device.get("integration_id"))
     room = _text(device.get("room") or device.get("area"))
-    state = _text(device.get("status") or device.get("state"))
+    state = _text(device.get("state") or device.get("status"))
     type_label = _monitor_device_type_label(device)
     return {
         "value": value,
@@ -1224,6 +1224,8 @@ def _monitor_integration_options(
     provider_rows: Dict[str, Dict[str, Dict[str, Any]]] = {"camera": {}, "sensor": {}}
     for device in registry.get("devices") or []:
         if not isinstance(device, dict):
+            continue
+        if not _monitor_trigger_values_for_device(device):
             continue
         kind = _monitor_device_kind(device)
         provider = _normalize_event_provider(device.get("integration_id"))
@@ -1268,6 +1270,8 @@ def _monitor_device_options(
     seen: set[str] = set()
     for device in registry.get("devices") or []:
         if not isinstance(device, dict):
+            continue
+        if not _monitor_trigger_values_for_device(device):
             continue
         kind = _monitor_device_kind(device)
         provider = _normalize_event_provider(device.get("integration_id"))
@@ -3218,7 +3222,18 @@ def _monitor_event_trigger(
     if "motion" in corpus:
         active = new_value == state_on if state_on else new_value in _MONITOR_ACTIVE_STATES
         return "motion" if active else ""
-    if any(token in corpus for token in ("contact", "entry", "door_window", "open_close", "window")):
+    if any(
+        token in corpus
+        for token in (
+            "contact",
+            "entry",
+            "door",
+            "window",
+            "open_close",
+            "garage",
+            "cover",
+        )
+    ):
         if (state_on and new_value == state_on) or new_value in {"open", "opened", "on", "no_contact"}:
             return "opens"
         if (state_off and new_value == state_off) or new_value in {"closed", "close", "off", "contact"}:
@@ -3702,7 +3717,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "options": default_trigger_options,
                     "dependent_options": trigger_dependency,
                     "value": default_trigger_events,
-                    "description": "Choose one or more events reported by this device. A motion-only camera will show only Motion.",
+                    "description": "Only events explicitly reported by the selected device's integration are shown.",
                     "full_width": True,
                 },
                 {
