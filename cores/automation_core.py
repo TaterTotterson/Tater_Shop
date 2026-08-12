@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import logging
+import math
+import os
 import re
+import struct
+import threading
 import time
 import uuid
+import wave
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 from announcement_targets import build_announcement_target_options
 import requests
@@ -20,10 +29,14 @@ from notify import dispatch_notification, notifier_destination_catalog
 from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
+try:
+    from tater_paths import agent_lab_path as _tater_agent_lab_path
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
+    _tater_agent_lab_path = None
 
 
-__version__ = "1.3.2"
-MIN_TATER_VERSION = "59"
+__version__ = "1.3.3"
+MIN_TATER_VERSION = "98"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
     "device actions, notifications, and announcement targets."
@@ -52,8 +65,36 @@ _RUNTIME_KEY = "automation:runtime"
 _CURSOR_KEY = "automation:integration_runtime:last_seq"
 _INTEGRATION_EVENTS_KEY = "tater:integration_runtime:events"
 _INTEGRATION_EVENT_SEQ_KEY = "tater:integration_runtime:event_seq"
+_EVENT_SEQUENCE_MAX = 9_223_372_036_854_775_807
+_LEGACY_CURSOR_CLAMP = 1_000_000
 _HISTORY_LIMIT = 200
 _WORKER_COUNT = 4
+_BACKGROUND_AUDIO_MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+_BACKGROUND_AUDIO_PRESET_SECONDS = 12
+_BACKGROUND_AUDIO_PRESET_SAMPLE_RATE = 24000
+_BACKGROUND_AUDIO_PRESETS: Tuple[Dict[str, str], ...] = (
+    {
+        "id": "morning_glow",
+        "label": "Morning Glow",
+        "description": "Warm, optimistic synth chords for weather and wake-up announcements.",
+    },
+    {
+        "id": "calm_focus",
+        "label": "Calm Focus",
+        "description": "A soft, steady ambient bed for reminders and status updates.",
+    },
+    {
+        "id": "gentle_rain",
+        "label": "Gentle Rain",
+        "description": "A light, seamless rain-like texture with subtle tonal movement.",
+    },
+    {
+        "id": "bright_pulse",
+        "label": "Bright Pulse",
+        "description": "A quiet rhythmic pulse for upbeat announcements.",
+    },
+)
+_background_audio_preset_lock = threading.Lock()
 
 _TRUE = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE = {"0", "false", "no", "off", "disabled", "n"}
@@ -219,6 +260,233 @@ def _int(value: Any, default: int = 0, *, minimum: int = 0, maximum: int = 1_000
     except Exception:
         parsed = int(default)
     return max(minimum, min(maximum, parsed))
+
+
+def _sequence(value: Any, default: int = 0) -> int:
+    text = _text(value)
+    try:
+        parsed = int(text)
+    except Exception:
+        try:
+            parsed = int(float(text))
+        except Exception:
+            parsed = int(default)
+    return max(0, min(_EVENT_SEQUENCE_MAX, parsed))
+
+
+def _background_audio_root() -> Path:
+    # Tater exposes this shared audio-scene asset folder through its existing
+    # /api/ai-tasks/background-audio route, even when AI Task Core is disabled.
+    if callable(_tater_agent_lab_path):
+        return Path(_tater_agent_lab_path("ai_task", "background_audio")).resolve()
+    configured = _text(os.getenv("TATER_AGENT_ROOT"))
+    base = Path(configured).expanduser() if configured else Path.cwd() / "agent_lab"
+    return (base / "ai_task" / "background_audio").resolve()
+
+
+def _background_audio_base_url() -> str:
+    port = _int(os.getenv("HTMLUI_PORT"), 8501, minimum=1, maximum=65535)
+    return f"http://127.0.0.1:{port}/api/ai-tasks/background-audio"
+
+
+def _background_audio_file_url(kind: str, filename: str) -> str:
+    clean_kind = _text(kind).lower()
+    clean_filename = Path(_text(filename)).name
+    if clean_kind not in {"presets", "uploads"} or not clean_filename:
+        return ""
+    return f"{_background_audio_base_url()}/{clean_kind}/{quote(clean_filename)}"
+
+
+def _background_audio_periodic_frequency(frequency: float) -> float:
+    duration = float(_BACKGROUND_AUDIO_PRESET_SECONDS)
+    return max(1.0 / duration, round(float(frequency) * duration) / duration)
+
+
+def _background_audio_preset_sample(preset_id: str, sample_time: float) -> float:
+    tau = math.tau
+
+    def tone(frequency: float, phase: float = 0.0) -> float:
+        return math.sin(tau * _background_audio_periodic_frequency(frequency) * sample_time + phase)
+
+    if preset_id == "morning_glow":
+        breath = 0.72 + (0.18 * math.sin(tau * sample_time / 6.0))
+        pad = (tone(261.63) + tone(329.63, 0.7) + tone(392.0, 1.4)) / 3.0
+        shimmer_gate = (0.5 + (0.5 * math.sin(tau * sample_time / 3.0))) ** 6
+        return (0.25 * breath * pad) + (0.055 * tone(659.25, 0.3) * shimmer_gate)
+    if preset_id == "calm_focus":
+        breath = 0.68 + (0.2 * math.sin(tau * sample_time / 12.0))
+        low = (tone(130.81) + tone(196.0, 0.8)) * 0.5
+        air = (tone(261.63, 1.1) + tone(293.66, 2.0)) * 0.5
+        return (0.22 * breath * low) + (0.07 * air)
+    if preset_id == "gentle_rain":
+        texture = 0.0
+        for index, frequency in enumerate((487.0, 613.0, 743.0, 887.0, 1061.0, 1229.0, 1451.0, 1693.0)):
+            texture += tone(frequency, 0.73 * index) * (0.7 / math.sqrt(index + 2.0))
+        drift = tone(174.61, 0.5) * (0.5 + (0.5 * math.sin(tau * sample_time / 6.0)))
+        return (0.04 * texture) + (0.045 * drift)
+    pulse = (0.5 + (0.5 * math.sin(tau * sample_time / 1.5))) ** 5
+    chord = (tone(220.0) + tone(277.18, 0.6) + tone(329.63, 1.2)) / 3.0
+    upper = tone(554.37, 0.9) * (0.5 + (0.5 * math.sin(tau * sample_time / 3.0)))
+    return (0.2 * chord * (0.35 + (0.65 * pulse))) + (0.045 * upper)
+
+
+def _write_background_audio_preset(path: Path, preset_id: str) -> None:
+    sample_rate = int(_BACKGROUND_AUDIO_PRESET_SAMPLE_RATE)
+    frame_count = sample_rate * int(_BACKGROUND_AUDIO_PRESET_SECONDS)
+    pcm = bytearray(frame_count * 2)
+    for index in range(frame_count):
+        sample = _background_audio_preset_sample(preset_id, index / sample_rate)
+        struct.pack_into("<h", pcm, index * 2, int(max(-0.92, min(0.92, sample)) * 32767.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with wave.open(str(temp_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(bytes(pcm))
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _ensure_background_audio_presets() -> Dict[str, Path]:
+    root = _background_audio_root() / "presets"
+    out: Dict[str, Path] = {}
+    with _background_audio_preset_lock:
+        for preset in _BACKGROUND_AUDIO_PRESETS:
+            preset_id = _text(preset.get("id"))
+            if not preset_id:
+                continue
+            path = root / f"{preset_id}.wav"
+            if not path.is_file() or path.stat().st_size <= 44:
+                _write_background_audio_preset(path, preset_id)
+            out[preset_id] = path
+    return out
+
+
+def _background_audio_preset_url(preset_id: Any) -> str:
+    clean_id = _text(preset_id).lower()
+    if clean_id not in {_text(row.get("id")) for row in _BACKGROUND_AUDIO_PRESETS}:
+        raise ValueError("Choose a valid background audio preset.")
+    path = _ensure_background_audio_presets().get(clean_id)
+    if not path or not path.is_file():
+        raise ValueError("The selected background audio preset could not be created.")
+    return _background_audio_file_url("presets", path.name)
+
+
+def _background_audio_detect_extension(filename: Any, content_type: Any, data: bytes) -> str:
+    suffix = Path(_text(filename)).suffix.lower()
+    content = _text(content_type).split(";", 1)[0].strip().lower()
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WAVE":
+        detected = ".wav"
+    elif data.startswith(b"fLaC"):
+        detected = ".flac"
+    elif data.startswith(b"ID3") or any(
+        data[index] == 0xFF and (data[index + 1] & 0xE0) == 0xE0
+        for index in range(max(0, min(len(data) - 1, 4096)))
+    ):
+        detected = ".mp3"
+    else:
+        raise ValueError("Uploaded background audio must be a valid WAV, MP3, or FLAC file.")
+    content_extensions = {
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/flac": ".flac",
+        "audio/x-flac": ".flac",
+    }
+    claimed = suffix or content_extensions.get(content, "")
+    if claimed and claimed not in {".wav", ".mp3", ".flac"}:
+        raise ValueError("Uploaded background audio must use a .wav, .mp3, or .flac filename.")
+    if claimed and claimed != detected:
+        raise ValueError("Uploaded background audio content does not match its filename.")
+    if detected == ".wav":
+        try:
+            with wave.open(io.BytesIO(data), "rb") as wav_file:
+                channels = int(wav_file.getnchannels())
+                sample_width = int(wav_file.getsampwidth())
+                sample_rate = int(wav_file.getframerate())
+                frame_count = int(wav_file.getnframes())
+        except Exception as exc:
+            raise ValueError("Uploaded WAV background audio is invalid or unsupported.") from exc
+        if channels not in {1, 2} or sample_width != 2 or not 8000 <= sample_rate <= 96000 or frame_count <= 0:
+            raise ValueError("Uploaded WAV background audio must be 16-bit mono or stereo at 8–96 kHz.")
+    return detected
+
+
+def _store_background_audio_upload(raw: Any) -> str:
+    upload = raw if isinstance(raw, dict) else {}
+    encoded = _text(upload.get("data_b64"))
+    if not encoded:
+        raise ValueError("Choose a WAV, MP3, or FLAC file to upload.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("The uploaded background audio could not be decoded.") from exc
+    if not data:
+        raise ValueError("The uploaded background audio is empty.")
+    if len(data) > _BACKGROUND_AUDIO_MAX_UPLOAD_BYTES:
+        raise ValueError("Uploaded background audio must be 16 MB or smaller.")
+    extension = _background_audio_detect_extension(upload.get("filename"), upload.get("content_type"), data)
+    source_stem = Path(_text(upload.get("filename")) or "background-audio").stem
+    safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", source_stem).strip("-_").lower() or "background-audio"
+    digest = hashlib.sha256(data).hexdigest()[:12]
+    filename = f"{safe_stem[:48]}-{digest}{extension}"
+    root = _background_audio_root() / "uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / filename
+    if not path.is_file() or path.stat().st_size != len(data):
+        temp_path = root / f".{filename}.{uuid.uuid4().hex}.tmp"
+        try:
+            temp_path.write_bytes(data)
+            os.replace(temp_path, path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return _background_audio_file_url("uploads", filename)
+
+
+def _background_audio_source_from_url(url: Any) -> str:
+    text = _text(url)
+    for preset in _BACKGROUND_AUDIO_PRESETS:
+        preset_id = _text(preset.get("id"))
+        if text.endswith(f"/presets/{preset_id}.wav"):
+            return f"preset:{preset_id}"
+    if "/api/ai-tasks/background-audio/uploads/" in text:
+        return "upload"
+    return "custom"
+
+
+def _normalize_tts_audio_scene(raw: Any) -> Dict[str, Any]:
+    scene = raw if isinstance(raw, dict) else {}
+    background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
+    finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
+    background_url = _text(background.get("url") or scene.get("background_url"))
+    if not background_url:
+        return {}
+    return {
+        "background": {
+            "url": background_url,
+            "loop": _bool(background.get("loop"), True),
+            "volume_percent": _int(background.get("volume_percent"), 60, maximum=100),
+        },
+        "ducking": {
+            "target_percent": _int(ducking.get("target_percent"), 35, maximum=100),
+            "attack_ms": _int(ducking.get("attack_ms"), 150, maximum=10000),
+            "release_ms": _int(ducking.get("release_ms"), 350, maximum=10000),
+        },
+        "finish": {
+            "fade_ms": _int(finish.get("fade_ms"), 500, maximum=10000),
+        },
+    }
 
 
 def _float(value: Any) -> Optional[float]:
@@ -925,6 +1193,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "tts_mode": tts_mode,
         "tts_text": raw_tts_text,
         "tts_targets": _list(raw.get("tts_targets")),
+        "tts_audio_scene": _normalize_tts_audio_scene(raw.get("tts_audio_scene")),
         "notification_title": _text(raw.get("notification_title") or "Tater Automation"),
         "notification_message": _text(raw.get("notification_message")),
         "notification_targets": _list(raw.get("notification_targets")),
@@ -1057,7 +1326,7 @@ def _integration_events(client: Any, after_seq: int, limit: int = 200) -> List[D
             event = _json_record(raw)
             if not event:
                 continue
-            seq = _int(event.get("seq"), 0, minimum=0)
+            seq = _sequence(event.get("seq"), 0)
             if seq <= after_seq:
                 reached_cursor = True
                 continue
@@ -1065,8 +1334,18 @@ def _integration_events(client: Any, after_seq: int, limit: int = 200) -> List[D
             rows.append(event)
         if reached_cursor or len(raw_rows) < page_size:
             break
-    rows.sort(key=lambda item: _int(item.get("seq"), 0))
+    rows.sort(key=lambda item: _sequence(item.get("seq"), 0))
     return rows[:max_rows]
+
+
+def _resolve_event_cursor(stored: Any, current: Any) -> Tuple[int, bool]:
+    current_seq = _sequence(current, 0)
+    if stored is None:
+        return current_seq, False
+    stored_seq = _sequence(stored, 0)
+    if stored_seq == _LEGACY_CURSOR_CLAMP and current_seq > _LEGACY_CURSOR_CLAMP:
+        return current_seq, True
+    return stored_seq, False
 
 
 def _walk_values(value: Any, *, depth: int = 0) -> Iterable[Tuple[str, Any]]:
@@ -1433,7 +1712,7 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
             _device_id(first_device),
         ),
         "room": _text(first_device.get("room") or first_device.get("area")),
-        "event_seq": _int(event.get("seq"), 0),
+        "event_seq": _sequence(event.get("seq"), 0),
     }
 
 
@@ -1612,11 +1891,22 @@ async def _execute_tts(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[st
         voice_core_wyoming_port=settings["voice_core_wyoming_port"],
         voice_core_wyoming_voice=settings["voice_core_wyoming_voice"],
         default_backend=settings["backend"],
+        audio_scene=_normalize_tts_audio_scene(rule.get("tts_audio_scene")),
     )
     if isinstance(result, dict) and result.get("ok") is False:
         raise RuntimeError(_text(result.get("error")) or "TTS delivery failed.")
     count = _int((result or {}).get("sent_count") if isinstance(result, dict) else 0, 0)
-    return {"ok": True, "summary": f'Spoke “{message[:120]}” to {count or len(_list(rule.get("tts_targets")))} target(s).'}
+    scene_sent = _int((result or {}).get("audio_scene_sent_count") if isinstance(result, dict) else 0, 0)
+    scene_fallback = _int((result or {}).get("audio_scene_fallback_count") if isinstance(result, dict) else 0, 0)
+    summary = f'Spoke “{message[:120]}” to {count or len(_list(rule.get("tts_targets")))} target(s).'
+    if scene_fallback:
+        summary += f" {scene_fallback} target(s) played TTS without background audio."
+    return {
+        "ok": True,
+        "summary": summary,
+        "audio_scene_sent_count": scene_sent,
+        "audio_scene_fallback_count": scene_fallback,
+    }
 
 
 async def _execute_notification(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1910,18 +2200,28 @@ async def _process_event(client: Any, event: Dict[str, Any]) -> int:
 
 async def _event_loop(stop_event: Optional[object]) -> None:
     stored = redis_client.get(_CURSOR_KEY)
-    if stored is None:
-        last_seq = _int(redis_client.get(_INTEGRATION_EVENT_SEQ_KEY), 0)
+    current = redis_client.get(_INTEGRATION_EVENT_SEQ_KEY)
+    last_seq, recovered = _resolve_event_cursor(stored, current)
+    if stored is None or recovered:
         redis_client.set(_CURSOR_KEY, str(last_seq))
-    else:
-        last_seq = _int(stored, 0)
+    if recovered:
+        logger.warning(
+            "[automation] recovered capped event cursor %s at live sequence %s",
+            _LEGACY_CURSOR_CLAMP,
+            last_seq,
+        )
+        _runtime_set(
+            redis_client,
+            last_event_seq=last_seq,
+            cursor_recovered_from=_LEGACY_CURSOR_CLAMP,
+        )
     while not (stop_event and stop_event.is_set()):
         events = _integration_events(redis_client, last_seq)
         if not events:
             await asyncio.sleep(0.25)
             continue
         for event in events:
-            seq = _int(event.get("seq"), last_seq)
+            seq = _sequence(event.get("seq"), last_seq)
             try:
                 await _process_event(redis_client, event)
             except Exception as exc:
@@ -2026,6 +2326,116 @@ def _value(values: Dict[str, Any], payload: Dict[str, Any], key: str, default: A
     return value
 
 
+def _tts_audio_scene_from_form(
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    existing: Any = None,
+) -> Dict[str, Any]:
+    current = _normalize_tts_audio_scene(existing)
+    current_background = (
+        current.get("background") if isinstance(current.get("background"), dict) else {}
+    )
+    current_ducking = current.get("ducking") if isinstance(current.get("ducking"), dict) else {}
+    current_finish = current.get("finish") if isinstance(current.get("finish"), dict) else {}
+    audio_enabled = _bool(
+        _value(values, payload, "tts_audio_enabled", bool(current_background.get("url"))),
+        bool(current_background.get("url")),
+    )
+    if not audio_enabled:
+        return {}
+
+    existing_url = _text(
+        _value(values, payload, "tts_background_audio_existing_url", current_background.get("url"))
+    )
+    custom_url = _text(_value(values, payload, "tts_background_audio_url"))
+    uploaded_audio = _value(values, payload, "tts_background_audio_upload")
+    source = _text(_value(values, payload, "tts_background_audio_source")).lower()
+    if not source:
+        if isinstance(uploaded_audio, dict) and uploaded_audio.get("data_b64"):
+            source = "upload"
+        elif custom_url:
+            source = "custom"
+        elif existing_url:
+            source = _background_audio_source_from_url(existing_url)
+        else:
+            source = "preset:morning_glow"
+
+    if source.startswith("preset:"):
+        background_url = _background_audio_preset_url(source.split(":", 1)[1])
+    elif source == "upload":
+        if isinstance(uploaded_audio, dict) and uploaded_audio.get("data_b64"):
+            background_url = _store_background_audio_upload(uploaded_audio)
+        elif existing_url and "/api/ai-tasks/background-audio/uploads/" in existing_url:
+            background_url = existing_url
+        else:
+            raise ValueError("Choose a background audio file to upload.")
+    elif source == "custom":
+        background_url = custom_url
+        if not background_url and existing_url and _background_audio_source_from_url(existing_url) == "custom":
+            background_url = existing_url
+        if not background_url.lower().startswith(("http://", "https://")):
+            raise ValueError("Background Audio URL must start with http:// or https://.")
+    else:
+        raise ValueError("Choose a valid background audio source.")
+
+    return _normalize_tts_audio_scene(
+        {
+            "background": {
+                "url": background_url,
+                "loop": _bool(
+                    _value(values, payload, "tts_background_loop", current_background.get("loop", True)),
+                    True,
+                ),
+                "volume_percent": _int(
+                    _value(
+                        values,
+                        payload,
+                        "tts_background_volume_percent",
+                        current_background.get("volume_percent"),
+                    ),
+                    60,
+                    maximum=100,
+                ),
+            },
+            "ducking": {
+                "target_percent": _int(
+                    _value(
+                        values,
+                        payload,
+                        "tts_ducking_target_percent",
+                        current_ducking.get("target_percent"),
+                    ),
+                    35,
+                    maximum=100,
+                ),
+                "attack_ms": _int(
+                    _value(values, payload, "tts_ducking_attack_ms", current_ducking.get("attack_ms")),
+                    150,
+                    maximum=10000,
+                ),
+                "release_ms": _int(
+                    _value(
+                        values,
+                        payload,
+                        "tts_ducking_release_ms",
+                        current_ducking.get("release_ms"),
+                    ),
+                    350,
+                    maximum=10000,
+                ),
+            },
+            "finish": {
+                "fade_ms": _int(
+                    _value(values, payload, "tts_background_fade_ms", current_finish.get("fade_ms")),
+                    500,
+                    maximum=10000,
+                ),
+            },
+        }
+    )
+
+
 def _rule_from_form(
     values: Dict[str, Any],
     payload: Dict[str, Any],
@@ -2059,6 +2469,7 @@ def _rule_from_form(
         "tts_mode",
         "tts_text",
         "tts_targets",
+        "tts_audio_scene",
         "notification_title",
         "notification_message",
         "notification_targets",
@@ -2077,6 +2488,19 @@ def _rule_from_form(
     rule = dict(previous)
     for field in fields:
         rule[field] = _value(values, payload, field, previous.get(field, ""))
+    audio_form_keys = {
+        "tts_audio_enabled",
+        "tts_background_audio_source",
+        "tts_background_audio_upload",
+        "tts_background_audio_url",
+        "tts_background_loop",
+    }
+    if audio_form_keys.intersection(values) or audio_form_keys.intersection(payload):
+        rule["tts_audio_scene"] = _tts_audio_scene_from_form(
+            values,
+            payload,
+            existing=previous.get("tts_audio_scene"),
+        )
     rule.update(
         {
             "id": _text(previous.get("id")) or str(uuid.uuid4()),
@@ -2119,6 +2543,178 @@ def _rule_from_form(
         if not _list(rule.get("camera_tts_targets")) and not _list(rule.get("camera_notification_targets")):
             raise ValueError("Choose at least one announcement or notification destination.")
     raise ValueError("Complete the required automation fields.")
+
+
+def _announcement_audio_fields(rule: Dict[str, Any], show_tts: Dict[str, Any]) -> List[Dict[str, Any]]:
+    scene = _normalize_tts_audio_scene(rule.get("tts_audio_scene"))
+    background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
+    finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
+    background_url = _text(background.get("url"))
+    source = _background_audio_source_from_url(background_url) if background_url else "preset:morning_glow"
+    show_for_audio = [show_tts, {"source_key": "tts_audio_enabled", "equals": "enabled"}]
+    source_options = [
+        {
+            "value": f"preset:{preset['id']}",
+            "label": preset["label"],
+            "description": preset["description"],
+            "icon": "♪",
+        }
+        for preset in _BACKGROUND_AUDIO_PRESETS
+    ]
+    source_options.extend(
+        [
+            {
+                "value": "upload",
+                "label": "Upload Audio",
+                "description": "Use your own WAV, MP3, or FLAC file.",
+                "icon": "↑",
+            },
+            {
+                "value": "custom",
+                "label": "Audio URL",
+                "description": "Use a stable HTTP(S) audio URL.",
+                "icon": "⌁",
+            },
+        ]
+    )
+    return [
+        {
+            "key": "tts_audio_enabled",
+            "label": "Background Audio",
+            "type": "select",
+            "presentation": "cards",
+            "options": [
+                {
+                    "value": "disabled",
+                    "label": "No Background Audio",
+                    "description": "Play the announcement by itself.",
+                    "icon": "○",
+                },
+                {
+                    "value": "enabled",
+                    "label": "Play Background Audio",
+                    "description": "Mix a looping audio bed underneath TTS on compatible Tater satellites.",
+                    "icon": "♪",
+                },
+            ],
+            "value": "enabled" if background_url else "disabled",
+            "show_when": show_tts,
+            "full_width": True,
+        },
+        {
+            "key": "tts_background_audio_source",
+            "label": "Background Track",
+            "type": "select",
+            "presentation": "cards",
+            "options": source_options,
+            "value": source,
+            "show_when_all": show_for_audio,
+            "full_width": True,
+        },
+        {
+            "key": "tts_background_audio_upload",
+            "label": "Upload Background Audio",
+            "type": "file",
+            "accept": ".wav,.mp3,.flac,audio/wav,audio/mpeg,audio/flac",
+            "file_encoding": "base64",
+            "max_bytes": _BACKGROUND_AUDIO_MAX_UPLOAD_BYTES,
+            "description": "WAV, MP3, or FLAC up to 16 MB. Tater stores it in Agent Lab.",
+            "value": "",
+            "show_when_all": [
+                *show_for_audio,
+                {"source_key": "tts_background_audio_source", "equals": "upload"},
+            ],
+            "full_width": True,
+        },
+        {
+            "key": "tts_background_audio_existing_url",
+            "label": "Existing Background Audio URL",
+            "type": "hidden",
+            "value": background_url,
+        },
+        {
+            "key": "tts_background_audio_url",
+            "label": "Background Audio URL",
+            "type": "text",
+            "description": "A stable HTTP(S) URL for WAV, MP3, or FLAC audio.",
+            "value": background_url if source == "custom" else "",
+            "show_when_all": [
+                *show_for_audio,
+                {"source_key": "tts_background_audio_source", "equals": "custom"},
+            ],
+            "full_width": True,
+        },
+        {
+            "key": "tts_background_volume_percent",
+            "label": "Background Volume (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "value": _int(background.get("volume_percent"), 60, maximum=100),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_ducking_target_percent",
+            "label": "Volume During Speech (%)",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "description": "Percentage of the background volume retained while Tater is speaking.",
+            "value": _int(ducking.get("target_percent"), 35, maximum=100),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_ducking_attack_ms",
+            "label": "Duck Attack (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _int(ducking.get("attack_ms"), 150, maximum=10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_ducking_release_ms",
+            "label": "Duck Release (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _int(ducking.get("release_ms"), 350, maximum=10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_background_fade_ms",
+            "label": "Final Fade-Out (ms)",
+            "type": "number",
+            "min": 0,
+            "max": 10000,
+            "value": _int(finish.get("fade_ms"), 500, maximum=10000),
+            "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_background_loop",
+            "label": "Track Playback",
+            "type": "select",
+            "presentation": "cards",
+            "options": [
+                {
+                    "value": "enabled",
+                    "label": "Loop Until Finished",
+                    "description": "Repeat the track until the announcement ends.",
+                    "icon": "↻",
+                },
+                {
+                    "value": "disabled",
+                    "label": "Play Once",
+                    "description": "Do not restart the track if it ends first.",
+                    "icon": "▶",
+                },
+            ],
+            "value": "enabled" if _bool(background.get("loop"), True) else "disabled",
+            "show_when_all": show_for_audio,
+            "full_width": True,
+        },
+    ]
 
 
 def _editor_fields(
@@ -2379,6 +2975,7 @@ def _editor_fields(
             "show_when_all": [show_tts, {"source_key": "tts_mode", "equals": "custom"}],
             "full_width": True,
         },
+        *_announcement_audio_fields(rule, show_tts),
         {
             "key": "action_category",
             "label": "Device Category",

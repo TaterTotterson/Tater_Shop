@@ -1,8 +1,12 @@
+import base64
 import importlib.util
+import io
 import json
 import sys
+import tempfile
 import types
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -312,6 +316,32 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["device"], "Front Yard")
         self.assertEqual(context["device_target"], "unifi_protect|cam-front")
 
+    def test_integration_events_keep_sequences_above_one_million(self):
+        self.redis.lists[self.core._INTEGRATION_EVENTS_KEY] = [
+            json.dumps({"seq": 1_358_240, "provider": "unifi_protect", "kind": "newer"}),
+            json.dumps({"seq": 1_358_239, "provider": "unifi_protect", "kind": "older"}),
+        ]
+
+        events = self.core._integration_events(self.redis, 1_358_238)
+
+        self.assertEqual([event["seq"] for event in events], [1_358_239, 1_358_240])
+
+    def test_legacy_capped_cursor_recovers_at_live_sequence(self):
+        self.assertEqual(
+            self.core._resolve_event_cursor("1000000", "1358240"),
+            (1_358_240, True),
+        )
+        self.assertEqual(
+            self.core._resolve_event_cursor("1358239", "1358240"),
+            (1_358_239, False),
+        )
+
+    def test_sequence_parser_preserves_64_bit_integer_precision(self):
+        self.assertEqual(
+            self.core._sequence("9007199254740993"),
+            9_007_199_254_740_993,
+        )
+
     def test_ignores_terminal_unifi_detection_update(self):
         rule = self._tts_rule(trigger_device="unifi_protect|cam-front")
         event = {
@@ -433,6 +463,123 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         ) as speak:
             await self.core._execute_tts(rule, {"device": "Front Yard"})
         self.assertEqual(speak.await_args.kwargs["text"], "A person was detected at Front Yard.")
+
+    async def test_announcement_passes_background_audio_scene_to_tater_satellite(self):
+        rule = self._tts_rule(
+            tts_audio_scene={
+                "background": {
+                    "url": "https://example.test/morning.wav",
+                    "loop": True,
+                    "volume_percent": 60,
+                },
+                "ducking": {"target_percent": 35, "attack_ms": 150, "release_ms": 350},
+                "finish": {"fade_ms": 500},
+            }
+        )
+        with patch.object(
+            self.core,
+            "speak_announcement_targets",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "sent_count": 1,
+                    "audio_scene_sent_count": 1,
+                    "audio_scene_fallback_count": 0,
+                }
+            ),
+        ) as speak:
+            result = await self.core._execute_tts(rule, {"device": "Front Yard"})
+
+        scene = speak.await_args.kwargs["audio_scene"]
+        self.assertEqual(scene["background"]["url"], "https://example.test/morning.wav")
+        self.assertEqual(scene["ducking"]["target_percent"], 35)
+        self.assertEqual(result["audio_scene_sent_count"], 1)
+
+    async def test_announcement_reports_audio_scene_fallback(self):
+        rule = self._tts_rule(
+            tts_audio_scene={"background": {"url": "https://example.test/morning.wav"}}
+        )
+        with patch.object(
+            self.core,
+            "speak_announcement_targets",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "sent_count": 1,
+                    "audio_scene_sent_count": 0,
+                    "audio_scene_fallback_count": 1,
+                }
+            ),
+        ):
+            result = await self.core._execute_tts(rule, {"device": "Front Yard"})
+
+        self.assertIn("played TTS without background audio", result["summary"])
+
+    def test_announcement_form_builds_and_persists_background_audio_preset(self):
+        values = {
+            "name": "Morning announcement",
+            "trigger_category": "camera",
+            "trigger_device": "unifi_protect|cam-front",
+            "trigger_event": "person",
+            "action_type": "tts",
+            "tts_mode": "default",
+            "tts_targets": ["voice_core:sat-kitchen"],
+            "tts_audio_enabled": "enabled",
+            "tts_background_audio_source": "preset:morning_glow",
+            "tts_background_volume_percent": 55,
+            "tts_ducking_target_percent": 30,
+            "tts_ducking_attack_ms": 125,
+            "tts_ducking_release_ms": 325,
+            "tts_background_fade_ms": 450,
+            "tts_background_loop": "enabled",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.core,
+            "_background_audio_root",
+            return_value=Path(temp_dir) / "background_audio",
+        ):
+            rule = self.core._rule_from_form(values, {"values": values})
+            generated = sorted((Path(temp_dir) / "background_audio" / "presets").glob("*.wav"))
+
+        scene = rule["tts_audio_scene"]
+        self.assertTrue(scene["background"]["url"].endswith("/presets/morning_glow.wav"))
+        self.assertEqual(scene["background"]["volume_percent"], 55)
+        self.assertEqual(scene["ducking"]["target_percent"], 30)
+        self.assertEqual(len(generated), 4)
+
+    def test_announcement_form_stores_uploaded_background_audio(self):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(8000)
+            wav_file.writeframes(b"\x00\x00" * 800)
+        audio = output.getvalue()
+        values = {
+            "name": "Uploaded bed",
+            "trigger_category": "camera",
+            "trigger_event": "person",
+            "action_type": "tts",
+            "tts_targets": ["voice_core:sat-kitchen"],
+            "tts_audio_enabled": "enabled",
+            "tts_background_audio_source": "upload",
+            "tts_background_audio_upload": {
+                "filename": "custom-bed.wav",
+                "content_type": "audio/wav",
+                "data_b64": base64.b64encode(audio).decode("ascii"),
+            },
+            "tts_background_loop": "enabled",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.core,
+            "_background_audio_root",
+            return_value=Path(temp_dir) / "background_audio",
+        ):
+            rule = self.core._rule_from_form(values, {"values": values})
+            uploads = list((Path(temp_dir) / "background_audio" / "uploads").glob("*.wav"))
+
+        self.assertEqual(len(uploads), 1)
+        self.assertIn("/api/ai-tasks/background-audio/uploads/", rule["tts_audio_scene"]["background"]["url"])
 
     def test_selected_camera_exposes_only_reported_trigger_events(self):
         options, dependency = self.core._trigger_event_dependency(
@@ -670,6 +817,58 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.core._event_match(rule, motion_event, sample_registry())[0])
         self.assertTrue(self.core._event_match(rule, press_event, sample_registry())[0])
 
+    def test_unifi_back_door_open_state_change_matches_selected_sensor(self):
+        device_id = "66097deb01fbe603e405bbf6"
+        back_door = {
+            "integration_id": "unifi_protect",
+            "integration_name": "UniFi Protect",
+            "id": device_id,
+            "ref": f"sensor:{device_id}",
+            "name": "Back Door",
+            "room": "Back Yard",
+            "type": "entry_sensor",
+            "category_ids": ["entry_sensor"],
+            "event_sources": [
+                {
+                    "type": "contact",
+                    "ref": device_id,
+                    "state_on": "open",
+                    "state_off": "closed",
+                }
+            ],
+        }
+        registry = {
+            "devices": [back_door],
+            "categories": [
+                {"id": "entry_sensor", "name": "Door & Window Sensors", "devices": [back_door]}
+            ],
+        }
+        rule = self._tts_rule(
+            trigger_category="entry_sensor",
+            trigger_integration="entry_sensor::unifi_protect",
+            trigger_device=f"unifi_protect|{device_id}",
+            trigger_event="opens",
+        )
+        event = {
+            "seq": 1_358_104,
+            "provider": "unifi_protect",
+            "kind": "state_changed",
+            "payload": {
+                "device_id": device_id,
+                "friendly_name": "Back Door",
+                "old_state": {"state": "closed"},
+                "new_state": {"state": "open"},
+            },
+        }
+
+        matched, context = self.core._event_match(rule, event, registry)
+
+        self.assertTrue(matched)
+        self.assertEqual(context["device"], "Back Door")
+        self.assertEqual(context["state"], "open")
+        self.assertEqual(context["old_state"], "closed")
+        self.assertEqual(context["event_seq"], 1_358_104)
+
     def test_awareness_import_action_is_not_supported(self):
         with self.assertRaises(KeyError):
             self.core.handle_htmlui_tab_action(
@@ -766,6 +965,16 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             "action_integration",
         )
         self.assertEqual(by_key["tts_mode"]["value"], "default")
+        self.assertEqual(by_key["tts_audio_enabled"]["type"], "select")
+        self.assertEqual(by_key["tts_audio_enabled"]["presentation"], "cards")
+        self.assertEqual(
+            by_key["tts_background_audio_source"]["show_when_all"],
+            [
+                {"source_key": "action_type", "equals": "tts"},
+                {"source_key": "tts_audio_enabled", "equals": "enabled"},
+            ],
+        )
+        self.assertEqual(by_key["tts_background_audio_upload"]["max_bytes"], 16 * 1024 * 1024)
         trigger_values = [
             row["value"]
             for row in by_key["trigger_event"]["dependent_options"]["options_by_source"][
