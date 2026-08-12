@@ -89,7 +89,23 @@ def sample_registry():
         "event_sources": [
             {"type": "motion", "ref": "binary_sensor.unifi_cam-front_motion"},
             {"type": "smart_person", "ref": "binary_sensor.unifi_cam-front_smart_person"},
+            {"type": "smart_animal", "ref": "binary_sensor.unifi_cam-front_smart_animal"},
             {"type": "doorbell", "ref": "binary_sensor.unifi_cam-front_doorbell"},
+        ],
+    }
+    doorbell = {
+        "integration_id": "unifi_protect",
+        "integration_name": "UniFi Protect",
+        "id": "doorbell-front",
+        "ref": "camera:doorbell-front",
+        "name": "Front Doorbell",
+        "room": "Front Door",
+        "category_ids": ["device"],
+        "type": "doorbell_camera",
+        "actions": ["camera_snapshot"],
+        "event_sources": [
+            {"type": "motion", "ref": "binary_sensor.unifi_doorbell-front_motion", "state_on": "on", "state_off": "off"},
+            {"type": "doorbell", "ref": "event.unifi_doorbell-front_doorbell", "state_on": "on", "state_off": "off"},
         ],
     }
     sensor = {
@@ -103,7 +119,7 @@ def sample_registry():
         "event_sources": [{"type": "contact", "ref": "binary_sensor.back_door"}],
     }
     return {
-        "devices": [camera, sensor],
+        "devices": [camera, doorbell, sensor],
         "categories": [],
         "rooms": [],
     }
@@ -184,8 +200,10 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.redis.values.clear()
         self.redis.lists.clear()
 
-    def _add_monitor(self, kind, device, area):
+    def _add_monitor(self, kind, device, area, trigger_events=None):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
+        if trigger_events is not None:
+            values["trigger_events"] = trigger_events
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             result = self.core.handle_htmlui_tab_action(
                 action="awareness_add_monitor",
@@ -224,6 +242,99 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(active)
         self.assertFalse(clear)
+
+    def test_camera_monitor_only_captures_selected_detection_types(self):
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            ["person", "animal"],
+        )
+        self.assertEqual(monitor["trigger_events"], ["person", "animal"])
+        self.assertFalse(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="binary_sensor.unifi_cam-front_motion",
+                new_state={"state": "on"},
+                old_state={"state": "off"},
+            )
+        )
+        self.assertTrue(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="binary_sensor.unifi_cam-front_smart_animal",
+                new_state={"state": "on"},
+                old_state={"state": "off"},
+            )
+        )
+
+    def test_motion_only_camera_exposes_only_motion_capture(self):
+        device = {
+            "integration_id": "homeassistant",
+            "id": "camera.garage",
+            "ref": "camera.garage",
+            "type": "camera",
+            "category_ids": ["camera"],
+            "event_sources": [
+                {"type": "motion", "ref": "binary_sensor.garage_motion", "state_on": "on", "state_off": "off"}
+            ],
+        }
+
+        self.assertEqual(self.core._monitor_trigger_values_for_device(device), ["motion"])
+
+    def test_sensor_monitor_can_capture_open_without_capture_on_close(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            ["opens"],
+        )
+        self.assertTrue(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="homeassistant",
+                entity_id="binary_sensor.back_door",
+                new_state={"state": "on"},
+                old_state={"state": "off"},
+            )
+        )
+        self.assertFalse(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="homeassistant",
+                entity_id="binary_sensor.back_door",
+                new_state={"state": "off"},
+                old_state={"state": "on"},
+            )
+        )
+
+    def test_doorbell_capture_does_not_treat_motion_as_a_button_press(self):
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|doorbell-front",
+            "Front Door",
+            ["doorbell"],
+        )
+        self.assertFalse(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="binary_sensor.unifi_doorbell-front_motion",
+                new_state={"state": "on"},
+                old_state={"state": "off"},
+            )
+        )
+        self.assertTrue(
+            self.core._monitor_matches_event(
+                monitor,
+                provider="unifi_protect",
+                entity_id="event.unifi_doorbell-front_doorbell",
+                new_state={"state": "on"},
+                old_state={"state": "off"},
+            )
+        )
 
     async def test_camera_monitor_uses_the_matching_event_type_and_stores_snapshot(self):
         monitor = self._add_monitor("camera", "unifi_protect|cam-front", "Front Yard")
@@ -270,14 +381,64 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
         ui = payload["ui"]
-        self.assertEqual([tab["key"] for tab in ui["manager_tabs"]], ["monitors", "add", "events"])
-        self.assertEqual(ui["default_tab"], "add")
+        self.assertEqual([tab["key"] for tab in ui["manager_tabs"]], ["events", "monitors", "add"])
+        self.assertEqual(ui["default_tab"], "events")
+        self.assertEqual(ui["appearance"], "awareness")
         fields = {field.get("key"): field for field in ui["add_form"]["fields"] if field.get("key")}
         self.assertEqual(fields["kind"]["presentation"], "cards")
         self.assertEqual(fields["device"]["presentation"], "cards")
+        self.assertEqual(fields["trigger_events"]["type"], "multiselect")
+        self.assertEqual(fields["trigger_events"]["presentation"], "cards")
+        self.assertEqual(fields["trigger_events"]["dependent_options"]["source_key"], "device")
+        doorbell_options = fields["trigger_events"]["dependent_options"]["options_by_source"][
+            "unifi_protect|doorbell-front"
+        ]
+        self.assertEqual([row["value"] for row in doorbell_options], ["motion", "doorbell"])
+        device_values = {
+            row["value"]
+            for row in fields["device"]["dependent_options"]["options_by_source"]["camera"]
+        }
+        self.assertIn("unifi_protect|doorbell-front", device_values)
         self.assertNotIn("trigger_entities", fields)
         self.assertNotIn("notification_targets", fields)
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")
+
+    def test_event_list_view_uses_compact_rows_instead_of_event_cards(self):
+        snapshot_id = "snapshot-list-view"
+        self.redis.values[self.core._event_snapshot_key(snapshot_id)] = json.dumps(
+            {
+                "content_type": "image/jpeg",
+                "bytes": 4,
+                "data_b64": "dGVzdA==",
+            }
+        )
+        event = {
+            "id": "event-list-view",
+            "source": "back_yard",
+            "type": "camera_person",
+            "entity_id": "camera.back_yard",
+            "ha_time": "2026-08-12T12:00:00",
+            "message": "A person is walking across the back yard.",
+            "snapshot_id": snapshot_id,
+            "data": {"area": "Back Yard"},
+        }
+
+        card_item = self.core._event_forms_from_events(self.redis, [event], list_view=False)[0]
+        list_item = self.core._event_forms_from_events(self.redis, [event], list_view=True)[0]
+
+        self.assertEqual(card_item["group"], "event")
+        self.assertTrue(card_item["fields"])
+        self.assertEqual(list_item["group"], "event_list")
+        self.assertEqual(list_item["card_variant"], "event_list")
+        self.assertEqual(list_item["detail"], event["message"])
+        self.assertTrue(list_item["hero_image_src"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(list_item["fields"], [])
+
+        self.core._runtime_set(self.redis, events_list_view=True)
+        with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
+            ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
+        events_tab = next(tab for tab in ui["manager_tabs"] if tab["key"] == "events")
+        self.assertEqual(events_tab["item_group"], "event_list")
 
     def test_legacy_rule_actions_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "moved to Automation Core"):

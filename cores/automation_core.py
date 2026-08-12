@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -57,17 +57,37 @@ _WORKER_COUNT = 4
 
 _TRUE = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE = {"0", "false", "no", "off", "disabled", "n"}
-_ON_STATES = {"on", "open", "opened", "active", "detected", "connected", "online", "home", "present", "true", "1"}
+_ON_STATES = {
+    "on",
+    "open",
+    "opened",
+    "active",
+    "detected",
+    "motion",
+    "occupied",
+    "connected",
+    "online",
+    "home",
+    "present",
+    "wet",
+    "alarm",
+    "tamper",
+    "true",
+    "1",
+}
 _OFF_STATES = {
     "off",
     "closed",
     "close",
     "inactive",
     "clear",
+    "idle",
+    "unoccupied",
     "disconnected",
     "offline",
     "away",
     "not_present",
+    "dry",
     "false",
     "0",
 }
@@ -127,6 +147,7 @@ _CATEGORY_ICONS = {
     "lock": "◆",
     "motion": "⌁",
     "camera": "◉",
+    "doorbell": "◉",
     "leak": "◒",
     "climate": "◐",
     "temperature": "°",
@@ -290,7 +311,12 @@ def _device_ref(device: Dict[str, Any]) -> str:
 
 
 def _device_categories(device: Dict[str, Any]) -> set[str]:
-    return {_token(item) for item in (device.get("category_ids") or device.get("capabilities") or []) if _token(item)}
+    values = [
+        *(device.get("category_ids") or []),
+        *(device.get("capabilities") or []),
+        device.get("type"),
+    ]
+    return {_token(item) for item in values if _token(item)}
 
 
 def _device_actions(device: Dict[str, Any]) -> List[str]:
@@ -434,26 +460,43 @@ def _trigger_event_values_for_device(device: Dict[str, Any]) -> List[str]:
     for source in device.get("event_sources") or []:
         if not isinstance(source, dict):
             continue
+        source_mapped = False
         source_type = _token(source.get("type"))
         source_ref = _token(source.get("ref"))
-        corpus = f"{source_type} {source_ref}"
+        state_on = _token(source.get("state_on"))
+        state_off = _token(source.get("state_off"))
+        ref_hint = source_ref if source_type in {"", "event", "binary", "sensor", "value"} else ""
+        corpus = f"{source_type} {ref_hint}"
         if "license_plate" in corpus or "licenseplate" in corpus:
             add("license_plate")
+            source_mapped = True
         for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
             if event in corpus:
                 add(event)
+                source_mapped = True
         if any(token in corpus for token in ("contact", "entry", "door_window")):
             add("opens", "closes")
+            source_mapped = True
         if any(token in corpus for token in ("connectivity", "online", "network")):
             add("connects", "disconnects")
-        if source_type in {"switch", "light", "input", "binary", "power"}:
+            source_mapped = True
+        if source_type in {"occupancy", "presence", "switch", "light", "input", "power", "leak", "tamper"}:
             add("turns_on", "turns_off")
+            source_mapped = True
         if source_type in {"temperature", "humidity", "illuminance", "energy", "sensor", "value"}:
             add("changed", "above", "below")
+            source_mapped = True
+        if not source_mapped and (state_on or state_off):
+            add("turns_on", "turns_off")
 
     capability_corpus = " ".join(
         _token(value)
-        for value in [*(device.get("capabilities") or []), *(device.get("features") or [])]
+        for value in [
+            *(device.get("category_ids") or []),
+            *(device.get("capabilities") or []),
+            *(device.get("features") or []),
+            device.get("type"),
+        ]
         if _token(value)
     )
     if "license_plate" in capability_corpus or "licenseplate" in capability_corpus:
@@ -463,8 +506,10 @@ def _trigger_event_values_for_device(device: Dict[str, Any]) -> List[str]:
             add(event)
 
     categories = _device_categories(device)
+    if "doorbell" in categories:
+        add("doorbell")
     if not found:
-        if "camera" in categories:
+        if "camera" in categories or "doorbell" in categories:
             add("motion")
         if "motion" in categories:
             add("motion")
@@ -991,6 +1036,54 @@ def _matching_devices(event: Dict[str, Any], registry: Dict[str, Any]) -> List[D
     return matches
 
 
+def _event_source_types(event: Dict[str, Any], devices: Sequence[Dict[str, Any]]) -> set[str]:
+    event_variants: set[str] = set()
+    for ref in _event_refs(event):
+        event_variants.update(_token_variants(ref))
+    source_types: set[str] = set()
+    for device in devices:
+        for source in device.get("event_sources") or []:
+            if not isinstance(source, dict):
+                continue
+            source_variants: set[str] = set()
+            for ref_key in ("ref", "resource_ref", "id"):
+                source_variants.update(_token_variants(source.get(ref_key)))
+            if event_variants.intersection(source_variants):
+                source_type = _token(source.get("type"))
+                if source_type:
+                    source_types.add(source_type)
+    return source_types
+
+
+def _event_signal_haystack(event: Dict[str, Any], devices: Sequence[Dict[str, Any]], state: str) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    signal_keys = {
+        "type",
+        "event_type",
+        "eventtype",
+        "detection_type",
+        "detectiontype",
+        "smart_detect_types",
+        "smartdetecttypes",
+        "device_class",
+        "deviceclass",
+        "resource_type",
+        "resourcetype",
+        "action",
+        "state",
+        "status",
+    }
+    signals = [_text(event.get("kind")), state, *_event_source_types(event, devices)]
+    for key, value in _walk_values(payload):
+        if _token(key) not in signal_keys:
+            continue
+        if isinstance(value, (dict, list)):
+            signals.append(json.dumps(value, default=str))
+        else:
+            signals.append(_text(value))
+    return " ".join(item.lower().replace("-", "_") for item in signals if _text(item))
+
+
 def _heuristic_categories(event: Dict[str, Any]) -> set[str]:
     provider = _text(event.get("provider")).lower()
     kind = _text(event.get("kind")).lower()
@@ -1122,6 +1215,7 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     kind = _text(event.get("kind")).lower()
     haystack = f"{kind} {state} {json.dumps(payload, default=str)[:20000]}".lower()
+    signal_haystack = _event_signal_haystack(event, devices, state)
     trigger = _token(rule.get("trigger_event"))
     expected = _text(rule.get("trigger_value")).lower()
     attribute = _text(rule.get("trigger_attribute"))
@@ -1145,7 +1239,7 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
         matched = "disconnected" in kind or "missing" in kind or state in {"disconnected", "offline", "away"}
     elif trigger == "doorbell":
         matched = not _event_is_terminal(event) and any(
-            word in haystack for word in ("doorbell", "ring", "pressed", "button_press")
+            word in signal_haystack for word in ("doorbell", "ring", "pressed", "button_press")
         )
     elif trigger in {"motion", "person", "vehicle", "animal", "package", "face", "license_plate"}:
         needles = {trigger}
@@ -1154,7 +1248,7 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
         matched = (
             not _event_is_terminal(event)
             and state not in _OFF_STATES
-            and any(needle in haystack for needle in needles)
+            and any(needle in signal_haystack for needle in needles)
         )
     elif trigger == "equals":
         matched = _text(compared_value).lower() == expected

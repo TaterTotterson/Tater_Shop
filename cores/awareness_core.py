@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
@@ -174,6 +174,13 @@ _MONITOR_ACTIVE_STATES = {
     "active",
     "detected",
     "motion",
+    "occupied",
+    "present",
+    "connected",
+    "online",
+    "wet",
+    "alarm",
+    "tamper",
     "ringing",
     "pressed",
     "true",
@@ -185,9 +192,32 @@ _MONITOR_INACTIVE_STATES = {
     "inactive",
     "clear",
     "idle",
+    "unoccupied",
+    "away",
+    "disconnected",
+    "offline",
+    "dry",
     "false",
     "0",
 }
+_MONITOR_TRIGGER_OPTIONS = [
+    {"value": "changed", "label": "Changes", "icon": "↻"},
+    {"value": "turns_on", "label": "Becomes active", "icon": "●"},
+    {"value": "turns_off", "label": "Becomes inactive", "icon": "○"},
+    {"value": "opens", "label": "Opens", "icon": "↗"},
+    {"value": "closes", "label": "Closes", "icon": "↘"},
+    {"value": "motion", "label": "Detects motion", "icon": "⌁"},
+    {"value": "person", "label": "Detects a person", "icon": "♟"},
+    {"value": "vehicle", "label": "Detects a vehicle", "icon": "◆"},
+    {"value": "animal", "label": "Detects an animal", "icon": "♣"},
+    {"value": "package", "label": "Detects a package", "icon": "▣"},
+    {"value": "face", "label": "Detects a face", "icon": "◎"},
+    {"value": "license_plate", "label": "Detects a license plate", "icon": "▤"},
+    {"value": "doorbell", "label": "Doorbell is pressed", "icon": "◉"},
+    {"value": "connects", "label": "Connects / comes online", "icon": "⌁"},
+    {"value": "disconnects", "label": "Disconnects / goes offline", "icon": "×"},
+]
+_MONITOR_TRIGGER_VALUES = {row["value"] for row in _MONITOR_TRIGGER_OPTIONS}
 _UNIFI_SMART_TYPE_ALIASES = {
     "people": "person",
     "human": "person",
@@ -780,11 +810,29 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         source_ref = _text(source.get("ref"))
         source_type = _category_token(source.get("type"))
         if source_ref:
-            event_sources.append({"ref": source_ref, "type": source_type})
+            source_row = {"ref": source_ref, "type": source_type}
+            for state_key in ("state_on", "state_off"):
+                state_value = _text(source.get(state_key))
+                if state_value:
+                    source_row[state_key] = state_value
+            event_sources.append(source_row)
     categories = [_category_token(item) for item in _monitor_string_list(raw.get("categories"))]
     categories = [item for item in categories if item]
     event_types = [_category_token(item) for item in _monitor_string_list(raw.get("event_types"))]
     event_types = [item for item in event_types if item]
+    trigger_events = [
+        _monitor_trigger_token(item)
+        for item in _monitor_string_list(raw.get("trigger_events"))
+    ]
+    trigger_events = [item for item in trigger_events if item in _MONITOR_TRIGGER_VALUES]
+    if not trigger_events:
+        trigger_events = _monitor_trigger_values_for_device(
+            {
+                "type": kind,
+                "category_ids": categories,
+                "event_sources": event_sources,
+            }
+        )
     return {
         "id": _text(raw.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -795,6 +843,7 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "event_refs": event_refs,
         "event_sources": event_sources,
         "event_types": event_types,
+        "trigger_events": trigger_events,
         "categories": categories,
         "name": name,
         "area": area or kind,
@@ -897,7 +946,163 @@ def _monitor_device_kind(device: Dict[str, Any]) -> str:
         return "camera"
     if categories.intersection(_MONITOR_SENSOR_CATEGORIES):
         return "sensor"
+    event_corpus = " ".join(
+        _text(value).lower()
+        for source in device.get("event_sources") or []
+        if isinstance(source, dict)
+        for value in (source.get("type"), source.get("ref"))
+        if _text(value)
+    )
+    feature_corpus = " ".join(
+        _text(value).lower()
+        for value in [
+            device.get("type"),
+            *(device.get("features") or []),
+            *(device.get("actions") or []),
+        ]
+        if _text(value)
+    )
+    if any(token in f"{event_corpus} {feature_corpus}" for token in ("camera", "doorbell", "snapshot")):
+        return "camera"
+    if event_corpus:
+        return "sensor"
     return ""
+
+
+def _monitor_trigger_token(value: Any) -> str:
+    token = _category_token(value)
+    aliases = {
+        "smart_person": "person",
+        "smart_vehicle": "vehicle",
+        "smart_animal": "animal",
+        "smart_package": "package",
+        "smart_face": "face",
+        "smart_license_plate": "license_plate",
+        "licenseplate": "license_plate",
+        "doorbell_pressed": "doorbell",
+        "ring": "doorbell",
+        "open": "opens",
+        "close": "closes",
+    }
+    return aliases.get(token, token)
+
+
+def _monitor_trigger_values_for_device(device: Dict[str, Any]) -> List[str]:
+    found: set[str] = set()
+
+    def add(*values: str) -> None:
+        for value in values:
+            token = _monitor_trigger_token(value)
+            if token in _MONITOR_TRIGGER_VALUES:
+                found.add(token)
+
+    for source in device.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        source_mapped = False
+        source_type = _category_token(source.get("type"))
+        source_ref = _text(source.get("ref")).lower().replace("-", "_")
+        state_on = _text(source.get("state_on")).lower()
+        state_off = _text(source.get("state_off")).lower()
+        ref_hint = source_ref if source_type in {"", "event", "binary", "sensor", "value"} else ""
+        corpus = f"{source_type} {ref_hint}"
+        if "license_plate" in corpus or "licenseplate" in corpus:
+            add("license_plate")
+            source_mapped = True
+        for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
+            if event in corpus:
+                add(event)
+                source_mapped = True
+        if any(token in corpus for token in ("contact", "entry", "door_window", "open_close", "window")):
+            add("opens", "closes")
+            source_mapped = True
+        if any(token in corpus for token in ("connectivity", "online", "network")):
+            add("connects", "disconnects")
+            source_mapped = True
+        if source_type in {"occupancy", "presence", "switch", "light", "input", "power", "leak", "tamper"}:
+            add("turns_on", "turns_off")
+            source_mapped = True
+        if source_type in {"temperature", "humidity", "illuminance", "energy", "battery", "sensor", "value"}:
+            add("changed")
+            source_mapped = True
+        if not source_mapped and (state_on or state_off):
+            add("turns_on", "turns_off")
+
+    capability_corpus = " ".join(
+        _category_token(value)
+        for value in [
+            *(device.get("category_ids") or []),
+            *(device.get("capabilities") or []),
+            *(device.get("features") or []),
+            device.get("type"),
+        ]
+        if _category_token(value)
+    )
+    if "license_plate" in capability_corpus or "licenseplate" in capability_corpus:
+        add("license_plate")
+    for event in ("person", "vehicle", "animal", "package", "face", "doorbell", "motion"):
+        if event in capability_corpus:
+            add(event)
+
+    categories = _monitor_device_categories(device)
+    if "doorbell" in categories:
+        add("doorbell")
+    if not found:
+        if "camera" in categories or _monitor_device_kind(device) == "camera":
+            add("motion")
+        if "motion" in categories:
+            add("motion")
+        if categories.intersection({"entry_sensor", "garage_door"}):
+            add("opens", "closes")
+        if categories.intersection({"presence", "leak"}):
+            add("turns_on", "turns_off")
+        if categories.intersection({"temperature", "humidity", "illuminance", "energy", "battery", "sensor"}):
+            add("changed")
+    if not found:
+        add("changed")
+    return [row["value"] for row in _MONITOR_TRIGGER_OPTIONS if row["value"] in found]
+
+
+def _monitor_trigger_option(value: Any) -> Dict[str, Any]:
+    token = _monitor_trigger_token(value)
+    row = next((item for item in _MONITOR_TRIGGER_OPTIONS if item["value"] == token), None)
+    if row:
+        return dict(row)
+    return {"value": token, "label": token.replace("_", " ").title(), "icon": "◆"}
+
+
+def _monitor_trigger_dependency(
+    registry: Dict[str, Any],
+    *,
+    current_device: Any = "",
+    current_events: Any = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_values: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        encoded = _monitor_device_value(device)
+        if not encoded or not _monitor_device_kind(device):
+            continue
+        values = _monitor_trigger_values_for_device(device)
+        all_values.update(values)
+        options_by_source[encoded] = [_monitor_trigger_option(value) for value in values]
+    default_options = [
+        _monitor_trigger_option(row["value"])
+        for row in _MONITOR_TRIGGER_OPTIONS
+        if row["value"] in all_values
+    ]
+    selected = list(options_by_source.get(_text(current_device), default_options))
+    for saved in _monitor_string_list(current_events):
+        token = _monitor_trigger_token(saved)
+        if token and not any(_text(row.get("value")) == token for row in selected):
+            selected.append({**_monitor_trigger_option(token), "meta": "Saved setting"})
+    return selected, {
+        "source_key": "device",
+        "options_by_source": options_by_source,
+        "default_options": default_options,
+    }
 
 
 def _monitor_device_value(device: Dict[str, Any]) -> str:
@@ -1016,7 +1221,12 @@ def _build_monitor_from_values(
         if source_type and source_type not in event_types:
             event_types.append(source_type)
         if ref:
-            event_sources.append({"ref": ref, "type": source_type})
+            source_row = {"ref": ref, "type": source_type}
+            for state_key in ("state_on", "state_off"):
+                state_value = _text(source.get(state_key))
+                if state_value:
+                    source_row[state_key] = state_value
+            event_sources.append(source_row)
     if kind == "sensor" or not event_refs:
         for ref in (device_ref, device_id):
             if ref and ref not in event_refs:
@@ -1025,6 +1235,23 @@ def _build_monitor_from_values(
         sensor_alias = _unifi_sensor_entity(device_id)
         if sensor_alias not in event_refs:
             event_refs.append(sensor_alias)
+    available_trigger_events = _monitor_trigger_values_for_device(device)
+    raw_trigger_events = _value(
+        values,
+        payload,
+        "trigger_events",
+        previous.get("trigger_events") or available_trigger_events,
+    )
+    requested_trigger_events = [
+        _monitor_trigger_token(item)
+        for item in _monitor_string_list(raw_trigger_events)
+    ]
+    trigger_events: List[str] = []
+    for item in requested_trigger_events:
+        if item in available_trigger_events and item not in trigger_events:
+            trigger_events.append(item)
+    if not trigger_events:
+        raise ValueError("Choose at least one event that should trigger this monitored source.")
     now_ts = time.time()
     default_name = _text(device.get("name")) or device_id
     default_area = _text(device.get("room") or device.get("area")) or default_name
@@ -1038,6 +1265,7 @@ def _build_monitor_from_values(
         "event_refs": event_refs,
         "event_sources": event_sources,
         "event_types": event_types,
+        "trigger_events": trigger_events,
         "categories": sorted(_monitor_device_categories(device)),
         "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
@@ -2639,28 +2867,12 @@ def _event_forms_from_events(
         if entity_id:
             subtitle_parts.append(f"Entity: {entity_id}")
         description = _text(event.get("message"))
-        if description and list_view:
-            subtitle_parts.append(f"Summary: {_compact(description, limit=120)}")
         subtitle = " • ".join([part for part in subtitle_parts if part])
 
         fields: List[Dict[str, Any]] = []
         snapshot = _event_snapshot_preview(client, event)
         snapshot_id = _text(snapshot.get("snapshot_id"))
-        if list_view and snapshot.get("data_url"):
-            fields.append(
-                {
-                    "key": f"snapshot_thumb_{idx}",
-                    "label": "Thumbnail",
-                    "type": "image",
-                    "src": _text(snapshot.get("data_url")),
-                    "alt": f"{title} thumbnail",
-                    "hide_label": True,
-                    "display": "thumbnail",
-                    "max_width": 160,
-                    "max_height": 90,
-                }
-            )
-        elif (not list_view) and snapshot.get("data_url"):
+        if (not list_view) and snapshot.get("data_url"):
             fields.append(
                 {
                     "key": f"snapshot_{idx}",
@@ -2671,19 +2883,14 @@ def _event_forms_from_events(
                     "hide_label": True,
                 }
             )
-        elif snapshot_id:
+        elif snapshot_id and not list_view:
             fields.append(
                 {
                     "key": f"snapshot_status_{idx}",
                     "label": "Snapshot",
-                    "type": "text" if not list_view else "textarea",
-                    "value": (
-                        f"Stored snapshot unavailable ({snapshot_id})"
-                        if not list_view
-                        else f"Snapshot stored: {snapshot_id}"
-                    ),
+                    "type": "text",
+                    "value": f"Stored snapshot unavailable ({snapshot_id})",
                     "read_only": True,
-                    "hide_label": bool(list_view),
                 }
             )
 
@@ -2703,9 +2910,13 @@ def _event_forms_from_events(
         items.append(
             {
                 "id": item_id,
-                "group": "event",
+                "group": "event_list" if list_view else "event",
+                "card_variant": "event_list" if list_view else "",
                 "title": title,
                 "subtitle": subtitle,
+                "detail": _compact(description, limit=240) if list_view else "",
+                "hero_image_src": _text(snapshot.get("data_url")) if list_view else "",
+                "hero_image_alt": f"{title} thumbnail" if list_view else "",
                 "fields_popup": False,
                 "fields_dropdown": False,
                 "sections_in_dropdown": False,
@@ -2822,26 +3033,35 @@ def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
     }
 
 
-def _monitor_event_type(monitor: Dict[str, Any], entity_id: Any, new_state: Dict[str, Any]) -> str:
-    attrs = new_state.get("attributes") if isinstance(new_state, dict) else {}
-    if not isinstance(attrs, dict):
-        attrs = {}
+def _monitor_event_source(monitor: Dict[str, Any], entity_id: Any) -> Dict[str, Any]:
     entity_token = _text(entity_id).casefold()
-    matched_source_type = ""
     for source in monitor.get("event_sources") or []:
         if not isinstance(source, dict):
             continue
-        if _text(source.get("ref")).casefold() == entity_token:
-            matched_source_type = _text(source.get("type"))
-            break
-    fallback_event_types = monitor.get("event_types") or []
-    sole_event_type = _text(fallback_event_types[0]) if len(fallback_event_types) == 1 else ""
-    corpus = " ".join(
+        _provider, raw_ref = _split_provider_ref(source.get("ref"), monitor.get("provider"))
+        if _text(raw_ref or source.get("ref")).casefold() == entity_token:
+            return source
+    return {}
+
+
+def _monitor_event_trigger(
+    monitor: Dict[str, Any],
+    entity_id: Any,
+    new_state: Dict[str, Any],
+    old_state: Dict[str, Any],
+) -> str:
+    attrs = new_state.get("attributes") if isinstance(new_state, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    source = _monitor_event_source(monitor, entity_id)
+    matched_source_type = _text(source.get("type"))
+    new_value = _text((new_state or {}).get("state")).lower()
+    old_value = _text((old_state or {}).get("state")).lower()
+    state_on = _text(source.get("state_on")).lower()
+    state_off = _text(source.get("state_off")).lower()
+    attribute_corpus = " ".join(
         _text(value).lower().replace("-", "_")
         for value in (
-            entity_id,
-            matched_source_type,
-            sole_event_type,
             attrs.get("event_type"),
             attrs.get("detection_type"),
             attrs.get("device_class"),
@@ -2849,14 +3069,52 @@ def _monitor_event_type(monitor: Dict[str, Any], entity_id: Any, new_state: Dict
         )
         if _text(value)
     )
+    corpus = " ".join(
+        item
+        for item in (
+            matched_source_type.lower().replace("-", "_"),
+            attribute_corpus,
+            _text(entity_id).lower().replace("-", "_") if not matched_source_type else "",
+        )
+        if item
+    )
     if "doorbell" in corpus or "ring" in corpus:
-        return "doorbell"
+        return "" if new_value in _MONITOR_INACTIVE_STATES else "doorbell"
     if "license_plate" in corpus or "licenseplate" in corpus:
-        return "license_plate"
-    for token in ("person", "vehicle", "animal", "package", "face", "motion"):
+        return "" if new_value in _MONITOR_INACTIVE_STATES else "license_plate"
+    for token in ("person", "vehicle", "animal", "package", "face"):
         if token in corpus:
-            return token
-    return "activity" if _text(monitor.get("kind")) == "camera" else "changed"
+            return "" if new_value in _MONITOR_INACTIVE_STATES else token
+    if "motion" in corpus:
+        active = new_value == state_on if state_on else new_value in _MONITOR_ACTIVE_STATES
+        return "motion" if active else ""
+    if any(token in corpus for token in ("contact", "entry", "door_window", "open_close", "window")):
+        if (state_on and new_value == state_on) or new_value in {"open", "opened", "on", "no_contact"}:
+            return "opens"
+        if (state_off and new_value == state_off) or new_value in {"closed", "close", "off", "contact"}:
+            return "closes"
+        return "changed" if new_value != old_value else ""
+    if any(token in corpus for token in ("connectivity", "online", "network")):
+        if (state_on and new_value == state_on) or new_value in {"connected", "online", "home", "present"}:
+            return "connects"
+        if (state_off and new_value == state_off) or new_value in {"disconnected", "offline", "away"}:
+            return "disconnects"
+    if state_on and new_value == state_on and new_value != old_value:
+        return "turns_on"
+    if state_off and new_value == state_off and new_value != old_value:
+        return "turns_off"
+    if new_value in _MONITOR_ACTIVE_STATES and old_value not in _MONITOR_ACTIVE_STATES:
+        return "turns_on"
+    if new_value in _MONITOR_INACTIVE_STATES and old_value not in _MONITOR_INACTIVE_STATES:
+        return "turns_off"
+    return "changed" if new_value != old_value or new_state.get("attributes") != old_state.get("attributes") else ""
+
+
+def _monitor_event_type(monitor: Dict[str, Any], entity_id: Any, new_state: Dict[str, Any], old_state: Dict[str, Any]) -> str:
+    trigger = _monitor_event_trigger(monitor, entity_id, new_state, old_state)
+    if trigger in {"doorbell", "license_plate", "person", "vehicle", "animal", "package", "face", "motion"}:
+        return trigger
+    return "activity" if _text(monitor.get("kind")) == "camera" else (trigger or "changed")
 
 
 def _monitor_camera_target(monitor: Dict[str, Any]) -> str:
@@ -2887,7 +3145,7 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     entity_id = _text(event.get("entity_id"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
-    event_kind = _monitor_event_type(monitor, entity_id, new_state)
+    event_kind = _monitor_event_type(monitor, entity_id, new_state, old_state)
     cooldown_seconds = _setting_int(
         redis_client,
         "camera_monitor_cooldown_seconds",
@@ -3039,6 +3297,16 @@ def _monitor_form(
         current_kind=kind,
         current_device=selected_device,
     )
+    trigger_options, trigger_dependency = _monitor_trigger_dependency(
+        registry,
+        current_device=selected_device,
+        current_events=monitor.get("trigger_events"),
+    )
+    trigger_labels = [
+        _text(_monitor_trigger_option(value).get("label"))
+        for value in monitor.get("trigger_events") or []
+        if _text(value)
+    ]
     enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
     last_event = _fmt_ts(monitor.get("last_event_ts"))
     return {
@@ -3047,7 +3315,7 @@ def _monitor_form(
         "title": _text(monitor.get("name")) or _text(monitor.get("area")) or "Monitored source",
         "subtitle": (
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
-            f"last event: {last_event}"
+            f"{', '.join(trigger_labels) or 'No triggers'} • last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -3083,7 +3351,18 @@ def _monitor_form(
                 "options": device_options,
                 "dependent_options": device_dependency,
                 "value": selected_device,
-                "description": "Awareness automatically follows the event sources reported by this device.",
+                "description": "Only compatible cameras, doorbells, and sensors from enabled integrations are shown.",
+                "full_width": True,
+            },
+            {
+                "key": "trigger_events",
+                "label": "Capture Events When",
+                "type": "multiselect",
+                "presentation": "cards",
+                "options": trigger_options,
+                "dependent_options": trigger_dependency,
+                "value": list(monitor.get("trigger_events") or []),
+                "description": "Select one or more events reported by this device. Only those events will be stored in Awareness history.",
                 "full_width": True,
             },
             {
@@ -3128,10 +3407,16 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         default_kind = "sensor"
         camera_options, device_dependency = _monitor_device_options(registry, current_kind="sensor")
     default_device = _text(camera_options[0].get("value")) if camera_options else ""
+    default_trigger_options, trigger_dependency = _monitor_trigger_dependency(
+        registry,
+        current_device=default_device,
+    )
+    default_trigger_events = [_text(row.get("value")) for row in default_trigger_options if _text(row.get("value"))]
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
     return {
         "kind": "settings_manager",
+        "appearance": "awareness",
         "title": "Awareness Monitoring",
         "empty_message": "No cameras or sensors are being monitored yet.",
         "stats_refresh_button": True,
@@ -3170,22 +3455,13 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         "item_fields_popup": True,
         "item_fields_popup_label": "Edit Monitored Source",
         "item_sections_in_dropdown": True,
-        "default_tab": "monitors" if monitors else "add",
+        "default_tab": "events",
         "manager_tabs": [
-            {
-                "key": "monitors",
-                "label": "Monitored Sources",
-                "source": "items",
-                "item_group": "monitors",
-                "selector": False,
-                "empty_message": "No cameras or sensors are being monitored.",
-            },
-            {"key": "add", "label": "Add Source", "source": "add_form"},
             {
                 "key": "events",
                 "label": "Event History",
                 "source": "items",
-                "item_group": "event",
+                "item_group": "event_list" if event_list_view else "event",
                 "selector": False,
                 "page_size": 24,
                 "server_pagination": {
@@ -3198,6 +3474,15 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 "empty_message": "No stored awareness events found.",
             },
+            {
+                "key": "monitors",
+                "label": "Monitored Sources",
+                "source": "items",
+                "item_group": "monitors",
+                "selector": False,
+                "empty_message": "No cameras or sensors are being monitored.",
+            },
+            {"key": "add", "label": "Add Source", "source": "add_form"},
         ],
         "add_form": {
             "action": "awareness_add_monitor",
@@ -3239,6 +3524,17 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "dependent_options": device_dependency,
                     "value": default_device,
                     "description": "Only compatible devices from enabled integrations are shown.",
+                    "full_width": True,
+                },
+                {
+                    "key": "trigger_events",
+                    "label": "Capture Events When",
+                    "type": "multiselect",
+                    "presentation": "cards",
+                    "options": default_trigger_options,
+                    "dependent_options": trigger_dependency,
+                    "value": default_trigger_events,
+                    "description": "Choose one or more events reported by this device. A motion-only camera will show only Motion.",
                     "full_width": True,
                 },
                 {
@@ -3450,7 +3746,13 @@ def _monitor_matches_event(
         return False
     if _text(monitor.get("kind")) == "camera" and new_value in _MONITOR_INACTIVE_STATES:
         return False
-    return True
+    trigger = _monitor_event_trigger(monitor, entity_id, new_state, old_state)
+    selected_triggers = {
+        _monitor_trigger_token(value)
+        for value in monitor.get("trigger_events") or []
+        if _monitor_trigger_token(value)
+    }
+    return bool(trigger and (not selected_triggers or trigger in selected_triggers))
 
 
 def _enqueue_monitor_event(client: Any, monitor_id: Any, event: Dict[str, Any]) -> None:

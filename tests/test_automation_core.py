@@ -168,6 +168,22 @@ def sample_registry():
             {"type": "smart_animal", "ref": "binary_sensor.unifi_cam-front_smart_animal"},
         ],
     }
+    doorbell = {
+        "integration_id": "unifi_protect",
+        "integration_name": "UniFi Protect",
+        "id": "doorbell-front",
+        "ref": "camera:doorbell-front",
+        "name": "Front Doorbell",
+        "room": "Front Door",
+        "type": "camera",
+        "category_ids": ["camera"],
+        "capabilities": ["camera", "motion", "doorbell"],
+        "actions": ["camera_snapshot"],
+        "event_sources": [
+            {"type": "motion", "ref": "binary_sensor.unifi_doorbell-front_motion", "state_on": "on", "state_off": "off"},
+            {"type": "doorbell", "ref": "event.unifi_doorbell-front_doorbell", "state_on": "on", "state_off": "off"},
+        ],
+    }
     light = {
         "integration_id": "homeassistant",
         "integration_name": "Home Assistant",
@@ -187,13 +203,16 @@ def sample_registry():
         "room": "Entry",
         "category_ids": ["entry_sensor"],
         "actions": [],
+        "event_sources": [
+            {"type": "contact", "ref": "binary_sensor.front_door", "state_on": "open", "state_off": "closed"}
+        ],
     }
     return {
-        "devices": [camera, light, entry],
+        "devices": [camera, doorbell, light, entry],
         "categories": [
             {"id": "light", "name": "Lights", "order": 10, "devices": [light]},
             {"id": "entry_sensor", "name": "Door & Window Sensors", "order": 50, "devices": [entry]},
-            {"id": "camera", "name": "Cameras", "order": 70, "devices": [camera]},
+            {"id": "camera", "name": "Cameras", "order": 70, "devices": [camera, doorbell]},
         ],
         "rooms": [
             {"id": "kitchen", "name": "Kitchen"},
@@ -359,6 +378,51 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         values = [row["value"] for row in options]
         self.assertEqual(values, ["motion", "person", "animal"])
         self.assertEqual(dependency["source_key"], "trigger_device")
+
+    def test_motion_only_camera_exposes_only_motion_trigger(self):
+        device = {
+            "integration_id": "homeassistant",
+            "id": "camera.garage",
+            "ref": "camera.garage",
+            "type": "camera",
+            "category_ids": ["camera"],
+            "event_sources": [
+                {"type": "motion", "ref": "binary_sensor.garage_motion", "state_on": "on", "state_off": "off"}
+            ],
+        }
+
+        self.assertEqual(self.core._trigger_event_values_for_device(device), ["motion"])
+
+    def test_doorbell_and_sensor_expose_device_specific_trigger_events(self):
+        doorbell_options, _dependency = self.core._trigger_event_dependency(
+            sample_registry(),
+            current_device="unifi_protect|doorbell-front",
+        )
+        sensor_options, _dependency = self.core._trigger_event_dependency(
+            sample_registry(),
+            current_device="homeassistant|binary_sensor.front_door",
+        )
+        self.assertEqual([row["value"] for row in doorbell_options], ["motion", "doorbell"])
+        self.assertEqual([row["value"] for row in sensor_options], ["opens", "closes"])
+
+    def test_doorbell_rule_does_not_treat_doorbell_camera_motion_as_a_press(self):
+        rule = self._tts_rule(
+            trigger_device="unifi_protect|doorbell-front",
+            trigger_event="doorbell",
+        )
+        motion_event = {
+            "provider": "unifi_protect",
+            "kind": "protect_event",
+            "payload": {"type": "cameraMotion", "camera": "doorbell-front"},
+        }
+        press_event = {
+            "provider": "unifi_protect",
+            "kind": "protect_event",
+            "payload": {"type": "ring", "camera": "doorbell-front"},
+        }
+
+        self.assertFalse(self.core._event_match(rule, motion_event, sample_registry())[0])
+        self.assertTrue(self.core._event_match(rule, press_event, sample_registry())[0])
 
     def test_awareness_import_action_is_not_supported(self):
         with self.assertRaises(KeyError):
