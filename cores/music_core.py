@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.1.2"
+__version__ = "3.2.0"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -94,6 +94,30 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 200,
             "description": "Maximum number of matched tracks placed in one queue.",
+        },
+        "airplay_receiver_enabled": {
+            "label": "AirPlay Receiver",
+            "type": "checkbox",
+            "default": False,
+            "description": "Let Apple devices send live audio to selected Tater Native satellites.",
+        },
+        "airplay_receiver_name": {
+            "label": "AirPlay Receiver Name",
+            "type": "text",
+            "default": "Tater Music",
+            "description": "The name advertised in the AirPlay speaker picker.",
+        },
+        "airplay_receiver_pin": {
+            "label": "AirPlay Pairing PIN",
+            "type": "password",
+            "default": "",
+            "description": "Optional fixed four-digit PIN used when a device pairs for the first time.",
+        },
+        "airplay_receiver_targets": {
+            "label": "AirPlay Satellites",
+            "type": "text",
+            "default": "",
+            "description": "Tater Native satellites or stereo pairs that play incoming AirPlay audio.",
         },
         "recommendations_enabled": {
             "label": "Tater Recommendations",
@@ -472,6 +496,111 @@ def _settings(client: Any = None) -> Dict[str, str]:
         return settings
     except Exception:
         return {}
+
+
+def _external_audio_module() -> Any:
+    try:
+        import external_audio
+
+        return external_audio
+    except Exception:
+        return None
+
+
+def _airplay_receiver_targets(
+    cfg: Dict[str, Any],
+    player: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    configured = _normalize_stereo_targets(cfg.get("airplay_receiver_targets"))
+    if not configured and isinstance(player, dict):
+        configured = _normalize_stereo_targets(player.get("targets") or player.get("target"))
+    return [target for target in configured if _is_native_target(target)]
+
+
+def _external_audio_config(
+    cfg: Dict[str, Any],
+    player: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    current_player = player if isinstance(player, dict) else _player()
+    targets = _airplay_receiver_targets(cfg, current_player)
+    default_volume = _as_int(
+        current_player.get("volume_percent"),
+        _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
+        0,
+        100,
+    )
+    settings = _selected_player_settings(
+        targets,
+        cfg,
+        default_volume=default_volume,
+    )
+    return {
+        "enabled": _as_bool(cfg.get("airplay_receiver_enabled"), False),
+        "receiver_name": _text(cfg.get("airplay_receiver_name")) or "Tater Music",
+        "receiver_pin": _text(cfg.get("airplay_receiver_pin")),
+        "targets": targets,
+        "volume_percent": default_volume,
+        "target_volume_percent": {
+            target: _as_int(values.get("volume_percent"), default_volume, 0, 100)
+            for target, values in settings.items()
+        },
+        "target_sync_offset_ms": {
+            target: _as_int(values.get("sync_offset_ms"), 0, -1000, 1000)
+            for target, values in settings.items()
+        },
+    }
+
+
+def _configure_external_audio(
+    cfg: Optional[Dict[str, Any]] = None,
+    player: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    settings = cfg if isinstance(cfg, dict) else _settings()
+    module = _external_audio_module()
+    if module is None:
+        return {
+            "enabled": _as_bool(settings.get("airplay_receiver_enabled"), False),
+            "status": "runtime_unavailable",
+            "receiver_error": "Update Tater to a build that includes External Audio Input.",
+            "targets": _airplay_receiver_targets(settings, player),
+            "input_active": False,
+        }
+    try:
+        result = module.configure_external_audio_runtime(
+            _external_audio_config(settings, player)
+        )
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        return {
+            "enabled": _as_bool(settings.get("airplay_receiver_enabled"), False),
+            "status": "error",
+            "receiver_error": _text(exc),
+            "targets": _airplay_receiver_targets(settings, player),
+            "input_active": False,
+        }
+
+
+def _external_audio_status(cfg: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
+    module = _external_audio_module()
+    if module is None:
+        return {
+            "enabled": _as_bool(cfg.get("airplay_receiver_enabled"), False),
+            "status": "runtime_unavailable",
+            "receiver_error": "Update Tater to a build that includes External Audio Input.",
+            "targets": _airplay_receiver_targets(cfg, player),
+            "input_active": False,
+        }
+    try:
+        result = module.get_external_audio_status()
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        return {
+            "enabled": _as_bool(cfg.get("airplay_receiver_enabled"), False),
+            "status": "error",
+            "receiver_error": _text(exc),
+            "targets": _airplay_receiver_targets(cfg, player),
+            "input_active": False,
+        }
 
 
 def _target_group_signature(targets: Any) -> str:
@@ -5582,6 +5711,41 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             target_options.append({"value": saved, "label": f"Saved player: {saved}"})
             known_targets.add(saved.casefold())
 
+    airplay_targets = _canonical_option_targets(
+        _airplay_receiver_targets(cfg, player),
+        target_options,
+    )
+    airplay_targets = [target for target in airplay_targets if _is_native_target(target)]
+    native_target_options = [
+        row
+        for row in target_options
+        if isinstance(row, dict) and _is_native_target(row.get("value"))
+    ]
+    external_audio = _external_audio_status(cfg, player)
+    airplay_enabled = _as_bool(cfg.get("airplay_receiver_enabled"), False)
+    external_status = _text(external_audio.get("status") or "disabled").lower()
+    external_error = _text(
+        external_audio.get("route_error") or external_audio.get("receiver_error")
+    )
+    external_status_labels = {
+        "disabled": "OFF",
+        "starting": "STARTING",
+        "ready": "READY",
+        "buffering": "BUFFERING",
+        "receiving": "RECEIVING",
+        "routing": "CONNECTING SATS",
+        "playing": "PLAYING",
+        "waiting_for_targets": "CHOOSE SATS",
+        "dependency_missing": "UXPLAY NEEDED",
+        "runtime_unavailable": "TATER UPDATE NEEDED",
+        "stopped": "STOPPED",
+        "error": "ERROR",
+    }
+    external_status_label = external_status_labels.get(
+        external_status,
+        external_status.replace("_", " ").upper() or "UNKNOWN",
+    )
+
     item_forms = [_player_item(player, target_options, active_provider, cfg), _search_item()]
     item_forms.extend(
         _recommendation_ui_items(cfg, catalog, runtime, active_provider, store)
@@ -5592,6 +5756,110 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     item_forms.extend(_provider_cards(cfg, catalog, active_provider))
     item_forms.extend(
         [
+            {
+                "id": "settings:airplay_receiver",
+                "group": "settings",
+                "title": "AirPlay Receiver",
+                "subtitle": (
+                    "Send audio from an iPhone, iPad, Mac, or compatible Android app "
+                    "to synchronized Tater Native satellites."
+                ),
+                "detail": (
+                    external_error
+                    if external_error
+                    else f"Incoming AirPlay audio is playing on {_target_summary(airplay_targets)}."
+                    if external_status == "playing"
+                    else "Visible in the AirPlay speaker picker and waiting for audio."
+                    if external_status == "ready"
+                    else "Enable the receiver and choose at least one Native satellite or stereo pair."
+                    if not airplay_enabled
+                    else "Choose at least one Native satellite or stereo pair."
+                    if not airplay_targets
+                    else "The receiver uses the same UxPlay adapter on Docker/Linux and macOS."
+                ),
+                "hero_badges": [
+                    {
+                        "label": external_status_label if airplay_enabled else "OFF",
+                        "tone": (
+                            "good"
+                            if external_status in {"ready", "receiving", "routing", "playing"}
+                            else "warn"
+                            if airplay_enabled
+                            else "muted"
+                        ),
+                    },
+                    {"label": "UXPLAY", "tone": "muted"},
+                    {
+                        "label": f"{len(airplay_targets)} SAT GROUP{'' if len(airplay_targets) == 1 else 'S'}",
+                        "tone": "muted",
+                    },
+                    *(
+                        [{"label": "LIVE INPUT", "tone": "good"}]
+                        if external_audio.get("input_active")
+                        else []
+                    ),
+                ],
+                "summary_rows": [
+                    {
+                        "label": "Receiver",
+                        "value": _text(cfg.get("airplay_receiver_name")) or "Tater Music",
+                    },
+                    {
+                        "label": "Destinations",
+                        "value": _target_summary(airplay_targets) if airplay_targets else "Choose below",
+                    },
+                    {
+                        "label": "Adapter",
+                        "value": "UxPlay 1.73+ · AirPlay audio receiver",
+                    },
+                ],
+                "fields": [
+                    {
+                        "key": "airplay_receiver_enabled",
+                        "label": "Enable AirPlay Receiver",
+                        "type": "checkbox",
+                        "value": airplay_enabled,
+                        "description": "Advertise this Tater server as an AirPlay audio destination.",
+                    },
+                    {
+                        "key": "airplay_receiver_name",
+                        "label": "Receiver Name",
+                        "type": "text",
+                        "value": _text(cfg.get("airplay_receiver_name")) or "Tater Music",
+                        "placeholder": "Tater Music",
+                    },
+                    {
+                        "key": "airplay_receiver_pin",
+                        "label": "Pairing PIN (optional)",
+                        "type": "password",
+                        "value": _text(cfg.get("airplay_receiver_pin")),
+                        "placeholder": "Four digits",
+                        "description": "A fixed four-digit PIN is requested only when a device first pairs.",
+                    },
+                    {
+                        "key": "airplay_receiver_targets",
+                        "label": "Play AirPlay On",
+                        "type": "multiselect",
+                        "value": airplay_targets,
+                        "size": max(4, min(8, len(native_target_options))),
+                        "options": native_target_options,
+                        "description": "Only Tater Native satellites and Native stereo pairs are listed.",
+                    },
+                ],
+                "actions": (
+                    [
+                        {
+                            "action": "music_airplay_stop",
+                            "label": "Stop AirPlay Input",
+                            "tone": "danger",
+                        }
+                    ]
+                    if external_audio.get("input_active")
+                    else []
+                ),
+                "save_action": "music_save_settings",
+                "save_label": "Save AirPlay Receiver",
+            },
             {
                 "id": "settings:music",
                 "group": "settings",
@@ -5727,6 +5995,10 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                 "value": _format_time(
                     catalog.get("synced_at") or runtime.get("last_sync_at")
                 ),
+            },
+            {
+                "label": "AirPlay Receiver",
+                "value": external_status_label if airplay_enabled else "Off",
             },
         ],
         "items": [],
@@ -6021,6 +6293,10 @@ def handle_htmlui_tab_action(
             "mixed_sync_default_adjustment_ms",
             "default_shuffle",
             "maximum_queue_tracks",
+            "airplay_receiver_enabled",
+            "airplay_receiver_name",
+            "airplay_receiver_pin",
+            "airplay_receiver_targets",
             "recommendations_enabled",
             "recommendation_interval_hours",
             "recommendation_playlist_count",
@@ -6034,6 +6310,22 @@ def handle_htmlui_tab_action(
             updates["default_targets"] = json.dumps(
                 _normalize_stereo_targets(updates["default_targets"])
             )
+        if "airplay_receiver_targets" in updates:
+            targets = _normalize_stereo_targets(updates["airplay_receiver_targets"])
+            non_native = [target for target in targets if not _is_native_target(target)]
+            if non_native:
+                raise ValueError("AirPlay Receiver destinations must be Tater Native satellites or stereo pairs.")
+            updates["airplay_receiver_targets"] = json.dumps(targets)
+        if "airplay_receiver_name" in updates:
+            updates["airplay_receiver_name"] = (
+                _text(updates.get("airplay_receiver_name"))[:80] or "Tater Music"
+            )
+        if "airplay_receiver_pin" in updates:
+            raw_pin = _text(updates.get("airplay_receiver_pin"))
+            pin = "".join(char for char in raw_pin if char.isdigit())
+            if raw_pin and (len(pin) != 4 or pin != raw_pin):
+                raise ValueError("The AirPlay pairing PIN must be exactly four digits, or left blank.")
+            updates["airplay_receiver_pin"] = pin
         if "prompt_person_id" in updates:
             updates["prompt_person_id"] = _text(updates.get("prompt_person_id"))
             if updates["prompt_person_id"] and not _people_person_name(
@@ -6066,7 +6358,20 @@ def handle_htmlui_tab_action(
             )
         ):
             _schedule_music_prompt_profile_refresh(store)
+        if any(key.startswith("airplay_receiver_") for key in updates):
+            _configure_external_audio(next_settings, _player(store))
         return {"ok": True, "message": "Music Core settings saved."}
+
+    if action_name == "music_airplay_stop":
+        module = _external_audio_module()
+        if module is None:
+            raise RuntimeError("External Audio Input is not available in this Tater build.")
+        result = module.stop_external_audio_input()
+        return {
+            "ok": True,
+            "message": "AirPlay input stopped on the selected satellites.",
+            "status": result if isinstance(result, dict) else {},
+        }
 
     if action_name == "music_recommendations_refresh":
         started = _schedule_recommendation_refresh(store)
@@ -6788,6 +7093,7 @@ def run(stop_event: Optional[object] = None) -> None:
     try:
         while not (stop_event and getattr(stop_event, "is_set", lambda: False)()):
             cfg = _settings()
+            _configure_external_audio(cfg, _player())
             active_provider = _provider_id(cfg.get("provider"))
             if not _paired(cfg, active_provider):
                 _save_hash(redis_client, RUNTIME_KEY, {"status": "waiting_for_pairing"})
@@ -6885,4 +7191,10 @@ def run(stop_event: Optional[object] = None) -> None:
                 )
             time.sleep(1.0)
     finally:
+        module = _external_audio_module()
+        if module is not None:
+            try:
+                module.configure_external_audio_runtime({"enabled": False})
+            except Exception:
+                pass
         logger.info("[Music] Core stopped.")
