@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -310,6 +310,32 @@ def _device_ref(device: Dict[str, Any]) -> str:
     return _text(device.get("ref") or device.get("id"))
 
 
+def _integration_value(category: Any, provider: Any) -> str:
+    category_token = _token(category)
+    provider_token = _token(provider)
+    if not category_token or not provider_token:
+        return ""
+    return f"{category_token}::{provider_token}"
+
+
+def _integration_provider(value: Any) -> str:
+    token = _text(value)
+    if "::" not in token:
+        return ""
+    _category, provider = token.split("::", 1)
+    return _token(provider)
+
+
+def _integration_from_devices(category: Any, values: Any) -> str:
+    integrations: set[str] = set()
+    for value in _list(values):
+        provider, _device = _decode_device(value)
+        integration = _integration_value(category, provider)
+        if integration:
+            integrations.add(integration)
+    return next(iter(integrations)) if len(integrations) == 1 else ""
+
+
 def _device_categories(device: Dict[str, Any]) -> set[str]:
     values = [
         *(device.get("category_ids") or []),
@@ -354,9 +380,9 @@ def _category_rows(
         devices = [item for item in category.get("devices") or [] if isinstance(item, dict)]
         if triggerable_only:
             devices = [item for item in devices if _trigger_event_values_for_device(item)]
+        if actionable_only:
+            devices = [item for item in devices if _device_actions(item)]
         if not devices:
-            continue
-        if actionable_only and not any(_device_actions(item) for item in devices):
             continue
         category_id = _token(category.get("id"))
         if not category_id:
@@ -416,43 +442,103 @@ def _device_option(device: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _device_dependency(
+def _integration_dependency(
     registry: Dict[str, Any],
     *,
     current_category: str = "",
+    source_key: str,
+    actionable_only: bool = False,
+    triggerable_only: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_options: List[Dict[str, Any]] = []
+    for category in _category_rows(
+        registry,
+        actionable_only=actionable_only,
+        triggerable_only=triggerable_only,
+    ):
+        providers: Dict[str, Dict[str, Any]] = {}
+        for device in category["devices"]:
+            provider = _token(device.get("integration_id"))
+            if not provider:
+                continue
+            row = providers.setdefault(
+                provider,
+                {
+                    "value": _integration_value(category["id"], provider),
+                    "label": _text(device.get("integration_name")) or provider.replace("_", " ").title(),
+                    "count": 0,
+                    "icon": _CATEGORY_ICONS.get(category["id"], "◆"),
+                },
+            )
+            row["count"] = _int(row.get("count"), 0, minimum=0) + 1
+        rows: List[Dict[str, Any]] = []
+        for provider_row in providers.values():
+            row = dict(provider_row)
+            count = _int(row.pop("count", 0), 0, minimum=0)
+            row["description"] = f"{count} compatible device{'s' if count != 1 else ''} available"
+            rows.append(row)
+        rows.sort(key=lambda item: (_text(item.get("label")).casefold(), _text(item.get("value"))))
+        options_by_source[category["id"]] = rows
+        all_options.extend(dict(row) for row in rows)
+    selected = [dict(row) for row in options_by_source.get(_token(current_category), [])]
+    return selected, {
+        "source_key": source_key,
+        "options_by_source": options_by_source,
+        "default_options": all_options,
+    }
+
+
+def _device_dependency(
+    registry: Dict[str, Any],
+    *,
+    current_integration: str = "",
+    source_key: str,
     current_values: Any = None,
     multiple: bool = False,
     allow_any: bool = False,
+    actionable_only: bool = False,
     triggerable_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     current = _list(current_values)
     options_by_source: Dict[str, List[Dict[str, Any]]] = {}
     all_options: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    for category in _category_rows(registry, triggerable_only=triggerable_only):
-        rows = [_device_option(device) for device in category["devices"]]
-        if not multiple and allow_any:
-            rows = [
-                {
-                    "value": "",
-                    "label": "Any device",
-                    "description": "Run when any device in this category matches.",
-                    "icon": "✦",
-                },
-                *rows,
-            ]
-        options_by_source[category["id"]] = rows
-        for row in rows:
-            if not row["value"] or row["value"] in seen:
-                continue
-            seen.add(row["value"])
-            all_options.append(row)
-    selected_rows = options_by_source.get(_token(current_category), all_options)
+    for category in _category_rows(
+        registry,
+        actionable_only=actionable_only,
+        triggerable_only=triggerable_only,
+    ):
+        devices_by_integration: Dict[str, List[Dict[str, Any]]] = {}
+        for device in category["devices"]:
+            integration = _integration_value(category["id"], device.get("integration_id"))
+            if integration:
+                devices_by_integration.setdefault(integration, []).append(device)
+        for integration, devices in devices_by_integration.items():
+            rows = [_device_option(device) for device in devices]
+            rows.sort(key=lambda item: (_text(item.get("label")).casefold(), _text(item.get("value"))))
+            if not multiple and allow_any:
+                rows = [
+                    {
+                        "value": "",
+                        "label": "Any device",
+                        "description": "Run when any compatible device from this integration matches.",
+                        "icon": "✦",
+                    },
+                    *rows,
+                ]
+            options_by_source[integration] = rows
+            for row in rows:
+                if not row["value"] or row["value"] in seen:
+                    continue
+                seen.add(row["value"])
+                all_options.append(row)
+    selected_rows = [dict(row) for row in options_by_source.get(_text(current_integration), [])]
     for value in current:
         if value and not any(row.get("value") == value for row in selected_rows):
             selected_rows.append({"value": value, "label": f"{value} (saved)"})
     return selected_rows, {
-        "source_key": "trigger_category" if not multiple else "action_category",
+        "source_key": source_key,
         "options_by_source": options_by_source,
         "default_options": all_options,
     }
@@ -600,27 +686,33 @@ def _trigger_event_dependency(
 def _action_dependency(
     registry: Dict[str, Any],
     *,
-    current_category: str = "",
+    current_integration: str = "",
     current_action: str = "",
 ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     options_by_source: Dict[str, List[Dict[str, str]]] = {}
     all_actions: set[str] = set()
     for category in _category_rows(registry, actionable_only=True):
-        actions = sorted({action for device in category["devices"] for action in _device_actions(device)})
-        all_actions.update(actions)
-        options_by_source[category["id"]] = [
-            {"value": action, "label": _ACTION_LABELS.get(action, action.replace("_", " ").title())}
-            for action in actions
-        ]
+        actions_by_integration: Dict[str, set[str]] = {}
+        for device in category["devices"]:
+            integration = _integration_value(category["id"], device.get("integration_id"))
+            if integration:
+                actions_by_integration.setdefault(integration, set()).update(_device_actions(device))
+        for integration, integration_actions in actions_by_integration.items():
+            actions = sorted(integration_actions)
+            all_actions.update(actions)
+            options_by_source[integration] = [
+                {"value": action, "label": _ACTION_LABELS.get(action, action.replace("_", " ").title())}
+                for action in actions
+            ]
     default_options = [
         {"value": action, "label": _ACTION_LABELS.get(action, action.replace("_", " ").title())}
         for action in sorted(all_actions)
     ]
-    selected = list(options_by_source.get(_token(current_category), default_options))
+    selected = list(options_by_source.get(_text(current_integration), default_options))
     if current_action and not any(row["value"] == current_action for row in selected):
         selected.append({"value": current_action, "label": f"{current_action.replace('_', ' ').title()} (saved)"})
     return selected, {
-        "source_key": "action_category",
+        "source_key": "action_integration",
         "options_by_source": options_by_source,
         "default_options": default_options,
     }
@@ -795,22 +887,35 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     if action_type not in {"device", "tts", "notification", "camera_ai"}:
         return None
     now = time.time()
+    trigger_device = _text(raw.get("trigger_device"))
+    trigger_integration = _text(raw.get("trigger_integration")) or _integration_from_devices(
+        trigger_category,
+        trigger_device,
+    )
+    action_category = _token(raw.get("action_category"))
+    action_devices = _list(raw.get("action_devices"))
+    action_integration = _text(raw.get("action_integration")) or _integration_from_devices(
+        action_category,
+        action_devices,
+    )
     rule = {
         "id": _text(raw.get("id")) or str(uuid.uuid4()),
         "name": _text(raw.get("name")) or "New automation",
         "enabled": _bool(raw.get("enabled"), True),
         "preset": _token(raw.get("preset") or "custom"),
         "trigger_category": trigger_category,
-        "trigger_device": _text(raw.get("trigger_device")),
+        "trigger_integration": trigger_integration,
+        "trigger_device": trigger_device,
         "trigger_room": _token(raw.get("trigger_room")),
         "trigger_event": trigger_event,
         "trigger_attribute": _text(raw.get("trigger_attribute")),
         "trigger_value": _text(raw.get("trigger_value")),
         "cooldown_seconds": _int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
         "action_type": action_type,
-        "action_category": _token(raw.get("action_category")),
+        "action_category": action_category,
+        "action_integration": action_integration,
         "action_scope": _token(raw.get("action_scope") or "devices"),
-        "action_devices": _list(raw.get("action_devices")),
+        "action_devices": action_devices,
         "action_room": _token(raw.get("action_room")),
         "action_operation": _token(raw.get("action_operation")),
         "action_value": _text(raw.get("action_value")),
@@ -1248,6 +1353,16 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
         ]
         if not devices:
             return False, {}
+    else:
+        integration_provider = _integration_provider(rule.get("trigger_integration"))
+        if integration_provider:
+            devices = [
+                device
+                for device in devices
+                if _token(device.get("integration_id")) == integration_provider
+            ]
+            if not devices:
+                return False, {}
 
     room = _token(rule.get("trigger_room"))
     if room and not any(_device_room(device) == room for device in devices):
@@ -1395,6 +1510,7 @@ def _action_payload(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, 
 
 def _action_targets(rule: Dict[str, Any], registry: Dict[str, Any]) -> List[Dict[str, Any]]:
     category = _token(rule.get("action_category"))
+    integration_provider = _integration_provider(rule.get("action_integration"))
     room = _token(rule.get("action_room"))
     operation = _token(rule.get("action_operation"))
     selected = {_decode_device(value) for value in _list(rule.get("action_devices"))}
@@ -1405,6 +1521,8 @@ def _action_targets(rule: Dict[str, Any], registry: Dict[str, Any]) -> List[Dict
         provider = _text(device.get("integration_id"))
         device_id = _device_id(device)
         if category not in _device_categories(device) or operation not in _device_actions(device):
+            continue
+        if integration_provider and _token(provider) != integration_provider:
             continue
         if room and _device_room(device) != room:
             continue
@@ -1920,6 +2038,7 @@ def _rule_from_form(
         "name",
         "enabled",
         "trigger_category",
+        "trigger_integration",
         "trigger_device",
         "trigger_room",
         "trigger_event",
@@ -1928,6 +2047,7 @@ def _rule_from_form(
         "cooldown_seconds",
         "action_type",
         "action_category",
+        "action_integration",
         "action_scope",
         "action_devices",
         "action_room",
@@ -2011,9 +2131,22 @@ def _editor_fields(
 ) -> List[Dict[str, Any]]:
     trigger_category = _token(rule.get("trigger_category"))
     action_category = _token(rule.get("action_category"))
-    trigger_device_options, trigger_device_dependency = _device_dependency(
+    trigger_integration = _text(rule.get("trigger_integration")) or _integration_from_devices(
+        trigger_category,
+        rule.get("trigger_device"),
+    )
+    trigger_integration_options, trigger_integration_dependency = _integration_dependency(
         registry,
         current_category=trigger_category,
+        source_key="trigger_category",
+        triggerable_only=True,
+    )
+    if not trigger_integration and trigger_integration_options:
+        trigger_integration = _text(trigger_integration_options[0].get("value"))
+    trigger_device_options, trigger_device_dependency = _device_dependency(
+        registry,
+        current_integration=trigger_integration,
+        source_key="trigger_integration",
         current_values=rule.get("trigger_device"),
         multiple=False,
         allow_any=bool(rule.get("id") and not _text(rule.get("trigger_device"))),
@@ -2027,15 +2160,29 @@ def _editor_fields(
         current_device=current_trigger_device,
         current_event=rule.get("trigger_event"),
     )
-    action_device_options, action_device_dependency = _device_dependency(
+    action_integration = _text(rule.get("action_integration")) or _integration_from_devices(
+        action_category,
+        rule.get("action_devices"),
+    )
+    action_integration_options, action_integration_dependency = _integration_dependency(
         registry,
         current_category=action_category,
+        source_key="action_category",
+        actionable_only=True,
+    )
+    if not action_integration and action_integration_options:
+        action_integration = _text(action_integration_options[0].get("value"))
+    action_device_options, action_device_dependency = _device_dependency(
+        registry,
+        current_integration=action_integration,
+        source_key="action_integration",
         current_values=rule.get("action_devices"),
         multiple=True,
+        actionable_only=True,
     )
     action_options, action_dependency = _action_dependency(
         registry,
-        current_category=action_category,
+        current_integration=action_integration,
         current_action=_token(rule.get("action_operation")),
     )
     announcement_options = (
@@ -2109,6 +2256,17 @@ def _editor_fields(
             "full_width": True,
         },
         {
+            "key": "trigger_integration",
+            "label": "Integration",
+            "type": "select",
+            "presentation": "cards",
+            "options": trigger_integration_options,
+            "dependent_options": trigger_integration_dependency,
+            "value": trigger_integration,
+            "description": "Choose the enabled integration that reports this trigger.",
+            "full_width": True,
+        },
+        {
             "key": "trigger_device",
             "label": "Which Device?",
             "type": "select",
@@ -2116,7 +2274,7 @@ def _editor_fields(
             "options": trigger_device_options,
             "dependent_options": trigger_device_dependency,
             "value": current_trigger_device,
-            "description": "Only devices from the selected category are shown.",
+            "description": "Only compatible devices from the selected integration are shown.",
             "full_width": True,
         },
         {
@@ -2232,6 +2390,18 @@ def _editor_fields(
             "full_width": True,
         },
         {
+            "key": "action_integration",
+            "label": "Integration",
+            "type": "select",
+            "presentation": "cards",
+            "options": action_integration_options,
+            "dependent_options": action_integration_dependency,
+            "value": action_integration,
+            "description": "Choose the enabled integration Tater should use for this action.",
+            "show_when": show_device_action,
+            "full_width": True,
+        },
+        {
             "key": "action_scope",
             "label": "Which Ones?",
             "type": "select",
@@ -2246,7 +2416,7 @@ def _editor_fields(
                 {
                     "value": "category",
                     "label": "Every Compatible Device",
-                    "description": "Apply the action to every compatible device in this category.",
+                    "description": "Apply the action to every compatible device from this integration.",
                     "icon": "✦",
                 },
             ],
@@ -2618,13 +2788,32 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         (row["value"] for row in _category_options(registry, actionable_only=True)),
         "",
     )
-    default_action_options, _dependency = _action_dependency(
+    default_trigger_integrations, _trigger_integration_dependency = _integration_dependency(
+        registry,
+        current_category=default_trigger_category,
+        source_key="trigger_category",
+        triggerable_only=True,
+    )
+    default_trigger_integration = (
+        _text(default_trigger_integrations[0].get("value")) if default_trigger_integrations else ""
+    )
+    default_action_integrations, _action_integration_dependency = _integration_dependency(
         registry,
         current_category=default_action_category,
+        source_key="action_category",
+        actionable_only=True,
+    )
+    default_action_integration = (
+        _text(default_action_integrations[0].get("value")) if default_action_integrations else ""
+    )
+    default_action_options, _dependency = _action_dependency(
+        registry,
+        current_integration=default_action_integration,
     )
     default_trigger_devices, _trigger_device_dependency = _device_dependency(
         registry,
-        current_category=default_trigger_category,
+        current_integration=default_trigger_integration,
+        source_key="trigger_integration",
         multiple=False,
         triggerable_only=True,
     )
@@ -2635,18 +2824,22 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     )
     default_action_devices, _action_device_dependency = _device_dependency(
         registry,
-        current_category=default_action_category,
+        current_integration=default_action_integration,
+        source_key="action_integration",
         multiple=True,
+        actionable_only=True,
     )
     blank = {
         "name": "",
         "enabled": True,
         "trigger_category": default_trigger_category,
+        "trigger_integration": default_trigger_integration,
         "trigger_device": default_trigger_device,
         "trigger_event": default_trigger_events[0]["value"] if default_trigger_events else "changed",
         "cooldown_seconds": 30,
         "action_type": "tts",
         "action_category": default_action_category,
+        "action_integration": default_action_integration,
         "action_scope": "devices",
         "action_devices": [default_action_devices[0]["value"]] if default_action_devices else [],
         "action_operation": default_action_options[0]["value"] if default_action_options else "",
@@ -2706,6 +2899,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         "empty_message": "No automations configured yet.",
         "ui": {
             "kind": "settings_manager",
+            "appearance": "automation",
             "title": "Tater Automations",
             "empty_message": "No automations configured yet.",
             "stats_refresh_button": True,

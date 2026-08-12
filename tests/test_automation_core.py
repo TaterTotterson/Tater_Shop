@@ -180,8 +180,18 @@ def sample_registry():
         "capabilities": ["camera", "motion", "doorbell"],
         "actions": ["camera_snapshot"],
         "event_sources": [
-            {"type": "motion", "ref": "binary_sensor.unifi_doorbell-front_motion", "state_on": "on", "state_off": "off"},
-            {"type": "doorbell", "ref": "event.unifi_doorbell-front_doorbell", "state_on": "on", "state_off": "off"},
+            {
+                "type": "motion",
+                "ref": "binary_sensor.unifi_doorbell-front_motion",
+                "state_on": "on",
+                "state_off": "off",
+            },
+            {
+                "type": "doorbell",
+                "ref": "event.unifi_doorbell-front_doorbell",
+                "state_on": "on",
+                "state_off": "off",
+            },
         ],
     }
     light = {
@@ -206,7 +216,12 @@ def sample_registry():
         "status": "online",
         "state": "closed",
         "event_sources": [
-            {"type": "contact", "ref": "binary_sensor.front_door", "state_on": "open", "state_off": "closed"}
+            {
+                "type": "contact",
+                "ref": "binary_sensor.front_door",
+                "state_on": "open",
+                "state_off": "closed",
+            }
         ],
     }
     return {
@@ -222,6 +237,35 @@ def sample_registry():
             {"id": "entry", "name": "Entry"},
         ],
     }
+
+
+def multi_integration_registry():
+    registry = sample_registry()
+    garage_camera = {
+        "integration_id": "homeassistant",
+        "integration_name": "Home Assistant",
+        "id": "camera.garage",
+        "ref": "camera.garage",
+        "name": "Garage Camera",
+        "room": "Garage",
+        "category_ids": ["camera"],
+        "actions": ["camera_snapshot"],
+        "event_sources": [{"type": "motion", "ref": "binary_sensor.garage_motion"}],
+    }
+    hue_light = {
+        "integration_id": "hue",
+        "integration_name": "Philips Hue",
+        "id": "light.porch",
+        "ref": "light.porch",
+        "name": "Porch Light",
+        "room": "Porch",
+        "category_ids": ["light"],
+        "actions": ["turn_on", "turn_off"],
+    }
+    registry["devices"].extend([garage_camera, hue_light])
+    next(row for row in registry["categories"] if row["id"] == "camera")["devices"].append(garage_camera)
+    next(row for row in registry["categories"] if row["id"] == "light")["devices"].append(hue_light)
+    return registry
 
 
 class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
@@ -344,6 +388,24 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         targets = self.core._action_targets(rule, sample_registry())
         self.assertEqual([item["id"] for item in targets], ["light.kitchen"])
 
+    def test_category_action_targets_respect_selected_integration(self):
+        rule = self.core._normalize_rule(
+            {
+                "trigger_category": "camera",
+                "trigger_event": "person",
+                "action_type": "device",
+                "action_category": "light",
+                "action_integration": "light::hue",
+                "action_scope": "category",
+                "action_operation": "turn_on",
+            }
+        )
+        self.assertIsNotNone(rule)
+
+        targets = self.core._action_targets(rule, multi_integration_registry())
+
+        self.assertEqual([item["id"] for item in targets], ["light.porch"])
+
     def test_guided_form_builds_default_announcement_rule(self):
         values = {
             "name": "Front yard person",
@@ -380,6 +442,84 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         values = [row["value"] for row in options]
         self.assertEqual(values, ["motion", "person", "animal"])
         self.assertEqual(dependency["source_key"], "trigger_device")
+
+    def test_integration_step_groups_trigger_and_action_devices(self):
+        registry = multi_integration_registry()
+
+        trigger_integrations, trigger_dependency = self.core._integration_dependency(
+            registry,
+            current_category="camera",
+            source_key="trigger_category",
+            triggerable_only=True,
+        )
+        trigger_devices, device_dependency = self.core._device_dependency(
+            registry,
+            current_integration="camera::homeassistant",
+            source_key="trigger_integration",
+            triggerable_only=True,
+        )
+        action_integrations, _action_integration_dependency = self.core._integration_dependency(
+            registry,
+            current_category="light",
+            source_key="action_category",
+            actionable_only=True,
+        )
+        hue_actions, action_dependency = self.core._action_dependency(
+            registry,
+            current_integration="light::hue",
+        )
+
+        self.assertEqual(
+            [row["value"] for row in trigger_integrations],
+            ["camera::homeassistant", "camera::unifi_protect"],
+        )
+        self.assertEqual(trigger_dependency["source_key"], "trigger_category")
+        self.assertEqual([row["value"] for row in trigger_devices], ["homeassistant|camera.garage"])
+        self.assertEqual(device_dependency["source_key"], "trigger_integration")
+        self.assertEqual(
+            [row["value"] for row in action_integrations],
+            ["light::homeassistant", "light::hue"],
+        )
+        self.assertEqual([row["value"] for row in hue_actions], ["turn_off", "turn_on"])
+        self.assertEqual(action_dependency["source_key"], "action_integration")
+
+    def test_normalized_rules_derive_integrations_from_saved_devices(self):
+        rule = self.core._normalize_rule(
+            {
+                "trigger_category": "camera",
+                "trigger_device": "unifi_protect|cam-front",
+                "trigger_event": "person",
+                "action_type": "device",
+                "action_category": "light",
+                "action_scope": "devices",
+                "action_devices": ["homeassistant|light.kitchen"],
+                "action_operation": "turn_on",
+            }
+        )
+
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["trigger_integration"], "camera::unifi_protect")
+        self.assertEqual(rule["action_integration"], "light::homeassistant")
+
+    def test_legacy_multi_integration_action_keeps_its_unscoped_targets(self):
+        rule = self.core._normalize_rule(
+            {
+                "trigger_category": "camera",
+                "trigger_event": "person",
+                "action_type": "device",
+                "action_category": "light",
+                "action_scope": "devices",
+                "action_devices": ["homeassistant|light.kitchen", "hue|light.porch"],
+                "action_operation": "turn_on",
+            }
+        )
+
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["action_integration"], "")
+        self.assertEqual(
+            [device["id"] for device in self.core._action_targets(rule, multi_integration_registry())],
+            ["light.kitchen", "light.porch"],
+        )
 
     def test_motion_only_camera_exposes_only_motion_trigger(self):
         device = {
@@ -598,12 +738,33 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         fields = payload["ui"]["add_form"]["fields"]
         by_key = {item.get("key"): item for item in fields if item.get("key")}
         self.assertEqual(by_key["trigger_category"]["type"], "select")
+        self.assertEqual(by_key["trigger_integration"]["type"], "select")
         self.assertEqual(by_key["trigger_device"]["type"], "select")
         self.assertEqual(by_key["trigger_event"]["type"], "select")
         self.assertEqual(by_key["action_type"]["type"], "select")
         self.assertEqual(by_key["tts_targets"]["type"], "multiselect")
-        for key in ("trigger_category", "trigger_device", "trigger_event", "action_type", "tts_targets"):
+        for key in (
+            "trigger_category",
+            "trigger_integration",
+            "trigger_device",
+            "trigger_event",
+            "action_type",
+            "action_integration",
+            "tts_targets",
+        ):
             self.assertEqual(by_key[key]["presentation"], "cards")
+        self.assertEqual(
+            by_key["trigger_device"]["dependent_options"]["source_key"],
+            "trigger_integration",
+        )
+        self.assertEqual(
+            by_key["action_devices"]["dependent_options"]["source_key"],
+            "action_integration",
+        )
+        self.assertEqual(
+            by_key["action_operation"]["dependent_options"]["source_key"],
+            "action_integration",
+        )
         self.assertEqual(by_key["tts_mode"]["value"], "default")
         trigger_values = [
             row["value"]
