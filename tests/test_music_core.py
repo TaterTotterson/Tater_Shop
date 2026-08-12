@@ -2809,6 +2809,115 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(play.call_args.kwargs["volume_percent"], 0)
         self.assertEqual(self.core._player(self.redis)["current"]["id"], "track:two")
 
+    def test_airplay_receiver_card_lists_only_native_destinations(self):
+        self.redis.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "airplay_receiver_enabled": "true",
+                "airplay_receiver_name": "House Tater",
+                "airplay_receiver_pin": "3939",
+                "airplay_receiver_targets": json.dumps(
+                    ["voice_core:native:kitchen", "voice_core:stereo:office"]
+                ),
+            },
+        )
+        runtime = types.SimpleNamespace(
+            get_external_audio_status=lambda: {
+                "enabled": True,
+                "status": "ready",
+                "receiver_running": True,
+                "input_active": False,
+                "targets": ["voice_core:native:kitchen", "voice_core:stereo:office"],
+            }
+        )
+        with patch.object(
+            self.core,
+            "_external_audio_module",
+            return_value=runtime,
+        ), patch.object(
+            self.core,
+            "_target_options",
+            return_value=[
+                {"value": "voice_core:native:kitchen", "label": "Tater Sat: Kitchen"},
+                {"value": "voice_core:stereo:office", "label": "Tater Stereo: Office"},
+                {"value": "sonos:den", "label": "Sonos: Den"},
+                {"value": "airplay:living", "label": "AirPlay Bridge: Living"},
+            ],
+        ):
+            payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
+
+        card = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "settings:airplay_receiver"
+        )
+        fields = {row["key"]: row for row in card["fields"]}
+        self.assertEqual(card["hero_badges"][0]["label"], "READY")
+        self.assertEqual(fields["airplay_receiver_name"]["value"], "House Tater")
+        self.assertEqual(fields["airplay_receiver_pin"]["type"], "password")
+        self.assertEqual(
+            [row["value"] for row in fields["airplay_receiver_targets"]["options"]],
+            ["voice_core:native:kitchen", "voice_core:stereo:office"],
+        )
+
+    def test_saving_airplay_receiver_configures_tater_runtime(self):
+        configure = Mock(return_value={"status": "ready"})
+        runtime = types.SimpleNamespace(
+            configure_external_audio_runtime=configure,
+            get_external_audio_status=lambda: {"status": "ready"},
+        )
+        with patch.object(self.core, "_external_audio_module", return_value=runtime):
+            result = self.core.handle_htmlui_tab_action(
+                action="music_save_settings",
+                payload={
+                    "values": {
+                        "airplay_receiver_enabled": True,
+                        "airplay_receiver_name": "House Tater",
+                        "airplay_receiver_pin": "3939",
+                        "airplay_receiver_targets": ["voice_core:native:kitchen"],
+                    }
+                },
+                redis_client=self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        saved = self.redis.hgetall(self.core.SETTINGS_KEY)
+        self.assertEqual(saved["airplay_receiver_pin"], "3939")
+        self.assertEqual(
+            json.loads(saved["airplay_receiver_targets"]),
+            ["voice_core:native:kitchen"],
+        )
+        config = configure.call_args.args[0]
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["receiver_name"], "House Tater")
+        self.assertEqual(config["targets"], ["voice_core:native:kitchen"])
+
+    def test_airplay_receiver_rejects_invalid_pin_and_non_native_target(self):
+        with self.assertRaisesRegex(ValueError, "exactly four digits"):
+            self.core.handle_htmlui_tab_action(
+                action="music_save_settings",
+                payload={"values": {"airplay_receiver_pin": "12345"}},
+                redis_client=self.redis,
+            )
+        with self.assertRaisesRegex(ValueError, "Tater Native"):
+            self.core.handle_htmlui_tab_action(
+                action="music_save_settings",
+                payload={"values": {"airplay_receiver_targets": ["sonos:den"]}},
+                redis_client=self.redis,
+            )
+
+    def test_airplay_stop_action_uses_external_audio_runtime(self):
+        stop = Mock(return_value={"status": "ready"})
+        runtime = types.SimpleNamespace(stop_external_audio_input=stop)
+        with patch.object(self.core, "_external_audio_module", return_value=runtime):
+            result = self.core.handle_htmlui_tab_action(
+                action="music_airplay_stop",
+                payload={},
+                redis_client=self.redis,
+            )
+        self.assertTrue(result["ok"])
+        stop.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
