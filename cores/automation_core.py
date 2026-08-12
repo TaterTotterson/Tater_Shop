@@ -22,7 +22,7 @@ from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -2461,164 +2461,6 @@ def _history_form(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _awareness_target(provider: Any, value: Any) -> str:
-    token = _text(value)
-    if not token:
-        return ""
-    if "|" in token:
-        return token
-    return _encode_device(provider, token)
-
-
-def _awareness_notification_targets(value: Any) -> List[str]:
-    targets: List[str] = []
-    raw = value if isinstance(value, list) else []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        encoded = _encode_notification_target(item.get("platform"), item.get("targets"))
-        if encoded:
-            targets.append(encoded)
-    return targets
-
-
-def _awareness_trigger_event(rule: Dict[str, Any]) -> str:
-    trigger_text = " ".join(
-        _list(rule.get("trigger_entities") or rule.get("trigger_entity"))
-    ).lower()
-    for event in ("person", "vehicle", "animal", "package", "face"):
-        if event in trigger_text:
-            return event
-    if "license" in trigger_text or "plate" in trigger_text:
-        return "license_plate"
-    if _token(rule.get("kind")) == "doorbell":
-        return "doorbell"
-    if _token(rule.get("kind")) == "entry_sensor":
-        return "opens"
-    return "motion"
-
-
-def _convert_awareness_rule(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    kind = _token(raw.get("kind"))
-    source_id = _text(raw.get("id"))
-    provider = _text(raw.get("provider"))
-    now = time.time()
-    base: Dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "name": f"{_text(raw.get('name')) or kind.replace('_', ' ').title()} (imported)",
-        "enabled": False,
-        "preset": "custom",
-        "cooldown_seconds": _int(raw.get("cooldown_seconds"), 30),
-        "created_at": now,
-        "updated_at": now,
-        "source_core": "awareness",
-        "source_rule_id": source_id,
-    }
-    if kind in {"camera", "doorbell"}:
-        camera = _awareness_target(provider, raw.get("camera_entity"))
-        if not camera:
-            return None
-        tts_targets = _list(raw.get("players"))
-        notification_targets = _awareness_notification_targets(
-            raw.get("notification_targets") or raw.get("notification_destinations")
-        )
-        if not tts_targets and not notification_targets:
-            return None
-        fallback = "Someone is at the door." if kind == "doorbell" else "Camera activity was detected."
-        prompt = (
-            "Briefly describe who or what is at the door. Do not invent details."
-            if kind == "doorbell"
-            else "Briefly describe the important visible camera activity. Do not invent details."
-        )
-        base.update(
-            {
-                "trigger_category": "camera",
-                "trigger_device": camera,
-                "trigger_event": _awareness_trigger_event(raw),
-                "action_type": "camera_ai",
-                "camera_source": "selected",
-                "camera_device": camera,
-                "vision_prompt": prompt,
-                "vision_fallback": fallback,
-                "camera_tts_text": "{vision}",
-                "camera_tts_targets": tts_targets,
-                "camera_notification_title": _text(raw.get("title") or "Camera Activity"),
-                "camera_notification_message": "{vision}",
-                "camera_notification_targets": notification_targets,
-                "camera_notification_priority": _text(raw.get("priority") or "normal"),
-            }
-        )
-    elif kind == "entry_sensor":
-        sensor = _awareness_target(
-            provider,
-            raw.get("sensor_entity") or raw.get("trigger_entity"),
-        )
-        if not sensor:
-            return None
-        tts_targets = _list(raw.get("players"))
-        notification_targets = _awareness_notification_targets(
-            raw.get("notification_targets") or raw.get("notification_destinations")
-        )
-        base.update(
-            {
-                "trigger_category": "entry_sensor",
-                "trigger_device": sensor,
-                "trigger_event": "opens",
-            }
-        )
-        if tts_targets:
-            base.update(
-                {
-                    "action_type": "tts",
-                    "tts_text": "{device} opened.",
-                    "tts_targets": tts_targets,
-                }
-            )
-        elif notification_targets:
-            base.update(
-                {
-                    "action_type": "notification",
-                    "notification_title": _text(raw.get("title") or "Entry Sensor"),
-                    "notification_message": "{device} opened.",
-                    "notification_targets": notification_targets,
-                    "notification_priority": _text(raw.get("priority") or "normal"),
-                }
-            )
-        else:
-            return None
-    else:
-        return None
-    return _normalize_rule(base)
-
-
-def _import_awareness_rules(client: Any) -> Dict[str, Any]:
-    existing_sources = {
-        _text(rule.get("source_rule_id"))
-        for rule in _load_rules(client).values()
-        if _token(rule.get("source_core")) == "awareness"
-    }
-    raw_rules = client.hgetall("awareness:rules") or {}
-    imported = 0
-    skipped = 0
-    for field, value in raw_rules.items():
-        payload = _json_record(value)
-        if not payload:
-            skipped += 1
-            continue
-        payload.setdefault("id", _text(field))
-        source_id = _text(payload.get("id"))
-        if source_id in existing_sources:
-            skipped += 1
-            continue
-        converted = _convert_awareness_rule(payload)
-        if not converted:
-            skipped += 1
-            continue
-        _save_rule(client, converted)
-        existing_sources.add(source_id)
-        imported += 1
-    return {"imported": imported, "skipped": skipped}
-
 
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
@@ -2788,16 +2630,6 @@ def handle_htmlui_tab_action(
     if action_name == "automation_refresh_devices":
         _registry(client, refresh=True)
         return {"ok": True, "message": "Integration devices refreshed."}
-    if action_name == "automation_import_awareness":
-        result = _import_awareness_rules(client)
-        return {
-            "ok": True,
-            **result,
-            "message": (
-                f"Imported {result['imported']} Awareness automation(s) as disabled. "
-                f"Skipped {result['skipped']} unsupported or already imported rule(s)."
-            ),
-        }
     if action_name == "automation_add_rule":
         rule = _rule_from_form(values, body)
         _save_rule(client, rule)

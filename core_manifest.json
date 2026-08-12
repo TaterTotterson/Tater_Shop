@@ -19,7 +19,7 @@
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "min_tater_version": "59",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, and announcement targets.",
       "settings_category": "Automation Core Settings",
@@ -33,21 +33,27 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "09faceabf2d2e9f9fffefa2d66a1bc0cf9e55717abdf710dae2b10da6461b8db"
+      "sha256": "e1513def831340fc7e58dea0df22a22eba9840f27c33ed07588374641c0de2bd"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "3.4.14",
+      "version": "4.0.0",
       "min_tater_version": "59",
-      "description": "Awareness Core integration core for Tater.",
+      "description": "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, and device actions.",
       "settings_category": "Awareness Core Settings",
       "required_settings_count": 4,
       "autostart_key": "awareness_core_running",
-      "tags": [],
+      "tags": [
+        "awareness",
+        "cameras",
+        "sensors",
+        "event-history",
+        "vision"
+      ],
       "entry": "cores/awareness_core.py",
-      "sha256": "ada9100c3e551ed0ed753061ee91d2d9dc77622d3e3e242bab1e915803b3410d"
+      "sha256": "324bcfb4d6a51533f3003a5043ab566b44dcd6d6e34c1f3b55fbf09b23337056"
     },
     {
       "id": "environment",

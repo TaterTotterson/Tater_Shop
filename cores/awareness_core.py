@@ -1,3 +1,5 @@
+"""Observe selected cameras and sensors and keep a queryable home-activity history."""
+
 import asyncio
 import ast
 import base64
@@ -33,14 +35,16 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
     _shared_normalize_hydra_llm_provider = None
     _shared_describe_image_with_local_llm = None
     _shared_resolve_hydra_base_servers = None
-from notify import dispatch_notification, notifier_destination_catalog
-from speech_settings import get_speech_settings as get_shared_speech_settings
-from speech_tts import speak_announcement_targets
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
-from announcement_targets import build_announcement_target_options
 
-__version__ = "3.4.14"
+__version__ = "4.0.0"
+CORE_DESCRIPTION = (
+    "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
+    "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
+    "and device actions."
+)
+TAGS = ["awareness", "cameras", "sensors", "event-history", "vision"]
 
 load_dotenv()
 
@@ -116,11 +120,11 @@ CORE_SETTINGS = {
             "default": 768,
             "description": "Maximum JPEG size to store per event snapshot.",
         },
-        "entity_catalog_ttl_sec": {
-            "label": "Entity Catalog Cache (sec)",
+        "camera_monitor_cooldown_seconds": {
+            "label": "Camera Event Cooldown (sec)",
             "type": "number",
             "default": 30,
-            "description": "How long to cache provider entity discovery for UI dropdowns.",
+            "description": "Minimum time between snapshot and vision checks for each monitored camera.",
         },
     },
 }
@@ -131,17 +135,12 @@ CORE_WEBUI_TAB = {
     "requires_running": True,
 }
 
-_RULES_KEY = "awareness:rules"
-_EXEC_QUEUE_KEY = "awareness:exec_queue"
+_MONITORS_KEY = "awareness:monitors"
+_EXEC_QUEUE_KEY = "awareness:monitor_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
 _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
-_ENTITY_CATALOG_CACHE_PREFIX = "awareness:entity_catalog_cache:"
-_DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
-_FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
-_S3BOX_FIRMWARE_PROFILE_KEY = "template:s3box_display"
-_AWARENESS_WORKER_COUNT = 10
-_AWARENESS_STARTED_TS = time.time()
+_AWARENESS_WORKER_COUNT = 4
 
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled", "y"}
 _FALSE_TOKENS = {"0", "false", "no", "off", "disabled", "n"}
@@ -155,23 +154,40 @@ _SUPPORTED_EVENT_PROVIDERS = {
     "aladdin",
     "sonos",
 }
-_AREA_PRESETS = [
-    "camera",
-    "doorbell",
-    "events",
-    "front yard",
-    "back yard",
-    "front door",
-    "back door",
-    "driveway",
-    "garage",
-    "living room",
-    "kitchen",
-    "hallway",
-    "office",
-    "bedroom",
-    "patio",
-]
+_MONITOR_SENSOR_CATEGORIES = {
+    "entry_sensor",
+    "garage_door",
+    "motion",
+    "presence",
+    "leak",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "energy",
+    "battery",
+    "sensor",
+}
+_MONITOR_ACTIVE_STATES = {
+    "on",
+    "open",
+    "opened",
+    "active",
+    "detected",
+    "motion",
+    "ringing",
+    "pressed",
+    "true",
+    "1",
+}
+_MONITOR_INACTIVE_STATES = {
+    "off",
+    "closed",
+    "inactive",
+    "clear",
+    "idle",
+    "false",
+    "0",
+}
 _UNIFI_SMART_TYPE_ALIASES = {
     "people": "person",
     "human": "person",
@@ -203,13 +219,6 @@ _UNIFI_SMART_TYPE_LABELS = {
     "package": "Package",
     "face": "Face",
     "license_plate": "License Plate",
-}
-_UNIFI_SMART_TYPE_FALLBACK = ("person", "vehicle", "animal", "package")
-
-_ENTITY_CACHE_LOCK = threading.Lock()
-_ENTITY_CACHE: Dict[str, Dict[str, Any]] = {
-    "homeassistant": {"ts": 0.0, "data": {}},
-    "unifi_protect": {"ts": 0.0, "data": {}},
 }
 _EVENT_FILTER_RUNTIME_KEYS = {
     "camera": "events_filter_camera",
@@ -274,13 +283,6 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _redis_field_text(value: Any) -> str:
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8").strip()
-        except Exception:
-            return ""
-    return _text(value)
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -322,6 +324,10 @@ def _slug(value: str) -> str:
     return text or "unknown"
 
 
+def _category_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", _text(value).lower()).strip("_")
+
+
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -359,23 +365,6 @@ def _settings(client: Any) -> Dict[str, str]:
 def _setting_int(client: Any, key: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
     return _as_int(_settings(client).get(key), default, minimum=minimum, maximum=maximum)
 
-
-def _camera_startup_defer_seconds(client: Any) -> int:
-    raw_default = _text(os.getenv("TATER_AWARENESS_CAMERA_STARTUP_DEFER_SECONDS") or "60")
-    default = _as_int(raw_default, 60, minimum=0, maximum=1800)
-    return _setting_int(client, "camera_startup_defer_seconds", default, minimum=0, maximum=1800)
-
-
-def _camera_startup_defer_remaining(client: Any, rule: Dict[str, Any], reason: str) -> float:
-    if _text(reason).lower() == "manual":
-        return 0.0
-    kind = _text((rule or {}).get("kind")).lower()
-    if kind not in {"camera", "doorbell"}:
-        return 0.0
-    defer_seconds = _camera_startup_defer_seconds(client)
-    if defer_seconds <= 0:
-        return 0.0
-    return max(0.0, (_AWARENESS_STARTED_TS + float(defer_seconds)) - time.time())
 
 
 def _normalize_event_provider(value: Any) -> str:
@@ -417,50 +406,13 @@ def _split_provider_ref(value: Any, fallback_provider: Any = "all") -> Tuple[str
     return _normalize_event_provider(fallback_provider), token
 
 
-def _provider_from_rule_fields(rule: Dict[str, Any]) -> str:
-    for item in _normalize_trigger_entities((rule or {}).get("trigger_entities")):
-        provider = _provider_from_entity_ref(item)
-        if provider:
-            return provider
-    for key in ("sensor_entity", "trigger_entity", "camera_entity"):
-        provider = _provider_from_entity_ref((rule or {}).get(key))
-        if provider:
-            return provider
-    return ""
+def _entity_object_id(entity_id: str) -> str:
+    _provider, raw_entity = _split_provider_ref(entity_id, "")
+    token = _text(raw_entity or entity_id).lower()
+    if "." in token:
+        return token.split(".", 1)[1]
+    return token
 
-
-def _provider_from_entity_ref(value: Any) -> str:
-    provider, raw_value = _split_provider_ref(value, "")
-    if provider != "all" and raw_value:
-        return provider
-    return ""
-
-
-def _concrete_rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
-    provider = _normalize_event_provider((rule or {}).get("provider"))
-    if provider != "all":
-        return provider
-    inferred = _provider_from_rule_fields(rule)
-    if inferred:
-        return inferred
-    fallback_provider = _normalize_event_provider(fallback)
-    return fallback_provider if fallback_provider != "all" else ""
-
-
-def _rule_provider(rule: Dict[str, Any], *, fallback: str = "") -> str:
-    return _concrete_rule_provider(rule, fallback=fallback)
-
-
-def _snapshot_target_for_camera(camera: Any, rule_provider: Any) -> Tuple[str, str]:
-    provider, target = _split_provider_ref(camera, "")
-    if provider != "all":
-        return provider, target
-    camera_target = _text(target or camera)
-    inferred = _provider_from_entity_ref(camera_target)
-    if inferred:
-        return inferred, camera_target
-    provider = _normalize_event_provider(rule_provider)
-    return "" if provider == "all" else provider, camera_target
 
 
 def _provider_label(provider: str) -> str:
@@ -622,18 +574,6 @@ def _integration_runtime_events(client: Any, *, after_seq: int, limit: int = 100
     return events[:max_rows]
 
 
-def _integration_runtime_state(client: Any, provider: Any, state_id: Any) -> Dict[str, Any]:
-    redis_obj = client or redis_client
-    provider_token = _normalize_event_provider(provider)
-    entity_id = _text(state_id)
-    if redis_obj is None or provider_token == "all" or not entity_id:
-        return {}
-    try:
-        record = _redis_json_object(redis_obj.hget(_INTEGRATION_RUNTIME_STATES_KEY, f"{provider_token}:{entity_id}"))
-    except Exception:
-        logger.debug("[awareness] failed to read integration runtime state for %s:%s", provider_token, entity_id, exc_info=True)
-        return {}
-    return record or {}
 
 
 def _integration_runtime_connected(value: Any) -> bool:
@@ -788,6 +728,329 @@ def _append_event(client: Any, *, source: str, payload: Dict[str, Any]) -> None:
     _trim_events_for_source(redis_obj, source)
 
 
+def _monitor_string_list(value: Any) -> List[str]:
+    raw = value
+    if isinstance(raw, str):
+        token = raw.strip()
+        if token.startswith("[") and token.endswith("]"):
+            try:
+                raw = json.loads(token)
+            except Exception:
+                raw = [token]
+        elif token:
+            raw = [token]
+        else:
+            raw = []
+    if isinstance(raw, (tuple, set)):
+        raw = list(raw)
+    if not isinstance(raw, list):
+        raw = [] if raw in (None, "") else [raw]
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = _text(item)
+        if not token or token.casefold() in seen:
+            continue
+        seen.add(token.casefold())
+        out.append(token)
+    return out
+
+
+def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    kind = _text(raw.get("kind")).lower()
+    if kind not in {"camera", "sensor"}:
+        return None
+    provider = _normalize_event_provider(raw.get("provider"))
+    if provider == "all":
+        return None
+    device_id = _text(raw.get("device_id"))
+    device_ref = _text(raw.get("device_ref") or device_id)
+    if not device_id or not device_ref:
+        return None
+    now_ts = time.time()
+    area = " ".join((_text(raw.get("area")) or _text(raw.get("name")) or kind).split())
+    name = _text(raw.get("name")) or area or f"Monitored {kind}"
+    event_refs = _monitor_string_list(raw.get("event_refs"))
+    event_sources: List[Dict[str, str]] = []
+    for source in raw.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        source_ref = _text(source.get("ref"))
+        source_type = _category_token(source.get("type"))
+        if source_ref:
+            event_sources.append({"ref": source_ref, "type": source_type})
+    categories = [_category_token(item) for item in _monitor_string_list(raw.get("categories"))]
+    categories = [item for item in categories if item]
+    event_types = [_category_token(item) for item in _monitor_string_list(raw.get("event_types"))]
+    event_types = [item for item in event_types if item]
+    return {
+        "id": _text(raw.get("id")) or str(uuid.uuid4()),
+        "kind": kind,
+        "provider": provider,
+        "device_id": device_id,
+        "device_ref": device_ref,
+        "selected_device": _provider_ref(provider, device_id),
+        "event_refs": event_refs,
+        "event_sources": event_sources,
+        "event_types": event_types,
+        "categories": categories,
+        "name": name,
+        "area": area or kind,
+        "enabled": _bool(raw.get("enabled"), True),
+        "created_at": _as_float(raw.get("created_at"), now_ts),
+        "updated_at": _as_float(raw.get("updated_at"), now_ts),
+        "last_event_ts": _as_float(raw.get("last_event_ts"), 0.0),
+        "last_status": _text(raw.get("last_status")),
+        "last_summary": _text(raw.get("last_summary")),
+        "last_error": _text(raw.get("last_error")),
+    }
+
+
+def _load_monitors(client: Any) -> Dict[str, Dict[str, Any]]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        return {}
+    try:
+        raw_rows = redis_obj.hgetall(_MONITORS_KEY) or {}
+    except Exception:
+        logger.debug("[awareness] failed to load monitors", exc_info=True)
+        return {}
+    monitors: Dict[str, Dict[str, Any]] = {}
+    for field, value in raw_rows.items():
+        try:
+            payload = value if isinstance(value, dict) else json.loads(_text(value))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload.setdefault("id", _text(field))
+        monitor = _normalize_monitor(payload)
+        if monitor:
+            monitors[monitor["id"]] = monitor
+    return monitors
+
+
+def _get_monitor(client: Any, monitor_id: Any) -> Optional[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    mid = _text(monitor_id)
+    if redis_obj is None or not mid:
+        return None
+    try:
+        raw = redis_obj.hget(_MONITORS_KEY, mid)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        payload = raw if isinstance(raw, dict) else json.loads(_text(raw))
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        payload.setdefault("id", mid)
+    return _normalize_monitor(payload)
+
+
+def _save_monitor(client: Any, monitor: Dict[str, Any]) -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    if redis_obj is None:
+        raise ValueError("Redis connection is unavailable.")
+    normalized = _normalize_monitor(monitor)
+    if not normalized:
+        raise ValueError("Invalid Awareness monitor.")
+    redis_obj.hset(_MONITORS_KEY, normalized["id"], json.dumps(normalized))
+    return normalized
+
+
+def _remove_monitor(client: Any, monitor_id: Any) -> bool:
+    redis_obj = client or redis_client
+    mid = _text(monitor_id)
+    if redis_obj is None or not mid:
+        return False
+    return bool(redis_obj.hdel(_MONITORS_KEY, mid))
+
+
+def _monitor_registry(client: Any, *, refresh: bool = False) -> Dict[str, Any]:
+    try:
+        from integration_registry import get_integration_device_registry
+
+        registry = get_integration_device_registry(client or redis_client, refresh=refresh)
+    except Exception:
+        logger.debug("[awareness] integration device registry unavailable", exc_info=True)
+        return {"devices": [], "categories": [], "rooms": []}
+    return registry if isinstance(registry, dict) else {"devices": [], "categories": [], "rooms": []}
+
+
+def _monitor_device_categories(device: Dict[str, Any]) -> set[str]:
+    values = [
+        *(device.get("category_ids") or []),
+        *(device.get("capabilities") or []),
+        device.get("type"),
+    ]
+    return {_category_token(item) for item in values if _category_token(item)}
+
+
+def _monitor_device_kind(device: Dict[str, Any]) -> str:
+    categories = _monitor_device_categories(device)
+    if "camera" in categories or "doorbell" in categories:
+        return "camera"
+    if categories.intersection(_MONITOR_SENSOR_CATEGORIES):
+        return "sensor"
+    return ""
+
+
+def _monitor_device_value(device: Dict[str, Any]) -> str:
+    provider = _normalize_event_provider(device.get("integration_id"))
+    device_id = _text(device.get("id") or device.get("ref"))
+    return _provider_ref(provider, device_id) if provider != "all" and device_id else ""
+
+
+def _find_monitor_device(registry: Dict[str, Any], selected_device: Any) -> Optional[Dict[str, Any]]:
+    provider, device_id = _split_provider_ref(selected_device, "")
+    wanted = _text(device_id).casefold()
+    if provider == "all" or not wanted:
+        return None
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        if _normalize_event_provider(device.get("integration_id")) != provider:
+            continue
+        identities = {
+            _text(device.get("id")).casefold(),
+            _text(device.get("ref")).casefold(),
+        }
+        if wanted in identities:
+            return device
+    return None
+
+
+def _monitor_device_option(device: Dict[str, Any]) -> Dict[str, Any]:
+    value = _monitor_device_value(device)
+    provider_name = _text(device.get("integration_name")) or _provider_label(device.get("integration_id"))
+    room = _text(device.get("room") or device.get("area"))
+    state = _text(device.get("status") or device.get("state"))
+    return {
+        "value": value,
+        "label": _text(device.get("name")) or _text(device.get("id") or device.get("ref")),
+        "description": " • ".join(item for item in (room, provider_name) if item),
+        "meta": state,
+        "icon": "◎" if _monitor_device_kind(device) == "camera" else "◇",
+    }
+
+
+def _monitor_device_options(
+    registry: Dict[str, Any],
+    *,
+    current_kind: str = "camera",
+    current_device: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_kind: Dict[str, List[Dict[str, Any]]] = {"camera": [], "sensor": []}
+    seen: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        kind = _monitor_device_kind(device)
+        option = _monitor_device_option(device)
+        value = _text(option.get("value"))
+        if kind not in options_by_kind or not value or value in seen:
+            continue
+        seen.add(value)
+        options_by_kind[kind].append(option)
+    for rows in options_by_kind.values():
+        rows.sort(key=lambda row: (_text(row.get("label")).casefold(), _text(row.get("value"))))
+    kind = current_kind if current_kind in options_by_kind else "camera"
+    selected = [dict(row) for row in options_by_kind[kind]]
+    current = _text(current_device)
+    if current and not any(_text(row.get("value")) == current for row in selected):
+        selected.append({"value": current, "label": f"{current} (saved)", "icon": "◆"})
+    return selected, {
+        "source_key": "kind",
+        "options_by_source": options_by_kind,
+        "default_options": [*options_by_kind["camera"], *options_by_kind["sensor"]],
+    }
+
+
+def _build_monitor_from_values(
+    *,
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    client: Any,
+    existing: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    previous = existing if isinstance(existing, dict) else {}
+    kind = _text(_value(values, payload, "kind", previous.get("kind") or "camera")).lower()
+    if kind not in {"camera", "sensor"}:
+        raise ValueError("Choose Camera or Sensor.")
+    selected = _text(
+        _value(values, payload, "device", previous.get("selected_device") or _provider_ref(previous.get("provider"), previous.get("device_id")))
+    )
+    registry = _monitor_registry(client)
+    device = _find_monitor_device(registry, selected)
+    if not device:
+        raise ValueError("Choose an available device from a connected integration.")
+    actual_kind = _monitor_device_kind(device)
+    if actual_kind != kind:
+        raise ValueError(f"The selected device is not available as a {kind} monitor.")
+    provider = _normalize_event_provider(device.get("integration_id"))
+    device_id = _text(device.get("id") or device.get("ref"))
+    device_ref = _text(device.get("ref") or device_id)
+    for saved in _load_monitors(client).values():
+        if _text(saved.get("id")) == _text(previous.get("id")):
+            continue
+        if (
+            _normalize_event_provider(saved.get("provider")) == provider
+            and _text(saved.get("device_id")).casefold() == device_id.casefold()
+        ):
+            raise ValueError("That device is already being monitored.")
+    event_refs: List[str] = []
+    event_types: List[str] = []
+    event_sources: List[Dict[str, str]] = []
+    for source in device.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        ref = _text(source.get("ref"))
+        source_type = _category_token(source.get("type"))
+        if ref and ref not in event_refs:
+            event_refs.append(ref)
+        if source_type and source_type not in event_types:
+            event_types.append(source_type)
+        if ref:
+            event_sources.append({"ref": ref, "type": source_type})
+    if kind == "sensor" or not event_refs:
+        for ref in (device_ref, device_id):
+            if ref and ref not in event_refs:
+                event_refs.append(ref)
+    if kind == "sensor" and provider == "unifi_protect":
+        sensor_alias = _unifi_sensor_entity(device_id)
+        if sensor_alias not in event_refs:
+            event_refs.append(sensor_alias)
+    now_ts = time.time()
+    default_name = _text(device.get("name")) or device_id
+    default_area = _text(device.get("room") or device.get("area")) or default_name
+    monitor = {
+        **previous,
+        "id": _text(previous.get("id")) or str(uuid.uuid4()),
+        "kind": kind,
+        "provider": provider,
+        "device_id": device_id,
+        "device_ref": device_ref,
+        "event_refs": event_refs,
+        "event_sources": event_sources,
+        "event_types": event_types,
+        "categories": sorted(_monitor_device_categories(device)),
+        "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
+        "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
+        "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "created_at": _as_float(previous.get("created_at"), now_ts),
+        "updated_at": now_ts,
+    }
+    normalized = _normalize_monitor(monitor)
+    if not normalized:
+        raise ValueError("Could not create that Awareness monitor.")
+    return normalized
+
+
 def _unwrap_form_value(value: Any) -> Any:
     if isinstance(value, dict):
         for key in ("value", "id", "entity_id", "service", "target", "key", "name"):
@@ -814,407 +1077,6 @@ def _unwrap_form_value(value: Any) -> Any:
     return value
 
 
-def _normalize_players(value: Any) -> List[str]:
-    raw = _unwrap_form_value(value)
-    if isinstance(raw, str):
-        token = raw.strip()
-        if token.startswith("[") and token.endswith("]"):
-            try:
-                raw = _unwrap_form_value(json.loads(token))
-            except Exception:
-                try:
-                    raw = _unwrap_form_value(ast.literal_eval(token))
-                except Exception:
-                    raw = token
-        elif token.startswith("{") and token.endswith("}"):
-            try:
-                raw = _unwrap_form_value(json.loads(token))
-            except Exception:
-                try:
-                    raw = _unwrap_form_value(ast.literal_eval(token))
-                except Exception:
-                    raw = token
-    parts: List[str] = []
-    if isinstance(raw, (list, tuple, set)):
-        for item in raw:
-            token = _text(_unwrap_form_value(item))
-            if token:
-                parts.append(token)
-    elif isinstance(raw, dict):
-        token = _text(_unwrap_form_value(raw))
-        if token and token != _text(raw):
-            parts.append(token)
-        else:
-            for item in raw.values():
-                candidate = _text(_unwrap_form_value(item))
-                if candidate:
-                    parts.append(candidate)
-    else:
-        text = _text(raw)
-        parts = [chunk.strip() for chunk in text.replace(",", "\n").split("\n") if chunk.strip()]
-    seen: set[str] = set()
-    out: List[str] = []
-    for item in parts:
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def _normalize_trigger_entities(value: Any) -> List[str]:
-    raw_value = value
-    if isinstance(value, str):
-        token = value.strip()
-        if token.startswith("[") and token.endswith("]"):
-            try:
-                decoded = json.loads(token)
-                raw_value = decoded
-            except Exception:
-                raw_value = value
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in _normalize_players(raw_value):
-        token = _text(item)
-        if not token:
-            continue
-        lowered = token.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        out.append(token)
-    return out
-
-
-def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return None
-
-    kind = _text(raw.get("kind")).lower()
-    if kind not in {"camera", "doorbell", "entry_sensor"}:
-        return None
-
-    rule_id = _text(raw.get("id")) or str(uuid.uuid4())
-    now_ts = time.time()
-
-    base: Dict[str, Any] = {
-        "id": rule_id,
-        "kind": kind,
-        "provider": _concrete_rule_provider(raw),
-        "name": _text(raw.get("name")) or f"{kind.title()} rule",
-        "enabled": _bool(raw.get("enabled"), True),
-        "created_at": _as_float(raw.get("created_at"), now_ts),
-        "updated_at": _as_float(raw.get("updated_at"), now_ts),
-        "last_run_ts": _as_float(raw.get("last_run_ts"), 0.0),
-        "last_status": _text(raw.get("last_status")),
-        "last_summary": _text(raw.get("last_summary")),
-        "last_error": _text(raw.get("last_error")),
-    }
-    if not _text(base.get("provider")):
-        return None
-
-    if kind == "camera":
-        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
-        if not trigger_entities:
-            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
-        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
-        notification_targets = _normalize_notification_targets(
-            raw.get("notification_targets") or raw.get("notification_destinations"),
-            device_services=legacy_device_services,
-        )
-        base.update(
-            {
-                "camera_entity": _text(raw.get("camera_entity")),
-                "area": _text(raw.get("area")) or "camera",
-                "trigger_entities": trigger_entities,
-                "trigger_entity": trigger_entities[0] if trigger_entities else "",
-                "trigger_to_state": "on",
-                "trigger_attribute": "",
-                "trigger_attribute_value": "",
-                "query": "",
-                "cooldown_seconds": _as_int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
-                "notification_cooldown_seconds": _as_int(
-                    raw.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
-                ),
-                "ignore_vehicles": _bool(raw.get("ignore_vehicles"), False),
-                "title": _text(raw.get("title") or "Camera Event"),
-                "priority": "high"
-                if _text(raw.get("priority") or "high").lower() in {"critical", "high"}
-                else "normal",
-                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
-                "notification_targets": notification_targets,
-                "display_notifications": _bool(raw.get("display_notifications"), False),
-                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
-            }
-        )
-        return base
-
-    if kind == "doorbell":
-        camera_entity = _text(raw.get("camera_entity"))
-        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
-        if not trigger_entities:
-            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
-        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
-        notification_targets = _normalize_notification_targets(
-            raw.get("notification_targets") or raw.get("notification_destinations"),
-            device_services=legacy_device_services,
-        )
-        provider_token = _concrete_rule_provider({**raw, "provider": base.get("provider")})
-        if provider_token == "unifi_protect" and camera_entity:
-            camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
-            if camera_id:
-                expected_trigger = _unifi_camera_doorbell_trigger(camera_id)
-                expected_lower = expected_trigger.lower()
-                current_lower = [_text(item).lower() for item in trigger_entities]
-                if not trigger_entities:
-                    trigger_entities = [expected_trigger]
-                elif expected_lower not in current_lower:
-                    # Legacy UniFi doorbell rules could end up bound to motion/smart triggers.
-                    # If the current triggers are camera-scoped UniFi triggers, normalize to the doorbell press trigger.
-                    camera_prefix = f"binary_sensor.unifi_{camera_id}_"
-                    if current_lower and all(token.startswith(camera_prefix) for token in current_lower):
-                        trigger_entities = [expected_trigger]
-                    else:
-                        trigger_entities = [expected_trigger] + [
-                            item for item in trigger_entities if _text(item).lower() != expected_lower
-                        ]
-        base.update(
-            {
-                "camera_entity": camera_entity,
-                "area": _text(raw.get("area")) or "front door",
-                "trigger_entities": trigger_entities,
-                "trigger_entity": trigger_entities[0] if trigger_entities else "",
-                "trigger_to_state": "on",
-                "trigger_attribute": "",
-                "trigger_attribute_value": "",
-                "players": _normalize_players(raw.get("players")),
-                "title": _text(raw.get("title") or "Doorbell"),
-                "priority": "high"
-                if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
-                else "normal",
-                "notifications": _bool(raw.get("notifications"), True),
-                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
-                "notification_targets": notification_targets,
-                "display_notifications": _bool(raw.get("display_notifications"), False),
-                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
-            }
-        )
-        return base
-
-    if kind == "entry_sensor":
-        trigger_entities = _normalize_trigger_entities(raw.get("trigger_entities"))
-        sensor_entity = _text(raw.get("sensor_entity"))
-        if sensor_entity and sensor_entity not in trigger_entities:
-            trigger_entities = [sensor_entity]
-        if not trigger_entities:
-            trigger_entities = _normalize_trigger_entities(raw.get("trigger_entity"))
-        sensor_type = _text(raw.get("sensor_type") or "door").lower()
-        if sensor_type not in {"door", "window", "garage"}:
-            sensor_type = "door"
-        area_value = _text(raw.get("area"))
-        legacy_device_services = _normalize_device_services(raw.get("device_services") or raw.get("device_service"))
-        notification_targets = _normalize_notification_targets(
-            raw.get("notification_targets") or raw.get("notification_destinations"),
-            device_services=legacy_device_services,
-        )
-        base.update(
-            {
-                "sensor_entity": trigger_entities[0] if trigger_entities else sensor_entity,
-                "camera_entity": _text(raw.get("camera_entity")),
-                "sensor_type": sensor_type,
-                "area": area_value or sensor_type,
-                "trigger_entities": trigger_entities,
-                "trigger_entity": trigger_entities[0] if trigger_entities else "",
-                "trigger_to_state": _text(raw.get("trigger_to_state")),
-                "players": _normalize_players(raw.get("players")),
-                "title": _text(raw.get("title") or "Entry Sensor"),
-                "priority": "high"
-                if _text(raw.get("priority") or "normal").lower() in {"critical", "high"}
-                else "normal",
-                "notifications": _bool(raw.get("notifications"), False),
-                "device_services": _device_services_from_notification_targets(notification_targets) or legacy_device_services,
-                "notification_targets": notification_targets,
-                "display_notifications": _bool(raw.get("display_notifications"), False),
-                "display_targets": _normalize_display_targets(raw.get("display_targets") or raw.get("display_target")),
-            }
-        )
-        return base
-
-
-_RULE_FINGERPRINT_IGNORE_KEYS = {
-    "id",
-    "created_at",
-    "updated_at",
-    "last_run_ts",
-    "last_status",
-    "last_summary",
-    "last_error",
-}
-
-
-def _rule_canonical_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _rule_canonical_value(value[key]) for key in sorted(value)}
-    if isinstance(value, list):
-        items = [_rule_canonical_value(item) for item in value]
-        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
-    if isinstance(value, tuple):
-        items = [_rule_canonical_value(item) for item in value]
-        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
-    if isinstance(value, str):
-        return value.strip().lower()
-    return value
-
-
-def _rule_fingerprint(rule: Dict[str, Any]) -> str:
-    stable = {
-        key: value
-        for key, value in (rule or {}).items()
-        if key not in _RULE_FINGERPRINT_IGNORE_KEYS
-    }
-    return json.dumps(_rule_canonical_value(stable), sort_keys=True, separators=(",", ":"))
-
-
-def _rule_migration_score(rule: Dict[str, Any]) -> float:
-    return max(
-        _as_float((rule or {}).get("updated_at"), 0.0),
-        _as_float((rule or {}).get("last_run_ts"), 0.0),
-        _as_float((rule or {}).get("created_at"), 0.0),
-    )
-
-
-def _migrate_loaded_rules(
-    redis_obj: Any,
-    candidates: List[Tuple[str, Dict[str, Any], bool, float]],
-    invalid_fields: Optional[set[str]] = None,
-) -> Dict[str, Dict[str, Any]]:
-    chosen_by_fingerprint: Dict[str, Tuple[str, Dict[str, Any], bool, float]] = {}
-    stale_fields: set[str] = set(invalid_fields or set())
-
-    for field_name, normalized, needs_write, source_score in candidates:
-        fingerprint = _rule_fingerprint(normalized)
-        existing = chosen_by_fingerprint.get(fingerprint)
-        if existing is None:
-            chosen_by_fingerprint[fingerprint] = (field_name, normalized, needs_write, source_score)
-            continue
-        existing_field, existing_rule, existing_needs_write, existing_score = existing
-        if source_score > existing_score:
-            if existing_field:
-                stale_fields.add(existing_field)
-            chosen_by_fingerprint[fingerprint] = (field_name, normalized, needs_write, source_score)
-        else:
-            if field_name:
-                stale_fields.add(field_name)
-            if needs_write and not existing_needs_write:
-                chosen_by_fingerprint[fingerprint] = (existing_field, existing_rule, True, existing_score)
-
-    out: Dict[str, Dict[str, Any]] = {}
-    fields_to_write: List[Tuple[str, Dict[str, Any]]] = []
-    scores_by_id: Dict[str, float] = {}
-    for field_name, normalized, needs_write, source_score in chosen_by_fingerprint.values():
-        rule_id = _text(normalized.get("id"))
-        if not rule_id:
-            continue
-        existing = out.get(rule_id)
-        if existing is not None and scores_by_id.get(rule_id, 0.0) > source_score:
-            if field_name:
-                stale_fields.add(field_name)
-            continue
-        out[rule_id] = normalized
-        scores_by_id[rule_id] = source_score
-        if needs_write or (field_name and field_name != rule_id):
-            fields_to_write.append((field_name, normalized))
-        if field_name and field_name != rule_id:
-            stale_fields.add(field_name)
-
-    if redis_obj is not None:
-        wrote = 0
-        removed = 0
-        for _field_name, normalized in fields_to_write:
-            rule_id = _text(normalized.get("id"))
-            if not rule_id:
-                continue
-            try:
-                redis_obj.hset(_RULES_KEY, rule_id, json.dumps(normalized))
-                wrote += 1
-            except Exception:
-                logger.debug("[awareness] failed to write migrated rule %s", rule_id, exc_info=True)
-        for field_name in sorted(field for field in stale_fields if field and field not in out):
-            try:
-                removed += int(redis_obj.hdel(_RULES_KEY, field_name) or 0)
-            except Exception:
-                logger.debug("[awareness] failed to remove stale rule field %s", field_name, exc_info=True)
-        if wrote or removed:
-            logger.info("[awareness] normalized stored rules (written=%d removed_stale=%d)", wrote, removed)
-
-    return out
-
-
-def _load_rules(client: Any) -> Dict[str, Dict[str, Any]]:
-    redis_obj = client or redis_client
-    raw = redis_obj.hgetall(_RULES_KEY) if redis_obj else {}
-    if not isinstance(raw, dict):
-        return {}
-    candidates: List[Tuple[str, Dict[str, Any], bool, float]] = []
-    invalid_fields: set[str] = set()
-    for field_name_raw, row in raw.items():
-        field_name = _redis_field_text(field_name_raw)
-        try:
-            payload = json.loads(row)
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        source_score = _rule_migration_score(payload)
-        if not _text(payload.get("id")) and field_name:
-            payload["id"] = field_name
-        normalized = _normalize_rule(payload)
-        if not normalized:
-            if field_name:
-                invalid_fields.add(field_name)
-            continue
-        rule_id = _text(normalized.get("id"))
-        needs_write = field_name != rule_id
-        if not needs_write:
-            try:
-                needs_write = json.dumps(payload, sort_keys=True) != json.dumps(normalized, sort_keys=True)
-            except Exception:
-                needs_write = True
-        candidates.append((field_name, normalized, needs_write, source_score))
-    return _migrate_loaded_rules(redis_obj, candidates, invalid_fields=invalid_fields)
-
-
-def _get_rule(client: Any, rule_id: str) -> Optional[Dict[str, Any]]:
-    rid = _text(rule_id)
-    if not rid:
-        return None
-    redis_obj = client or redis_client
-    raw = redis_obj.hget(_RULES_KEY, rid)
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        return None
-    return _normalize_rule(payload)
-
-
-def _save_rule(client: Any, rule: Dict[str, Any]) -> None:
-    redis_obj = client or redis_client
-    normalized = _normalize_rule(rule)
-    if not normalized:
-        raise ValueError("Invalid awareness rule payload.")
-    redis_obj.hset(_RULES_KEY, normalized["id"], json.dumps(normalized))
-
-
-def _remove_rule(client: Any, rule_id: str) -> bool:
-    redis_obj = client or redis_client
-    rid = _text(rule_id)
-    if not rid:
-        return False
-    removed = redis_obj.hdel(_RULES_KEY, rid)
-    return bool(removed)
-
 
 def _queue_depth(client: Any) -> int:
     redis_obj = client or redis_client
@@ -1223,53 +1085,6 @@ def _queue_depth(client: Any) -> int:
     except Exception:
         return 0
 
-
-def _enqueue_execution(client: Any, *, rule_id: str, reason: str, event: Optional[Dict[str, Any]] = None) -> None:
-    redis_obj = client or redis_client
-    payload = {
-        "rule_id": _text(rule_id),
-        "reason": _text(reason) or "manual",
-        "event": event or {},
-        "queued_at": time.time(),
-    }
-    redis_obj.lpush(_EXEC_QUEUE_KEY, json.dumps(payload))
-    _runtime_set(redis_obj, queue_depth=_queue_depth(redis_obj))
-
-
-def _enqueue_execution_after_delay(
-    client: Any,
-    *,
-    rule_id: str,
-    reason: str,
-    event: Optional[Dict[str, Any]] = None,
-    delay_seconds: float = 0.0,
-) -> bool:
-    redis_obj = client or redis_client
-    delay = max(0.0, float(delay_seconds or 0.0))
-    if delay <= 0.0:
-        _enqueue_execution(redis_obj, rule_id=rule_id, reason=reason, event=event)
-        return True
-
-    rid = _text(rule_id)
-    if not rid:
-        return False
-    dedupe_key = f"awareness:startup_defer:{rid}"
-    try:
-        if redis_obj.set(dedupe_key, "1", ex=max(30, int(delay) + 60), nx=True) is None:
-            return False
-    except Exception:
-        logger.debug("[awareness] failed to reserve startup defer key %s", dedupe_key, exc_info=True)
-
-    def _later() -> None:
-        try:
-            _enqueue_execution(redis_obj, rule_id=rid, reason=reason, event=event)
-        except Exception:
-            logger.debug("[awareness] failed to enqueue deferred execution for %s", rid, exc_info=True)
-
-    timer = threading.Timer(delay, _later)
-    timer.daemon = True
-    timer.start()
-    return True
 
 
 def _dequeue_execution(client: Any) -> Optional[Dict[str, Any]]:
@@ -1290,13 +1105,6 @@ def _ha_config() -> Dict[str, str]:
     return load_homeassistant_config(required=True)
 
 
-def _ha_config_optional() -> Dict[str, str]:
-    try:
-        return _ha_config()
-    except Exception:
-        return {"base": "", "token": ""}
-
-
 def _unifi_camera_id_from_entity(camera_entity: str) -> str:
     object_id = _entity_object_id(camera_entity)
     if object_id.startswith("unifi_"):
@@ -1304,17 +1112,8 @@ def _unifi_camera_id_from_entity(camera_entity: str) -> str:
     return object_id
 
 
-def _unifi_sensor_id_from_entity(sensor_entity: str) -> str:
-    object_id = _entity_object_id(sensor_entity)
-    if object_id.startswith("unifi_sensor_"):
-        return object_id[len("unifi_sensor_") :]
-    if object_id.startswith("unifi_"):
-        return object_id[len("unifi_") :]
-    return object_id
 
 
-def _unifi_camera_entity(camera_id: str) -> str:
-    return f"camera.unifi_{_text(camera_id).lower()}"
 
 
 def _unifi_camera_motion_trigger(camera_id: str) -> str:
@@ -1325,8 +1124,10 @@ def _unifi_camera_doorbell_trigger(camera_id: str) -> str:
     return f"binary_sensor.unifi_{_text(camera_id).lower()}_doorbell"
 
 
-def _unifi_name_key(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", _text(value).lower())
+def _unifi_sensor_entity(sensor_id: str) -> str:
+    return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
+
+
 
 
 def _unifi_normalize_smart_type(raw_type: Any) -> str:
@@ -1410,12 +1211,6 @@ def _unifi_marker_token(value: Any) -> str:
     return _text(value)
 
 
-def _unifi_smart_type_values(raw: Any) -> List[str]:
-    if isinstance(raw, (list, tuple, set)):
-        return [_text(item) for item in raw if _text(item)]
-    if isinstance(raw, str):
-        return _normalize_players(raw)
-    return []
 
 
 def _unifi_event_matches_smart_type(event_obj: Dict[str, Any], smart_type: str) -> bool:
@@ -1446,169 +1241,14 @@ def _unifi_event_matches_smart_type(event_obj: Dict[str, Any], smart_type: str) 
     return False
 
 
-def _unifi_smart_marker_from_container(raw: Any, smart_type: str, *, depth: int = 0) -> str:
-    if depth > 6 or raw is None:
-        return ""
-    token = _unifi_normalize_smart_type(smart_type)
-    if not token:
-        return ""
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            if _unifi_matches_smart_type_text(key, token):
-                marker = _unifi_marker_token(value)
-                if marker:
-                    return f"{_text(key)}:{marker}"
-        if _unifi_event_matches_smart_type(raw, token):
-            marker = _unifi_marker_token(raw)
-            if marker:
-                return marker
-        for value in raw.values():
-            if isinstance(value, (dict, list)):
-                marker = _unifi_smart_marker_from_container(value, token, depth=depth + 1)
-                if marker:
-                    return marker
-        return ""
-    if isinstance(raw, list):
-        for item in raw[:12]:
-            marker = _unifi_smart_marker_from_container(item, token, depth=depth + 1)
-            if marker:
-                return marker
-    return ""
 
 
-def _unifi_camera_recent_smart_types(camera_row: Dict[str, Any]) -> set[str]:
-    out: set[str] = set()
-    for key in (
-        "lastSmartDetectType",
-        "lastSmartDetectTypes",
-        "smartDetectType",
-        "smartDetectTypes",
-        "lastDetectionType",
-        "lastDetectionTypes",
-        "lastObjectType",
-        "lastObjectTypes",
-    ):
-        value = camera_row.get(key)
-        if isinstance(value, dict):
-            for raw_type in value.keys():
-                token = _unifi_normalize_smart_type(raw_type)
-                if token:
-                    out.add(token)
-            continue
-        for raw_type in _unifi_smart_type_values(value):
-            token = _unifi_normalize_smart_type(raw_type)
-            if token:
-                out.add(token)
-    return out
 
 
-def _unifi_camera_any_smart_marker(camera_row: Dict[str, Any]) -> str:
-    for key in (
-        "lastSmartDetectEventId",
-        "lastSmartDetectEventIds",
-        "lastSmartDetectAt",
-        "lastSmartDetect",
-        "lastSmartDetectTs",
-        "lastDetectionAt",
-        "lastDetectionTs",
-    ):
-        marker = _unifi_marker_token(camera_row.get(key))
-        if marker:
-            return f"{key}:{marker}"
-    for key, value in camera_row.items():
-        key_text = _text(key)
-        key_lower = key_text.lower()
-        if "smart" not in key_lower and "detect" not in key_lower:
-            continue
-        if key_lower.endswith("types"):
-            continue
-        marker = _unifi_marker_token(value)
-        if marker:
-            return f"{key_text}:{marker}"
-    return ""
 
 
-def _unifi_nested_keyword_marker(
-    raw: Any,
-    *,
-    include_any: Tuple[str, ...],
-    must_have_any: Tuple[str, ...],
-    exclude_any: Tuple[str, ...] = (),
-    depth: int = 0,
-) -> str:
-    if raw is None or depth > 8:
-        return ""
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            key_text = _text(key)
-            key_lower = key_text.lower()
-            include_ok = any(token in key_lower for token in include_any) if include_any else True
-            required_ok = any(token in key_lower for token in must_have_any) if must_have_any else True
-            excluded = any(token in key_lower for token in exclude_any)
-            if include_ok and required_ok and not excluded:
-                marker = _unifi_marker_token(value)
-                if marker:
-                    return f"{key_text}:{marker}"
-            nested = _unifi_nested_keyword_marker(
-                value,
-                include_any=include_any,
-                must_have_any=must_have_any,
-                exclude_any=exclude_any,
-                depth=depth + 1,
-            )
-            if nested:
-                return f"{key_text}.{nested}"
-        return ""
-    if isinstance(raw, list):
-        for index, item in enumerate(raw[:16]):
-            nested = _unifi_nested_keyword_marker(
-                item,
-                include_any=include_any,
-                must_have_any=must_have_any,
-                exclude_any=exclude_any,
-                depth=depth + 1,
-            )
-            if nested:
-                return f"[{index}].{nested}"
-    return ""
 
 
-def _unifi_camera_smart_detect_types(camera_row: Dict[str, Any]) -> List[str]:
-    found: set[str] = set()
-
-    def _add(raw_type: Any) -> None:
-        token = _unifi_normalize_smart_type(raw_type)
-        if token:
-            found.add(token)
-
-    feature_flags = camera_row.get("featureFlags")
-    if isinstance(feature_flags, dict):
-        for raw_type in _unifi_smart_type_values(feature_flags.get("smartDetectTypes")):
-            _add(raw_type)
-
-    for key in ("smartDetectTypes", "smart_detection_types", "smartTypes"):
-        value = camera_row.get(key)
-        if isinstance(value, dict):
-            for raw_type in value.keys():
-                _add(raw_type)
-            continue
-        for raw_type in _unifi_smart_type_values(value):
-            _add(raw_type)
-
-    for key in ("lastSmartDetects", "lastSmartDetectEvents", "lastSmartDetectEventIds", "smartDetects", "smartDetectEvents"):
-        value = camera_row.get(key)
-        if isinstance(value, dict):
-            for raw_type in value.keys():
-                _add(raw_type)
-
-    has_smart_hint = bool(found)
-    if not has_smart_hint and isinstance(feature_flags, dict):
-        has_smart_hint = bool(feature_flags.get("hasSmartDetect"))
-    if not has_smart_hint:
-        has_smart_hint = any("smartdetect" in _text(key).lower() for key in camera_row.keys())
-    if has_smart_hint and not found:
-        found.update(_UNIFI_SMART_TYPE_FALLBACK)
-    return sorted(found)
 
 
 def _unifi_camera_smart_trigger(camera_id: str, smart_type: str) -> str:
@@ -1616,197 +1256,7 @@ def _unifi_camera_smart_trigger(camera_id: str, smart_type: str) -> str:
     return f"binary_sensor.unifi_{_text(camera_id).lower()}_smart_{token}"
 
 
-def _unifi_camera_smart_marker(camera_row: Dict[str, Any], smart_type: str) -> str:
-    token = _unifi_normalize_smart_type(smart_type)
-    if not token:
-        return ""
-    for key in ("lastSmartDetects", "lastSmartDetectEvents", "lastSmartDetectEventIds", "smartDetects", "smartDetectEvents"):
-        marker = _unifi_smart_marker_from_container(camera_row.get(key), token)
-        if marker:
-            return f"{key}:{marker}"
-    for key, value in camera_row.items():
-        key_text = _text(key)
-        key_lower = key_text.lower()
-        if "smart" not in key_lower and "detect" not in key_lower:
-            continue
-        if key_lower.endswith("types"):
-            continue
-        # HA's UniFi integration exposes fields like last_person_detect_event,
-        # last_vehicle_detect_event, etc. Use the key itself as a type hint.
-        if _unifi_matches_smart_type_text(key_text, token):
-            direct_marker = _unifi_marker_token(value)
-            if direct_marker:
-                return f"{key_text}:{direct_marker}"
-        marker = _unifi_smart_marker_from_container(value, token)
-        if marker:
-            return f"{key_text}:{marker}"
-    recent_types = _unifi_camera_recent_smart_types(camera_row)
-    if token in recent_types:
-        generic_marker = _unifi_camera_any_smart_marker(camera_row)
-        if generic_marker:
-            return f"recent:{token}:{generic_marker}"
-    nested_marker = _unifi_smart_marker_from_container(camera_row, token)
-    if nested_marker:
-        return f"nested:{nested_marker}"
-    return ""
 
-
-def _unifi_camera_name_index() -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    try:
-        catalog = _entity_catalog(provider="unifi_protect")
-    except Exception:
-        return out
-    cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
-    for camera_entity, label in cameras:
-        camera_id = _text(_unifi_camera_id_from_entity(camera_entity)).lower()
-        if not camera_id:
-            continue
-        label_text = _text(label)
-        camera_name = label_text.rsplit("(", 1)[0].strip() if "(" in label_text else label_text
-        candidates = [
-            camera_name,
-            _entity_object_id(camera_entity).replace("unifi_", "").replace("_", " "),
-            camera_id,
-        ]
-        for candidate in candidates:
-            key = _unifi_name_key(candidate)
-            if key and key not in out:
-                out[key] = camera_id
-    return out
-
-
-def _unifi_sensor_entity(sensor_id: str) -> str:
-    return f"binary_sensor.unifi_sensor_{_text(sensor_id).lower()}"
-
-
-def _unifi_payload_rows(payload: Any, key: str = "") -> List[Dict[str, Any]]:
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-    if not isinstance(payload, dict):
-        return []
-    keys = [token for token in (key, "data", "items", "results", "devices") if token]
-    for item_key in keys:
-        value = payload.get(item_key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            return [row for row in value.values() if isinstance(row, dict)]
-    if key:
-        singular = key[:-1] if key.endswith("s") else key
-        value = payload.get(singular)
-        if isinstance(value, dict):
-            return [value]
-    return [payload] if _text(payload.get("id")) else []
-
-
-def _unifi_list_from_integration(resource: str, paths: List[str]) -> List[Dict[str, Any]]:
-    module = _integration_module("unifi_protect")
-    if module is None:
-        return []
-    public_func = getattr(module, f"list_unifi_{resource}", None)
-    if callable(public_func):
-        return _unifi_payload_rows(public_func(), resource)
-    helper = getattr(module, "_list_unifi_rows", None)
-    if callable(helper):
-        return _unifi_payload_rows(helper(resource, paths), resource)
-    return []
-
-
-def _unifi_list_resource(resource: str, paths: List[str]) -> List[Dict[str, Any]]:
-    try:
-        rows = _unifi_list_from_integration(resource, paths)
-        if rows:
-            return rows
-    except Exception:
-        logger.debug("[awareness] UniFi %s discovery via integration module failed", resource, exc_info=True)
-    for path in paths:
-        try:
-            rows = _unifi_payload_rows(_unifi_request("GET", path), resource)
-            if rows:
-                return rows
-        except Exception:
-            logger.debug("[awareness] UniFi %s discovery failed path=%s", resource, path, exc_info=True)
-    return []
-
-
-def _unifi_list_cameras() -> List[Dict[str, Any]]:
-    return _unifi_list_resource(
-        "cameras",
-        ["/proxy/protect/integration/v1/cameras", "/proxy/protect/api/cameras", "/proxy/protect/api/bootstrap"],
-    )
-
-
-def _unifi_list_sensors() -> List[Dict[str, Any]]:
-    return _unifi_list_resource(
-        "sensors",
-        ["/proxy/protect/integration/v1/sensors", "/proxy/protect/api/sensors", "/proxy/protect/api/bootstrap"],
-    )
-
-
-def _ha_headers(token: str, *, json_content: bool = True) -> Dict[str, str]:
-    headers = {"Authorization": f"Bearer {token}"}
-    if json_content:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-
-def _state_matches_custom(rule: Dict[str, Any], new_state: Dict[str, Any], old_state: Dict[str, Any]) -> bool:
-    expected_state = _text(rule.get("trigger_to_state")).lower()
-    actual_state = _text((new_state or {}).get("state")).lower()
-    if expected_state and actual_state != expected_state:
-        return False
-    if not expected_state and _text((old_state or {}).get("state")).lower() == actual_state:
-        return False
-    attr_key = _text(rule.get("trigger_attribute"))
-    attr_expected = _text(rule.get("trigger_attribute_value")).lower()
-    if not attr_key:
-        return True
-    attrs = (new_state or {}).get("attributes") or {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-    attr_value = attrs.get(attr_key)
-    if isinstance(attr_value, list):
-        tokens = [_text(item).lower() for item in attr_value]
-        if not attr_expected:
-            return bool(tokens)
-        return any(attr_expected == token or attr_expected in token for token in tokens)
-    attr_text = _text(attr_value).lower()
-    if not attr_expected:
-        return bool(attr_text)
-    return attr_expected == attr_text or attr_expected in attr_text
-
-
-def _rule_matches_event(
-    rule: Dict[str, Any],
-    *,
-    provider: str,
-    entity_id: str,
-    new_state: Dict[str, Any],
-    old_state: Dict[str, Any],
-) -> bool:
-    provider_token = _normalize_event_provider(provider)
-    rule_provider = _rule_provider(rule)
-    trigger_entities = _normalize_trigger_entities(rule.get("trigger_entities"))
-    if not trigger_entities:
-        legacy = _text(rule.get("trigger_entity"))
-        if legacy:
-            trigger_entities = [legacy]
-    event_entity = _text(entity_id).lower()
-    if trigger_entities:
-        matched_entity = False
-        for trigger_entity in trigger_entities:
-            trigger_provider, trigger_raw = _split_provider_ref(trigger_entity, rule_provider)
-            if trigger_provider not in {"all", provider_token}:
-                continue
-            if _text(trigger_raw).lower() == event_entity:
-                matched_entity = True
-                break
-        if not matched_entity:
-            return False
-    elif rule_provider not in {"all", provider_token}:
-        return False
-    return _state_matches_custom(rule, new_state, old_state)
 
 
 def _entry_state_action(state_value: Any) -> Tuple[str, str]:
@@ -1827,14 +1277,6 @@ def _friendly_entity_name(entity_id: str, state_obj: Dict[str, Any]) -> str:
         return friendly
     token = _entity_object_id(entity_id).replace("_", " ").strip()
     return token or entity_id
-
-
-def _camera_cooldown_key(camera_entity: str) -> str:
-    return f"tater:camera_event:cooldown:v2:{camera_entity}"
-
-
-def _camera_notify_cooldown_key(camera_entity: str) -> str:
-    return f"tater:camera_event:notify_cooldown:v2:{camera_entity}"
 
 
 def _acquire_cooldown(key: str, cooldown_seconds: int) -> bool:
@@ -1879,223 +1321,6 @@ def _is_nothing_notable_summary(summary: Any) -> bool:
         "no notable activity",
     }
 
-
-def _normalize_device_service(raw: Any) -> str:
-    text = _text(raw)
-    if not text:
-        return ""
-    if text.lower().startswith("notify."):
-        return text.split(".", 1)[1].strip()
-    if "." in text:
-        left, right = text.split(".", 1)
-        if left.strip().lower() == "notify":
-            return right.strip()
-    return text
-
-
-def _normalize_device_services(raw: Any) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in _normalize_players(raw):
-        token = _normalize_device_service(item)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        out.append(token)
-    return out
-
-
-def _notification_clean_targets_dict(raw: Any) -> Dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    out: Dict[str, Any] = {}
-    for key, value in raw.items():
-        token = _text(key)
-        if not token:
-            continue
-        if isinstance(value, bool):
-            out[token] = bool(value)
-            continue
-        text = _text(value)
-        if text:
-            out[token] = text
-    return out
-
-
-def _notification_target_entry(platform: Any, targets: Any = None) -> Dict[str, Any]:
-    platform_name = _text(platform).lower()
-    if not platform_name:
-        return {}
-    return {
-        "platform": platform_name,
-        "targets": _notification_clean_targets_dict(targets),
-    }
-
-
-def _notification_encode_destination(platform: Any, targets: Any = None) -> str:
-    entry = _notification_target_entry(platform, targets)
-    if not entry:
-        return ""
-    try:
-        return json.dumps(entry, separators=(",", ":"), sort_keys=True)
-    except Exception:
-        return ""
-
-
-def _notification_decode_destination(raw: Any) -> Dict[str, Any]:
-    if isinstance(raw, dict):
-        entry = _notification_target_entry(raw.get("platform"), raw.get("targets"))
-        if entry:
-            return entry
-        service = _normalize_device_service(raw.get("device_service"))
-        return _notification_target_entry("homeassistant", {"device_service": service}) if service else {}
-    value = _text(raw)
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except Exception:
-        service = _normalize_device_service(value)
-        return _notification_target_entry("homeassistant", {"device_service": service}) if service else {}
-    if not isinstance(parsed, dict):
-        return {}
-    return _notification_target_entry(parsed.get("platform"), parsed.get("targets"))
-
-
-def _normalize_notification_targets(raw: Any, *, device_services: Any = None) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    raw_items: List[Any]
-    if isinstance(raw, (list, tuple, set)):
-        raw_items = list(raw)
-    elif isinstance(raw, dict):
-        raw_items = [raw]
-    elif raw in (None, ""):
-        raw_items = []
-    else:
-        raw_text = _text(raw)
-        raw_items = [raw_text] if raw_text.startswith("{") and raw_text.endswith("}") else _normalize_players(raw)
-
-    for item in raw_items:
-        entry = _notification_decode_destination(item)
-        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(entry)
-
-    if not out:
-        for service in _normalize_device_services(device_services):
-            entry = _notification_target_entry("homeassistant", {"device_service": service})
-            value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
-            if not value or value in seen:
-                continue
-            seen.add(value)
-            out.append(entry)
-    return out
-
-
-def _notification_target_values(raw: Any, *, device_services: Any = None) -> List[str]:
-    out: List[str] = []
-    for entry in _normalize_notification_targets(raw, device_services=device_services):
-        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
-        if value:
-            out.append(value)
-    return out
-
-
-def _device_services_from_notification_targets(raw: Any) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for entry in _normalize_notification_targets(raw):
-        if _text(entry.get("platform")).lower() != "homeassistant":
-            continue
-        service = _normalize_device_service((entry.get("targets") or {}).get("device_service"))
-        if not service or service in seen:
-            continue
-        seen.add(service)
-        out.append(service)
-    return out
-
-
-def _normalize_display_target(raw: Any) -> str:
-    token = _text(raw)
-    if not token:
-        return ""
-    clean = re.sub(r"[^A-Za-z0-9:._,@-]+", "_", token).strip("._,")
-    return clean[:120] or ""
-
-
-def _normalize_display_targets(raw: Any) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in _normalize_players(raw):
-        token = _normalize_display_target(item)
-        if not token or token in seen:
-            continue
-        if token.lower() == "all":
-            return ["all"]
-        seen.add(token)
-        out.append(token)
-    return out
-
-
-def _display_target_pairs(current_values: Any = None) -> List[Tuple[str, str]]:
-    pairs: List[Tuple[str, str]] = [("all", "All Tater displays")]
-    seen: set[str] = {"all"}
-
-    def add_target(value: Any, label: Any = "") -> None:
-        token = _normalize_display_target(value)
-        if not token or token.lower() in seen:
-            return
-        seen.add(token.lower())
-        pairs.append((token, _text(label) or token))
-
-    try:
-        profile_rows = redis_client.hgetall(_DISPLAY_PROFILE_HASH_KEY) or {}
-    except Exception:
-        profile_rows = {}
-    if isinstance(profile_rows, dict):
-        for raw_key, raw_value in profile_rows.items():
-            key = _text(raw_key)
-            label = key
-            try:
-                profile = json.loads(_text(raw_value))
-                if isinstance(profile, dict):
-                    label = _text(profile.get("name") or profile.get("friendly_name") or profile.get("display_name") or key)
-                    add_target(profile.get("display_target") or key, label)
-                    continue
-            except Exception:
-                pass
-            add_target(key, label)
-
-    try:
-        raw_profile = redis_client.hget(_FIRMWARE_PROFILE_HASH_KEY, _S3BOX_FIRMWARE_PROFILE_KEY)
-        firmware_profile = json.loads(_text(raw_profile)) if raw_profile not in (None, "") else {}
-    except Exception:
-        firmware_profile = {}
-    if isinstance(firmware_profile, dict):
-        add_target(
-            firmware_profile.get("display_target"),
-            firmware_profile.get("friendly_name") or firmware_profile.get("display_name") or firmware_profile.get("display_target"),
-        )
-
-    for current in _normalize_display_targets(current_values):
-        add_target(current, f"{current} (current)")
-    return pairs
-
-
-def _display_target_options(current_values: Any = None) -> List[Dict[str, str]]:
-    return _multiselect_choices_from_pairs(_display_target_pairs(current_values), current_values=current_values)
-
-
-def _display_snapshot_url(snapshot_store: Any) -> str:
-    row = snapshot_store if isinstance(snapshot_store, dict) else {}
-    snapshot_id = _text(row.get("snapshot_id"))
-    if not snapshot_id:
-        return ""
-    return f"/tater-ha/v1/display/snapshots/{snapshot_id}"
 
 
 def _camera_snapshot_sync(ha_base: str, token: str, camera_entity: str) -> bytes:
@@ -2380,144 +1605,7 @@ async def _vision_describe(
     )
 
 
-async def _notify_homeassistant(
-    *,
-    title: str,
-    message: str,
-    priority: str,
-    device_services: Any,
-    origin: Dict[str, Any],
-) -> Dict[str, Any]:
-    return await _notify_destinations(
-        title=title,
-        message=message,
-        priority=priority,
-        notification_targets=[],
-        device_services=device_services,
-        origin=origin,
-    )
 
-
-async def _notify_destinations(
-    *,
-    title: str,
-    message: str,
-    priority: str,
-    notification_targets: Any,
-    device_services: Any = None,
-    origin: Dict[str, Any],
-) -> Dict[str, Any]:
-    targets_list = _normalize_notification_targets(notification_targets, device_services=device_services)
-    if not targets_list:
-        return {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-    meta = {"priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal"}
-    sent_count = 0
-    errors: List[str] = []
-
-    async def _dispatch_once(platform: str, targets: Dict[str, Any]) -> None:
-        nonlocal sent_count
-        try:
-            result = await dispatch_notification(
-                platform=platform,
-                title=title,
-                content=message,
-                targets=targets,
-                origin=origin,
-                meta=meta,
-            )
-        except Exception as exc:
-            errors.append(str(exc))
-            return
-        result_text = _text(result)
-        if result_text.lower().startswith("queued notification"):
-            sent_count += 1
-            return
-        errors.append(result_text or f"{platform} notifier returned empty result")
-
-    # Keep persistent notifications off in Awareness routing; this path only
-    # targets explicit Home Assistant notify services selected in the rule.
-    for entry in targets_list:
-        platform = _text(entry.get("platform")).lower()
-        if not platform:
-            continue
-        targets = dict(entry.get("targets") or {})
-        if platform == "homeassistant":
-            targets.setdefault("persistent", False)
-        await _dispatch_once(platform, targets)
-
-    if sent_count > 0:
-        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
-        if errors:
-            result["warnings"] = errors
-        return result
-    return {"ok": False, "sent_count": 0, "error": "; ".join(errors) or "notification dispatch failed"}
-
-
-async def _notify_display(
-    *,
-    kind: str,
-    title: str,
-    message: str,
-    priority: str,
-    display_targets: Any,
-    snapshot_store: Any,
-    origin: Dict[str, Any],
-    ttl_seconds: int = 90,
-) -> Dict[str, Any]:
-    targets = _normalize_display_targets(display_targets)
-    if not targets:
-        targets = ["all"]
-    snapshot_url = _display_snapshot_url(snapshot_store)
-    normalized_kind = _text(kind) or "notification"
-    meta = {
-        "display_kind": normalized_kind,
-        "priority": "high" if _text(priority).lower() in {"high", "critical"} else "normal",
-        "description": message,
-        "summary": message,
-        "snapshot_url": snapshot_url,
-        "image_format": "jpeg" if snapshot_url else "",
-        "ttl_seconds": _as_int(ttl_seconds, 90, minimum=6, maximum=3600),
-    }
-    try:
-        result = await dispatch_notification(
-            platform="display",
-            title=title,
-            content=message,
-            targets={"target": targets[0] if len(targets) == 1 else "all", "targets": targets},
-            origin=origin,
-            meta=meta,
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "sent_count": 0,
-            "error": str(exc),
-            "snapshot_url": snapshot_url,
-            "targets": targets,
-        }
-    result_text = _text(result)
-    ok = result_text.lower().startswith("queued notification")
-    return {
-        "ok": ok,
-        "sent_count": 1 if ok else 0,
-        "result": result_text,
-        "snapshot_url": snapshot_url,
-        "targets": targets,
-    }
-
-
-def _event_window(timeframe: str) -> Tuple[datetime, datetime, str]:
-    now = datetime.now()
-    token = _text(timeframe).lower()
-    if token == "yesterday":
-        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1) - timedelta(seconds=1)
-        return start, end, "yesterday"
-    if token in {"last_24h", "last24h"}:
-        return now - timedelta(hours=24), now, "in the last 24 hours"
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1) - timedelta(seconds=1)
-    return start, end, "today"
 
 def _discover_event_sources(client: Any) -> List[str]:
     redis_obj = client or redis_client
@@ -2871,12 +1959,6 @@ def _json_object_from_text(text: Any) -> Dict[str, Any]:
     return {}
 
 
-def _events_query_event_ids(candidate_events: List[Dict[str, Any]]) -> List[str]:
-    return [
-        str(item.get("event_id") or "").strip()
-        for item in candidate_events
-        if isinstance(item, dict) and str(item.get("event_id") or "").strip()
-    ]
 
 
 async def _events_query_llm_json_object(
@@ -3463,62 +2545,6 @@ def _event_allowed_by_filter(filters: Dict[str, bool], event_type: str) -> bool:
     return bool(filters.get(event_type))
 
 
-def _event_filter_form(
-    *,
-    filters: Dict[str, bool],
-    list_view: bool,
-    totals: Dict[str, int],
-    visible_totals: Dict[str, int],
-) -> Dict[str, Any]:
-    labels = [("camera", "Cameras"), ("doorbell", "Doorbells"), ("sensor", "Sensors")]
-    selected_labels = [label for key, label in labels if filters.get(key)]
-    if selected_labels:
-        subtitle = f"Showing: {', '.join(selected_labels)}"
-    else:
-        subtitle = "No event types selected. Enable at least one type to view matching events."
-    subtitle += f" • View: {'List' if list_view else 'Current'}"
-    subtitle += (
-        f" • Visible {visible_totals.get('camera', 0)}/{totals.get('camera', 0)} cameras, "
-        f"{visible_totals.get('doorbell', 0)}/{totals.get('doorbell', 0)} doorbells, "
-        f"{visible_totals.get('sensor', 0)}/{totals.get('sensor', 0)} sensors"
-    )
-    return {
-        "id": "awareness_event_filters",
-        "group": "event",
-        "title": "Event Filters",
-        "subtitle": subtitle,
-        "save_action": "awareness_save_event_filters",
-        "save_label": "Apply Filters",
-        "fields_popup": False,
-        "fields_dropdown": True,
-        "sections_in_dropdown": False,
-        "fields": [
-            {
-                "key": "show_camera_events",
-                "label": "Show Cameras",
-                "type": "checkbox",
-                "value": bool(filters.get("camera", True)),
-            },
-            {
-                "key": "show_doorbell_events",
-                "label": "Show Doorbells",
-                "type": "checkbox",
-                "value": bool(filters.get("doorbell", True)),
-            },
-            {
-                "key": "show_sensor_events",
-                "label": "Show Sensors",
-                "type": "checkbox",
-                "value": bool(filters.get("sensor", True)),
-            },
-            {
-                "key": "show_event_list_view",
-                "label": "List View (compact)",
-                "type": "checkbox",
-                "value": bool(list_view),
-            },
-        ],
-    }
 
 
 def _event_source_lengths(client: Any, sources: List[str]) -> Dict[str, int]:
@@ -3761,8 +2787,6 @@ def _event_page_for_ui(
     }
 
 
-def _event_items_for_ui(client: Any) -> List[Dict[str, Any]]:
-    return list(_event_page_for_ui(client).get("items") or [])
 
 
 def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
@@ -3797,352 +2821,187 @@ def _event_stats_for_ui(client: Any) -> Dict[str, Any]:
         "last_event": last_event,
     }
 
-def _shared_announcement_tts_settings() -> Dict[str, Any]:
-    shared = get_shared_speech_settings()
-    return {
-        "backend": _text(shared.get("announcement_tts_backend") or shared.get("tts_backend") or "wyoming"),
-        "model": _text(shared.get("announcement_tts_model")),
-        "voice": _text(shared.get("announcement_tts_voice")),
-        "wyoming_host": _text(shared.get("wyoming_tts_host")),
-        "wyoming_port": shared.get("wyoming_tts_port"),
-        "wyoming_voice": _text(shared.get("wyoming_tts_voice")),
-        "voice_core_backend": _text(shared.get("tts_backend")),
-        "voice_core_model": _text(shared.get("tts_model")),
-        "voice_core_voice": _text(shared.get("tts_voice")),
-        "voice_core_wyoming_host": _text(shared.get("wyoming_tts_host")),
-        "voice_core_wyoming_port": shared.get("wyoming_tts_port"),
-        "voice_core_wyoming_voice": _text(shared.get("wyoming_tts_voice")),
-    }
 
-
-async def _execute_camera_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
-    del llm_client
-    camera = _text(rule.get("camera_entity"))
-    area = _text(rule.get("area")) or "camera"
-    provider = _rule_provider(rule)
-    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
-    provider = snapshot_provider
-    if not camera:
-        raise ValueError("Camera rule is missing camera_entity.")
-
-    cooldown_seconds = _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400)
-    cooldown_key = _camera_cooldown_key(camera)
-    if not _acquire_cooldown(cooldown_key, cooldown_seconds):
-        return {
-            "ok": True,
-            "summary": "Camera cooldown active.",
-            "camera": camera,
-            "area": area,
-            "provider": provider,
-            "skipped": "cooldown",
-        }
-
-    vision = get_shared_vision_settings(
-        default_api_base="http://127.0.0.1:1234",
-        default_model="qwen2.5-vl-7b-instruct",
+def _monitor_event_type(monitor: Dict[str, Any], entity_id: Any, new_state: Dict[str, Any]) -> str:
+    attrs = new_state.get("attributes") if isinstance(new_state, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    entity_token = _text(entity_id).casefold()
+    matched_source_type = ""
+    for source in monitor.get("event_sources") or []:
+        if not isinstance(source, dict):
+            continue
+        if _text(source.get("ref")).casefold() == entity_token:
+            matched_source_type = _text(source.get("type"))
+            break
+    fallback_event_types = monitor.get("event_types") or []
+    sole_event_type = _text(fallback_event_types[0]) if len(fallback_event_types) == 1 else ""
+    corpus = " ".join(
+        _text(value).lower().replace("-", "_")
+        for value in (
+            entity_id,
+            matched_source_type,
+            sole_event_type,
+            attrs.get("event_type"),
+            attrs.get("detection_type"),
+            attrs.get("device_class"),
+            attrs.get("resource_type"),
+        )
+        if _text(value)
     )
-    query = _text(rule.get("query"))
-    ignore_vehicles = _bool(rule.get("ignore_vehicles"), False)
+    if "doorbell" in corpus or "ring" in corpus:
+        return "doorbell"
+    if "license_plate" in corpus or "licenseplate" in corpus:
+        return "license_plate"
+    for token in ("person", "vehicle", "animal", "package", "face", "motion"):
+        if token in corpus:
+            return token
+    return "activity" if _text(monitor.get("kind")) == "camera" else "changed"
 
+
+def _monitor_camera_target(monitor: Dict[str, Any]) -> str:
+    target = _text(monitor.get("device_ref") or monitor.get("device_id"))
+    if _normalize_event_provider(monitor.get("provider")) == "unifi_protect" and target.startswith("camera:"):
+        return _text(target.split(":", 1)[1])
+    return target
+
+
+def _monitor_snapshot_fields(event_payload: Dict[str, Any], snapshot_store: Dict[str, Any]) -> None:
+    data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+    if snapshot_store.get("stored"):
+        snapshot_id = _text(snapshot_store.get("snapshot_id"))
+        event_payload["snapshot_id"] = snapshot_id
+        data["snapshot_id"] = snapshot_id
+        data["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
+        data["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    elif snapshot_store.get("reason"):
+        data["snapshot_status"] = _text(snapshot_store.get("reason"))
+        data["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    event_payload["data"] = data
+
+
+async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _normalize_event_provider(monitor.get("provider"))
+    camera_target = _monitor_camera_target(monitor)
+    area = _text(monitor.get("area") or monitor.get("name") or "camera")
+    entity_id = _text(event.get("entity_id"))
+    new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
+    old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
+    event_kind = _monitor_event_type(monitor, entity_id, new_state)
+    cooldown_seconds = _setting_int(
+        redis_client,
+        "camera_monitor_cooldown_seconds",
+        30,
+        minimum=0,
+        maximum=86400,
+    )
+    cooldown_key = f"awareness:monitor:camera_cooldown:{_text(monitor.get('id'))}"
+    if not _acquire_cooldown(cooldown_key, cooldown_seconds):
+        return {"ok": True, "summary": "Camera event cooldown active.", "skipped": "cooldown"}
+
+    snapshot_store: Dict[str, Any] = {}
+    jpeg: bytes = b""
+    content_type = "image/jpeg"
+    error_text = ""
     try:
-        jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
+        jpeg, content_type = await _capture_camera_snapshot(provider, camera_target)
+        vision = get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="qwen2.5-vl-7b-instruct",
+        )
         summary = await _vision_describe(
             image_bytes=jpeg,
             api_base=_text(vision.get("api_base")),
             model=_text(vision.get("model")),
             api_key=_text(vision.get("api_key")),
-            query=query,
-            ignore_vehicles=ignore_vehicles,
-            mode="camera",
+            query="doorbell alert" if event_kind == "doorbell" else "",
+            ignore_vehicles=False,
+            mode="doorbell" if event_kind == "doorbell" else "camera",
             vision_mode=_text(vision.get("mode")),
             vision_provider=_text(vision.get("provider")),
         )
         summary = _compact(summary, limit=180) or "Nothing notable."
-    except Exception:
+    except Exception as exc:
+        error_text = str(exc)
+        logger.warning("[awareness] monitored camera capture failed for %s: %s", camera_target, exc)
+        summary = ""
+        snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
+
+    if _is_nothing_notable_summary(summary) and event_kind in {"activity", "motion"}:
         _clear_cooldown(cooldown_key)
-        logger.exception("[awareness] camera snapshot/vision failed for %s", camera)
-        raise
-
-    if _is_nothing_notable_summary(summary):
-        _clear_cooldown(cooldown_key)
-        return {
-            "ok": True,
-            "summary": summary,
-            "camera": camera,
-            "area": area,
-            "provider": provider,
-            "skipped": "nothing_notable",
-        }
-
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
-    trigger_entity = _text(event.get("entity_id"))
-    event_payload = {
-        "source": _slug(area),
-        "title": _text(rule.get("title") or "Camera Event"),
-        "type": "camera_event",
-        "message": summary,
-        "entity_id": camera,
-        "ha_time": _now_iso(),
-        "level": "info",
-        "data": {
-            "area": area,
-            "reason": reason,
-            "trigger_entity": trigger_entity,
-            "provider": provider,
-            "query": query,
-            "ignore_vehicles": ignore_vehicles,
-        },
-    }
-    if snapshot_store.get("stored"):
-        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    elif snapshot_store.get("reason"):
-        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    _append_event(redis_client, source=area, payload=event_payload)
-
-    notify_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-    display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
-    notification_targets = _normalize_notification_targets(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-    )
-    display_enabled = _bool(rule.get("display_notifications"), False)
-    display_targets = _normalize_display_targets(rule.get("display_targets") or rule.get("display_target"))
-    notification_cooldown_seconds = _as_int(rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400)
-    if notification_targets or display_enabled:
-        notify_key = _camera_notify_cooldown_key(camera)
-        if notification_cooldown_seconds > 0 and not _acquire_cooldown(notify_key, notification_cooldown_seconds):
-            notify_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
-            display_result = {"ok": True, "sent_count": 0, "skipped": "notification_cooldown"}
+        return {"ok": True, "summary": summary, "skipped": "nothing_notable"}
+    if not summary or _is_nothing_notable_summary(summary):
+        if event_kind == "doorbell":
+            summary = f"The doorbell was pressed at {area}."
         else:
-            origin = {
-                "platform": "awareness_core",
-                "scope": "camera_rule",
-                "rule_id": rule.get("id"),
-                "camera": camera,
-                "area": area,
-                "provider": provider,
-                "trigger_entity": trigger_entity,
-            }
-            if notification_targets:
-                notify_result = await _notify_destinations(
-                    title=_text(rule.get("title") or "Camera Event"),
-                    message=summary,
-                    priority=_text(rule.get("priority") or "high"),
-                    notification_targets=notification_targets,
-                    origin=origin,
-                )
-            if display_enabled:
-                display_result = await _notify_display(
-                    kind="camera",
-                    title=_text(rule.get("title") or "Camera Event"),
-                    message=summary,
-                    priority=_text(rule.get("priority") or "high"),
-                    display_targets=display_targets,
-                    snapshot_store=snapshot_store,
-                    origin=origin,
-                    ttl_seconds=90,
-                )
-            if notification_cooldown_seconds > 0:
-                attempted_results = []
-                if notification_targets:
-                    attempted_results.append(notify_result)
-                if display_enabled:
-                    attempted_results.append(display_result)
-                if attempted_results and not any(row.get("ok") for row in attempted_results):
-                    _clear_cooldown(notify_key)
+            summary = f"{event_kind.replace('_', ' ').title()} activity was detected at {area}."
+    if jpeg:
+        snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=content_type)
 
-    return {
-        "ok": True,
-        "summary": summary,
-        "camera": camera,
-        "area": area,
-        "provider": provider,
-        "notification": notify_result,
-        "display_notification": display_result,
-    }
-
-
-async def _execute_doorbell_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
-    del llm_client
-    camera = _text(rule.get("camera_entity"))
-    area = _text(rule.get("area")) or "front door"
-    provider = _rule_provider(rule)
-    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
-    provider = snapshot_provider
-    if not camera:
-        raise ValueError("Doorbell rule is missing camera_entity.")
-    vision = get_shared_vision_settings(
-        default_api_base="http://127.0.0.1:1234",
-        default_model="qwen2.5-vl-7b-instruct",
-    )
-    players = _normalize_players(rule.get("players"))
-    ha_for_playback = _ha_config_optional()
-    shared_tts = _shared_announcement_tts_settings()
-    tts_backend = _text(shared_tts.get("backend") or "wyoming")
-    tts_model = _text(shared_tts.get("model"))
-    tts_voice = _text(shared_tts.get("voice"))
-    jpeg: bytes = b""
-    snapshot_content_type = "image/jpeg"
-    try:
-        jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
-        spoken_line = await _vision_describe(
-            image_bytes=jpeg,
-            api_base=_text(vision.get("api_base")),
-            model=_text(vision.get("model")),
-            api_key=_text(vision.get("api_key")),
-            query="doorbell alert",
-            ignore_vehicles=False,
-            mode="doorbell",
-            vision_mode=_text(vision.get("mode")),
-            vision_provider=_text(vision.get("provider")),
-        )
-        spoken_line = _compact(spoken_line, limit=180) or "Someone is at the door."
-    except Exception:
-        logger.exception("[awareness] doorbell snapshot/vision failed for %s", camera)
-        spoken_line = "Someone is at the door."
-    snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
-    tts_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "no_players", "backend": tts_backend}
-    if players:
-        try:
-            tts_result = await speak_announcement_targets(
-                text=spoken_line,
-                backend=tts_backend,
-                ha_base=_text(ha_for_playback.get("base")),
-                token=_text(ha_for_playback.get("token")),
-                targets=players,
-                model=tts_model,
-                voice=tts_voice,
-                wyoming_host=_text(shared_tts.get("wyoming_host")),
-                wyoming_port=shared_tts.get("wyoming_port"),
-                wyoming_voice=_text(shared_tts.get("wyoming_voice")),
-                voice_core_backend=_text(shared_tts.get("voice_core_backend")),
-                voice_core_model=_text(shared_tts.get("voice_core_model")),
-                voice_core_voice=_text(shared_tts.get("voice_core_voice")),
-                voice_core_wyoming_host=_text(shared_tts.get("voice_core_wyoming_host")),
-                voice_core_wyoming_port=shared_tts.get("voice_core_wyoming_port"),
-                voice_core_wyoming_voice=_text(shared_tts.get("voice_core_wyoming_voice")),
-                default_backend=tts_backend,
-            )
-        except Exception as exc:
-            logger.warning("[awareness] doorbell TTS failed for %s: %s", camera, exc)
-            tts_result = {"ok": False, "sent_count": 0, "error": str(exc), "backend": tts_backend}
-    event_payload = {
+    event_payload: Dict[str, Any] = {
         "source": _slug(area),
-        "title": "Doorbell",
-        "type": "doorbell",
-        "message": spoken_line,
-        "entity_id": camera,
+        "title": "Doorbell" if event_kind == "doorbell" else f"{area} Camera",
+        "type": "doorbell" if event_kind == "doorbell" else "camera_event",
+        "message": summary,
+        "entity_id": _text(monitor.get("device_ref") or monitor.get("device_id")),
         "ha_time": _now_iso(),
         "level": "info",
         "data": {
             "area": area,
-            "players": players,
-            "tts_backend": tts_backend,
-            "tts_model": tts_model,
-            "tts_voice": tts_voice,
-            "reason": reason,
-            "trigger_entity": _text(event.get("entity_id")),
             "provider": provider,
+            "monitor_id": _text(monitor.get("id")),
+            "event_type": event_kind,
+            "trigger_entity": entity_id,
+            "new_state": _text(new_state.get("state")),
+            "old_state": _text(old_state.get("state")),
         },
     }
-    if snapshot_store.get("stored"):
-        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    elif snapshot_store.get("reason"):
-        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
+    if error_text:
+        event_payload["data"]["capture_error"] = _compact(error_text, limit=180)
+    _monitor_snapshot_fields(event_payload, snapshot_store)
     _append_event(redis_client, source=area, payload=event_payload)
-    origin = {
-        "platform": "awareness_core",
-        "scope": "doorbell_rule",
-        "rule_id": rule.get("id"),
-        "camera": camera,
-        "area": area,
-        "provider": provider,
-    }
-    notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-    if _bool(rule.get("notifications"), True):
-        notification_targets = _normalize_notification_targets(
-            rule.get("notification_targets") or rule.get("notification_destinations"),
-            device_services=rule.get("device_services") or rule.get("device_service"),
-        )
-        notify_result = await _notify_destinations(
-            title=_text(rule.get("title") or "Doorbell"),
-            message=spoken_line,
-            priority=_text(rule.get("priority") or "normal"),
-            notification_targets=notification_targets,
-            origin=origin,
-        )
-    display_result: Dict[str, Any] = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
-    if _bool(rule.get("display_notifications"), False):
-        display_result = await _notify_display(
-            kind="doorbell",
-            title=_text(rule.get("title") or "Doorbell"),
-            message=spoken_line,
-            priority=_text(rule.get("priority") or "normal"),
-            display_targets=rule.get("display_targets") or rule.get("display_target"),
-            snapshot_store=snapshot_store,
-            origin=origin,
-            ttl_seconds=90,
-        )
-    return {
-        "ok": True,
-        "summary": spoken_line,
-        "camera": camera,
-        "area": area,
-        "provider": provider,
-        "players": players,
-        "tts": tts_result,
-        "notification": notify_result,
-        "display_notification": display_result,
-    }
+    return {"ok": True, "summary": summary, "event_type": event_kind, "warning": error_text}
 
 
-async def _execute_entry_sensor_rule(
-    rule: Dict[str, Any],
-    llm_client: Any,
-    reason: str,
-    event: Dict[str, Any],
-) -> Dict[str, Any]:
-    del llm_client
-    provider = _rule_provider(rule)
-    sensor_type = _text(rule.get("sensor_type") or "door").lower()
-    if sensor_type not in {"door", "window", "garage"}:
-        sensor_type = "door"
-    camera = _text(rule.get("camera_entity"))
-    snapshot_provider, camera_target = _snapshot_target_for_camera(camera, provider)
-    entity_id = _text(event.get("entity_id")) or _text(rule.get("sensor_entity"))
+def _monitor_sensor_type(monitor: Dict[str, Any]) -> str:
+    corpus = " ".join(
+        [
+            *[_text(item).lower() for item in monitor.get("categories") or []],
+            _text(monitor.get("name")).lower(),
+            _text(monitor.get("area")).lower(),
+        ]
+    )
+    for token in ("window", "garage", "door", "motion", "presence", "leak", "temperature", "humidity"):
+        if token in corpus:
+            return token
+    return "device"
+
+
+async def _execute_sensor_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    entity_id = _text(event.get("entity_id") or monitor.get("device_ref") or monitor.get("device_id"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
-    action_label, action_token = _entry_state_action((new_state or {}).get("state"))
-    sensor_name = _friendly_entity_name(entity_id, new_state or old_state)
-    summary = _compact(f"{sensor_name} {action_label}.", limit=120)
-    spoken_action = "open" if action_token == "open" else ("closed" if action_token == "closed" else action_label)
-    spoken_line = _compact(f"{sensor_name} {spoken_action}.", limit=180)
-    title = _compact(f"{sensor_name} {action_label}", limit=90)
-    area = _text(rule.get("area")) or sensor_name
-    ha_for_playback = _ha_config_optional()
-    shared_tts = _shared_announcement_tts_settings()
-    tts_backend = _text(shared_tts.get("backend") or "wyoming")
-    tts_model = _text(shared_tts.get("model"))
-    tts_voice = _text(shared_tts.get("voice"))
-    snapshot_store: Dict[str, Any] = {}
-    if camera:
-        try:
-            jpeg, snapshot_content_type = await _capture_camera_snapshot(snapshot_provider, camera_target)
-            snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=snapshot_content_type)
-        except Exception as exc:
-            logger.warning("[awareness] entry sensor snapshot failed for %s (%s): %s", camera, provider, exc)
-            snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
+    new_value = _text(new_state.get("state"))
+    old_value = _text(old_state.get("state"))
+    sensor_type = _monitor_sensor_type(monitor)
+    name = _text(monitor.get("name")) or _friendly_entity_name(entity_id, new_state or old_state)
+    area = _text(monitor.get("area")) or name
+    action_label, action_token = _entry_state_action(new_value)
+    if sensor_type in {"door", "window", "garage"}:
+        summary = f"{name} {action_label}."
+    elif sensor_type in {"motion", "presence", "leak"} and new_value.lower() in _MONITOR_ACTIVE_STATES:
+        summary = f"{name} detected {sensor_type}."
+        action_token = "detected"
+    elif sensor_type in {"motion", "presence", "leak"} and new_value.lower() in _MONITOR_INACTIVE_STATES:
+        summary = f"{name} is clear."
+        action_token = "clear"
+    else:
+        summary = f"{name} changed to {new_value or 'unknown'}."
+        action_token = "changed"
+    summary = _compact(summary, limit=180)
     event_payload = {
         "source": _slug(area),
-        "title": title,
+        "title": name,
         "type": f"{sensor_type}_sensor_{action_token}",
         "message": summary,
         "entity_id": entity_id,
@@ -4150,1589 +3009,134 @@ async def _execute_entry_sensor_rule(
         "level": "info",
         "data": {
             "area": area,
+            "provider": _normalize_event_provider(monitor.get("provider")),
+            "monitor_id": _text(monitor.get("id")),
             "sensor_type": sensor_type,
-            "reason": reason,
             "trigger_entity": entity_id,
-            "new_state": _text((new_state or {}).get("state")),
-            "old_state": _text((old_state or {}).get("state")),
-            "provider": provider,
-            "tts_backend": tts_backend,
-            "tts_model": tts_model,
-            "tts_voice": tts_voice,
+            "new_state": new_value,
+            "old_state": old_value,
         },
     }
-    if camera:
-        event_payload["data"]["camera_entity"] = camera
-    if snapshot_store.get("stored"):
-        event_payload["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_id"] = _text(snapshot_store.get("snapshot_id"))
-        event_payload["data"]["snapshot_content_type"] = _text(snapshot_store.get("content_type") or "image/jpeg")
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
-    elif snapshot_store.get("reason"):
-        event_payload["data"]["snapshot_status"] = _text(snapshot_store.get("reason"))
-        event_payload["data"]["snapshot_bytes"] = _as_int(snapshot_store.get("bytes"), 0, minimum=0)
     _append_event(redis_client, source=area, payload=event_payload)
-    players = _normalize_players(rule.get("players"))
-    tts_result: Dict[str, Any] = {
-        "ok": True,
-        "sent_count": 0,
-        "skipped": "open_only" if action_token != "open" else "no_players",
-        "backend": tts_backend,
-    }
-    if action_token == "open" and players:
-        try:
-            tts_result = await speak_announcement_targets(
-                text=spoken_line,
-                backend=tts_backend,
-                ha_base=_text(ha_for_playback.get("base")),
-                token=_text(ha_for_playback.get("token")),
-                targets=players,
-                model=tts_model,
-                voice=tts_voice,
-                wyoming_host=_text(shared_tts.get("wyoming_host")),
-                wyoming_port=shared_tts.get("wyoming_port"),
-                wyoming_voice=_text(shared_tts.get("wyoming_voice")),
-                voice_core_backend=_text(shared_tts.get("voice_core_backend")),
-                voice_core_model=_text(shared_tts.get("voice_core_model")),
-                voice_core_voice=_text(shared_tts.get("voice_core_voice")),
-                voice_core_wyoming_host=_text(shared_tts.get("voice_core_wyoming_host")),
-                voice_core_wyoming_port=shared_tts.get("voice_core_wyoming_port"),
-                voice_core_wyoming_voice=_text(shared_tts.get("voice_core_wyoming_voice")),
-                default_backend=tts_backend,
-            )
-        except Exception as exc:
-            logger.warning("[awareness] entry sensor TTS failed for %s: %s", entity_id, exc)
-            tts_result = {"ok": False, "sent_count": 0, "error": str(exc), "backend": tts_backend}
-    origin = {
-        "platform": "awareness_core",
-        "scope": "entry_sensor_rule",
-        "rule_id": rule.get("id"),
-        "entity_id": entity_id,
-        "sensor_type": sensor_type,
-        "area": area,
-        "provider": provider,
-    }
-    notify_result: Dict[str, Any]
-    display_result: Dict[str, Any]
-    if action_token != "open":
-        notify_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
-        display_result = {"ok": True, "sent_count": 0, "skipped": "open_only"}
-    else:
-        if not _bool(rule.get("notifications"), False):
-            notify_result = {"ok": True, "sent_count": 0, "skipped": "notifications_disabled"}
-        else:
-            notification_targets = _normalize_notification_targets(
-                rule.get("notification_targets") or rule.get("notification_destinations"),
-                device_services=rule.get("device_services") or rule.get("device_service"),
-            )
-            notify_result = await _notify_destinations(
-                title=_text(rule.get("title") or "Entry Sensor"),
-                message=summary,
-                priority=_text(rule.get("priority") or "normal"),
-                notification_targets=notification_targets,
-                origin=origin,
-            )
-        if _bool(rule.get("display_notifications"), False):
-            display_result = await _notify_display(
-                kind="camera" if snapshot_store.get("stored") else "notification",
-                title=_text(rule.get("title") or "Entry Sensor"),
-                message=summary,
-                priority=_text(rule.get("priority") or "normal"),
-                display_targets=rule.get("display_targets") or rule.get("display_target"),
-                snapshot_store=snapshot_store,
-                origin=origin,
-                ttl_seconds=90,
-            )
-        else:
-            display_result = {"ok": True, "sent_count": 0, "skipped": "display_notifications_disabled"}
-    return {
-        "ok": True,
-        "summary": summary,
-        "sensor_type": sensor_type,
-        "entity_id": entity_id,
-        "area": area,
-        "provider": provider,
-        "players": players,
-        "tts": tts_result,
-        "notification": notify_result,
-        "display_notification": display_result,
-    }
+    return {"ok": True, "summary": summary, "event_type": action_token}
 
 
-async def _execute_rule(rule: Dict[str, Any], llm_client: Any, reason: str, event: Dict[str, Any]) -> Dict[str, Any]:
-    kind = _text(rule.get("kind")).lower()
-    if kind == "camera":
-        return await _execute_camera_rule(rule, llm_client, reason, event)
-    if kind == "doorbell":
-        return await _execute_doorbell_rule(rule, llm_client, reason, event)
-    if kind == "entry_sensor":
-        return await _execute_entry_sensor_rule(rule, llm_client, reason, event)
-    raise ValueError(f"Unsupported rule kind: {kind}")
+async def _execute_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    if _text(monitor.get("kind")) == "camera":
+        return await _execute_camera_monitor(monitor, event)
+    return await _execute_sensor_monitor(monitor, event)
 
 
-def _empty_entity_catalog() -> Dict[str, List[Tuple[str, str]]]:
-    return {
-        "cameras": [],
-        "triggers": [],
-        "doorbell_triggers": [],
-        "media_players": [],
-        "tts": [],
-        "input_text": [],
-        "notify_services": [],
-        "weather_sensors": [],
-        "weather_temp": [],
-        "weather_wind": [],
-        "weather_rain": [],
-        "entry_sensors": [],
-        "entry_sensors_door": [],
-        "entry_sensors_window": [],
-        "entry_sensors_garage": [],
-    }
 
-
-def _entity_catalog_cache_key(provider: str) -> str:
-    return f"{_ENTITY_CATALOG_CACHE_PREFIX}{_normalize_event_provider(provider)}"
-
-
-def _coerce_cached_catalog_payload(payload: Any) -> Optional[Dict[str, List[Tuple[str, str]]]]:
-    source = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
-    if not isinstance(source, dict):
-        return None
-    catalog = _empty_entity_catalog()
-    found = False
-    for key in catalog:
-        rows = source.get(key)
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            value = ""
-            label = ""
-            if isinstance(row, dict):
-                value = _text(row.get("value") or row.get("id") or row.get("entity_id"))
-                label = _text(row.get("label") or row.get("name"))
-            elif isinstance(row, (list, tuple)) and len(row) >= 2:
-                value = _text(row[0])
-                label = _text(row[1])
-            if not value:
-                continue
-            catalog[key].append((value, label or value))
-            found = True
-    return catalog if found else None
-
-
-def _redis_cached_catalog(provider: str, *, ttl: int, allow_stale: bool = False) -> Optional[Dict[str, List[Tuple[str, str]]]]:
-    redis_obj = redis_client
-    if redis_obj is None:
-        return None
-    try:
-        payload = _redis_json_object(redis_obj.get(_entity_catalog_cache_key(provider)))
-    except Exception:
-        return None
-    if not payload:
-        return None
-    ts = _as_float(payload.get("ts"), 0.0)
-    if not allow_stale and (ts + ttl) <= time.time():
-        return None
-    catalog = _coerce_cached_catalog_payload(payload)
-    if catalog is None:
-        return None
-    key = _normalize_event_provider(provider)
-    with _ENTITY_CACHE_LOCK:
-        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
-        bucket["ts"] = ts or time.time()
-        bucket["data"] = catalog
-        _ENTITY_CACHE[key] = bucket
-    return catalog
-
-
-def _cached_catalog(
-    provider: str,
-    *,
-    force_refresh: bool = False,
-    allow_stale: bool = False,
-) -> Optional[Dict[str, List[Tuple[str, str]]]]:
-    cache_ttl = _setting_int(redis_client, "entity_catalog_ttl_sec", 30, minimum=5, maximum=600)
-    now_ts = time.time()
-    key = _normalize_event_provider(provider)
-    with _ENTITY_CACHE_LOCK:
-        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
-        _ENTITY_CACHE[key] = bucket
-        if force_refresh:
-            return None
-        data = bucket.get("data")
-        expired = (_as_float(bucket.get("ts"), 0.0) + cache_ttl) <= now_ts
-        if expired:
-            if allow_stale and isinstance(data, dict) and data:
-                return data
-        elif isinstance(data, dict) and data:
-            return data
-    if not force_refresh:
-        return _redis_cached_catalog(key, ttl=cache_ttl, allow_stale=allow_stale)
-    return None
-
-
-def _set_cached_catalog(provider: str, catalog: Dict[str, List[Tuple[str, str]]]) -> None:
-    key = _normalize_event_provider(provider)
-    with _ENTITY_CACHE_LOCK:
-        bucket = _ENTITY_CACHE.get(key) or {"ts": 0.0, "data": {}}
-        bucket["ts"] = time.time()
-        bucket["data"] = catalog
-        _ENTITY_CACHE[key] = bucket
-    redis_obj = redis_client
-    if redis_obj is not None:
-        try:
-            redis_obj.set(
-                _entity_catalog_cache_key(key),
-                json.dumps({"ts": time.time(), "data": catalog}, default=str),
-            )
-        except Exception:
-            logger.debug("[awareness] failed to persist entity catalog cache for %s", key, exc_info=True)
-
-
-def _stale_cached_catalog(provider: str) -> Optional[Dict[str, List[Tuple[str, str]]]]:
-    key = _normalize_event_provider(provider)
-    with _ENTITY_CACHE_LOCK:
-        bucket = _ENTITY_CACHE.get(key) or {}
-        data = bucket.get("data")
-        if isinstance(data, dict) and data:
-            return data
-    return None
-
-
-def _finalize_catalog(catalog: Dict[str, List[Tuple[str, str]]]) -> Dict[str, List[Tuple[str, str]]]:
-    for key in list(catalog.keys()):
-        deduped: List[Tuple[str, str]] = []
-        seen: set[str] = set()
-        for value, label in catalog[key]:
-            token = _text(value)
-            if not token or token in seen:
-                continue
-            seen.add(token)
-            deduped.append((token, _text(label) or token))
-        catalog[key] = sorted(deduped, key=lambda row: row[1].lower())
-    if not catalog["doorbell_triggers"]:
-        catalog["doorbell_triggers"] = list(catalog["triggers"])
-    if not catalog["weather_temp"]:
-        catalog["weather_temp"] = list(catalog["weather_sensors"])
-    if not catalog["weather_wind"]:
-        catalog["weather_wind"] = list(catalog["weather_sensors"])
-    if not catalog["weather_rain"]:
-        catalog["weather_rain"] = list(catalog["weather_sensors"])
-    return catalog
-
-
-def _ha_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
-    cached = _cached_catalog("homeassistant", force_refresh=force_refresh)
-    if cached is not None:
-        return _catalog_with_announcement_targets(cached)
-    catalog = _empty_entity_catalog()
-    try:
-        ha = _ha_config()
-        resp = requests.get(
-            f"{ha['base']}/api/states",
-            headers=_ha_headers(ha["token"], json_content=False),
-            timeout=10,
-        )
-        resp.raise_for_status()
-        states = resp.json() or []
-    except Exception:
-        stale = _stale_cached_catalog("homeassistant")
-        if stale is not None:
-            return _catalog_with_announcement_targets(stale)
-        catalog = _catalog_with_announcement_targets(catalog)
-        _set_cached_catalog("homeassistant", catalog)
-        return catalog
-
-    def _label(entry: Dict[str, Any]) -> str:
-        entity_id = _text(entry.get("entity_id"))
-        attrs = entry.get("attributes") or {}
-        if not isinstance(attrs, dict):
-            attrs = {}
-        name = _text(attrs.get("friendly_name"))
-        return f"{name} ({entity_id})" if name else entity_id
-
-    def _is_temp_sensor(entity_id_lower: str, device_class: str, unit: str) -> bool:
-        if device_class == "temperature":
-            return True
-        if unit in {"°c", "°f", "c", "f"}:
-            return True
-        return any(token in entity_id_lower for token in ("temp", "temperature"))
-
-    def _is_wind_sensor(entity_id_lower: str, device_class: str) -> bool:
-        if device_class == "wind_speed":
-            return True
-        return "wind" in entity_id_lower
-
-    def _is_rain_sensor(entity_id_lower: str, device_class: str) -> bool:
-        if device_class in {"precipitation", "precipitation_intensity"}:
-            return True
-        return any(token in entity_id_lower for token in ("rain", "precip"))
-
-    for row in states:
-        if not isinstance(row, dict):
-            continue
-        entity_id = _text(row.get("entity_id"))
-        if not entity_id:
-            continue
-        label = _label(row)
-        lower = entity_id.lower()
-        attrs = row.get("attributes") or {}
-        if not isinstance(attrs, dict):
-            attrs = {}
-        device_class = _text(attrs.get("device_class")).lower()
-        unit = _text(attrs.get("unit_of_measurement")).lower()
-        if lower.startswith("camera."):
-            catalog["cameras"].append((entity_id, label))
-        if lower.startswith("tts."):
-            catalog["tts"].append((entity_id, label))
-        if lower.startswith("input_text."):
-            catalog["input_text"].append((entity_id, label))
-        if lower.startswith(("sensor.", "weather.")):
-            catalog["weather_sensors"].append((entity_id, label))
-            if _is_temp_sensor(lower, device_class, unit):
-                catalog["weather_temp"].append((entity_id, label))
-            if _is_wind_sensor(lower, device_class):
-                catalog["weather_wind"].append((entity_id, label))
-            if _is_rain_sensor(lower, device_class):
-                catalog["weather_rain"].append((entity_id, label))
-        if lower.startswith(("binary_sensor.", "sensor.", "cover.")):
-            name_hint = f"{lower} {_text(attrs.get('friendly_name')).lower()}"
-            is_garage = device_class == "garage_door" or "garage" in name_hint
-            is_window = device_class == "window" or "window" in name_hint
-            is_door = device_class in {"door", "opening"} or any(
-                token in name_hint for token in ("door", "contact", "opening")
-            )
-            if is_door:
-                catalog["entry_sensors"].append((entity_id, label))
-                catalog["entry_sensors_door"].append((entity_id, label))
-            if is_window:
-                catalog["entry_sensors"].append((entity_id, label))
-                catalog["entry_sensors_window"].append((entity_id, label))
-            # Garage options intentionally prefer cover.* so users select actionable garage door entities.
-            if is_garage and lower.startswith("cover."):
-                catalog["entry_sensors"].append((entity_id, label))
-                catalog["entry_sensors_garage"].append((entity_id, label))
-        if lower.startswith(("binary_sensor.", "sensor.", "event.", "button.", "switch.", "input_boolean.")):
-            catalog["triggers"].append((entity_id, label))
-            if any(token in lower for token in ("doorbell", "ring", "ding", "button", "press")):
-                catalog["doorbell_triggers"].append((entity_id, label))
-
-    try:
-        svc_resp = requests.get(
-            f"{ha['base']}/api/services",
-            headers=_ha_headers(ha["token"], json_content=False),
-            timeout=10,
-        )
-        svc_resp.raise_for_status()
-        domains = svc_resp.json() or []
-        for domain_row in domains:
-            if not isinstance(domain_row, dict):
-                continue
-            if _text(domain_row.get("domain")).lower() != "notify":
-                continue
-            services = domain_row.get("services")
-            if not isinstance(services, dict):
-                continue
-            for service_name, service_meta in services.items():
-                svc = _text(service_name)
-                if not svc:
-                    continue
-                full_service = f"notify.{svc}"
-                meta = service_meta if isinstance(service_meta, dict) else {}
-                nice_name = _text(meta.get("name"))
-                label = f"{nice_name} ({full_service})" if nice_name else full_service
-                catalog["notify_services"].append((full_service, label))
-    except Exception:
-        logger.debug("[awareness] notify service discovery failed", exc_info=True)
-
-    catalog = _catalog_with_announcement_targets(catalog)
-    _set_cached_catalog("homeassistant", catalog)
-    return catalog
-
-
-def _unifi_camera_is_doorbell(camera_row: Dict[str, Any]) -> bool:
-    name = _text(camera_row.get("name")).lower()
-    model = _text(camera_row.get("modelKey") or camera_row.get("model_key") or camera_row.get("type")).lower()
-    hint = f"{name} {model}"
-    return "doorbell" in hint or "g4db" in hint or "g5db" in hint
-
-
-def _unifi_sensor_type(sensor_row: Dict[str, Any]) -> str:
-    name = _text(sensor_row.get("name")).lower()
-    mount_type = _text(sensor_row.get("mountType") or sensor_row.get("mount_type") or sensor_row.get("mount")).lower()
-    sensor_type = _text(
-        sensor_row.get("sensorType")
-        or sensor_row.get("sensor_type")
-        or sensor_row.get("modelKey")
-        or sensor_row.get("model_key")
-        or sensor_row.get("type")
-    ).lower()
-    hint = f"{name} {mount_type} {sensor_type}"
-    if "garage" in hint:
-        return "garage"
-    if "window" in hint:
-        return "window"
-    return "door"
-
-
-def _unifi_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
-    cached = _cached_catalog("unifi_protect", force_refresh=force_refresh)
-    if cached is not None:
-        return cached
-    catalog = _empty_entity_catalog()
-    # Keep Home Assistant support entities available so notifications still work.
-    ha_support = _ha_entity_catalog(force_refresh=force_refresh)
-    if not any(ha_support.get(key) for key in ("tts", "notify_services", "input_text")):
-        stale_ha_support = _stale_cached_catalog("homeassistant")
-        if stale_ha_support is not None:
-            ha_support = stale_ha_support
-    for key in ("tts", "input_text", "notify_services", "weather_sensors", "weather_temp", "weather_wind", "weather_rain"):
-        catalog[key] = list(ha_support.get(key) or [])
-    try:
-        cameras = _unifi_list_cameras()
-    except Exception:
-        cameras = []
-    try:
-        sensors = _unifi_list_sensors()
-    except Exception:
-        sensors = []
-
-    for row in cameras:
-        if not isinstance(row, dict):
-            continue
-        camera_id = _text(row.get("id")).lower()
-        if not camera_id:
-            continue
-        camera_name = _text(row.get("name")) or camera_id
-        camera_entity = _unifi_camera_entity(camera_id)
-        catalog["cameras"].append((camera_entity, f"{camera_name} ({camera_entity})"))
-        motion_trigger = _unifi_camera_motion_trigger(camera_id)
-        catalog["triggers"].append((motion_trigger, f"{camera_name} motion ({motion_trigger})"))
-        for smart_type in _unifi_camera_smart_detect_types(row):
-            smart_label = _unifi_smart_type_label(smart_type)
-            smart_trigger = _unifi_camera_smart_trigger(camera_id, smart_type)
-            catalog["triggers"].append((smart_trigger, f"{camera_name} {smart_label} ({smart_trigger})"))
-        if _unifi_camera_is_doorbell(row):
-            doorbell_trigger = _unifi_camera_doorbell_trigger(camera_id)
-            catalog["doorbell_triggers"].append(
-                (doorbell_trigger, f"{camera_name} doorbell button press ({doorbell_trigger})")
-            )
-
-    for row in sensors:
-        if not isinstance(row, dict):
-            continue
-        sensor_id = _text(row.get("id")).lower()
-        if not sensor_id:
-            continue
-        sensor_name = _text(row.get("name")) or sensor_id
-        sensor_entity = _unifi_sensor_entity(sensor_id)
-        catalog["entry_sensors"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
-        sensor_type = _unifi_sensor_type(row)
-        if sensor_type == "window":
-            catalog["entry_sensors_window"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
-        elif sensor_type == "garage":
-            catalog["entry_sensors_garage"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
-        else:
-            catalog["entry_sensors_door"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
-        # Sensors can be used as direct trigger entities in entry sensor rules.
-        catalog["triggers"].append((sensor_entity, f"{sensor_name} ({sensor_entity})"))
-
-    catalog = _finalize_catalog(catalog)
-    _set_cached_catalog("unifi_protect", catalog)
-    return catalog
-
-
-def _prefixed_event_catalog(catalog: Dict[str, List[Tuple[str, str]]], provider: str) -> Dict[str, List[Tuple[str, str]]]:
-    out = _empty_entity_catalog()
-    provider_name = _provider_label(provider)
-    for key, pairs in (catalog or {}).items():
-        if key not in out:
-            continue
-        if key in {"cameras", "triggers", "doorbell_triggers", "entry_sensors", "entry_sensors_door", "entry_sensors_window", "entry_sensors_garage"}:
-            out[key] = [
-                (_provider_ref(provider, value), f"{provider_name}: {_text(label) or _text(value)}")
-                for value, label in pairs or []
-            ]
-        else:
-            out[key] = list(pairs or [])
-    return out
-
-
-def _catalog_extend(target: Dict[str, List[Tuple[str, str]]], source: Dict[str, List[Tuple[str, str]]]) -> None:
-    for key in target:
-        target[key].extend(source.get(key) or [])
-
-
-def _device_label(provider_name: str, device: Dict[str, Any], device_id: str) -> str:
-    name = _text(device.get("name")) or device_id
-    device_type = _text(device.get("type")).replace("_", " ")
-    suffix = f"{provider_name}: {name}"
-    if device_type:
-        suffix = f"{suffix} {device_type}"
-    return f"{suffix} ({device_id})"
-
-
-def _category_token(value: Any) -> str:
-    return re.sub(r"[^a-z0-9_]+", "_", _text(value).lower()).strip("_")
-
-
-def _integration_devices_catalog(provider_filter: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
-    catalog = _empty_entity_catalog()
-    filter_provider = _normalize_event_provider(provider_filter or "all")
-    try:
-        from integration_registry import get_integration_device_registry
-
-        registry = get_integration_device_registry(redis_client)
-    except Exception:
-        logger.debug("[awareness] integration device registry catalog unavailable", exc_info=True)
-        return catalog
-
-    for device in registry.get("devices") or []:
-        if not isinstance(device, dict):
-            continue
-        provider = _normalize_event_provider(device.get("integration_id"))
-        if provider == "all":
-            continue
-        if filter_provider != "all" and provider != filter_provider:
-            continue
-        provider_name = _text(device.get("integration_name")) or _provider_label(provider)
-        device_id = _text(device.get("id") or device.get("ref"))
-        if not device_id:
-            continue
-        device_type = _category_token(device.get("type"))
-        details = device.get("details") if isinstance(device.get("details"), dict) else {}
-        capabilities = {
-            _category_token(item)
-            for item in [*(device.get("category_ids") or []), *(device.get("capabilities") or [])]
-            if _category_token(item)
-        }
-        if device_type:
-            capabilities.add(device_type)
-        entity = _text(device.get("ref")) or f"{device_type or 'device'}:{device_id}"
-        ref = _provider_ref(provider, entity)
-        label = _device_label(provider_name, device, entity)
-
-        if "camera" in capabilities or device_type == "camera":
-            catalog["cameras"].append((ref, label))
-        if "media_player" in capabilities:
-            catalog["media_players"].append((ref, label))
-        if "doorbell" in capabilities:
-            catalog["doorbell_triggers"].append((ref, label))
-        if {"motion", "presence", "network_device"} & capabilities or device_type in {"motion", "client"}:
-            catalog["triggers"].append((ref, label))
-        if {"entry_sensor", "garage_door"} & capabilities or device_type in {"contact", "entry_sensor", "garage_door"}:
-            catalog["entry_sensors"].append((ref, label))
-            name_hint = " ".join(
-                _text(value).lower()
-                for value in (
-                    device.get("name"),
-                    device.get("room"),
-                    details.get("resource_type"),
-                    details.get("device_class"),
-                    details.get("sensor_type"),
-                    details.get("mountType"),
-                    details.get("mount_type"),
-                )
-                if _text(value)
-            )
-            if "window" in capabilities or "window" in name_hint:
-                catalog["entry_sensors_window"].append((ref, label))
-            elif "garage_door" in capabilities or "garage" in capabilities or "garage" in name_hint:
-                catalog["entry_sensors_garage"].append((ref, label))
-            else:
-                catalog["entry_sensors_door"].append((ref, label))
-            catalog["triggers"].append((ref, label))
-        if "temperature" in capabilities or device_type in {"temperature", "thermostat"}:
-            catalog["weather_sensors"].append((ref, label))
-            catalog["weather_temp"].append((ref, label))
-        if "humidity" in capabilities:
-            catalog["weather_sensors"].append((ref, label))
-        if "illuminance" in capabilities:
-            catalog["weather_sensors"].append((ref, label))
-
-        for event_source in device.get("event_sources") or []:
-            if not isinstance(event_source, dict):
-                continue
-            source_ref = _text(event_source.get("ref"))
-            if not source_ref:
-                continue
-            source_type = _category_token(event_source.get("type"))
-            full_ref = _provider_ref(provider, source_ref)
-            source_label = f"{provider_name}: {_text(device.get('name')) or device_id} {source_type.replace('_', ' ') or 'event'} ({source_ref})"
-            if source_type == "doorbell":
-                catalog["doorbell_triggers"].append((full_ref, source_label))
-            elif source_type in {"door", "window", "garage", "contact", "entry_sensor"}:
-                catalog["entry_sensors"].append((full_ref, source_label))
-                if source_type == "window":
-                    catalog["entry_sensors_window"].append((full_ref, source_label))
-                elif source_type == "garage":
-                    catalog["entry_sensors_garage"].append((full_ref, source_label))
-                else:
-                    catalog["entry_sensors_door"].append((full_ref, source_label))
-                catalog["triggers"].append((full_ref, source_label))
-            else:
-                catalog["triggers"].append((full_ref, source_label))
-
-        if provider == "unifi_network" or {"light", "switch", "plug", "network_device"} & capabilities:
-            catalog["triggers"].append((ref, label))
-    return catalog
-
-
-def _catalog_has_device_options(catalog: Dict[str, List[Tuple[str, str]]]) -> bool:
-    return any(catalog.get(key) for key in ("cameras", "triggers", "entry_sensors", "weather_sensors", "media_players"))
-
-
-def _all_integrations_entity_catalog(force_refresh: bool = False) -> Dict[str, List[Tuple[str, str]]]:
-    cached = _cached_catalog("all", force_refresh=force_refresh, allow_stale=not force_refresh)
-    if cached is not None:
-        return cached
-    catalog = _empty_entity_catalog()
-    _catalog_extend(catalog, _integration_devices_catalog())
-    catalog = _finalize_catalog(catalog)
-    catalog = _catalog_with_announcement_targets(catalog)
-    _set_cached_catalog("all", catalog)
-    return catalog
-
-
-def _entity_catalog(force_refresh: bool = False, *, provider: Optional[str] = None) -> Dict[str, List[Tuple[str, str]]]:
-    active_provider = _normalize_event_provider(provider or "all")
-    if active_provider == "all":
-        return _all_integrations_entity_catalog(force_refresh=force_refresh)
-    if active_provider == "unifi_protect":
-        cached = _cached_catalog(active_provider, force_refresh=force_refresh)
-        if cached is not None:
-            return cached
-        catalog = _integration_devices_catalog(provider_filter=active_provider)
-        if not _catalog_has_device_options(catalog):
-            return _unifi_entity_catalog(force_refresh=force_refresh)
-        catalog = _finalize_catalog(catalog)
-        catalog = _catalog_with_announcement_targets(catalog)
-        _set_cached_catalog(active_provider, catalog)
-        return catalog
-    if active_provider == "homeassistant":
-        return _ha_entity_catalog(force_refresh=force_refresh)
-    cached = _cached_catalog(active_provider, force_refresh=force_refresh)
-    if cached is not None:
-        return cached
-    catalog = _integration_devices_catalog(provider_filter=active_provider)
-    catalog = _finalize_catalog(catalog)
-    _set_cached_catalog(active_provider, catalog)
-    return catalog
-
-
-def _choices_from_pairs(
-    pairs: List[Tuple[str, str]],
-    *,
-    placeholder: str,
-    current_value: str = "",
-    current_label: str = "",
-) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = [{"value": "", "label": placeholder}]
-    seen: set[str] = {""}
-    for value, label in pairs:
-        token = _text(value)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        out.append({"value": token, "label": _text(label) or token})
-    current = _text(current_value)
-    if current and current not in seen:
-        out.append({"value": current, "label": _text(current_label) or f"{current} (current)"})
-    return out
-
-
-def _multiselect_choices_from_pairs(
-    pairs: List[Tuple[str, str]],
-    *,
-    current_values: Any = None,
-) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    seen: set[str] = set()
-    for value, label in pairs:
-        token = _text(value)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        out.append({"value": token, "label": _text(label) or token})
-    for current in _normalize_players(current_values):
-        token = _text(current)
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        out.append({"value": token, "label": f"{token} (current)"})
-    return out
-
-
-def _notification_destination_catalog(redis_obj: Any) -> Dict[str, Any]:
-    if redis_obj is None:
-        return {"platforms": []}
-    try:
-        payload = notifier_destination_catalog(redis_client=redis_obj, limit=250)
-    except Exception:
-        logger.debug("[awareness] notifier destination catalog failed", exc_info=True)
-        return {"platforms": []}
-    if not isinstance(payload, dict):
-        return {"platforms": []}
-    if not isinstance(payload.get("platforms"), list):
-        payload["platforms"] = []
-    return payload
-
-
-def _notification_catalog_platform_map(catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    rows = catalog.get("platforms") if isinstance(catalog, dict) else []
-    if not isinstance(rows, list):
-        return out
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        platform = _text(row.get("platform")).lower()
-        if platform:
-            out[platform] = row
-    return out
-
-
-def _notification_destination_label(platform: Any, targets: Any) -> str:
-    platform_name = _text(platform).lower()
-    payload = _notification_clean_targets_dict(targets)
-    if platform_name == "discord":
-        channel = _text(payload.get("channel") or payload.get("channel_id"))
-        guild = _text(payload.get("guild") or payload.get("guild_name") or payload.get("guild_id"))
-        if channel and guild:
-            return f"{channel} • {guild}"
-        return channel or guild or "Discord target"
-    if platform_name == "irc":
-        return _text(payload.get("channel")) or "IRC channel"
-    if platform_name == "matrix":
-        return _text(payload.get("room_alias") or payload.get("room_id") or payload.get("channel")) or "Matrix room"
-    if platform_name == "telegram":
-        channel = _text(payload.get("channel"))
-        chat_id = _text(payload.get("chat_id"))
-        if channel and chat_id and channel != chat_id:
-            return f"{channel} • {chat_id}"
-        return channel or chat_id or "Telegram chat"
-    if platform_name == "homeassistant":
-        return _normalize_device_service(payload.get("device_service")) or "Home Assistant defaults"
-    if platform_name == "webui":
-        return "WebUI chat"
-    if platform_name == "macos":
-        scope = _text(payload.get("scope"))
-        device_id = _text(payload.get("device_id"))
-        if scope and device_id:
-            return f"{scope} • {device_id}"
-        return scope or device_id or "macOS target"
-    if platform_name == "little_spud":
-        user = _text(payload.get("user"))
-        device_name = _text(payload.get("device_name"))
-        device_id = _text(payload.get("device_id"))
-        node_id = _text(payload.get("node_id"))
-        if user and device_name:
-            return f"{user} on {device_name}"
-        if user and device_id:
-            return f"{user} on {device_id}"
-        return device_name or device_id or node_id or _text(payload.get("scope")) or "Little Spud"
-    return _text(payload.get("channel") or payload.get("room_id") or payload.get("chat_id") or payload.get("device_id")) or "Destination"
-
-
-def _notification_destination_options(
-    current_targets: Any = None,
-    *,
-    device_services: Any = None,
-    catalog: Dict[str, Any],
-) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    seen: set[str] = set()
-
-    for platform_name, platform_row in _notification_catalog_platform_map(catalog).items():
-        platform_label = _text(platform_row.get("label")) or platform_name
-        requires_target = bool(platform_row.get("requires_target"))
-        if not requires_target:
-            value = _notification_encode_destination(platform_name, {})
-            if value and value not in seen:
-                out.append({"value": value, "label": f"{platform_label}: defaults"})
-                seen.add(value)
-        destinations = platform_row.get("destinations")
-        if not isinstance(destinations, list):
-            continue
-        for row in destinations:
-            if not isinstance(row, dict):
-                continue
-            targets = _notification_clean_targets_dict(row.get("targets"))
-            value = _notification_encode_destination(platform_name, targets)
-            if not value or value in seen:
-                continue
-            label = _text(row.get("label")) or _notification_destination_label(platform_name, targets)
-            out.append({"value": value, "label": f"{platform_label}: {label}"})
-            seen.add(value)
-
-    for entry in _normalize_notification_targets(current_targets, device_services=device_services):
-        value = _notification_encode_destination(entry.get("platform"), entry.get("targets"))
-        if not value or value in seen:
-            continue
-        platform = _text(entry.get("platform")).lower()
-        platform_row = _notification_catalog_platform_map(catalog).get(platform, {})
-        platform_label = _text(platform_row.get("label")) or platform or "Notifier"
-        label = _notification_destination_label(platform, entry.get("targets"))
-        out.append({"value": value, "label": f"{platform_label}: {label} (current)"})
-        seen.add(value)
-    return out
-
-
-def _players_text(value: Any) -> str:
-    return "\n".join(_normalize_players(value))
-
-
-def _announcement_target_pairs(
-    homeassistant_pairs: List[Tuple[str, str]],
-) -> List[Tuple[str, str]]:
-    del homeassistant_pairs
-    pairs: List[Tuple[str, str]] = []
-    seen: set[str] = set()
-
-    for option in _awareness_playback_target_options():
-        if not isinstance(option, dict):
-            continue
-        token = _text(option.get("value"))
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        pairs.append((token, _text(option.get("label")) or token))
-
-    return pairs
-
-
-def _catalog_with_announcement_targets(
-    catalog: Dict[str, List[Tuple[str, str]]],
-) -> Dict[str, List[Tuple[str, str]]]:
-    next_catalog = _empty_entity_catalog()
-    source = catalog if isinstance(catalog, dict) else {}
-    for key in next_catalog:
-        next_catalog[key] = list(source.get(key) or [])
-    next_catalog["media_players"] = _announcement_target_pairs(next_catalog.get("media_players") or [])
-    return _finalize_catalog(next_catalog)
-
-
-def _awareness_playback_target_options(*, current_values: Any = None) -> List[Dict[str, str]]:
-    ha = _ha_config_optional()
-    return build_announcement_target_options(
-        homeassistant_base_url=ha.get("base", ""),
-        homeassistant_token=ha.get("token", ""),
-        include_homeassistant=True,
-        include_sonos=True,
-        include_unifi_protect=True,
-        current_values=current_values,
-    )
-
-
-def _announcement_tts_fields(
-    rule: Dict[str, Any],
-    catalog: Dict[str, List[Tuple[str, str]]],
-    *,
-    players_description: str,
-) -> List[Dict[str, Any]]:
-    del catalog
-    playback_options = [
-        dict(option)
-        for option in _awareness_playback_target_options(current_values=rule.get("players"))
-        if isinstance(option, dict)
-    ]
-    return [
-        {
-            "key": "players",
-            "label": "Playback Targets",
-            "type": "multiselect",
-            "description": players_description,
-            "options": playback_options,
-            "value": _normalize_players(rule.get("players")),
-        },
-    ]
-
-
-
-def _announcement_tts_add_fields(
-    catalog: Dict[str, List[Tuple[str, str]]],
-    *,
-    show_when: Dict[str, Any],
-    players_description: str,
-) -> List[Dict[str, Any]]:
-    fields = _announcement_tts_fields(
-        {
-            "players": [],
-        },
-        catalog,
-        players_description=players_description,
-    )
-    wrapped: List[Dict[str, Any]] = []
-    for field in fields:
-        field_copy = dict(field)
-        show_when_all: List[Dict[str, Any]] = [dict(show_when)]
-        existing_show = field_copy.pop("show_when", None)
-        if isinstance(existing_show, dict):
-            show_when_all.append(existing_show)
-        existing_show_all = field_copy.pop("show_when_all", None)
-        if isinstance(existing_show_all, list):
-            show_when_all.extend([cond for cond in existing_show_all if isinstance(cond, dict)])
-        field_copy["show_when_all"] = show_when_all
-        wrapped.append(field_copy)
-    return wrapped
-
-
-def _rule_subtitle(rule: Dict[str, Any]) -> str:
-    kind = _text(rule.get("kind"))
-    enabled = "Enabled" if _bool(rule.get("enabled"), True) else "Disabled"
-    last_run = _fmt_ts(rule.get("last_run_ts"))
-    provider = _provider_label(_rule_provider(rule))
-    return f"{enabled} - {kind} - {provider} - last: {last_run}"
-
-
-def _to_area_label(area_value: str) -> str:
-    value = _text(area_value).replace("_", " ").strip()
-    if not value:
-        return ""
-    return " ".join(part.capitalize() for part in value.split())
-
-
-def _area_options(rules: Dict[str, Dict[str, Any]], *, current_value: str = "") -> List[Dict[str, str]]:
-    candidates: set[str] = set()
-    for preset in _AREA_PRESETS:
-        token = _text(preset).lower()
-        if token:
-            candidates.add(token)
-    for source in _discover_event_sources(redis_client):
-        token = _text(source).replace("_", " ").lower()
-        if token:
-            candidates.add(" ".join(token.split()))
-    for rule in (rules or {}).values():
-        area = _text((rule or {}).get("area")).lower()
-        if area:
-            candidates.add(" ".join(area.split()))
-
-    out: List[Dict[str, str]] = [{"value": "", "label": "(Select area)"}]
-    seen: set[str] = {""}
-    for area in sorted(candidates):
-        if area in seen:
-            continue
-        seen.add(area)
-        out.append({"value": area, "label": _to_area_label(area) or area})
-
-    current = _text(current_value).lower()
-    if current and current not in seen:
-        out.append({"value": current, "label": _to_area_label(current) or f"{current} (current)"})
-    return out
-
-
-def _entity_object_id(entity_id: str) -> str:
-    _provider, raw_entity = _split_provider_ref(entity_id, "")
-    token = _text(raw_entity or entity_id).lower()
-    if "." in token:
-        return token.split(".", 1)[1]
-    return token
-
-
-def _camera_aliases(camera_entity: str) -> List[str]:
-    object_id = _entity_object_id(camera_entity)
-    aliases: set[str] = {object_id}
-    for suffix in ("_high", "_low", "_snapshot", "_stream", "_still"):
-        if object_id.endswith(suffix):
-            aliases.add(object_id[: -len(suffix)])
-    parts = [part for part in re.split(r"[_\-.]+", object_id) if part]
-    if len(parts) >= 2:
-        aliases.add("_".join(parts[:2]))
-    if parts:
-        aliases.add(parts[0])
-    return sorted([item for item in aliases if len(item) >= 3], key=len, reverse=True)
-
-
-def _trigger_matches_camera(camera_entity: str, trigger_entity: str) -> bool:
-    camera_provider, raw_camera = _split_provider_ref(camera_entity, "all")
-    trigger_provider, raw_trigger = _split_provider_ref(trigger_entity, camera_provider)
-    if camera_provider != "all" and trigger_provider != "all" and camera_provider != trigger_provider:
-        return False
-    trigger_object = _entity_object_id(raw_trigger)
-    for alias in _camera_aliases(raw_camera):
-        if alias and alias in trigger_object:
-            return True
-    return False
-
-
-def _trigger_dependency_for_camera(
-    *,
-    catalog: Dict[str, List[Tuple[str, str]]],
-    current_camera: str,
-    current_triggers: Any,
-    doorbell: bool,
-) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
-    trigger_pairs = catalog.get("doorbell_triggers") if doorbell else catalog.get("triggers")
-    trigger_pairs = trigger_pairs if isinstance(trigger_pairs, list) else []
-    cameras = catalog.get("cameras") if isinstance(catalog.get("cameras"), list) else []
-    if doorbell:
-        # Ensure every camera exposes a derived doorbell trigger option even when
-        # backend catalog heuristics fail to classify a camera as a doorbell.
-        existing = {_text(pair[0]).lower() for pair in trigger_pairs}
-        for camera_entity, camera_label in cameras:
-            camera_provider, raw_camera_entity = _split_provider_ref(camera_entity, "all")
-            if camera_provider != "unifi_protect":
-                continue
-            camera_id = _text(_unifi_camera_id_from_entity(raw_camera_entity)).lower()
-            if not camera_id:
-                continue
-            derived = _provider_ref("unifi_protect", _unifi_camera_doorbell_trigger(camera_id))
-            if derived.lower() in existing:
-                continue
-            label_name = _catalog_label_name(camera_label, camera_entity)
-            trigger_pairs.append((derived, f"{label_name} doorbell button press ({derived})"))
-            existing.add(derived.lower())
-        doorbell_only = [
-            pair for pair in trigger_pairs
-            if _text(_split_provider_ref(pair[0], "")[1]).lower().endswith("_doorbell")
-        ]
-        if doorbell_only:
-            trigger_pairs = doorbell_only
-    current_trigger_values = _normalize_trigger_entities(current_triggers)
-
-    default_options = _multiselect_choices_from_pairs(
-        trigger_pairs,
-        current_values=current_trigger_values if not _text(current_camera) else [],
-    )
-
-    options_by_source: Dict[str, List[Dict[str, str]]] = {}
-    for camera_entity, _label in cameras:
-        token = _text(camera_entity)
-        if not token:
-            continue
-        narrowed_pairs = [pair for pair in trigger_pairs if _trigger_matches_camera(token, pair[0])]
-        if not narrowed_pairs:
-            continue
-        options_by_source[token] = _multiselect_choices_from_pairs(
-            narrowed_pairs,
-            current_values=current_trigger_values if _text(current_camera) == token else [],
-        )
-
-    current_camera_token = _text(current_camera)
-    if current_camera_token and current_camera_token not in options_by_source and current_trigger_values:
-        options_by_source[current_camera_token] = _multiselect_choices_from_pairs(
-            [],
-            current_values=current_trigger_values,
-        )
-
-    return default_options, {
-        "source_key": "camera_entity",
-        "options_by_source": options_by_source,
-        "default_options": default_options,
-    }
-
-
-def _entry_sensor_dependency_options(
-    *,
-    catalog: Dict[str, List[Tuple[str, str]]],
-    current_type: str,
-    current_entity: str,
-) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
-    sensor_type = _text(current_type).lower()
-    if sensor_type not in {"door", "window", "garage"}:
-        sensor_type = "door"
-    all_pairs = catalog.get("entry_sensors") or catalog.get("triggers") or []
-    door_pairs = catalog.get("entry_sensors_door") or all_pairs
-    window_pairs = catalog.get("entry_sensors_window") or all_pairs
-    garage_pairs = catalog.get("entry_sensors_garage") or []
-    if not _text(current_entity):
-        door_pairs = all_pairs
-    placeholder = "(Select door/window/garage sensor)"
-    default_options = _choices_from_pairs(
-        all_pairs,
-        placeholder=placeholder,
-        current_value=_text(current_entity),
-    )
-    options_by_source: Dict[str, List[Dict[str, str]]] = {
-        "door": _choices_from_pairs(
-            door_pairs,
-            placeholder=placeholder,
-            current_value=_text(current_entity) if sensor_type == "door" else "",
-        ),
-        "window": _choices_from_pairs(
-            window_pairs,
-            placeholder=placeholder,
-            current_value=_text(current_entity) if sensor_type == "window" else "",
-        ),
-        "garage": _choices_from_pairs(
-            garage_pairs,
-            placeholder=placeholder,
-            current_value=_text(current_entity) if sensor_type == "garage" else "",
-        ),
-    }
-    return default_options, {
-        "source_key": "sensor_type",
-        "options_by_source": options_by_source,
-        "default_options": default_options,
-    }
-
-
-def _camera_form(
-    rule: Dict[str, Any],
-    catalog: Dict[str, List[Tuple[str, str]]],
-    notification_catalog: Dict[str, Any],
-    rules: Dict[str, Dict[str, Any]],
+def _monitor_form(
+    monitor: Dict[str, Any],
+    registry: Dict[str, Any],
 ) -> Dict[str, Any]:
-    camera_options = _choices_from_pairs(
-        catalog.get("cameras") or [],
-        placeholder="(Select camera)",
-        current_value=_text(rule.get("camera_entity")),
+    kind = _text(monitor.get("kind") or "camera")
+    selected_device = _provider_ref(monitor.get("provider"), monitor.get("device_id"))
+    device_options, device_dependency = _monitor_device_options(
+        registry,
+        current_kind=kind,
+        current_device=selected_device,
     )
-    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
-        catalog=catalog,
-        current_camera=_text(rule.get("camera_entity")),
-        current_triggers=rule.get("trigger_entities") or rule.get("trigger_entity"),
-        doorbell=False,
-    )
-    area_options = _area_options(
-        rules,
-        current_value=_text(rule.get("area")),
-    )
-    notify_destination_options = _notification_destination_options(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-        catalog=notification_catalog,
-    )
-    notify_destination_values = _notification_target_values(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-    )
-    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
+    enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
+    last_event = _fmt_ts(monitor.get("last_event_ts"))
     return {
-        "id": rule["id"],
-        "group": "camera",
-        "title": _text(rule.get("name")) or "Camera rule",
-        "subtitle": _rule_subtitle(rule),
-        "save_action": "awareness_save_rule",
-        "remove_action": "awareness_remove_rule",
-        "run_action": "awareness_run_now",
-        "run_label": "Run Now",
-        "remove_confirm": "Remove this camera rule?",
+        "id": monitor["id"],
+        "group": "monitors",
+        "title": _text(monitor.get("name")) or _text(monitor.get("area")) or "Monitored source",
+        "subtitle": (
+            f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
+            f"last event: {last_event}"
+        ),
+        "save_action": "awareness_save_monitor",
+        "remove_action": "awareness_remove_monitor",
+        "remove_confirm": "Stop monitoring this source? Stored event history will be kept.",
         "fields": [
-            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
-            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
             {
-                "key": "camera_entity",
-                "label": "Camera",
+                "key": "kind",
+                "label": "Source Type",
                 "type": "select",
-                "options": camera_options,
-                "value": _text(rule.get("camera_entity")),
-            },
-            {
-                "key": "area",
-                "label": "Area",
-                "type": "select",
-                "options": area_options,
-                "value": _text(rule.get("area")),
-            },
-        ],
-        "sections": [
-            {
-                "label": "Trigger",
-                "fields": [
-                    {
-                        "key": "trigger_entities",
-                        "label": "Trigger Entities",
-                        "type": "multiselect",
-                        "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
-                        "options": trigger_options,
-                        "dependent_options": trigger_dependency,
-                        "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
-                    },
-                ],
-            },
-            {
-                "label": "Detection",
-                "fields": [
-                    {
-                        "key": "cooldown_seconds",
-                        "label": "Cooldown (sec)",
-                        "type": "number",
-                        "value": _as_int(rule.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
-                    },
-                    {
-                        "key": "notification_cooldown_seconds",
-                        "label": "Notification Cooldown (sec)",
-                        "type": "number",
-                        "value": _as_int(
-                            rule.get("notification_cooldown_seconds"), 0, minimum=0, maximum=86400
-                        ),
-                    },
-                    {
-                        "key": "ignore_vehicles",
-                        "label": "Ignore Vehicles",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("ignore_vehicles"), False),
-                    },
-                ],
-            },
-            {
-                "label": "Notifications",
-                "fields": [
-                    {"key": "title", "label": "Title", "type": "text", "value": _text(rule.get("title") or "Camera Event")},
-                    {
-                        "key": "priority",
-                        "label": "Priority",
-                        "type": "select",
-                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
-                        "value": _text(rule.get("priority") or "high"),
-                    },
-                    {
-                        "key": "notification_targets",
-                        "label": "Notification Destinations",
-                        "type": "multiselect",
-                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
-                        "options": notify_destination_options,
-                        "value": notify_destination_values,
-                    },
-                    {
-                        "key": "display_notifications",
-                        "label": "Show On ESPHome Displays",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("display_notifications"), False),
-                    },
-                    {
-                        "key": "display_targets",
-                        "label": "Display Targets",
-                        "type": "multiselect",
-                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
-                        "options": display_target_options,
-                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def _doorbell_form(
-    rule: Dict[str, Any],
-    catalog: Dict[str, List[Tuple[str, str]]],
-    notification_catalog: Dict[str, Any],
-    rules: Dict[str, Dict[str, Any]],
-) -> Dict[str, Any]:
-    camera_options = _choices_from_pairs(
-        catalog.get("cameras") or [],
-        placeholder="(Select camera)",
-        current_value=_text(rule.get("camera_entity")),
-    )
-    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
-        catalog=catalog,
-        current_camera=_text(rule.get("camera_entity")),
-        current_triggers=rule.get("trigger_entities") or rule.get("trigger_entity"),
-        doorbell=True,
-    )
-    area_options = _area_options(
-        rules,
-        current_value=_text(rule.get("area")),
-    )
-    notify_destination_options = _notification_destination_options(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-        catalog=notification_catalog,
-    )
-    notify_destination_values = _notification_target_values(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-    )
-    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
-    return {
-        "id": rule["id"],
-        "group": "doorbell",
-        "title": _text(rule.get("name")) or "Doorbell rule",
-        "subtitle": _rule_subtitle(rule),
-        "save_action": "awareness_save_rule",
-        "remove_action": "awareness_remove_rule",
-        "run_action": "awareness_run_now",
-        "run_label": "Run Now",
-        "remove_confirm": "Remove this doorbell rule?",
-        "fields": [
-            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
-            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
-            {
-                "key": "camera_entity",
-                "label": "Camera",
-                "type": "select",
-                "options": camera_options,
-                "value": _text(rule.get("camera_entity")),
-            },
-            {
-                "key": "area",
-                "label": "Area",
-                "type": "select",
-                "options": area_options,
-                "value": _text(rule.get("area")),
-            },
-            {
-                "key": "notifications",
-                "label": "Send Notifications",
-                "type": "checkbox",
-                "value": _bool(rule.get("notifications"), True),
-            },
-        ],
-        "sections": [
-            {
-                "label": "Trigger",
-                "fields": [
-                    {
-                        "key": "trigger_entities",
-                        "label": "Trigger Entities",
-                        "type": "multiselect",
-                        "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
-                        "options": trigger_options,
-                        "dependent_options": trigger_dependency,
-                        "value": _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity")),
-                    },
-                ],
-            },
-            {
-                "label": "Playback",
-                "fields": _announcement_tts_fields(
-                    rule,
-                    catalog,
-                    players_description="Speak the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
-                ),
-            },
-            {
-                "label": "Notifications",
-                "fields": [
-                    {"key": "title", "label": "Title", "type": "text", "value": _text(rule.get("title") or "Doorbell")},
-                    {
-                        "key": "priority",
-                        "label": "Priority",
-                        "type": "select",
-                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
-                        "value": _text(rule.get("priority") or "normal"),
-                    },
-                    {
-                        "key": "notification_targets",
-                        "label": "Notification Destinations",
-                        "type": "multiselect",
-                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
-                        "options": notify_destination_options,
-                        "value": notify_destination_values,
-                    },
-                    {
-                        "key": "display_notifications",
-                        "label": "Show On ESPHome Displays",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("display_notifications"), False),
-                    },
-                    {
-                        "key": "display_targets",
-                        "label": "Display Targets",
-                        "type": "multiselect",
-                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
-                        "options": display_target_options,
-                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
-                    },
-                ],
-            },
-        ],
-    }
-
-
-
-def _entry_sensor_form(
-    rule: Dict[str, Any],
-    catalog: Dict[str, List[Tuple[str, str]]],
-    notification_catalog: Dict[str, Any],
-    rules: Dict[str, Dict[str, Any]],
-) -> Dict[str, Any]:
-    camera_options = _choices_from_pairs(
-        catalog.get("cameras") or [],
-        placeholder="(Optional snapshot camera)",
-        current_value=_text(rule.get("camera_entity")),
-    )
-    sensor_options, sensor_dependency = _entry_sensor_dependency_options(
-        catalog=catalog,
-        current_type=_text(rule.get("sensor_type") or "door"),
-        current_entity=_text(rule.get("sensor_entity") or rule.get("trigger_entity")),
-    )
-    area_options = _area_options(
-        rules,
-        current_value=_text(rule.get("area")),
-    )
-    sensor_type = _text(rule.get("sensor_type") or "door").lower()
-    if sensor_type not in {"door", "window", "garage"}:
-        sensor_type = "door"
-    notify_destination_options = _notification_destination_options(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-        catalog=notification_catalog,
-    )
-    notify_destination_values = _notification_target_values(
-        rule.get("notification_targets") or rule.get("notification_destinations"),
-        device_services=rule.get("device_services") or rule.get("device_service"),
-    )
-    display_target_options = _display_target_options(rule.get("display_targets") or rule.get("display_target"))
-    return {
-        "id": rule["id"],
-        "group": "entry_sensor",
-        "title": _text(rule.get("name")) or "Entry sensor rule",
-        "subtitle": _rule_subtitle(rule),
-        "save_action": "awareness_save_rule",
-        "remove_action": "awareness_remove_rule",
-        "run_action": "awareness_run_now",
-        "run_label": "Run Now",
-        "remove_confirm": "Remove this entry sensor rule?",
-        "fields": [
-            {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": _bool(rule.get("enabled"), True)},
-            {"key": "name", "label": "Rule Name", "type": "text", "value": _text(rule.get("name"))},
-            {
-                "key": "sensor_type",
-                "label": "Sensor Type",
-                "type": "select",
+                "presentation": "cards",
                 "options": [
-                    {"value": "door", "label": "Door"},
-                    {"value": "window", "label": "Window"},
-                    {"value": "garage", "label": "Garage"},
+                    {
+                        "value": "camera",
+                        "label": "Camera",
+                        "description": "Store notable camera activity with snapshots and vision descriptions.",
+                        "icon": "◎",
+                    },
+                    {
+                        "value": "sensor",
+                        "label": "Sensor",
+                        "description": "Store state changes from doors, motion, presence, climate, and other sensors.",
+                        "icon": "◇",
+                    },
                 ],
-                "value": sensor_type,
+                "value": kind,
+                "full_width": True,
             },
             {
-                "key": "sensor_entity",
-                "label": "Sensor Entity",
+                "key": "device",
+                "label": "Device",
                 "type": "select",
-                "options": sensor_options,
-                "dependent_options": sensor_dependency,
-                "value": _text(rule.get("sensor_entity") or rule.get("trigger_entity")),
-            },
-            {
-                "key": "camera_entity",
-                "label": "Snapshot Camera (optional)",
-                "type": "select",
-                "options": camera_options,
-                "value": _text(rule.get("camera_entity")),
+                "presentation": "cards",
+                "options": device_options,
+                "dependent_options": device_dependency,
+                "value": selected_device,
+                "description": "Awareness automatically follows the event sources reported by this device.",
+                "full_width": True,
             },
             {
                 "key": "area",
                 "label": "Area",
-                "type": "select",
-                "options": area_options,
-                "value": _text(rule.get("area")),
+                "type": "text",
+                "placeholder": "Back Yard, Front Door, Garage…",
+                "value": _text(monitor.get("area")),
+                "description": "Events are grouped under this area in Awareness history.",
             },
             {
-                "key": "notifications",
-                "label": "Send Notifications (open only)",
+                "key": "name",
+                "label": "Display Name",
+                "type": "text",
+                "value": _text(monitor.get("name")),
+            },
+            {
+                "key": "enabled",
+                "label": "Monitor This Source",
                 "type": "checkbox",
-                "value": _bool(rule.get("notifications"), False),
-            },
-        ],
-        "sections": [
-            {
-                "label": "Playback (open only)",
-                "fields": _announcement_tts_fields(
-                    rule,
-                    catalog,
-                    players_description="When the sensor opens, speak using the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
-                ),
-            },
-            {
-                "label": "Notifications",
-                "fields": [
-                    {
-                        "key": "title",
-                        "label": "Notification Title",
-                        "type": "text",
-                        "value": _text(rule.get("title") or "Entry Sensor"),
-                    },
-                    {
-                        "key": "priority",
-                        "label": "Priority",
-                        "type": "select",
-                        "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
-                        "value": _text(rule.get("priority") or "normal"),
-                    },
-                    {
-                        "key": "notification_targets",
-                        "label": "Notification Destinations",
-                        "type": "multiselect",
-                        "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
-                        "options": notify_destination_options,
-                        "value": notify_destination_values,
-                    },
-                    {
-                        "key": "display_notifications",
-                        "label": "Show On ESPHome Displays",
-                        "type": "checkbox",
-                        "value": _bool(rule.get("display_notifications"), False),
-                    },
-                    {
-                        "key": "display_targets",
-                        "label": "Display Targets",
-                        "type": "multiselect",
-                        "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
-                        "options": display_target_options,
-                        "value": _normalize_display_targets(rule.get("display_targets") or rule.get("display_target")),
-                    },
-                ],
+                "value": _bool(monitor.get("enabled"), True),
             },
         ],
     }
-
 
 
 def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
-    all_rules = _load_rules(client)
-    rules: Dict[str, Dict[str, Any]] = dict(all_rules)
-    catalog = _entity_catalog(provider="all")
-    notification_catalog = _notification_destination_catalog(client)
+    monitors = _load_monitors(client)
+    registry = _monitor_registry(client)
     event_page = _event_page_for_ui(client)
     event_forms = list(event_page.get("items") or [])
-    forms: List[Dict[str, Any]] = []
-    for rule in sorted(
-        rules.values(),
-        key=lambda row: (_text(row.get("kind")), _text(row.get("name")).lower(), _text(row.get("id"))),
-    ):
-        kind = _text(rule.get("kind")).lower()
-        if kind == "camera":
-            forms.append(_camera_form(rule, catalog, notification_catalog, rules))
-        elif kind == "doorbell":
-            forms.append(_doorbell_form(rule, catalog, notification_catalog, rules))
-        elif kind == "entry_sensor":
-            forms.append(_entry_sensor_form(rule, catalog, notification_catalog, rules))
-    all_forms = event_forms + forms
-    camera_options = _choices_from_pairs(catalog.get("cameras") or [], placeholder="(Select camera)")
-    area_options = _area_options(rules)
-    trigger_options, trigger_dependency = _trigger_dependency_for_camera(
-        catalog=catalog,
-        current_camera="",
-        current_triggers=[],
-        doorbell=False,
-    )
-    doorbell_trigger_options, doorbell_trigger_dependency = _trigger_dependency_for_camera(
-        catalog=catalog,
-        current_camera="",
-        current_triggers=[],
-        doorbell=True,
-    )
-    entry_sensor_options, entry_sensor_dependency = _entry_sensor_dependency_options(
-        catalog=catalog,
-        current_type="door",
-        current_entity="",
-    )
-    notify_destination_options = _notification_destination_options(catalog=notification_catalog)
-    display_target_options = _display_target_options()
+    monitor_forms = [
+        _monitor_form(monitor, registry)
+        for monitor in sorted(
+            monitors.values(),
+            key=lambda row: (_text(row.get("kind")), _text(row.get("name")).casefold(), _text(row.get("id"))),
+        )
+    ]
+    default_kind = "camera"
+    camera_options, device_dependency = _monitor_device_options(registry, current_kind="camera")
+    if not camera_options:
+        default_kind = "sensor"
+        camera_options, device_dependency = _monitor_device_options(registry, current_kind="sensor")
+    default_device = _text(camera_options[0].get("value")) if camera_options else ""
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
-    show_camera = {"source_key": "kind", "equals": "camera"}
-    show_doorbell = {"source_key": "kind", "equals": "doorbell"}
-    show_entry = {"source_key": "kind", "equals": "entry_sensor"}
-    show_doorbell_or_entry = {"source_key": "kind", "any_of": ["doorbell", "entry_sensor"]}
-    show_camera_or_doorbell = {"source_key": "kind", "any_of": ["camera", "doorbell"]}
-    show_camera_or_doorbell_or_entry = {"source_key": "kind", "any_of": ["camera", "doorbell", "entry_sensor"]}
-    add_tts_fields = _announcement_tts_add_fields(
-        catalog,
-        show_when=show_doorbell_or_entry,
-        players_description="Speak using the shared announcement voice on selected Voice Core satellites, Sonos speakers, Home Assistant media players, or UniFi Protect camera speakers.",
-    )
     return {
         "kind": "settings_manager",
-        "title": "Awareness Automations",
-        "empty_message": "No awareness rules configured yet.",
+        "title": "Awareness Monitoring",
+        "empty_message": "No cameras or sensors are being monitored yet.",
         "stats_refresh_button": True,
-        "stats_refresh_label": "Refresh",
+        "stats_refresh_label": "Refresh devices",
+        "stats_refresh_action": "awareness_refresh_devices",
         "stats_controls_action": "awareness_save_event_filters",
         "stats_controls_auto_save": True,
         "stats_controls": [
@@ -5762,15 +3166,24 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
             },
         ],
         "item_fields_dropdown": True,
-        "item_fields_dropdown_label": "Rule Settings",
+        "item_fields_dropdown_label": "Monitor Settings",
         "item_fields_popup": True,
-        "item_fields_popup_label": "Rule Settings",
+        "item_fields_popup_label": "Edit Monitored Source",
         "item_sections_in_dropdown": True,
-        "default_tab": "events",
+        "default_tab": "monitors" if monitors else "add",
         "manager_tabs": [
             {
+                "key": "monitors",
+                "label": "Monitored Sources",
+                "source": "items",
+                "item_group": "monitors",
+                "selector": False,
+                "empty_message": "No cameras or sensors are being monitored.",
+            },
+            {"key": "add", "label": "Add Source", "source": "add_form"},
+            {
                 "key": "events",
-                "label": "Events",
+                "label": "Event History",
                 "source": "items",
                 "item_group": "event",
                 "selector": False,
@@ -5785,180 +3198,77 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 "empty_message": "No stored awareness events found.",
             },
-            {
-                "key": "cameras",
-                "label": "Cameras",
-                "source": "items",
-                "item_group": "camera",
-                "selector": False,
-                "empty_message": "No camera rules configured.",
-            },
-            {
-                "key": "doorbells",
-                "label": "Doorbells",
-                "source": "items",
-                "item_group": "doorbell",
-                "selector": True,
-                "selector_label": "Select Doorbell Rule",
-                "empty_message": "No doorbell rules configured.",
-            },
-            {
-                "key": "entries",
-                "label": "Entry Sensors",
-                "source": "items",
-                "item_group": "entry_sensor",
-                "selector": False,
-                "empty_message": "No entry sensor rules configured.",
-            },
-            {"key": "create", "label": "Create Rule", "source": "add_form"},
         ],
         "add_form": {
-            "action": "awareness_add_rule",
-            "submit_label": "Add Rule",
+            "action": "awareness_add_monitor",
+            "submit_label": "Start Monitoring",
             "fields": [
                 {
-                    "key": "kind",
-                    "label": "Rule Type",
-                    "type": "select",
-                    "options": [
-                        {"value": "camera", "label": "Camera"},
-                        {"value": "doorbell", "label": "Doorbell"},
-                        {"value": "entry_sensor", "label": "Door/Window/Garage Sensor"},
-                    ],
-                    "value": "camera",
+                    "type": "heading",
+                    "label": "1. Choose What Awareness Should Watch",
+                    "description": "Pick one camera or sensor. Automations and notifications stay in Automation Core.",
                 },
-                {"key": "name", "label": "Name", "type": "text", "value": ""},
-                {"key": "enabled", "label": "Enabled", "type": "checkbox", "value": True},
                 {
-                    "key": "camera_entity",
-                    "label": "Camera / Doorbell Camera",
+                    "key": "kind",
+                    "label": "Source Type",
                     "type": "select",
+                    "presentation": "cards",
+                    "options": [
+                        {
+                            "value": "camera",
+                            "label": "Camera",
+                            "description": "Capture notable activity, snapshots, and vision descriptions.",
+                            "icon": "◎",
+                        },
+                        {
+                            "value": "sensor",
+                            "label": "Sensor",
+                            "description": "Record door, motion, presence, climate, and other sensor changes.",
+                            "icon": "◇",
+                        },
+                    ],
+                    "value": default_kind,
+                    "full_width": True,
+                },
+                {
+                    "key": "device",
+                    "label": "Which Device?",
+                    "type": "select",
+                    "presentation": "cards",
                     "options": camera_options,
-                    "value": "",
-                    "description": "Optional for entry sensors: capture a snapshot on each sensor event.",
-                    "show_when": show_camera_or_doorbell_or_entry,
+                    "dependent_options": device_dependency,
+                    "value": default_device,
+                    "description": "Only compatible devices from enabled integrations are shown.",
+                    "full_width": True,
+                },
+                {
+                    "type": "heading",
+                    "label": "2. Name The Place",
+                    "description": "This makes event history easy to browse and ask Tater about.",
                 },
                 {
                     "key": "area",
                     "label": "Area",
-                    "type": "select",
-                    "options": area_options,
-                    "value": "",
-                    "show_when": show_camera_or_doorbell_or_entry,
-                },
-                {
-                    "key": "sensor_type",
-                    "label": "Sensor Type",
-                    "type": "select",
-                    "options": [
-                        {"value": "door", "label": "Door"},
-                        {"value": "window", "label": "Window"},
-                        {"value": "garage", "label": "Garage"},
-                    ],
-                    "value": "door",
-                    "show_when": show_entry,
-                },
-                {
-                    "key": "sensor_entity",
-                    "label": "Sensor Entity",
-                    "type": "select",
-                    "options": entry_sensor_options,
-                    "dependent_options": entry_sensor_dependency,
-                    "value": "",
-                    "show_when": show_entry,
-                },
-                {
-                    "key": "trigger_entities",
-                    "label": "Trigger Entities",
-                    "type": "multiselect",
-                    "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
-                    "options": trigger_options,
-                    "dependent_options": trigger_dependency,
-                    "value": [],
-                    "show_when": show_camera,
-                },
-                {
-                    "key": "doorbell_trigger_entities",
-                    "label": "Trigger Entities",
-                    "type": "multiselect",
-                    "description": "Select one or more trigger entities. Any selected trigger will run this rule.",
-                    "options": doorbell_trigger_options,
-                    "dependent_options": doorbell_trigger_dependency,
-                    "value": [],
-                    "show_when": show_doorbell,
-                },
-                {
-                    "key": "cooldown_seconds",
-                    "label": "Cooldown (sec)",
-                    "type": "number",
-                    "value": 30,
-                    "show_when": show_camera,
-                },
-                {
-                    "key": "notification_cooldown_seconds",
-                    "label": "Notification Cooldown (sec)",
-                    "type": "number",
-                    "value": 0,
-                    "show_when": show_camera,
-                },
-                {
-                    "key": "ignore_vehicles",
-                    "label": "Ignore Vehicles",
-                    "type": "checkbox",
-                    "value": False,
-                    "show_when": show_camera,
-                },
-                {
-                    "key": "notifications",
-                    "label": "Send Notifications",
-                    "type": "checkbox",
-                    "value": False,
-                    "show_when": show_doorbell_or_entry,
-                },
-                {
-                    "key": "title",
-                    "label": "Notification Title",
                     "type": "text",
-                    "value": "Camera Event",
-                    "show_when": show_camera_or_doorbell_or_entry,
+                    "placeholder": "Back Yard, Front Door, Garage…",
+                    "value": "",
                 },
                 {
-                    "key": "priority",
-                    "label": "Priority",
-                    "type": "select",
-                    "options": [{"value": "high", "label": "High"}, {"value": "normal", "label": "Normal"}],
-                    "value": "high",
-                    "show_when": show_camera_or_doorbell_or_entry,
+                    "key": "name",
+                    "label": "Display Name (optional)",
+                    "type": "text",
+                    "placeholder": "Uses the device name when left blank",
+                    "value": "",
                 },
                 {
-                    "key": "notification_targets",
-                    "label": "Notification Destinations",
-                    "type": "multiselect",
-                    "description": "Choose one or more notifier destinations from Tater's shared notification catalog.",
-                    "options": notify_destination_options,
-                    "value": [],
-                    "show_when": show_camera_or_doorbell_or_entry,
-                },
-                {
-                    "key": "display_notifications",
-                    "label": "Show On ESPHome Displays",
+                    "key": "enabled",
+                    "label": "Start Monitoring Now",
                     "type": "checkbox",
-                    "value": False,
-                    "show_when": show_camera_or_doorbell_or_entry,
+                    "value": True,
                 },
-                {
-                    "key": "display_targets",
-                    "label": "Display Targets",
-                    "type": "multiselect",
-                    "description": "Choose one or more S3Box display targets. Leave empty to use all displays when enabled.",
-                    "options": display_target_options,
-                    "value": [],
-                    "show_when": show_camera_or_doorbell_or_entry,
-                },
-                *add_tts_fields,
             ],
         },
-        "item_forms": all_forms,
+        "item_forms": [*event_forms, *monitor_forms],
     }
 
 
@@ -5967,25 +3277,23 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     event_stats = _event_stats_for_ui(client)
     counts = event_stats.get("counts") if isinstance(event_stats.get("counts"), dict) else {}
     total_count = _as_int(counts.get("total"), 0, minimum=0)
-    camera_count = _as_int(counts.get("camera"), 0, minimum=0)
-    doorbell_count = _as_int(counts.get("doorbell"), 0, minimum=0)
-    sensor_count = _as_int(counts.get("sensor"), 0, minimum=0)
-    other_count = _as_int(counts.get("other"), 0, minimum=0)
-    source_count = _as_int(event_stats.get("source_count"), 0, minimum=0)
     last_event = _text(event_stats.get("last_event")) or "n/a"
+    monitors = _load_monitors(client)
+    enabled_count = sum(1 for monitor in monitors.values() if _bool(monitor.get("enabled"), True))
+    monitored_cameras = sum(1 for monitor in monitors.values() if _text(monitor.get("kind")) == "camera")
+    monitored_sensors = sum(1 for monitor in monitors.values() if _text(monitor.get("kind")) == "sensor")
     return {
-        "summary": "Awareness event feed overview across camera, doorbell, and sensor activity.",
+        "summary": "Choose the cameras and sensors Awareness should observe and browse the history it stores.",
         "stats": [
-            {"label": "Total Events", "value": total_count},
-            {"label": "Camera Events", "value": camera_count},
-            {"label": "Doorbell Events", "value": doorbell_count},
-            {"label": "Sensor Events", "value": sensor_count},
-            {"label": "Other Events", "value": other_count},
-            {"label": "Event Sources", "value": source_count},
+            {"label": "Monitored Sources", "value": len(monitors)},
+            {"label": "Active", "value": enabled_count},
+            {"label": "Cameras", "value": monitored_cameras},
+            {"label": "Sensors", "value": monitored_sensors},
+            {"label": "Stored Events", "value": total_count},
             {"label": "Last Event", "value": last_event},
         ],
         "items": [],
-        "empty_message": "No awareness rules configured yet.",
+        "empty_message": "No cameras or sensors are being monitored yet.",
         "ui": _awareness_manager_ui(client),
     }
 
@@ -6001,193 +3309,6 @@ def _value(values: Dict[str, Any], payload: Dict[str, Any], key: str, default: A
     return _unwrap_form_value(payload.get(key, default))
 
 
-def _build_rule_from_values(
-    *,
-    kind: str,
-    values: Dict[str, Any],
-    payload: Dict[str, Any],
-    existing: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    now_ts = time.time()
-    previous = existing if isinstance(existing, dict) else {}
-    explicit_provider = "provider" in values or "provider" in payload
-    provider_value = _concrete_rule_provider(previous)
-    base: Dict[str, Any] = {
-        "id": _text(previous.get("id")) or str(uuid.uuid4()),
-        "kind": kind,
-        "provider": provider_value,
-        "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
-        "name": _text(_value(values, payload, "name", previous.get("name"))) or f"{kind.title()} rule",
-        "created_at": _as_float(previous.get("created_at"), now_ts),
-        "updated_at": now_ts,
-        "last_run_ts": _as_float(previous.get("last_run_ts"), 0.0),
-        "last_status": _text(previous.get("last_status")),
-        "last_summary": _text(previous.get("last_summary")),
-        "last_error": _text(previous.get("last_error")),
-    }
-    trigger_entities_default = _value(
-        values,
-        payload,
-        "trigger_entities",
-        previous.get("trigger_entities", previous.get("trigger_entity", "")),
-    )
-    if kind == "doorbell":
-        trigger_entities_default = _value(values, payload, "doorbell_trigger_entities", trigger_entities_default)
-    if kind == "entry_sensor":
-        trigger_entities_default = _value(values, payload, "sensor_entity", trigger_entities_default)
-    trigger_entities = _normalize_trigger_entities(trigger_entities_default)
-    if not trigger_entities:
-        legacy_trigger_default = _value(values, payload, "trigger_entity", previous.get("trigger_entity", ""))
-        if kind == "doorbell":
-            legacy_trigger_default = _value(values, payload, "doorbell_trigger_entity", legacy_trigger_default)
-        if kind == "entry_sensor":
-            legacy_trigger_default = _value(values, payload, "sensor_entity", legacy_trigger_default)
-        trigger_entities = _normalize_trigger_entities(legacy_trigger_default)
-    if kind == "doorbell":
-        title_default = "Doorbell"
-    elif kind == "entry_sensor":
-        title_default = "Entry Sensor"
-    else:
-        title_default = "Camera Event"
-    priority_default = "normal" if kind in {"doorbell", "entry_sensor"} else "high"
-    trigger_to_state_default = "on" if kind == "camera" else ""
-    notifications_default = False if kind == "entry_sensor" else True
-    priority_value = _text(_value(values, payload, "priority", previous.get("priority", priority_default))).lower()
-    notification_targets_present = "notification_targets" in values or "notification_targets" in payload
-    notification_targets_value = _value(
-        values,
-        payload,
-        "notification_targets",
-        previous.get("notification_targets", previous.get("notification_destinations", "")),
-    )
-    device_services_value = _value(
-        values,
-        payload,
-        "device_services",
-        previous.get("device_services", previous.get("device_service", "")),
-    )
-    if notification_targets_present:
-        notification_targets = _normalize_notification_targets(notification_targets_value)
-    else:
-        notification_targets = _normalize_notification_targets(
-            notification_targets_value,
-            device_services=device_services_value,
-        )
-    display_targets_value = _value(
-        values,
-        payload,
-        "display_targets",
-        previous.get("display_targets", previous.get("display_target", "")),
-    )
-    base.update(
-        {
-            "camera_entity": _text(_value(values, payload, "camera_entity", previous.get("camera_entity", ""))),
-            "area": _text(_value(values, payload, "area", previous.get("area", ""))),
-            "trigger_entities": trigger_entities,
-            "trigger_entity": trigger_entities[0] if trigger_entities else "",
-            "trigger_to_state": _text(
-                _value(values, payload, "trigger_to_state", previous.get("trigger_to_state", trigger_to_state_default))
-            ),
-            "trigger_attribute": _text(
-                _value(values, payload, "trigger_attribute", previous.get("trigger_attribute", ""))
-            ),
-            "trigger_attribute_value": _text(
-                _value(
-                    values,
-                    payload,
-                    "trigger_attribute_value",
-                    previous.get("trigger_attribute_value", ""),
-                )
-            ),
-            "query": _text(_value(values, payload, "query", previous.get("query", ""))),
-            "cooldown_seconds": _as_int(
-                _value(values, payload, "cooldown_seconds", previous.get("cooldown_seconds", 30)),
-                30,
-                minimum=0,
-                maximum=86400,
-            ),
-            "notification_cooldown_seconds": _as_int(
-                _value(
-                    values,
-                    payload,
-                    "notification_cooldown_seconds",
-                    previous.get("notification_cooldown_seconds", 0),
-                ),
-                0,
-                minimum=0,
-                maximum=86400,
-            ),
-            "ignore_vehicles": _bool(
-                _value(values, payload, "ignore_vehicles", previous.get("ignore_vehicles", False)),
-                False,
-            ),
-            "title": _text(_value(values, payload, "title", previous.get("title", title_default))),
-            "priority": "high" if priority_value in {"critical", "high"} else "normal",
-            "device_services": _device_services_from_notification_targets(notification_targets),
-            "notification_targets": notification_targets,
-            "display_notifications": _bool(
-                _value(values, payload, "display_notifications", previous.get("display_notifications", False)),
-                False,
-            ),
-            "display_targets": _normalize_display_targets(display_targets_value),
-            "players": _normalize_players(_value(values, payload, "players", previous.get("players", []))),
-            "notifications": _bool(
-                _value(values, payload, "notifications", previous.get("notifications", notifications_default)),
-                notifications_default,
-            ),
-            "sensor_type": _text(_value(values, payload, "sensor_type", previous.get("sensor_type", "door"))).lower(),
-            "sensor_entity": _text(
-                _value(
-                    values,
-                    payload,
-                    "sensor_entity",
-                    previous.get("sensor_entity", trigger_entities[0] if trigger_entities else ""),
-                )
-            ),
-        }
-    )
-    inferred_provider = _provider_from_rule_fields(base)
-    if explicit_provider:
-        provider_value = _concrete_rule_provider(
-            {**base, "provider": _value(values, payload, "provider", provider_value)}
-        )
-    elif inferred_provider:
-        provider_value = inferred_provider
-    base["provider"] = provider_value
-    if not _text(base.get("provider")):
-        raise ValueError("Select devices from a connected integration so Awareness can save the provider.")
-    if kind == "doorbell":
-        base["trigger_to_state"] = "on"
-        base["trigger_attribute"] = ""
-        base["trigger_attribute_value"] = ""
-    if kind == "camera":
-        if not base["camera_entity"]:
-            raise ValueError("Camera entity is required for camera rules.")
-        if not base["trigger_entities"]:
-            raise ValueError("At least one trigger entity is required for camera rules.")
-        if not base["area"]:
-            base["area"] = "camera"
-    elif kind == "doorbell":
-        if not base["camera_entity"]:
-            raise ValueError("Camera entity is required for doorbell rules.")
-        if not base["trigger_entities"]:
-            raise ValueError("At least one trigger entity is required for doorbell rules.")
-        if not base["players"]:
-            raise ValueError("At least one playback target is required for doorbell rules.")
-
-        if not base["area"]:
-            base["area"] = "front door"
-    elif kind == "entry_sensor":
-        if not base["trigger_entities"]:
-            raise ValueError("Sensor entity is required for entry sensor rules.")
-        base["sensor_entity"] = base["trigger_entities"][0]
-        if base["sensor_type"] not in {"door", "window", "garage"}:
-            base["sensor_type"] = "door"
-
-        if not base["area"]:
-            base["area"] = base["sensor_type"]
-    return _normalize_rule(base) or base
-
 
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
     client = redis_client or globals().get("redis_client")
@@ -6196,9 +3317,9 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     body = payload if isinstance(payload, dict) else {}
     values = _payload_values(body)
     action_name = _text(action).lower()
-    if action_name == "awareness_refresh_entities":
-        _entity_catalog(force_refresh=True, provider="all")
-        return {"ok": True, "message": "Integration device catalog refreshed."}
+    if action_name in {"awareness_refresh_devices", "awareness_refresh_entities"}:
+        _monitor_registry(client, refresh=True)
+        return {"ok": True, "message": "Available cameras and sensors refreshed."}
     if action_name == "awareness_save_event_filters":
         current_filters = _event_type_filters(client)
         current_list_view = _event_list_view_enabled(client)
@@ -6241,116 +3362,147 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "page": requested_page,
             "page_size": requested_page_size,
         }
-    if action_name == "awareness_add_rule":
-        kind = _text(_value(values, body, "kind")).lower()
-        if kind not in {"camera", "doorbell", "entry_sensor"}:
-            raise ValueError("Rule type must be camera, doorbell, or entry_sensor.")
-        rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=None)
-        _save_rule(client, rule)
-        return {"ok": True, "id": rule["id"], "message": "Awareness rule added."}
-    if action_name == "awareness_save_rule":
-        rule_id = _text(body.get("id"))
-        if not rule_id:
-            raise ValueError("Rule id is required.")
-        existing = _get_rule(client, rule_id)
+    if action_name == "awareness_add_monitor":
+        monitor = _build_monitor_from_values(values=values, payload=body, client=client)
+        monitor = _save_monitor(client, monitor)
+        return {"ok": True, "id": monitor["id"], "message": "Awareness is now monitoring this source."}
+    if action_name == "awareness_save_monitor":
+        monitor_id = _text(body.get("id"))
+        existing = _get_monitor(client, monitor_id)
         if not existing:
-            raise KeyError("Awareness rule not found.")
-        kind = _text(existing.get("kind")).lower()
-        rule = _build_rule_from_values(kind=kind, values=values, payload=body, existing=existing)
-        _save_rule(client, rule)
-        return {"ok": True, "id": rule_id, "message": "Awareness rule saved."}
-    if action_name == "awareness_remove_rule":
-        rule_id = _text(body.get("id"))
-        if not rule_id:
-            raise ValueError("Rule id is required.")
-        deleted = _remove_rule(client, rule_id)
-        if not deleted:
-            raise KeyError("Awareness rule not found.")
-        return {"ok": True, "id": rule_id, "message": "Awareness rule removed."}
-    if action_name == "awareness_run_now":
-        rule_id = _text(body.get("id"))
-        if not rule_id:
-            raise ValueError("Rule id is required.")
-        existing = _get_rule(client, rule_id)
-        if not existing:
-            raise KeyError("Awareness rule not found.")
-        event: Dict[str, Any] = {}
-        if _text(existing.get("kind")).lower() == "entry_sensor":
-            entity_id = _text(existing.get("sensor_entity") or existing.get("trigger_entity"))
-            friendly_name = _text(existing.get("name") or existing.get("area") or "Entry Sensor")
-            event = {
-                "entity_id": entity_id,
-                "new_state": {"state": "open", "attributes": {"friendly_name": friendly_name}},
-                "old_state": {"state": "closed", "attributes": {"friendly_name": friendly_name}},
-            }
-        _enqueue_execution(client, rule_id=rule_id, reason="manual", event=event)
-        return {"ok": True, "id": rule_id, "message": "Awareness rule queued to run now."}
+            raise KeyError("Monitored source not found.")
+        monitor = _build_monitor_from_values(
+            values=values,
+            payload=body,
+            client=client,
+            existing=existing,
+        )
+        monitor = _save_monitor(client, monitor)
+        return {"ok": True, "id": monitor["id"], "message": "Monitored source updated."}
+    if action_name == "awareness_remove_monitor":
+        monitor_id = _text(body.get("id"))
+        if not _remove_monitor(client, monitor_id):
+            raise KeyError("Monitored source not found.")
+        return {
+            "ok": True,
+            "id": monitor_id,
+            "message": "Source removed. Its stored event history was kept.",
+        }
+    if action_name in {
+        "awareness_add_rule",
+        "awareness_save_rule",
+        "awareness_remove_rule",
+        "awareness_run_now",
+    }:
+        raise ValueError("Awareness rules have moved to Automation Core. Add a camera or sensor monitor instead.")
     raise ValueError(f"Unknown action: {action_name}")
 
 
+
+def _monitor_matches_event(
+    monitor: Dict[str, Any],
+    *,
+    provider: str,
+    entity_id: str,
+    new_state: Dict[str, Any],
+    old_state: Dict[str, Any],
+) -> bool:
+    provider_token = _normalize_event_provider(provider)
+    if provider_token != _normalize_event_provider(monitor.get("provider")):
+        return False
+    event_entity = _text(entity_id).casefold()
+    if not event_entity:
+        return False
+    event_refs: set[str] = set()
+    for value in monitor.get("event_refs") or []:
+        _ref_provider, raw_ref = _split_provider_ref(value, provider_token)
+        token = _text(raw_ref or value).casefold()
+        if token:
+            event_refs.add(token)
+    device_refs = {
+        _text(monitor.get("device_ref")).casefold(),
+        _text(monitor.get("device_id")).casefold(),
+    }
+    device_refs.discard("")
+    matched = event_entity in (event_refs or device_refs)
+    if not matched and _text(monitor.get("kind")) == "camera":
+        device_id = _text(monitor.get("device_id")).casefold()
+        raw_device_ref = _text(monitor.get("device_ref")).casefold()
+        if raw_device_ref.startswith("camera:"):
+            raw_device_ref = raw_device_ref.split(":", 1)[1]
+        aliases = {device_id, raw_device_ref}
+        if provider_token == "unifi_protect":
+            matched = any(alias and len(alias) >= 3 and alias in event_entity for alias in aliases)
+        elif event_entity in device_refs:
+            attrs = new_state.get("attributes") if isinstance(new_state, dict) else {}
+            hint = " ".join(
+                _text((attrs or {}).get(key)).lower()
+                for key in ("event_type", "detection_type", "device_class", "resource_type")
+            )
+            matched = any(token in hint for token in ("motion", "person", "vehicle", "animal", "package", "doorbell"))
+    if not matched:
+        return False
+    new_value = _text((new_state or {}).get("state")).lower()
+    old_value = _text((old_state or {}).get("state")).lower()
+    new_attrs = (new_state or {}).get("attributes") if isinstance(new_state, dict) else {}
+    old_attrs = (old_state or {}).get("attributes") if isinstance(old_state, dict) else {}
+    if new_value == old_value and new_attrs == old_attrs:
+        return False
+    if _text(monitor.get("kind")) == "camera" and new_value in _MONITOR_INACTIVE_STATES:
+        return False
+    return True
+
+
+def _enqueue_monitor_event(client: Any, monitor_id: Any, event: Dict[str, Any]) -> None:
+    redis_obj = client or redis_client
+    payload = {
+        "monitor_id": _text(monitor_id),
+        "event": event if isinstance(event, dict) else {},
+        "queued_at": time.time(),
+    }
+    redis_obj.lpush(_EXEC_QUEUE_KEY, json.dumps(payload))
+    _runtime_set(redis_obj, queue_depth=_queue_depth(redis_obj))
+
+
 async def _awareness_worker_loop(stop_event: Optional[object], llm_client: Any) -> None:
+    del llm_client
     while not (stop_event and stop_event.is_set()):
         job = _dequeue_execution(redis_client)
         if not job:
             await asyncio.sleep(0.25)
             continue
         _runtime_set(redis_client, queue_depth=_queue_depth(redis_client))
-        rule_id = _text(job.get("rule_id"))
-        reason = _text(job.get("reason") or "manual")
+        monitor_id = _text(job.get("monitor_id"))
         event_payload = job.get("event") if isinstance(job.get("event"), dict) else {}
-        rule = _get_rule(redis_client, rule_id)
-        if not rule:
-            logger.info("[awareness] skipping queued run for missing rule %s", rule_id)
-            continue
-        if not _bool(rule.get("enabled"), True) and reason != "manual":
+        monitor = _get_monitor(redis_client, monitor_id)
+        if not monitor or not _bool(monitor.get("enabled"), True):
             continue
         try:
-            startup_defer = _camera_startup_defer_remaining(redis_client, rule, reason)
-            if startup_defer > 0.0:
-                requeued = _enqueue_execution_after_delay(
-                    redis_client,
-                    rule_id=rule_id,
-                    reason=f"{reason or 'trigger'}_startup_deferred",
-                    event=event_payload,
-                    delay_seconds=startup_defer + 1.0,
-                )
-                result = {
-                    "ok": True,
-                    "summary": (
-                        f"Camera vision warmup active; requeued in {int(startup_defer) + 1}s."
-                        if requeued
-                        else "Camera vision warmup active; already requeued."
-                    ),
-                    "skipped": "startup_warmup",
-                }
-            else:
-                result = await _execute_rule(rule, llm_client, reason, event_payload)
+            result = await _execute_monitor(monitor, event_payload)
+            current = _get_monitor(redis_client, monitor_id) or monitor
             now_ts = time.time()
-            rule_updates = result.get("rule_updates") if isinstance(result, dict) else {}
-            if isinstance(rule_updates, dict):
-                for key, value in rule_updates.items():
-                    rule[key] = value
-            rule["last_run_ts"] = now_ts
-            rule["last_status"] = "ok"
-            rule["last_summary"] = _text(result.get("summary"))
-            rule["last_error"] = ""
-            rule["updated_at"] = now_ts
-            _save_rule(redis_client, rule)
+            current["last_event_ts"] = _as_float(job.get("queued_at"), now_ts)
+            current["last_status"] = "ok"
+            current["last_summary"] = _compact(_text(result.get("summary")), limit=180)
+            current["last_error"] = ""
+            current["updated_at"] = now_ts
+            _save_monitor(redis_client, current)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error="")
-            summary = _compact(_text(result.get("summary")), limit=180)
-            rule_kind = _text(rule.get("kind")) or "unknown"
-            if summary:
-                logger.info("[awareness] rule %s (%s) ran via %s: %s", rule_id, rule_kind, reason, summary)
-            else:
-                logger.info("[awareness] rule %s (%s) ran via %s", rule_id, rule_kind, reason)
+            logger.info(
+                "[awareness] monitor %s (%s) observed %s",
+                monitor_id,
+                _text(monitor.get("kind")),
+                current["last_summary"] or "an event",
+            )
         except Exception as exc:
             now_ts = time.time()
-            logger.exception("[awareness] rule execution failed for %s", rule_id)
-            rule["last_run_ts"] = now_ts
-            rule["last_status"] = "error"
-            rule["last_error"] = str(exc)
-            rule["updated_at"] = now_ts
-            _save_rule(redis_client, rule)
+            logger.exception("[awareness] monitor execution failed for %s", monitor_id)
+            current = _get_monitor(redis_client, monitor_id) or monitor
+            current["last_event_ts"] = _as_float(job.get("queued_at"), now_ts)
+            current["last_status"] = "error"
+            current["last_error"] = _compact(str(exc), limit=300)
+            current["updated_at"] = now_ts
+            _save_monitor(redis_client, current)
             _runtime_set(redis_client, last_run_ts=now_ts, last_error=str(exc))
 
 
@@ -6362,16 +3514,13 @@ async def _handle_trigger_state_change(
     old_state: Dict[str, Any],
 ) -> None:
     provider_token = _normalize_event_provider(provider)
-    rules = _load_rules(redis_client)
-    for rule in rules.values():
-        kind = _text(rule.get("kind"))
-        if kind not in {"camera", "doorbell", "entry_sensor"}:
-            continue
-        if not _bool(rule.get("enabled"), True):
+    monitors = _load_monitors(redis_client)
+    for monitor in monitors.values():
+        if not _bool(monitor.get("enabled"), True):
             continue
         try:
-            if not _rule_matches_event(
-                rule,
+            if not _monitor_matches_event(
+                monitor,
                 provider=provider_token,
                 entity_id=entity_id,
                 new_state=new_state,
@@ -6379,18 +3528,18 @@ async def _handle_trigger_state_change(
             ):
                 continue
         except Exception:
-            logger.exception("[awareness] trigger match failed for rule %s", rule.get("id"))
+            logger.exception("[awareness] event match failed for monitor %s", monitor.get("id"))
             continue
         dedupe_key = (
-            f"awareness:dedupe:{provider_token}:{_text(rule.get('id'))}:{entity_id}:{_text(new_state.get('state')).lower()}"
+            f"awareness:monitor:dedupe:{provider_token}:{_text(monitor.get('id'))}:"
+            f"{entity_id}:{_text(new_state.get('state')).lower()}"
         )
         if redis_client.set(dedupe_key, "1", ex=2, nx=True) is None:
             continue
-        _enqueue_execution(
+        _enqueue_monitor_event(
             redis_client,
-            rule_id=_text(rule.get("id")),
-            reason="trigger",
-            event={"entity_id": entity_id, "new_state": new_state, "old_state": old_state},
+            _text(monitor.get("id")),
+            {"entity_id": entity_id, "new_state": new_state, "old_state": old_state},
         )
 
 
@@ -6410,147 +3559,27 @@ async def _handle_state_change_event(event_payload: Dict[str, Any]) -> None:
     )
 
 
-def _unifi_camera_motion_marker(camera_row: Dict[str, Any]) -> str:
-    for key in (
-        "lastMotionEventId",
-        "last_motion_event_id",
-        "lastMotionEvent",
-        "last_motion_event",
-        "lastMotionAt",
-        "last_motion_at",
-        "lastMotionTs",
-        "last_motion_ts",
-        "lastMotion",
-        "last_motion",
-        "lastSmartDetect",
-        "last_smart_detect",
-        "lastSmartDetectAt",
-        "last_smart_detect_at",
-    ):
-        marker = _unifi_marker_token(camera_row.get(key))
-        if marker:
-            return f"{key}:{marker}"
-    for key, value in camera_row.items():
-        key_text = _text(key)
-        key_lower = key_text.lower()
-        if "motion" not in key_lower:
-            continue
-        if any(token in key_lower for token in ("enable", "enabled", "setting", "sensitivity", "recording", "zone")):
-            continue
-        if not any(token in key_lower for token in ("event", "detect", "last", "time", "at", "ts", "id", "trigger")):
-            continue
-        marker = _unifi_marker_token(value)
-        if marker:
-            return f"{key_text}:{marker}"
-    nested_marker = _unifi_nested_keyword_marker(
-        camera_row,
-        include_any=("motion",),
-        must_have_any=("event", "detect", "last", "time", "at", "ts", "id", "trigger"),
-        exclude_any=("enable", "enabled", "setting", "sensitivity", "recording", "zone"),
-    )
-    if nested_marker:
-        return f"nested:{nested_marker}"
-    for key in (
-        "isMotionDetected",
-        "is_motion_detected",
-        "motionDetected",
-        "motion_detected",
-        "isPirMotionDetected",
-        "is_pir_motion_detected",
-    ):
-        if key in camera_row and camera_row.get(key) is not None:
-            return f"{key}:{1 if bool(camera_row.get(key)) else 0}"
-    return ""
 
-
-def _unifi_camera_doorbell_marker(camera_row: Dict[str, Any]) -> str:
-    for key in (
-        "lastRingEventId",
-        "last_ring_event_id",
-        "lastRingEventIds",
-        "last_ring_event_ids",
-        "lastRingEvent",
-        "last_ring_event",
-        "lastRingAt",
-        "last_ring_at",
-        "lastRingTs",
-        "last_ring_ts",
-        "lastRing",
-        "last_ring",
-        "lastDoorbellRing",
-        "last_doorbell_ring",
-        "lastDoorbellRingAt",
-        "last_doorbell_ring_at",
-        "lastDoorbellRingEventId",
-        "last_doorbell_ring_event_id",
-        "lastDoorbellPress",
-        "last_doorbell_press",
-        "lastDoorbellPressAt",
-        "last_doorbell_press_at",
-        "lastDoorbellPressEventId",
-        "last_doorbell_press_event_id",
-    ):
-        marker = _unifi_marker_token(camera_row.get(key))
-        if marker:
-            return f"{key}:{marker}"
-    for key, value in camera_row.items():
-        key_text = _text(key)
-        key_lower = key_text.lower()
-        if not any(token in key_lower for token in ("ring", "press")):
-            continue
-        if any(token in key_lower for token in ("enable", "enabled", "setting", "sensitivity")):
-            continue
-        if not any(token in key_lower for token in ("event", "last", "time", "at", "ts", "id", "press")):
-            continue
-        if isinstance(value, bool) and not value:
-            continue
-        marker = _unifi_marker_token(value)
-        if marker.lower() in {"0", "false", "off", "none", "null", "nan"}:
-            continue
-        if marker:
-            return f"{key_text}:{marker}"
-    nested_marker = _unifi_nested_keyword_marker(
-        camera_row,
-        include_any=("ring", "press"),
-        must_have_any=("event", "last", "time", "at", "ts", "id", "press", "ring"),
-        exclude_any=("enable", "enabled", "setting", "sensitivity"),
-    )
-    if nested_marker:
-        return f"nested:{nested_marker}"
-    for key in ("isRinging", "is_ringing", "isDoorbellRinging", "is_doorbell_ringing"):
-        if key in camera_row and bool(camera_row.get(key)):
-            return f"{key}:1"
-    return ""
-
-
-def _unifi_active_rule_smart_types_by_camera() -> Dict[str, set[str]]:
-    out: Dict[str, set[str]] = {}
+def _unifi_monitored_camera_ids() -> set[str]:
+    out: set[str] = set()
     try:
-        rules = _load_rules(redis_client)
+        monitors = _load_monitors(redis_client)
     except Exception:
         return out
-    for rule in rules.values():
-        if not isinstance(rule, dict):
+    for monitor in monitors.values():
+        if not isinstance(monitor, dict):
             continue
-        if _text(rule.get("kind")).lower() != "camera":
+        if _text(monitor.get("kind")).lower() != "camera":
             continue
-        if not _bool(rule.get("enabled"), True):
+        if not _bool(monitor.get("enabled"), True):
             continue
-        if _rule_provider(rule) != "unifi_protect":
+        if _normalize_event_provider(monitor.get("provider")) != "unifi_protect":
             continue
-        camera_id = _text(_unifi_camera_id_from_entity(_text(rule.get("camera_entity")))).lower()
+        camera_target = _monitor_camera_target(monitor)
+        camera_id = _text(_unifi_camera_id_from_entity(camera_target)).lower()
         if not camera_id:
             continue
-        prefix = f"binary_sensor.unifi_{camera_id}_smart_"
-        trigger_entities = _normalize_trigger_entities(rule.get("trigger_entities") or rule.get("trigger_entity"))
-        for trigger in trigger_entities:
-            token = _text(trigger).lower()
-            if not token.startswith(prefix):
-                continue
-            smart_type = _unifi_normalize_smart_type(token[len(prefix) :])
-            if not smart_type:
-                continue
-            out.setdefault(camera_id, set()).add(smart_type)
+        out.add(camera_id)
     return out
 
 def _unifi_ws_event_item(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -6724,36 +3753,25 @@ def _unifi_event_smart_types(item: Dict[str, Any], event_token: str) -> set[str]
     return {token for token in (_unifi_normalize_smart_type(x) for x in found) if token}
 
 
-def _catalog_label_name(label: Any, fallback: str) -> str:
-    text = _text(label)
-    if not text:
-        return fallback
-    if "(" in text and text.endswith(")"):
-        prefix = text.rsplit("(", 1)[0].strip()
-        if prefix:
-            return prefix
-    return text
 
 
 def _unifi_name_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
     camera_names: Dict[str, str] = {}
     sensor_names: Dict[str, str] = {}
-    try:
-        catalog = _entity_catalog(provider="unifi_protect")
-    except Exception:
-        return camera_names, sensor_names
-
-    for entity, label in catalog.get("cameras") or []:
-        camera_id = _text(_unifi_camera_id_from_entity(entity)).lower()
-        if not camera_id:
+    registry = _monitor_registry(redis_client)
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
             continue
-        camera_names[camera_id] = _catalog_label_name(label, camera_id)
-
-    for entity, label in catalog.get("entry_sensors") or []:
-        sensor_id = _text(_unifi_sensor_id_from_entity(entity)).lower()
-        if not sensor_id:
+        if _normalize_event_provider(device.get("integration_id")) != "unifi_protect":
             continue
-        sensor_names[sensor_id] = _catalog_label_name(label, sensor_id)
+        device_id = _text(device.get("id") or device.get("ref")).lower()
+        if not device_id:
+            continue
+        name = _text(device.get("name")) or device_id
+        if _monitor_device_kind(device) == "camera":
+            camera_names[device_id] = name
+        elif _monitor_device_kind(device) == "sensor":
+            sensor_names[device_id] = name
 
     return camera_names, sensor_names
 
@@ -6861,8 +3879,8 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
 
     if ("camerasmartdetect" in event_token or (is_smart_event and not is_sensor_event)) and camera_id:
         smart_types = _unifi_event_smart_types(item, event_token)
-        if not smart_types:
-            smart_types = set(_unifi_active_rule_smart_types_by_camera().get(camera_id) or set())
+        if not smart_types and camera_id in _unifi_monitored_camera_ids():
+            smart_types = {"motion"}
         for smart_type in sorted(smart_types):
             smart_entity = _unifi_camera_smart_trigger(camera_id, smart_type)
             attrs = {
@@ -7105,8 +4123,8 @@ async def _awareness_retention_loop(stop_event: Optional[object]) -> None:
 
 
 async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None:
-    rules = _load_rules(redis_client)
-    enabled_rules = sum(1 for rule in rules.values() if _bool(rule.get("enabled"), True))
+    monitors = _load_monitors(redis_client)
+    enabled_monitors = sum(1 for monitor in monitors.values() if _bool(monitor.get("enabled"), True))
     worker_count = max(1, int(_AWARENESS_WORKER_COUNT))
     _runtime_set(
         redis_client,
@@ -7119,11 +4137,11 @@ async def _awareness_main(stop_event: Optional[object], llm_client: Any) -> None
         last_error="",
     )
     logger.info(
-        "[awareness] core started v%s (%s) (rules=%d enabled=%d workers=%d)",
+        "[awareness] core started v%s (%s) (monitors=%d enabled=%d workers=%d)",
         __version__,
         __file__,
-        len(rules),
-        enabled_rules,
+        len(monitors),
+        enabled_monitors,
         worker_count,
     )
     tasks = [

@@ -360,25 +360,13 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(values, ["motion", "person", "animal"])
         self.assertEqual(dependency["source_key"], "trigger_device")
 
-    def test_awareness_import_is_disabled_and_deduplicated(self):
-        awareness = {
-            "id": "old-doorbell",
-            "kind": "doorbell",
-            "provider": "unifi_protect",
-            "name": "Front door",
-            "camera_entity": "camera:cam-front",
-            "players": ["voice_core:sat-kitchen"],
-            "trigger_entities": ["binary_sensor.unifi_cam-front_doorbell"],
-        }
-        self.redis.hset("awareness:rules", "old-doorbell", json.dumps(awareness))
-        first = self.core._import_awareness_rules(self.redis)
-        second = self.core._import_awareness_rules(self.redis)
-        self.assertEqual(first["imported"], 1)
-        self.assertEqual(second["imported"], 0)
-        imported = next(iter(self.core._load_rules(self.redis).values()))
-        self.assertFalse(imported["enabled"])
-        self.assertEqual(imported["source_rule_id"], "old-doorbell")
-        self.assertEqual(imported["action_type"], "camera_ai")
+    def test_awareness_import_action_is_not_supported(self):
+        with self.assertRaises(KeyError):
+            self.core.handle_htmlui_tab_action(
+                action="automation_import_awareness",
+                payload={},
+                redis_client=self.redis,
+            )
 
     async def test_camera_ai_uses_snapshot_vision_and_tts(self):
         rule = self.core._normalize_rule(
