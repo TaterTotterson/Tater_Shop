@@ -118,8 +118,53 @@ def sample_registry():
         "category_ids": ["entry_sensor"],
         "event_sources": [{"type": "contact", "ref": "binary_sensor.back_door"}],
     }
+    unifi_sensor = {
+        "integration_id": "unifi_protect",
+        "integration_name": "UniFi Protect",
+        "id": "sensor-back-door",
+        "ref": "binary_sensor.unifi_sensor_sensor-back-door",
+        "name": "Back Door",
+        "room": "Back Yard",
+        "type": "entry_sensor",
+        "category_ids": ["entry_sensor"],
+        "capabilities": ["entry_sensor", "door", "motion"],
+        "state": "closed",
+        "event_sources": [
+            {
+                "type": "door",
+                "ref": "binary_sensor.unifi_sensor_sensor-back-door",
+                "state_on": "open",
+                "state_off": "closed",
+            },
+            {
+                "type": "motion",
+                "ref": "binary_sensor.unifi_sensor_sensor-back-door",
+                "state_on": "motion",
+                "state_off": "clear",
+            },
+        ],
+    }
+    hue_sensor = {
+        "integration_id": "hue",
+        "integration_name": "Philips Hue",
+        "id": "hue-motion-hall",
+        "ref": "binary_sensor.hue_motion_hall",
+        "name": "Hall Motion",
+        "room": "Hall",
+        "type": "sensor",
+        "category_ids": ["motion"],
+        "state": "clear",
+        "event_sources": [
+            {
+                "type": "motion",
+                "ref": "binary_sensor.hue_motion_hall",
+                "state_on": "motion",
+                "state_off": "clear",
+            }
+        ],
+    }
     return {
-        "devices": [camera, doorbell, sensor],
+        "devices": [camera, doorbell, sensor, unifi_sensor, hue_sensor],
         "categories": [],
         "rooms": [],
     }
@@ -386,7 +431,10 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui["appearance"], "awareness")
         fields = {field.get("key"): field for field in ui["add_form"]["fields"] if field.get("key")}
         self.assertEqual(fields["kind"]["presentation"], "cards")
+        self.assertEqual(fields["integration"]["presentation"], "cards")
+        self.assertEqual(fields["integration"]["dependent_options"]["source_key"], "kind")
         self.assertEqual(fields["device"]["presentation"], "cards")
+        self.assertEqual(fields["device"]["dependent_options"]["source_key"], "integration")
         self.assertEqual(fields["trigger_events"]["type"], "multiselect")
         self.assertEqual(fields["trigger_events"]["presentation"], "cards")
         self.assertEqual(fields["trigger_events"]["dependent_options"]["source_key"], "device")
@@ -394,11 +442,27 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             "unifi_protect|doorbell-front"
         ]
         self.assertEqual([row["value"] for row in doorbell_options], ["motion", "doorbell"])
-        device_values = {
+        camera_values = {
             row["value"]
-            for row in fields["device"]["dependent_options"]["options_by_source"]["camera"]
+            for row in fields["device"]["dependent_options"]["options_by_source"][
+                "camera::unifi_protect"
+            ]
         }
-        self.assertIn("unifi_protect|doorbell-front", device_values)
+        self.assertIn("unifi_protect|doorbell-front", camera_values)
+        sensor_integrations = fields["integration"]["dependent_options"]["options_by_source"]["sensor"]
+        self.assertEqual(
+            [row["label"] for row in sensor_integrations],
+            ["Home Assistant", "Philips Hue", "UniFi Protect"],
+        )
+        unifi_sensors = fields["device"]["dependent_options"]["options_by_source"][
+            "sensor::unifi_protect"
+        ]
+        self.assertEqual([row["value"] for row in unifi_sensors], ["unifi_protect|sensor-back-door"])
+        self.assertEqual(unifi_sensors[0]["description"], "Door sensor • Back Yard • UniFi Protect")
+        self.assertEqual(unifi_sensors[0]["meta"], "closed")
+        hue_sensors = fields["device"]["dependent_options"]["options_by_source"]["sensor::hue"]
+        self.assertEqual([row["value"] for row in hue_sensors], ["hue|hue-motion-hall"])
+        self.assertEqual(hue_sensors[0]["description"], "Motion sensor • Hall • Philips Hue")
         self.assertNotIn("trigger_entities", fields)
         self.assertNotIn("notification_targets", fields)
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")

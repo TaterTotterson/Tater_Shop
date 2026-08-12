@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 
-__version__ = "4.1.0"
+__version__ = "4.1.1"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
@@ -1111,6 +1111,77 @@ def _monitor_device_value(device: Dict[str, Any]) -> str:
     return _provider_ref(provider, device_id) if provider != "all" and device_id else ""
 
 
+def _monitor_integration_value(kind: Any, provider: Any) -> str:
+    kind_token = _text(kind).lower()
+    provider_token = _normalize_event_provider(provider)
+    if kind_token not in {"camera", "sensor"} or provider_token == "all":
+        return ""
+    return f"{kind_token}::{provider_token}"
+
+
+def _monitor_device_type_label(device: Dict[str, Any]) -> str:
+    kind = _monitor_device_kind(device)
+    details = device.get("details") if isinstance(device.get("details"), dict) else {}
+    corpus = " ".join(
+        _category_token(value)
+        for value in [
+            device.get("type"),
+            details.get("sensor_kind"),
+            details.get("mount_type"),
+            *(device.get("category_ids") or []),
+            *(device.get("capabilities") or []),
+            *(device.get("features") or []),
+            *[
+                source.get("type")
+                for source in device.get("event_sources") or []
+                if isinstance(source, dict)
+            ],
+        ]
+        if _category_token(value)
+    )
+    if kind == "camera":
+        return "Doorbell camera" if "doorbell" in corpus else "Camera"
+    if "window" in corpus:
+        return "Window sensor"
+    if any(token in corpus for token in ("entry_sensor", "contact", "door", "open_close")):
+        return "Door sensor"
+    if "motion" in corpus:
+        return "Motion sensor"
+    if any(token in corpus for token in ("occupancy", "presence")):
+        return "Presence sensor"
+    if "leak" in corpus:
+        return "Leak sensor"
+    if "temperature" in corpus and "humidity" in corpus:
+        return "Climate sensor"
+    if "temperature" in corpus:
+        return "Temperature sensor"
+    if "humidity" in corpus:
+        return "Humidity sensor"
+    if "illuminance" in corpus or "light_level" in corpus:
+        return "Light sensor"
+    if "battery" in corpus:
+        return "Battery sensor"
+    return "Sensor"
+
+
+def _monitor_device_icon(device: Dict[str, Any]) -> str:
+    label = _monitor_device_type_label(device)
+    return {
+        "Doorbell camera": "◉",
+        "Camera": "◎",
+        "Door sensor": "↔",
+        "Window sensor": "▤",
+        "Motion sensor": "⌁",
+        "Presence sensor": "◇",
+        "Leak sensor": "◒",
+        "Temperature sensor": "°",
+        "Humidity sensor": "◔",
+        "Climate sensor": "◐",
+        "Light sensor": "☼",
+        "Battery sensor": "▰",
+    }.get(label, "◇")
+
+
 def _find_monitor_device(registry: Dict[str, Any], selected_device: Any) -> Optional[Dict[str, Any]]:
     provider, device_id = _split_provider_ref(selected_device, "")
     wanted = _text(device_id).casefold()
@@ -1135,44 +1206,92 @@ def _monitor_device_option(device: Dict[str, Any]) -> Dict[str, Any]:
     provider_name = _text(device.get("integration_name")) or _provider_label(device.get("integration_id"))
     room = _text(device.get("room") or device.get("area"))
     state = _text(device.get("status") or device.get("state"))
+    type_label = _monitor_device_type_label(device)
     return {
         "value": value,
         "label": _text(device.get("name")) or _text(device.get("id") or device.get("ref")),
-        "description": " • ".join(item for item in (room, provider_name) if item),
+        "description": " • ".join(item for item in (type_label, room, provider_name) if item),
         "meta": state,
-        "icon": "◎" if _monitor_device_kind(device) == "camera" else "◇",
+        "icon": _monitor_device_icon(device),
+    }
+
+
+def _monitor_integration_options(
+    registry: Dict[str, Any],
+    *,
+    current_kind: str = "camera",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    provider_rows: Dict[str, Dict[str, Dict[str, Any]]] = {"camera": {}, "sensor": {}}
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        kind = _monitor_device_kind(device)
+        provider = _normalize_event_provider(device.get("integration_id"))
+        if kind not in provider_rows or provider == "all":
+            continue
+        value = _monitor_integration_value(kind, provider)
+        row = provider_rows[kind].setdefault(
+            provider,
+            {
+                "value": value,
+                "label": _text(device.get("integration_name")) or _provider_label(provider),
+                "count": 0,
+                "icon": "◎" if kind == "camera" else "◇",
+            },
+        )
+        row["count"] = _as_int(row.get("count"), 0, minimum=0) + 1
+    options_by_kind: Dict[str, List[Dict[str, Any]]] = {"camera": [], "sensor": []}
+    for kind, providers in provider_rows.items():
+        for row in providers.values():
+            count = _as_int(row.pop("count", 0), 0, minimum=0)
+            noun = "camera" if kind == "camera" else "sensor"
+            row["description"] = f"{count} {noun}{'' if count == 1 else 's'} available"
+            options_by_kind[kind].append(row)
+        rows = options_by_kind[kind]
+        rows.sort(key=lambda row: (_text(row.get("label")).casefold(), _text(row.get("value"))))
+    kind = current_kind if current_kind in options_by_kind else "camera"
+    selected = [dict(row) for row in options_by_kind[kind]]
+    return selected, {
+        "source_key": "kind",
+        "options_by_source": options_by_kind,
+        "default_options": [*options_by_kind["camera"], *options_by_kind["sensor"]],
     }
 
 
 def _monitor_device_options(
     registry: Dict[str, Any],
     *,
-    current_kind: str = "camera",
+    current_integration: str = "",
     current_device: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    options_by_kind: Dict[str, List[Dict[str, Any]]] = {"camera": [], "sensor": []}
+    options_by_integration: Dict[str, List[Dict[str, Any]]] = {}
     seen: set[str] = set()
     for device in registry.get("devices") or []:
         if not isinstance(device, dict):
             continue
         kind = _monitor_device_kind(device)
+        provider = _normalize_event_provider(device.get("integration_id"))
+        integration_value = _monitor_integration_value(kind, provider)
         option = _monitor_device_option(device)
         value = _text(option.get("value"))
-        if kind not in options_by_kind or not value or value in seen:
+        if not integration_value or not value or value in seen:
             continue
         seen.add(value)
-        options_by_kind[kind].append(option)
-    for rows in options_by_kind.values():
+        options_by_integration.setdefault(integration_value, []).append(option)
+    for rows in options_by_integration.values():
         rows.sort(key=lambda row: (_text(row.get("label")).casefold(), _text(row.get("value"))))
-    kind = current_kind if current_kind in options_by_kind else "camera"
-    selected = [dict(row) for row in options_by_kind[kind]]
+    selected = [dict(row) for row in options_by_integration.get(_text(current_integration), [])]
     current = _text(current_device)
     if current and not any(_text(row.get("value")) == current for row in selected):
         selected.append({"value": current, "label": f"{current} (saved)", "icon": "◆"})
     return selected, {
-        "source_key": "kind",
-        "options_by_source": options_by_kind,
-        "default_options": [*options_by_kind["camera"], *options_by_kind["sensor"]],
+        "source_key": "integration",
+        "options_by_source": options_by_integration,
+        "default_options": [
+            dict(row)
+            for key in sorted(options_by_integration)
+            for row in options_by_integration[key]
+        ],
     }
 
 
@@ -1187,6 +1306,14 @@ def _build_monitor_from_values(
     kind = _text(_value(values, payload, "kind", previous.get("kind") or "camera")).lower()
     if kind not in {"camera", "sensor"}:
         raise ValueError("Choose Camera or Sensor.")
+    selected_integration = _text(
+        _value(
+            values,
+            payload,
+            "integration",
+            _monitor_integration_value(kind, previous.get("provider")),
+        )
+    )
     selected = _text(
         _value(values, payload, "device", previous.get("selected_device") or _provider_ref(previous.get("provider"), previous.get("device_id")))
     )
@@ -1198,6 +1325,9 @@ def _build_monitor_from_values(
     if actual_kind != kind:
         raise ValueError(f"The selected device is not available as a {kind} monitor.")
     provider = _normalize_event_provider(device.get("integration_id"))
+    actual_integration = _monitor_integration_value(actual_kind, provider)
+    if selected_integration and selected_integration != actual_integration:
+        raise ValueError("The selected device is not from the chosen integration.")
     device_id = _text(device.get("id") or device.get("ref"))
     device_ref = _text(device.get("ref") or device_id)
     for saved in _load_monitors(client).values():
@@ -3292,9 +3422,14 @@ def _monitor_form(
 ) -> Dict[str, Any]:
     kind = _text(monitor.get("kind") or "camera")
     selected_device = _provider_ref(monitor.get("provider"), monitor.get("device_id"))
-    device_options, device_dependency = _monitor_device_options(
+    selected_integration = _monitor_integration_value(kind, monitor.get("provider"))
+    integration_options, integration_dependency = _monitor_integration_options(
         registry,
         current_kind=kind,
+    )
+    device_options, device_dependency = _monitor_device_options(
+        registry,
+        current_integration=selected_integration,
         current_device=selected_device,
     )
     trigger_options, trigger_dependency = _monitor_trigger_dependency(
@@ -3341,6 +3476,17 @@ def _monitor_form(
                     },
                 ],
                 "value": kind,
+                "full_width": True,
+            },
+            {
+                "key": "integration",
+                "label": "Integration",
+                "type": "select",
+                "presentation": "cards",
+                "options": integration_options,
+                "dependent_options": integration_dependency,
+                "value": selected_integration,
+                "description": "Choose the integration that provides this camera or sensor.",
                 "full_width": True,
             },
             {
@@ -3402,11 +3548,22 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         )
     ]
     default_kind = "camera"
-    camera_options, device_dependency = _monitor_device_options(registry, current_kind="camera")
-    if not camera_options:
+    integration_options, integration_dependency = _monitor_integration_options(
+        registry,
+        current_kind=default_kind,
+    )
+    if not integration_options:
         default_kind = "sensor"
-        camera_options, device_dependency = _monitor_device_options(registry, current_kind="sensor")
-    default_device = _text(camera_options[0].get("value")) if camera_options else ""
+        integration_options, integration_dependency = _monitor_integration_options(
+            registry,
+            current_kind=default_kind,
+        )
+    default_integration = _text(integration_options[0].get("value")) if integration_options else ""
+    device_options, device_dependency = _monitor_device_options(
+        registry,
+        current_integration=default_integration,
+    )
+    default_device = _text(device_options[0].get("value")) if device_options else ""
     default_trigger_options, trigger_dependency = _monitor_trigger_dependency(
         registry,
         current_device=default_device,
@@ -3516,11 +3673,22 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "full_width": True,
                 },
                 {
+                    "key": "integration",
+                    "label": "Integration",
+                    "type": "select",
+                    "presentation": "cards",
+                    "options": integration_options,
+                    "dependent_options": integration_dependency,
+                    "value": default_integration,
+                    "description": "Choose where Awareness should look for cameras or sensors.",
+                    "full_width": True,
+                },
+                {
                     "key": "device",
                     "label": "Which Device?",
                     "type": "select",
                     "presentation": "cards",
-                    "options": camera_options,
+                    "options": device_options,
                     "dependent_options": device_dependency,
                     "value": default_device,
                     "description": "Only compatible devices from enabled integrations are shown.",
