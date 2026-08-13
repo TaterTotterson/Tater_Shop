@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.2.0"
+__version__ = "3.4.1"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -99,7 +99,7 @@ CORE_SETTINGS = {
             "label": "AirPlay Receiver",
             "type": "checkbox",
             "default": False,
-            "description": "Let Apple devices send live audio to selected Tater Native satellites.",
+            "description": "Let Apple devices send live audio to selected Tater Native, Sonos, and AirPlay speakers.",
         },
         "airplay_receiver_name": {
             "label": "AirPlay Receiver Name",
@@ -114,10 +114,10 @@ CORE_SETTINGS = {
             "description": "Optional fixed four-digit PIN used when a device pairs for the first time.",
         },
         "airplay_receiver_targets": {
-            "label": "AirPlay Satellites",
+            "label": "AirPlay Destinations",
             "type": "text",
             "default": "",
-            "description": "Tater Native satellites or stereo pairs that play incoming AirPlay audio.",
+            "description": "Tater Native satellites, stereo pairs, AirPlay-capable Sonos players, or AirPlay speakers that play incoming audio.",
         },
         "recommendations_enabled": {
             "label": "Tater Recommendations",
@@ -514,7 +514,7 @@ def _airplay_receiver_targets(
     configured = _normalize_stereo_targets(cfg.get("airplay_receiver_targets"))
     if not configured and isinstance(player, dict):
         configured = _normalize_stereo_targets(player.get("targets") or player.get("target"))
-    return [target for target in configured if _is_native_target(target)]
+    return [target for target in configured if _is_external_audio_target(target)]
 
 
 def _external_audio_config(
@@ -523,12 +523,10 @@ def _external_audio_config(
 ) -> Dict[str, Any]:
     current_player = player if isinstance(player, dict) else _player()
     targets = _airplay_receiver_targets(cfg, current_player)
-    default_volume = _as_int(
-        current_player.get("volume_percent"),
-        _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
-        0,
-        100,
-    )
+    # Incoming AirPlay owns the group-volume slider. Keep every selected
+    # destination at unity here so sender 100% can reach the player's real
+    # maximum and one saved Music Core volume does not attenuate it again.
+    default_volume = 100
     settings = _selected_player_settings(
         targets,
         cfg,
@@ -541,12 +539,17 @@ def _external_audio_config(
         "targets": targets,
         "volume_percent": default_volume,
         "target_volume_percent": {
-            target: _as_int(values.get("volume_percent"), default_volume, 0, 100)
-            for target, values in settings.items()
+            target: 100
+            for target in settings
         },
         "target_sync_offset_ms": {
             target: _as_int(values.get("sync_offset_ms"), 0, -1000, 1000)
             for target, values in settings.items()
+        },
+        "target_transport_mode": {
+            target: "airplay"
+            for target in targets
+            if _is_sonos_target(target)
         },
     }
 
@@ -745,6 +748,40 @@ def _selected_player_settings(
 def _is_native_target(value: Any) -> bool:
     target = _text(value).casefold()
     return target.startswith(("voice_core:native:", "voice_core:stereo:", "native:", "stereo:"))
+
+
+def _is_airplay_target(value: Any) -> bool:
+    return _text(value).casefold().startswith("airplay:")
+
+
+def _is_sonos_target(value: Any) -> bool:
+    return _text(value).casefold().startswith("sonos:")
+
+
+def _is_external_audio_target(value: Any) -> bool:
+    return _is_native_target(value) or _is_airplay_target(value) or _is_sonos_target(value)
+
+
+def _is_external_audio_option(row: Any) -> bool:
+    option = row if isinstance(row, dict) else {}
+    target = _text(option.get("value"))
+    if not _is_external_audio_target(target):
+        return False
+    if _is_sonos_target(target):
+        return _is_airplay_target(option.get("airplay_bridge_target"))
+    return True
+
+
+def _sonos_airplay_target(value: Any) -> str:
+    if not _is_sonos_target(value):
+        return ""
+    try:
+        from announcement_targets import resolve_sonos_airplay_target
+
+        target = _text(resolve_sonos_airplay_target(value))
+        return target if _is_airplay_target(target) else ""
+    except Exception:
+        return ""
 
 
 def _uses_audio_sync_transcode(targets: Any) -> bool:
@@ -2915,10 +2952,43 @@ def _compact_target_option(row: Dict[str, Any]) -> Dict[str, Any]:
     """Use shorter satellite labels in Music Core's space-limited pickers."""
     option = dict(row)
     label = _text(option.get("label"))
-    prefix = "Tater Satellite:"
-    if label.casefold().startswith(prefix.casefold()):
-        option["label"] = f"Tater Sat:{label[len(prefix):]}"
+    replacements = {
+        "Tater Satellite:": "Tater Sat:",
+        "AirPlay Bridge:": "AirPlay:",
+    }
+    for prefix, replacement in replacements.items():
+        if label.casefold().startswith(prefix.casefold()):
+            option["label"] = f"{replacement}{label[len(prefix):]}"
+            break
     return option
+
+
+def _split_local_airplay_receiver_options(
+    options: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], set[str]]:
+    """Keep this Tater's receiver out of its own outbound AirPlay player list."""
+    receiver_name = _text(cfg.get("airplay_receiver_name")) or "Tater Music"
+    wanted_name = receiver_name.casefold()
+    local_targets: set[str] = set()
+    outbound: List[Dict[str, Any]] = []
+    for row in options:
+        target = _text(row.get("value")) if isinstance(row, dict) else ""
+        label = _text(row.get("label")) if isinstance(row, dict) else ""
+        display_name = label
+        for prefix in ("AirPlay:", "AirPlay Bridge:"):
+            if display_name.casefold().startswith(prefix.casefold()):
+                display_name = display_name[len(prefix) :].strip()
+                break
+        display_name = display_name.split("(", 1)[0].strip()
+        if (
+            target.casefold().startswith("airplay:")
+            and display_name.casefold() == wanted_name
+        ):
+            local_targets.add(target.casefold())
+            continue
+        outbound.append(row)
+    return outbound, local_targets
 
 
 def _target_options(
@@ -3077,6 +3147,10 @@ def _resolve_targets(
         provider_id=provider_id,
         include_stereo_members=True,
     )
+    options, local_airplay_targets = _split_local_airplay_receiver_options(
+        options,
+        _settings(store),
+    )
     if explicit_room_names:
         resolved_rooms = [
             preferred_by_room.get(room_name) or _room_target_from_query(room_name, options)
@@ -3090,6 +3164,9 @@ def _resolve_targets(
         explicit = []
         for value in requested_values:
             direct_value = _text(value)
+            if direct_value.casefold() in local_airplay_targets:
+                explicit.append("")
+                continue
             if direct_value.casefold().startswith(("voice_core:", "ha:", "sonos:", "airplay:", "integration:")):
                 target = _target_alias_map(options).get(direct_value.casefold(), direct_value)
             else:
@@ -3256,7 +3333,24 @@ def _play_track(
     return result
 
 
-def _stop_target(targets: Any) -> List[str]:
+def _playback_voice_core_sessions(player: Dict[str, Any]) -> List[Dict[str, Any]]:
+    playback_result = (
+        player.get("playback_result")
+        if isinstance(player.get("playback_result"), dict)
+        else {}
+    )
+    return [
+        dict(row)
+        for row in list(playback_result.get("voice_core_sessions") or [])
+        if isinstance(row, dict) and _text(row.get("session_id"))
+    ]
+
+
+def _stop_target(
+    targets: Any,
+    *,
+    expected_voice_core_sessions: Any = None,
+) -> List[str]:
     warnings: List[str] = []
     try:
         from announcement_targets import split_announcement_targets
@@ -3268,30 +3362,46 @@ def _stop_target(targets: Any) -> List[str]:
     selectors = list(grouped.get("voice_core_selectors") or [])
     if selectors:
         try:
-            from tater_voice import native_satellite, stereo_pairs
+            sessions = [
+                dict(row)
+                for row in list(expected_voice_core_sessions or [])
+                if isinstance(row, dict) and _text(row.get("session_id"))
+            ]
+            if sessions:
+                from media_playback import _voice_core_stop_media_sync
 
-            for selector in selectors:
-                members = [selector]
-                pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
-                if isinstance(pair, dict) and pair:
-                    members = [
-                        _text(pair.get("left_selector")),
-                        _text(pair.get("right_selector")),
-                    ]
-                for member in members:
-                    if not member:
-                        continue
-                    try:
-                        native_satellite.run_on_runtime_loop(
-                            native_satellite.send_command(
-                                member,
-                                "media.session.stop",
-                                {"reason": "music_core_stop"},
-                            ),
-                            timeout=8.0,
-                        )
-                    except Exception as exc:
-                        warnings.append(f"{member}: {exc}")
+                warnings.extend(
+                    _voice_core_stop_media_sync(
+                        [],
+                        expected_sessions=sessions,
+                        reason="music_core_stop",
+                    )
+                )
+            else:
+                from tater_voice import native_satellite, stereo_pairs
+
+                for selector in selectors:
+                    members = [selector]
+                    pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
+                    if isinstance(pair, dict) and pair:
+                        members = [
+                            _text(pair.get("left_selector")),
+                            _text(pair.get("right_selector")),
+                        ]
+                    for member in members:
+                        if not member:
+                            continue
+                        try:
+                            native_satellite.run_on_runtime_loop(
+                                native_satellite.send_command(
+                                    member,
+                                    "media.session.stop",
+                                    {"reason": "music_core_stop"},
+                                ),
+                                timeout=8.0,
+                            )
+                        except Exception as exc:
+                            warnings.append(f"{member}: {exc}")
         except Exception as exc:
             warnings.append(_text(exc))
 
@@ -3591,7 +3701,10 @@ def _start_player_index(
             else ""
         )
         if _text(player.get("status")).lower() == "playing" and not reusable_airplay_group_id:
-            _stop_target(targets)
+            _stop_target(
+                targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(player),
+            )
         duration = max(0.0, _as_float(track.get("duration_seconds")))
         start_position = max(0.0, _as_float(start_position_seconds))
         if duration > 0:
@@ -3717,7 +3830,10 @@ def _route_player_targets(
         )
         warnings: List[str] = []
         if restart_required and old_targets:
-            warnings = _stop_target(old_targets)
+            warnings = _stop_target(
+                old_targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(player),
+            )
         player["targets"] = next_targets
         if restart_required:
             player.update(
@@ -3785,7 +3901,10 @@ def _create_and_start_queue(
         previous = _player(store)
         old_targets = _list(previous.get("targets") or previous.get("target"))
         if previous.get("status") == "playing" and old_targets:
-            _stop_target(old_targets)
+            _stop_target(
+                old_targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(previous),
+            )
         player = {
             "status": "queued",
             "provider": _provider_id(queue[0].get("provider"), _provider_id(cfg.get("provider"))),
@@ -3837,7 +3956,10 @@ def _advance_player(direction: int, *, client: Any = None) -> Dict[str, Any]:
                     index = _as_int(player.get("index"), 0, 0, max(0, len(queue) - 1))
                     next_index = index + 1
                 if next_index >= len(queue):
-                    _stop_target(player.get("targets") or player.get("target"))
+                    _stop_target(
+                        player.get("targets") or player.get("target"),
+                        expected_voice_core_sessions=_playback_voice_core_sessions(player),
+                    )
                     player.update(
                         {
                             "status": "finished",
@@ -3914,7 +4036,14 @@ def _pause_player(*, client: Any = None) -> Dict[str, Any]:
         if duration > 0:
             position = min(duration, position)
         targets = _list(player.get("targets") or player.get("target"))
-        warnings = _stop_target(targets) if targets else []
+        warnings = (
+            _stop_target(
+                targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(player),
+            )
+            if targets
+            else []
+        )
         player.update(
             {
                 "status": "paused",
@@ -3955,7 +4084,14 @@ def _stop_player(*, client: Any = None) -> Dict[str, Any]:
     with _state_lock:
         player = _player(store)
         targets = _list(player.get("targets") or player.get("target"))
-        warnings = _stop_target(targets) if targets else []
+        warnings = (
+            _stop_target(
+                targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(player),
+            )
+            if targets
+            else []
+        )
         player.update(
             {
                 "status": "stopped",
@@ -4637,7 +4773,7 @@ def _player_item(
             },
         ],
         "track_list": track_list,
-        "track_list_label": "Current Track List",
+        "track_list_label": "Playlist",
         "track_list_action": "music_ui_queue_play",
         "track_list_shuffle": bool(player.get("shuffle")),
         "track_list_shuffle_action": "music_ui_set_shuffle",
@@ -4932,7 +5068,16 @@ def get_client_music_state(
         current_values=player.get("targets"),
         provider_id=active_provider,
     )
+    target_options, local_airplay_targets = _split_local_airplay_receiver_options(
+        target_options,
+        cfg,
+    )
     saved_player_targets = _list(player.get("targets") or player.get("target"))
+    saved_player_targets = [
+        target
+        for target in saved_player_targets
+        if target.casefold() not in local_airplay_targets
+    ]
     player_targets = _canonical_option_targets(saved_player_targets, target_options)
     if player_targets != saved_player_targets:
         player["targets"] = player_targets
@@ -5700,6 +5845,20 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         current_values=saved_targets,
         provider_id=active_provider,
     )
+    target_options, local_airplay_targets = _split_local_airplay_receiver_options(
+        target_options,
+        cfg,
+    )
+    saved_player_targets = [
+        target
+        for target in saved_player_targets
+        if target.casefold() not in local_airplay_targets
+    ]
+    saved_default_targets = [
+        target
+        for target in saved_default_targets
+        if target.casefold() not in local_airplay_targets
+    ]
     saved_player_targets = _canonical_option_targets(saved_player_targets, target_options)
     saved_default_targets = _canonical_option_targets(saved_default_targets, target_options)
     saved_targets = _list([*saved_player_targets, *saved_default_targets])
@@ -5715,11 +5874,11 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         _airplay_receiver_targets(cfg, player),
         target_options,
     )
-    airplay_targets = [target for target in airplay_targets if _is_native_target(target)]
-    native_target_options = [
+    airplay_targets = [target for target in airplay_targets if _is_external_audio_target(target)]
+    receiver_target_options = [
         row
         for row in target_options
-        if isinstance(row, dict) and _is_native_target(row.get("value"))
+        if _is_external_audio_option(row)
     ]
     external_audio = _external_audio_status(cfg, player)
     airplay_enabled = _as_bool(cfg.get("airplay_receiver_enabled"), False)
@@ -5736,7 +5895,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         "routing": "CONNECTING SATS",
         "playing": "PLAYING",
         "waiting_for_targets": "CHOOSE SATS",
-        "dependency_missing": "UXPLAY NEEDED",
+        "dependency_missing": "SHAIRPORT NEEDED",
         "runtime_unavailable": "TATER UPDATE NEEDED",
         "stopped": "STOPPED",
         "error": "ERROR",
@@ -5758,11 +5917,11 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
         [
             {
                 "id": "settings:airplay_receiver",
-                "group": "settings",
-                "title": "AirPlay Receiver",
+                "group": "airplay",
+                "card_variant": "airplay_receiver",
+                "title": _text(cfg.get("airplay_receiver_name")) or "Tater Music",
                 "subtitle": (
-                    "Send audio from an iPhone, iPad, Mac, or compatible Android app "
-                    "to synchronized Tater Native satellites."
+                    "Your single AirPlay doorway into synchronized Tater Native and AirPlay speakers."
                 ),
                 "detail": (
                     external_error
@@ -5771,11 +5930,11 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     if external_status == "playing"
                     else "Visible in the AirPlay speaker picker and waiting for audio."
                     if external_status == "ready"
-                    else "Enable the receiver and choose at least one Native satellite or stereo pair."
+                    else "Enable the receiver and choose at least one Native or AirPlay destination."
                     if not airplay_enabled
                     else "Choose at least one Native satellite or stereo pair."
                     if not airplay_targets
-                    else "The receiver uses the same UxPlay adapter on Docker/Linux and macOS."
+                    else "The receiver uses the same Shairport Sync adapter on Docker/Linux and macOS."
                 ),
                 "hero_badges": [
                     {
@@ -5788,9 +5947,9 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                             else "muted"
                         ),
                     },
-                    {"label": "UXPLAY", "tone": "muted"},
+                    {"label": "SHAIRPORT SYNC", "tone": "muted"},
                     {
-                        "label": f"{len(airplay_targets)} SAT GROUP{'' if len(airplay_targets) == 1 else 'S'}",
+                        "label": f"{len(airplay_targets)} DESTINATION{'' if len(airplay_targets) == 1 else 'S'}",
                         "tone": "muted",
                     },
                     *(
@@ -5810,16 +5969,29 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     },
                     {
                         "label": "Adapter",
-                        "value": "UxPlay 1.73+ · AirPlay audio receiver",
+                        "value": "Shairport Sync 5.2+ · classic AirPlay/RAOP receiver",
                     },
                 ],
                 "fields": [
                     {
                         "key": "airplay_receiver_enabled",
-                        "label": "Enable AirPlay Receiver",
+                        "label": "Make This Receiver Available",
                         "type": "checkbox",
                         "value": airplay_enabled,
                         "description": "Advertise this Tater server as an AirPlay audio destination.",
+                    },
+                    {
+                        "key": "airplay_receiver_targets",
+                        "label": "Play Incoming AirPlay On",
+                        "type": "player_multiselect",
+                        "value": airplay_targets,
+                        "size": max(4, min(8, len(receiver_target_options))),
+                        "options": receiver_target_options,
+                        "description": (
+                            "Choose Tater Native satellites, stereo pairs, AirPlay-capable Sonos players, "
+                            "or discovered AirPlay speakers. Sonos uses its matched AirPlay endpoint. "
+                            "Tater keeps the selected destinations synchronized as one receiver."
+                        ),
                     },
                     {
                         "key": "airplay_receiver_name",
@@ -5836,15 +6008,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "placeholder": "Four digits",
                         "description": "A fixed four-digit PIN is requested only when a device first pairs.",
                     },
-                    {
-                        "key": "airplay_receiver_targets",
-                        "label": "Play AirPlay On",
-                        "type": "multiselect",
-                        "value": airplay_targets,
-                        "size": max(4, min(8, len(native_target_options))),
-                        "options": native_target_options,
-                        "description": "Only Tater Native satellites and Native stereo pairs are listed.",
-                    },
                 ],
                 "actions": (
                     [
@@ -5858,25 +6021,19 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     else []
                 ),
                 "save_action": "music_save_settings",
-                "save_label": "Save AirPlay Receiver",
+                "save_label": "Save AirPlay",
             },
             {
                 "id": "settings:music",
                 "group": "settings",
-                "title": "Music Core Settings",
-                "subtitle": "Defaults for catalog refreshes, queues, and playback.",
+                "card_variant": "settings_wide",
+                "title": "Playback Defaults",
+                "subtitle": "Where music starts and how broad requests behave.",
                 "fields": [
-                    {
-                        "key": "catalog_sync_interval_seconds",
-                        "label": "Catalog Sync Interval (sec)",
-                        "type": "number",
-                        "compact": True,
-                        "value": _as_int(cfg.get("catalog_sync_interval_seconds"), 900, 60, 86400),
-                    },
                     {
                         "key": "default_targets",
                         "label": "Default Players",
-                        "type": "multiselect",
+                        "type": "player_multiselect",
                         "value": saved_default_targets,
                         "size": max(4, min(8, len(target_options))),
                         "options": target_options,
@@ -5887,22 +6044,13 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     },
                     {
                         "key": "default_volume_percent",
-                        "label": "Default Volume (%)",
-                        "type": "number",
+                        "label": "Default Volume",
+                        "type": "range",
                         "value": _as_int(cfg.get("default_volume_percent"), 75, 0, 100),
-                    },
-                    {
-                        "key": "mixed_sync_default_adjustment_ms",
-                        "label": "Default Mixed Sync Adjustment (ms)",
-                        "type": "number",
-                        "value": _as_int(cfg.get("mixed_sync_default_adjustment_ms"), 0, -750, 3000),
-                        "min": -750,
-                        "max": 3000,
-                        "step": 25,
-                        "description": (
-                            "Starting adjustment for new Sonos + Tater Sat groups. Each group can be calibrated "
-                            "from the player popup."
-                        ),
+                        "min": 0,
+                        "max": 100,
+                        "step": 1,
+                        "suffix": "%",
                     },
                     {
                         "key": "default_shuffle",
@@ -5916,6 +6064,48 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "type": "number",
                         "value": _as_int(cfg.get("maximum_queue_tracks"), 200, 1, 1000),
                     },
+                ],
+                "save_action": "music_save_settings",
+                "save_label": "Save Playback Defaults",
+            },
+            {
+                "id": "settings:library_sync",
+                "group": "settings",
+                "title": "Library & Sync",
+                "subtitle": "Background refresh timing and the starting point for mixed speaker groups.",
+                "fields": [
+                    {
+                        "key": "catalog_sync_interval_seconds",
+                        "label": "Catalog Refresh (seconds)",
+                        "type": "number",
+                        "value": _as_int(cfg.get("catalog_sync_interval_seconds"), 900, 60, 86400),
+                        "min": 60,
+                        "max": 86400,
+                        "step": 60,
+                    },
+                    {
+                        "key": "mixed_sync_default_adjustment_ms",
+                        "label": "Mixed Group Starting Offset (ms)",
+                        "type": "number",
+                        "value": _as_int(cfg.get("mixed_sync_default_adjustment_ms"), 0, -750, 3000),
+                        "min": -750,
+                        "max": 3000,
+                        "step": 25,
+                        "description": (
+                            "Starting adjustment for new Sonos + Tater Sat groups. Fine-tune each player "
+                            "from the Players popup."
+                        ),
+                    },
+                ],
+                "save_action": "music_save_settings",
+                "save_label": "Save Library & Sync",
+            },
+            {
+                "id": "settings:personalization",
+                "group": "settings",
+                "title": "Personalization",
+                "subtitle": f"Control {assistant_possessive} recommendations and one Person's listening profile.",
+                "fields": [
                     {
                         "key": "recommendations_enabled",
                         "label": recommendations_label,
@@ -5971,7 +6161,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     },
                 ],
                 "save_action": "music_save_settings",
-                "save_label": "Save Music Settings",
+                "save_label": "Save Personalization",
             },
         ]
     )
@@ -6010,8 +6200,14 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "live_updates": True,
             "poll_interval_ms": 3000,
             "persistent_item_groups": ["player"],
-            "default_tab": "library",
+            "default_tab": "playlist",
             "manager_tabs": [
+                {
+                    "key": "playlist",
+                    "label": "Playlist",
+                    "source": "player_queue",
+                    "empty_message": "Play something from the library to start a playlist.",
+                },
                 {
                     "key": "library",
                     "label": "Browse Library",
@@ -6058,6 +6254,13 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "empty_message": f"Play some music to help {assistant_name} build recommendations.",
                 },
                 {"key": "providers", "label": "Tater Tube", "source": "items", "item_group": "providers"},
+                {
+                    "key": "airplay",
+                    "label": "AirPlay",
+                    "source": "items",
+                    "item_group": "airplay",
+                    "empty_message": "AirPlay Receiver is unavailable in this Tater build.",
+                },
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
             ],
             "item_fields_dropdown": True,
@@ -6312,9 +6515,22 @@ def handle_htmlui_tab_action(
             )
         if "airplay_receiver_targets" in updates:
             targets = _normalize_stereo_targets(updates["airplay_receiver_targets"])
-            non_native = [target for target in targets if not _is_native_target(target)]
-            if non_native:
-                raise ValueError("AirPlay Receiver destinations must be Tater Native satellites or stereo pairs.")
+            unsupported = [target for target in targets if not _is_external_audio_target(target)]
+            if unsupported:
+                raise ValueError(
+                    "AirPlay Receiver destinations must be Tater Native satellites, stereo pairs, "
+                    "AirPlay-capable Sonos players, or AirPlay speakers."
+                )
+            unavailable_sonos = [
+                target
+                for target in targets
+                if _is_sonos_target(target) and not _sonos_airplay_target(target)
+            ]
+            if unavailable_sonos:
+                raise ValueError(
+                    "Each Sonos receiver destination needs a currently discovered matching AirPlay endpoint: "
+                    + ", ".join(unavailable_sonos)
+                )
             updates["airplay_receiver_targets"] = json.dumps(targets)
         if "airplay_receiver_name" in updates:
             updates["airplay_receiver_name"] = (
@@ -6571,7 +6787,10 @@ def handle_htmlui_tab_action(
         )
         active_targets = _list(player.get("targets") or player.get("target"))
         if _text(player.get("status")).lower() == "playing" and active_targets:
-            _stop_target(active_targets)
+            _stop_target(
+                active_targets,
+                expected_voice_core_sessions=_playback_voice_core_sessions(player),
+            )
             player["status"] = "stopped"
             player["started_at"] = 0.0
             _save_player(player, store)

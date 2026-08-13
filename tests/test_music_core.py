@@ -1828,6 +1828,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(fields["volume_percent"]["type"], "range")
         self.assertEqual(fields["volume_percent"]["action"], "music_ui_set_volume")
         self.assertEqual(player["track_list"], [])
+        self.assertEqual(player["track_list_label"], "Playlist")
         self.assertEqual(player["track_list_action"], "music_ui_queue_play")
         self.assertEqual(player["track_list_shuffle_action"], "music_ui_set_shuffle")
         self.assertEqual(player["playback"]["seek_action"], "music_ui_seek")
@@ -1867,10 +1868,12 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(payload["ui"]["live_updates"])
         self.assertEqual(payload["ui"]["poll_interval_ms"], 3000)
         self.assertEqual(payload["ui"]["persistent_item_groups"], ["player"])
-        self.assertEqual(payload["ui"]["default_tab"], "library")
+        self.assertEqual(payload["ui"]["default_tab"], "playlist")
         tabs = {row["key"]: row for row in payload["ui"]["manager_tabs"]}
         self.assertNotIn("player", tabs)
+        self.assertEqual(tabs["playlist"]["source"], "player_queue")
         self.assertEqual(tabs["recommendations"]["item_group"], "recommendations")
+        self.assertEqual(tabs["airplay"]["item_group"], "airplay")
         self.assertEqual(
             [row["key"] for row in tabs["library"]["groups"]],
             ["search", "genres", "artists", "albums"],
@@ -1898,14 +1901,29 @@ class MusicCoreTests(unittest.TestCase):
             if row.get("id") == "settings:music"
         )
         settings_fields = {row["key"]: row for row in settings["fields"]}
-        self.assertEqual(settings_fields["default_targets"]["type"], "multiselect")
-        self.assertTrue(settings_fields["catalog_sync_interval_seconds"]["compact"])
-        self.assertEqual(settings_fields["mixed_sync_default_adjustment_ms"]["value"], 0)
-        self.assertTrue(settings_fields["recommendations_enabled"]["value"])
-        self.assertTrue(settings_fields["prompt_context_enabled"]["value"])
-        self.assertEqual(settings_fields["prompt_person_id"]["type"], "select")
-        self.assertEqual(settings_fields["prompt_person_id"]["options"][0]["label"], "Choose a person")
-        self.assertEqual(settings_fields["prompt_profile_interval_hours"]["value"], 12)
+        self.assertEqual(settings["title"], "Playback Defaults")
+        self.assertEqual(settings_fields["default_targets"]["type"], "player_multiselect")
+        self.assertEqual(settings_fields["default_volume_percent"]["type"], "range")
+        library_settings = next(
+            row for row in payload["ui"]["item_forms"]
+            if row.get("id") == "settings:library_sync"
+        )
+        library_fields = {row["key"]: row for row in library_settings["fields"]}
+        self.assertEqual(library_fields["catalog_sync_interval_seconds"]["min"], 60)
+        self.assertEqual(library_fields["mixed_sync_default_adjustment_ms"]["value"], 0)
+        personalization = next(
+            row for row in payload["ui"]["item_forms"]
+            if row.get("id") == "settings:personalization"
+        )
+        personalization_fields = {row["key"]: row for row in personalization["fields"]}
+        self.assertTrue(personalization_fields["recommendations_enabled"]["value"])
+        self.assertTrue(personalization_fields["prompt_context_enabled"]["value"])
+        self.assertEqual(personalization_fields["prompt_person_id"]["type"], "select")
+        self.assertEqual(
+            personalization_fields["prompt_person_id"]["options"][0]["label"],
+            "Choose a person",
+        )
+        self.assertEqual(personalization_fields["prompt_profile_interval_hours"]["value"], 12)
         recommendation_intro = next(
             row
             for row in payload["ui"]["item_forms"]
@@ -1940,7 +1958,7 @@ class MusicCoreTests(unittest.TestCase):
         settings = next(
             row
             for row in payload["ui"]["item_forms"]
-            if row.get("id") == "settings:music"
+            if row.get("id") == "settings:personalization"
         )
         settings_fields = {row["key"]: row for row in settings["fields"]}
         tasks = {
@@ -2103,7 +2121,10 @@ class MusicCoreTests(unittest.TestCase):
             return_value={"ok": True, "sent_count": 1},
         ) as play:
             player = self.core._advance_player(1, client=self.redis)
-        stop.assert_called_once_with(["voice_core:native:kitchen"])
+        stop.assert_called_once_with(
+            ["voice_core:native:kitchen"],
+            expected_voice_core_sessions=[],
+        )
         self.assertEqual(play.call_args.args[0]["id"], "track:two")
         self.assertEqual(player["index"], 1)
         self.assertEqual(player["current"]["id"], "track:two")
@@ -2132,7 +2153,43 @@ class MusicCoreTests(unittest.TestCase):
             )
         self.assertEqual([row["id"] for row in player["queue"]], ["second:1"])
         self.assertEqual([row["id"] for row in player["queue_original"]], ["second:1"])
-        stop.assert_called_once_with(["voice_core:native:kitchen"])
+        stop.assert_called_once_with(
+            ["voice_core:native:kitchen"],
+            expected_voice_core_sessions=[],
+        )
+
+    def test_stop_target_uses_owned_voice_session_cleanup(self):
+        sessions = [
+            {
+                "session_id": "music-session-1",
+                "selectors": ["native:kitchen"],
+            }
+        ]
+        announcement_targets = types.ModuleType("announcement_targets")
+        announcement_targets.split_announcement_targets = lambda _targets: {
+            "voice_core_selectors": ["native:kitchen"],
+        }
+        media_playback = types.ModuleType("media_playback")
+        media_playback._voice_core_stop_media_sync = Mock(return_value=[])
+
+        with patch.dict(
+            sys.modules,
+            {
+                "announcement_targets": announcement_targets,
+                "media_playback": media_playback,
+            },
+        ):
+            warnings = self.core._stop_target(
+                ["voice_core:native:kitchen"],
+                expected_voice_core_sessions=sessions,
+            )
+
+        self.assertEqual(warnings, [])
+        media_playback._voice_core_stop_media_sync.assert_called_once_with(
+            [],
+            expected_sessions=sessions,
+            reason="music_core_stop",
+        )
 
     def test_live_volume_and_shuffle_actions_update_the_player_without_restarting(self):
         queue = [
@@ -2267,7 +2324,10 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        stop.assert_called_once_with([target])
+        stop.assert_called_once_with(
+            [target],
+            expected_voice_core_sessions=[],
+        )
         paused = self.core._player(self.redis)
         self.assertEqual(paused["status"], "paused")
         self.assertEqual(paused["started_at"], 0.0)
@@ -2350,7 +2410,10 @@ class MusicCoreTests(unittest.TestCase):
         ) as play, patch.object(self.core, "_record_listening_history") as history:
             routed = self.core._route_player_targets(new_targets, client=self.redis)
 
-        stop.assert_called_once_with([old_target])
+        stop.assert_called_once_with(
+            [old_target],
+            expected_voice_core_sessions=[],
+        )
         self.assertEqual(play.call_args.args[1], new_targets)
         self.assertEqual(play.call_args.kwargs["start_position_seconds"], 47.5)
         history.assert_not_called()
@@ -2398,7 +2461,10 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        stop.assert_called_once_with([old_target])
+        stop.assert_called_once_with(
+            [old_target],
+            expected_voice_core_sessions=[],
+        )
         paused = self.core._player(self.redis)
         self.assertEqual(paused["status"], "paused")
         self.assertEqual(paused["targets"], [new_target])
@@ -2661,7 +2727,10 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        stop.assert_called_once_with(targets)
+        stop.assert_called_once_with(
+            targets,
+            expected_voice_core_sessions=[],
+        )
         kwargs = playback.play_media_url_targets.call_args.kwargs
         self.assertGreater(len(kwargs["audio_bytes"]), 1000)
         self.assertEqual(kwargs["target_volume_percent"], {targets[0]: 44, targets[1]: 63})
@@ -2809,7 +2878,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(play.call_args.kwargs["volume_percent"], 0)
         self.assertEqual(self.core._player(self.redis)["current"]["id"], "track:two")
 
-    def test_airplay_receiver_card_lists_only_native_destinations(self):
+    def test_airplay_receiver_card_lists_native_airplay_and_bridged_sonos_destinations(self):
         self.redis.hset(
             self.core.SETTINGS_KEY,
             mapping={
@@ -2840,7 +2909,12 @@ class MusicCoreTests(unittest.TestCase):
             return_value=[
                 {"value": "voice_core:native:kitchen", "label": "Tater Sat: Kitchen"},
                 {"value": "voice_core:stereo:office", "label": "Tater Stereo: Office"},
-                {"value": "sonos:den", "label": "Sonos: Den"},
+                {
+                    "value": "sonos:den",
+                    "label": "Sonos: Den",
+                    "airplay_bridge_target": "airplay:sonos-den",
+                },
+                {"value": "sonos:patio", "label": "Sonos: Patio"},
                 {"value": "airplay:living", "label": "AirPlay Bridge: Living"},
             ],
         ):
@@ -2852,13 +2926,73 @@ class MusicCoreTests(unittest.TestCase):
             if row.get("id") == "settings:airplay_receiver"
         )
         fields = {row["key"]: row for row in card["fields"]}
+        self.assertEqual(card["group"], "airplay")
+        self.assertEqual(card["card_variant"], "airplay_receiver")
         self.assertEqual(card["hero_badges"][0]["label"], "READY")
         self.assertEqual(fields["airplay_receiver_name"]["value"], "House Tater")
         self.assertEqual(fields["airplay_receiver_pin"]["type"], "password")
+        self.assertEqual(fields["airplay_receiver_targets"]["type"], "player_multiselect")
         self.assertEqual(
             [row["value"] for row in fields["airplay_receiver_targets"]["options"]],
-            ["voice_core:native:kitchen", "voice_core:stereo:office"],
+            [
+                "voice_core:native:kitchen",
+                "voice_core:stereo:office",
+                "sonos:den",
+                "airplay:living",
+            ],
         )
+
+    def test_local_airplay_receiver_is_not_offered_as_an_outbound_player(self):
+        self.redis.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "airplay_receiver_name": "Tater Music",
+                "default_targets": json.dumps(["airplay:localreceiver"]),
+            },
+        )
+        options = [
+            {
+                "value": "airplay:localreceiver",
+                "label": "AirPlay: Tater Music (Mac • 192.168.1.10)",
+            },
+            {
+                "value": "airplay:kitchen",
+                "label": "AirPlay: Kitchen HomePod (Apple • 192.168.1.20)",
+            },
+            {
+                "value": "voice_core:native:office",
+                "label": "Tater Sat: Office",
+            },
+        ]
+        with patch.object(self.core, "_target_options", return_value=options):
+            payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
+
+        player = next(
+            row for row in payload["ui"]["item_forms"] if row.get("id") == "player:main"
+        )
+        offered = {row["target"] for row in player["player_rows"]}
+        self.assertNotIn("airplay:localreceiver", offered)
+        self.assertIn("airplay:kitchen", offered)
+        settings = next(
+            row for row in payload["ui"]["item_forms"] if row.get("id") == "settings:music"
+        )
+        default_targets = next(
+            row for row in settings["fields"] if row.get("key") == "default_targets"
+        )
+        self.assertEqual(default_targets["value"], [])
+        receiver = next(
+            row
+            for row in payload["ui"]["item_forms"]
+            if row.get("id") == "settings:airplay_receiver"
+        )
+        receiver_targets = next(
+            row
+            for row in receiver["fields"]
+            if row.get("key") == "airplay_receiver_targets"
+        )
+        receiver_offered = {row["value"] for row in receiver_targets["options"]}
+        self.assertNotIn("airplay:localreceiver", receiver_offered)
+        self.assertIn("airplay:kitchen", receiver_offered)
 
     def test_saving_airplay_receiver_configures_tater_runtime(self):
         configure = Mock(return_value={"status": "ready"})
@@ -2866,7 +3000,15 @@ class MusicCoreTests(unittest.TestCase):
             configure_external_audio_runtime=configure,
             get_external_audio_status=lambda: {"status": "ready"},
         )
-        with patch.object(self.core, "_external_audio_module", return_value=runtime):
+        with patch.object(
+            self.core,
+            "_external_audio_module",
+            return_value=runtime,
+        ), patch.object(
+            self.core,
+            "_sonos_airplay_target",
+            return_value="airplay:sonos-den",
+        ):
             result = self.core.handle_htmlui_tab_action(
                 action="music_save_settings",
                 payload={
@@ -2874,7 +3016,11 @@ class MusicCoreTests(unittest.TestCase):
                         "airplay_receiver_enabled": True,
                         "airplay_receiver_name": "House Tater",
                         "airplay_receiver_pin": "3939",
-                        "airplay_receiver_targets": ["voice_core:native:kitchen"],
+                        "airplay_receiver_targets": [
+                            "voice_core:native:kitchen",
+                            "sonos:den",
+                            "airplay:living",
+                        ],
                     }
                 },
                 redis_client=self.redis,
@@ -2885,14 +3031,27 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(saved["airplay_receiver_pin"], "3939")
         self.assertEqual(
             json.loads(saved["airplay_receiver_targets"]),
-            ["voice_core:native:kitchen"],
+            ["voice_core:native:kitchen", "sonos:den", "airplay:living"],
         )
         config = configure.call_args.args[0]
         self.assertTrue(config["enabled"])
         self.assertEqual(config["receiver_name"], "House Tater")
-        self.assertEqual(config["targets"], ["voice_core:native:kitchen"])
+        self.assertEqual(
+            config["targets"],
+            ["voice_core:native:kitchen", "sonos:den", "airplay:living"],
+        )
+        self.assertEqual(config["volume_percent"], 100)
+        self.assertEqual(
+            config["target_volume_percent"],
+            {
+                "voice_core:native:kitchen": 100,
+                "sonos:den": 100,
+                "airplay:living": 100,
+            },
+        )
+        self.assertEqual(config["target_transport_mode"], {"sonos:den": "airplay"})
 
-    def test_airplay_receiver_rejects_invalid_pin_and_non_native_target(self):
+    def test_airplay_receiver_rejects_invalid_pin_and_unsupported_target(self):
         with self.assertRaisesRegex(ValueError, "exactly four digits"):
             self.core.handle_htmlui_tab_action(
                 action="music_save_settings",
@@ -2902,9 +3061,18 @@ class MusicCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Tater Native"):
             self.core.handle_htmlui_tab_action(
                 action="music_save_settings",
-                payload={"values": {"airplay_receiver_targets": ["sonos:den"]}},
+                payload={"values": {"airplay_receiver_targets": ["ha:media_player.den"]}},
                 redis_client=self.redis,
             )
+
+    def test_airplay_receiver_rejects_sonos_without_a_matching_airplay_endpoint(self):
+        with patch.object(self.core, "_sonos_airplay_target", return_value=""):
+            with self.assertRaisesRegex(ValueError, "matching AirPlay endpoint"):
+                self.core.handle_htmlui_tab_action(
+                    action="music_save_settings",
+                    payload={"values": {"airplay_receiver_targets": ["sonos:den"]}},
+                    redis_client=self.redis,
+                )
 
     def test_airplay_stop_action_uses_external_audio_runtime(self):
         stop = Mock(return_value={"status": "ready"})
