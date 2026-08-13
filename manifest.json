@@ -1193,7 +1193,7 @@
     {
       "id": "reachy_sleep",
       "name": "Reachy Sleep",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
       "description": "Use only when someone explicitly tells you to go to sleep, go to bed, or take a nap. Do not use merely because the user says they are going to sleep, asks a question about sleep, or asks Reachy to be quiet",
       "portals": [
@@ -1209,7 +1209,7 @@
         "motion"
       ],
       "entry": "verba/reachy_sleep.py",
-      "sha256": "a75febfeae2a730bb6c79bdf2eec2a310abc9d64400b425f3380443c893cda11"
+      "sha256": "561f00231937ed2dda2cbe07c53e6a59169495266fe7afaa7b9ae26d26a7091c"
     },
     {
       "id": "reachy_vision",

@@ -146,6 +146,8 @@ class ReachySleepTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["facts"]["selection_reason"], "same_room")
         self.assertIn('"hey reachy"', result["summary_for_user"])
+        self.assertIn("music", result["summary_for_user"])
+        self.assertTrue(result["data"]["music_wakes_reachy"])
         self.assertEqual(calls[0][0], "native:kitchen-reachy")
         self.assertEqual(calls[0][1], "reachy.sleep")
         self.assertEqual(calls[0][2], {"reason": "explicit_verba_request"})

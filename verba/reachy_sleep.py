@@ -10,11 +10,11 @@ class ReachySleepPlugin(ToolVerba):
     name = "reachy_sleep"
     verba_name = "Reachy Sleep"
     pretty_name = "Reachy Sleep"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "98.4"
     settings_category = "Reachy Sleep"
     description = (
-        "Put a connected Reachy Mini into its sleep pose until that Reachy hears its configured wake word."
+        "Put a connected Reachy Mini into its sleep pose until it hears its configured wake word or new music starts."
     )
     verba_dec = (
         "Use only when someone explicitly tells you to go to sleep, go to bed, or take a nap. Do not use merely "
@@ -24,7 +24,7 @@ class ReachySleepPlugin(ToolVerba):
     how_to_use = (
         "Call without asking for confirmation when the command is clearly directed at Reachy. The Verba chooses a "
         "connected Reachy, preferring the requesting Reachy or one in the same room, and puts it to sleep until its "
-        "local wake word is heard."
+        "local wake word is heard or new music starts playing."
     )
     platforms = ["voice_core"]
     tags = ["reachy", "robot", "sleep", "wake-word", "motion"]
@@ -230,7 +230,11 @@ class ReachySleepPlugin(ToolVerba):
             )
 
         wake_word = self._text(result.get("wake_word"))
-        wake_instruction = f'Say "{wake_word}" to wake it.' if wake_word else "Use its wake word to wake it."
+        wake_instruction = (
+            f'Say "{wake_word}" or start music to wake it.'
+            if wake_word
+            else "Use its wake word or start music to wake it."
+        )
         summary = f"{reachy_name or 'Reachy'} is going to sleep. {wake_instruction}"
         return action_success(
             facts={
@@ -245,10 +249,11 @@ class ReachySleepPlugin(ToolVerba):
                 "reachy_name": reachy_name,
                 "wake_word": wake_word,
                 "sleep_until_wake": True,
+                "music_wakes_reachy": True,
             },
             summary_for_user=summary,
             say_hint=(
-                "Briefly confirm that Reachy is going to sleep and mention its returned wake word. "
+                "Briefly confirm that Reachy is going to sleep and mention that its returned wake word or music will wake it. "
                 "Do not add another movement or camera action."
             ),
         )
