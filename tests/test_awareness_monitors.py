@@ -48,6 +48,11 @@ class FakeRedis:
         self.values[key] = value
         return True
 
+    def incr(self, key):
+        value = int(self.values.get(key, 0)) + 1
+        self.values[key] = value
+        return value
+
     def delete(self, key):
         self.values.pop(key, None)
         self.lists.pop(key, None)
@@ -71,6 +76,10 @@ class FakeRedis:
     def ltrim(self, key, start, end):
         rows = self.lists.get(key, [])
         self.lists[key] = rows[start:] if end < 0 else rows[start : end + 1]
+
+    def lset(self, key, index, value):
+        self.lists[key][index] = value
+        return True
 
     def scan_iter(self, match="*"):
         keys = [*self.hashes, *self.values, *self.lists]
@@ -343,6 +352,25 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.core._monitor_trigger_values_for_device(device), ["motion"])
 
+    def test_face_burst_gate_keeps_motion_and_uses_vision_for_smart_nonperson_events(self):
+        self.assertTrue(self.core._face_burst_should_run("motion", "A quiet driveway."))
+        self.assertTrue(self.core._face_burst_should_run("person", "A figure is near the porch."))
+        self.assertTrue(self.core._face_burst_should_run("doorbell", "The porch is visible."))
+        self.assertTrue(
+            self.core._face_burst_should_run(
+                "animal",
+                "A delivery driver is walking across the yard.",
+            )
+        )
+        self.assertTrue(
+            self.core._face_burst_should_run(
+                "vehicle",
+                "Two people stand next to a parked truck.",
+            )
+        )
+        self.assertFalse(self.core._face_burst_should_run("animal", "A dog runs across the lawn."))
+        self.assertFalse(self.core._face_burst_should_run("package", "A box is on the porch."))
+
     def test_capture_events_use_only_integration_declared_event_sources(self):
         device = {
             "type": "entry_sensor",
@@ -492,11 +520,27 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["type"], "door_sensor_open")
         self.assertEqual(event["message"], "Back Door opened.")
 
+    def test_new_event_returns_history_to_the_latest_page(self):
+        self.core._runtime_set(self.redis, events_page=4)
+        self.core._append_event(
+            self.redis,
+            source="Back Yard",
+            payload={
+                "id": "new-event",
+                "ha_time": "2026-08-13T11:30:00",
+                "type": "camera_event",
+                "message": "A person is in the back yard.",
+            },
+        )
+        self.assertEqual(self.core._runtime_get(self.redis)["events_page"], 1.0)
+        stored = json.loads(self.redis.lists["tater:automations:events:back_yard"][0])
+        self.assertEqual(stored["id"], "new-event")
+
     def test_ui_is_a_card_based_monitor_picker(self):
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
         ui = payload["ui"]
-        self.assertEqual([tab["key"] for tab in ui["manager_tabs"]], ["events", "monitors", "add"])
+        self.assertEqual([tab["key"] for tab in ui["manager_tabs"]], ["events", "faces", "monitors", "add"])
         self.assertEqual(ui["default_tab"], "events")
         self.assertEqual(ui["appearance"], "awareness")
         fields = {field.get("key"): field for field in ui["add_form"]["fields"] if field.get("key")}
@@ -542,6 +586,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hue_sensors[0]["description"], "Motion sensor • Hall • Philips Hue")
         self.assertNotIn("trigger_entities", fields)
         self.assertNotIn("notification_targets", fields)
+        self.assertEqual(fields["enabled"]["presentation"], "compact_toggle")
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")
 
     def test_event_list_view_uses_compact_rows_instead_of_event_cards(self):
@@ -580,6 +625,552 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
         events_tab = next(tab for tab in ui["manager_tabs"] if tab["key"] == "events")
         self.assertEqual(events_tab["item_group"], "event_list")
+
+    def test_face_id_tab_explains_that_the_model_must_be_enabled(self):
+        with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
+            ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
+        face_tab = next(tab for tab in ui["manager_tabs"] if tab["key"] == "faces")
+        self.assertEqual(face_tab["label"], "Face ID")
+        face_card = next(item for item in ui["item_forms"] if item.get("group") == "face_person")
+        self.assertEqual(face_card["title"], "Face ID needs to be enabled")
+
+    def test_face_identity_name_is_resolved_into_historical_event_context(self):
+        detection = {
+            "embedding": [1.0, 0.0, 0.0],
+            "facial_area": {"w": 120, "h": 120},
+            "confidence": 0.98,
+            "crop_b64": "ZmFjZQ==",
+            "crop_content_type": "image/jpeg",
+        }
+        identity = self.core._record_face_detection(
+            self.redis,
+            detection,
+            event_id="event-fred",
+            seen_at="2026-08-13T09:00:00",
+        )
+        second = self.core._record_face_detection(
+            self.redis,
+            {**detection, "embedding": [0.999, 0.001, 0.0]},
+            event_id="event-fred-2",
+            seen_at="2026-08-13T09:05:00",
+        )
+        self.assertEqual(second["id"], identity["id"])
+
+        self.core._save_face_session(
+            self.redis,
+            {"id": "session-fred", "status": "complete", "identity_ids": [identity["id"]]},
+        )
+        event = {
+            "id": "event-fred",
+            "source": "back_yard",
+            "ha_time": "2026-08-13T09:00:00",
+            "data": {"area": "Back Yard", "face_session_id": "session-fred"},
+        }
+        self.redis.lpush("tater:automations:events:back_yard", json.dumps(event))
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": identity["id"], "values": {"name": "Fred", "merge_into": ""}},
+            redis_client=self.redis,
+        )
+        context = self.core._face_event_context(self.redis, event)
+        compact = self.core._events_query_compact_event_for_llm(event, self.redis)
+        stored = json.loads(self.redis.lists["tater:automations:events:back_yard"][0])
+        self.assertEqual(context["known_people"], ["Fred"])
+        self.assertEqual(compact["data"]["known_people"], ["Fred"])
+        self.assertEqual(stored["data"]["known_people"], ["Fred"])
+
+    async def test_face_burst_captures_five_frames_before_analyzing(self):
+        runtime = types.SimpleNamespace(
+            MATCH_THRESHOLD=0.30,
+            analyze_image=lambda _image, _client: [],
+        )
+        session = {
+            "id": "burst-session",
+            "event_id": "burst-event",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        capture = AsyncMock(return_value=(b"next-frame", "image/jpeg"))
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_FACE_BURST_INTERVAL_SECONDS", 0.001),
+            patch.object(self.core, "_capture_camera_snapshot", new=capture),
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"first-frame",
+                initial_content_type="image/jpeg",
+            )
+        saved = self.core._load_face_session(self.redis, "burst-session")
+        self.assertEqual(capture.await_count, 4)
+        self.assertEqual(saved["frames_captured"], 5)
+        self.assertEqual(saved["frames_checked"], 5)
+        self.assertEqual(saved["status"], "no_faces")
+
+    async def test_face_burst_emits_linked_person_event_for_automation(self):
+        self.core._save_face_identity(
+            self.redis,
+            {
+                "id": "face_fred",
+                "name": "Fred",
+                "person_id": "person_fred",
+                "person_name": "Fred",
+                "centroid": [1.0, 0.0],
+                "centroid_count": 1,
+                "reference_centroids": [[1.0, 0.0]],
+                "observation_count": 1,
+                "event_count": 1,
+            },
+        )
+        runtime = types.SimpleNamespace(
+            MATCH_THRESHOLD=0.30,
+            analyze_image=lambda _image, _client: [
+                {
+                    "embedding": [1.0, 0.0],
+                    "facial_area": {"w": 120, "h": 120},
+                    "confidence": 0.99,
+                    "crop_b64": "ZmFjZQ==",
+                }
+            ],
+        )
+        session = {
+            "id": "burst-fred",
+            "event_id": "front-event",
+            "provider": "unifi_protect",
+            "camera_target": "cam-front",
+            "area": "Front Door",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_FACE_BURST_FRAME_COUNT", 1),
+            patch.object(self.core, "_people_person_name", return_value="Fred"),
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"frame",
+                initial_content_type="image/jpeg",
+            )
+
+        emitted = json.loads(self.redis.lists[self.core._INTEGRATION_RUNTIME_EVENTS_KEY][0])
+        saved = self.core._load_face_session(self.redis, "burst-fred")
+        self.assertEqual(emitted["provider"], "awareness")
+        self.assertEqual(emitted["kind"], "recognized_person")
+        self.assertEqual(emitted["payload"]["person_id"], "person_fred")
+        self.assertEqual(emitted["payload"]["camera_target"], "cam-front")
+        self.assertEqual(saved["recognized_person_ids"], ["person_fred"])
+        self.assertEqual(saved["automation_events_emitted"], 1)
+
+    def test_unknown_face_can_be_manually_sorted_into_a_known_person(self):
+        base = {
+            "facial_area": {"w": 100, "h": 100},
+            "confidence": 0.95,
+            "crop_b64": "ZmFjZQ==",
+        }
+        known = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [1.0, 0.0]},
+            event_id="known-event",
+            seen_at="2026-08-13T08:00:00",
+        )
+        unknown = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.0, 1.0]},
+            event_id="unknown-event",
+            seen_at="2026-08-13T08:05:00",
+        )
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": known["id"], "values": {"name": "Fred", "merge_into": ""}},
+            redis_client=self.redis,
+        )
+        self.core._save_face_session(
+            self.redis,
+            {"id": "unknown-session", "status": "complete", "identity_ids": [unknown["id"]]},
+        )
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": unknown["id"], "values": {"name": "", "merge_into": known["id"]}},
+            redis_client=self.redis,
+        )
+        session = self.core._load_face_session(self.redis, "unknown-session")
+        identities = self.core._face_identity_rows(self.redis)
+        self.assertEqual(session["identity_ids"], [known["id"]])
+        self.assertNotIn(unknown["id"], identities)
+        self.assertEqual(identities[known["id"]]["name"], "Fred")
+
+    def test_face_person_ui_is_a_compact_clickable_gallery_with_inline_name(self):
+        detection = {
+            "embedding": [1.0, 0.0, 0.0],
+            "facial_area": {"w": 120, "h": 120},
+            "confidence": 0.98,
+            "crop_b64": "ZmFjZQ==",
+            "crop_content_type": "image/jpeg",
+        }
+        identity = self.core._record_face_detection(
+            self.redis,
+            detection,
+            event_id="gallery-event-1",
+            seen_at="2026-08-13T09:00:00",
+        )
+        self.core._record_face_detection(
+            self.redis,
+            {**detection, "embedding": [0.999, 0.001, 0.0]},
+            event_id="gallery-event-2",
+            seen_at="2026-08-13T09:05:00",
+        )
+        with (
+            patch.object(self.core, "_face_runtime_status", return_value={"enabled": True, "state": "ready"}),
+            patch.object(self.core, "_monitor_registry", return_value=sample_registry()),
+        ):
+            ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
+
+        face = next(item for item in ui["item_forms"] if item.get("id") == identity["id"])
+        fields = {field["key"]: field for field in face["fields"]}
+        face_tab = next(tab for tab in ui["manager_tabs"] if tab["key"] == "faces")
+        self.assertEqual(face["group"], "face_person")
+        self.assertEqual(face["card_variant"], "face_person")
+        self.assertFalse(face["selectable"])
+        self.assertTrue(face["click_opens_fields"])
+        self.assertFalse(face["fields_popup"])
+        self.assertEqual(fields["name"]["type"], "text")
+        self.assertEqual(fields["person_id"]["type"], "select")
+        self.assertEqual(fields["observation_ids"]["type"], "image_checklist")
+        self.assertEqual(len(fields["observation_ids"]["options"]), 2)
+        self.assertTrue(all(row["selectable"] for row in fields["observation_ids"]["options"]))
+        self.assertEqual(fields["target_identity_id"]["type"], "select")
+        self.assertEqual(face["actions"][0]["action"], "awareness_move_face_images")
+        self.assertEqual(face_tab["item_group"], "face_person")
+        self.assertNotIn("bulk_actions", face_tab)
+
+    def test_face_identity_links_to_people_api_and_enriches_events(self):
+        people = [{"id": "person_fred", "display_name": "Fred", "aliases": []}]
+        identity = self.core._record_face_detection(
+            self.redis,
+            {
+                "embedding": [1.0, 0.0, 0.0],
+                "facial_area": {"w": 120, "h": 120},
+                "confidence": 0.98,
+                "crop_b64": "ZmFjZQ==",
+            },
+            event_id="event-fred-link",
+            seen_at="2026-08-13T09:00:00",
+        )
+        self.core._save_face_session(
+            self.redis,
+            {
+                "id": "session-fred-link",
+                "event_id": "event-fred-link",
+                "status": "complete",
+                "identity_ids": [identity["id"]],
+            },
+        )
+        self.redis.lpush(
+            "tater:automations:events:front_door",
+            json.dumps(
+                {
+                    "id": "event-fred-link",
+                    "source": "front_door",
+                    "ha_time": "2026-08-13T09:00:00",
+                    "data": {"face_session_id": "session-fred-link"},
+                }
+            ),
+        )
+
+        with (
+            patch.object(self.core, "_people_person_rows", return_value=people),
+            patch.object(self.core, "_people_attach_face_identity") as attach_face,
+            patch.object(self.core, "_face_runtime_status", return_value={"enabled": True, "state": "ready"}),
+        ):
+            saved = self.core.handle_htmlui_tab_action(
+                action="awareness_save_face_identity",
+                payload={
+                    "id": identity["id"],
+                    "values": {"name": "Temporary", "person_id": "person_fred"},
+                },
+                redis_client=self.redis,
+            )
+            linked = self.core._face_identity_rows(self.redis)[identity["id"]]
+            stored_event = json.loads(self.redis.lists["tater:automations:events:front_door"][0])
+            context = self.core._face_event_context(self.redis, stored_event)
+            with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
+                ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
+
+        self.assertEqual(saved["person_id"], "person_fred")
+        self.assertEqual(linked["person_id"], "person_fred")
+        self.assertEqual(linked["name"], "Fred")
+        attach_face.assert_called_once_with(
+            self.redis,
+            person_id="person_fred",
+            identity_id=identity["id"],
+            label="Fred",
+        )
+        self.assertEqual(context["known_people"], ["Fred"])
+        self.assertEqual(context["recognized_people"], ["Fred"])
+        self.assertEqual(context["recognized_person_ids"], ["person_fred"])
+        self.assertEqual(stored_event["data"]["recognized_person_ids"], ["person_fred"])
+        face = next(item for item in ui["item_forms"] if item.get("id") == identity["id"])
+        fields = {field["key"]: field for field in face["fields"]}
+        self.assertEqual(fields["person_id"]["value"], "person_fred")
+        self.assertEqual(fields["person_id"]["options"][1]["label"], "Fred")
+
+    def test_legacy_images_without_face_vectors_are_hidden(self):
+        legacy = {
+            "id": "face_legacy",
+            "name": "Fred",
+            "face_b64": "b2xkLWZ1bGwtc25hcHNob3Q=",
+            "face_content_type": "image/jpeg",
+            "centroid": [1.0, 0.0],
+            "observation_count": 5,
+        }
+
+        self.assertEqual(self.core._face_identity_gallery(self.redis, legacy), [])
+
+    def test_selected_face_images_can_move_to_an_existing_person(self):
+        base = {
+            "facial_area": {"w": 100, "h": 100},
+            "confidence": 0.95,
+            "crop_b64": "ZmFjZQ==",
+        }
+        known = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [1.0, 0.0]},
+            event_id="known-event",
+            seen_at="2026-08-13T08:00:00",
+        )
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": known["id"], "values": {"name": "Fred"}},
+            redis_client=self.redis,
+        )
+        unknown = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.0, 1.0]},
+            event_id="unknown-event-1",
+            seen_at="2026-08-13T08:05:00",
+        )
+        self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.001, 0.999]},
+            event_id="unknown-event-2",
+            seen_at="2026-08-13T08:06:00",
+        )
+        for suffix in ("1", "2"):
+            session_id = f"unknown-session-{suffix}"
+            event_id = f"unknown-event-{suffix}"
+            self.core._save_face_session(
+                self.redis,
+                {"id": session_id, "event_id": event_id, "status": "complete", "identity_ids": [unknown["id"]]},
+            )
+            self.redis.lpush(
+                "tater:automations:events:back_yard",
+                json.dumps(
+                    {
+                        "id": event_id,
+                        "source": "back_yard",
+                        "ha_time": f"2026-08-13T08:0{4 + int(suffix)}:00",
+                        "data": {"face_session_id": session_id},
+                    }
+                ),
+            )
+
+        source = self.core._face_identity_rows(self.redis)[unknown["id"]]
+        first = next(row for row in source["observations"] if row["event_id"] == "unknown-event-1")
+        moved = self.core.handle_htmlui_tab_action(
+            action="awareness_move_face_images",
+            payload={
+                "id": unknown["id"],
+                "values": {"observation_ids": [first["id"]], "target_identity_id": known["id"]},
+            },
+            redis_client=self.redis,
+        )
+        identities = self.core._face_identity_rows(self.redis)
+        self.assertEqual(moved["moved"], 1)
+        self.assertIn(unknown["id"], identities)
+        self.assertEqual(len(identities[known["id"]]["observations"]), 2)
+        self.assertEqual(len(identities[unknown["id"]]["observations"]), 1)
+        self.assertEqual(
+            self.core._load_face_session(self.redis, "unknown-session-1")["identity_ids"],
+            [known["id"]],
+        )
+
+        last = identities[unknown["id"]]["observations"][0]
+        moved_last = self.core.handle_htmlui_tab_action(
+            action="awareness_move_face_images",
+            payload={
+                "id": unknown["id"],
+                "values": {"observation_ids": [last["id"]], "target_identity_id": known["id"]},
+            },
+            redis_client=self.redis,
+        )
+        identities = self.core._face_identity_rows(self.redis)
+        self.assertTrue(moved_last["source_removed"])
+        self.assertNotIn(unknown["id"], identities)
+        self.assertEqual(len(identities[known["id"]]["observations"]), 3)
+        self.assertEqual(
+            self.core._load_face_session(self.redis, "unknown-session-2")["identity_ids"],
+            [known["id"]],
+        )
+
+    def test_bulk_merge_and_selected_image_unmerge_preserve_event_links(self):
+        base = {
+            "facial_area": {"w": 100, "h": 100},
+            "confidence": 0.95,
+            "crop_b64": "ZmFjZQ==",
+        }
+        known = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [1.0, 0.0]},
+            event_id="known-event",
+            seen_at="2026-08-13T08:00:00",
+        )
+        self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.999, 0.001]},
+            event_id="known-event-2",
+            seen_at="2026-08-13T08:01:00",
+        )
+        unknown = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.0, 1.0]},
+            event_id="unknown-event",
+            seen_at="2026-08-13T08:05:00",
+        )
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": known["id"], "values": {"name": "Fred"}},
+            redis_client=self.redis,
+        )
+        self.core._save_face_session(
+            self.redis,
+            {"id": "unknown-session", "event_id": "unknown-event", "status": "complete", "identity_ids": [unknown["id"]]},
+        )
+        merged = self.core.handle_htmlui_tab_action(
+            action="awareness_merge_face_identities",
+            payload={"values": {"identity_ids": [known["id"], unknown["id"]]}},
+            redis_client=self.redis,
+        )
+        self.assertEqual(merged["id"], known["id"])
+        combined = self.core._face_identity_rows(self.redis)[known["id"]]
+        self.assertEqual(len(combined["observations"]), 3)
+        selected = next(
+            row["id"] for row in combined["observations"] if row.get("event_id") == "unknown-event"
+        )
+
+        split = self.core.handle_htmlui_tab_action(
+            action="awareness_unmerge_face_observations",
+            payload={"id": known["id"], "values": {"observation_ids": [selected]}},
+            redis_client=self.redis,
+        )
+        identities = self.core._face_identity_rows(self.redis)
+        self.assertIn(split["id"], identities)
+        self.assertEqual(identities[split["id"]]["name"], "")
+        self.assertEqual(len(identities[known["id"]]["observations"]), 2)
+        session = self.core._load_face_session(self.redis, "unknown-session")
+        self.assertEqual(session["identity_ids"], [split["id"]])
+
+    def test_manual_merge_keeps_distinct_face_profiles_for_future_matching(self):
+        target = {
+            "id": "face_named",
+            "name": "Fred",
+            "centroid": [1.0, 0.0, 0.0],
+            "centroid_count": 5,
+            "observation_count": 5,
+            "event_count": 2,
+        }
+        source = {
+            "id": "face_angle",
+            "name": "",
+            "centroid": [0.70, 0.714, 0.0],
+            "centroid_count": 5,
+            "observation_count": 5,
+            "event_count": 1,
+            "observations": [
+                {
+                    "id": "observation-angle",
+                    "event_id": "event-angle",
+                    "seen_at": "2026-08-13T12:00:00",
+                    "embedding": [0.70, 0.714, 0.0],
+                    "face_b64": "ZmFjZQ==",
+                }
+            ],
+        }
+        self.core._save_face_identity(self.redis, target)
+        self.core._save_face_identity(self.redis, source)
+        merged = self.core._merge_face_identities(self.redis, source["id"], target["id"])
+
+        references = self.core._face_reference_embeddings(merged)
+        self.assertGreaterEqual(len(references), 2)
+        matched_id, distance = self.core._face_match_identity(
+            {merged["id"]: merged},
+            [0.69, 0.724, 0.0],
+            threshold=0.30,
+        )
+        self.assertEqual(matched_id, target["id"])
+        self.assertLess(distance, 0.01)
+
+    def test_face_reference_set_rotates_to_clearer_new_profiles(self):
+        dimensions = 27
+
+        def profile(index, strength=0.20):
+            embedding = [0.0] * dimensions
+            embedding[0] = 1.0
+            embedding[index + 1] = strength
+            return embedding
+
+        observations = [
+            {
+                "id": f"observation-{index}",
+                "seen_at": f"2026-08-13T12:{index:02d}:00",
+                "embedding": profile(index),
+                "quality": 0.8,
+            }
+            for index in range(25)
+        ]
+        clearer_new_view = profile(0, 0.21)
+        observations.insert(
+            0,
+            {
+                "id": "observation-new-clear",
+                "seen_at": "2026-08-13T13:00:00",
+                "embedding": clearer_new_view,
+                "quality": 2.8,
+            },
+        )
+        references = self.core._curate_face_reference_embeddings(
+            {
+                "centroid": [1.0] + ([0.0] * (dimensions - 1)),
+                "observations": observations,
+            }
+        )
+
+        self.assertEqual(len(references), self.core._FACE_REFERENCE_LIMIT)
+        self.assertIn(clearer_new_view, references)
+        self.assertNotIn(profile(0), references)
+
+    def test_face_reference_set_balances_quality_with_different_angles(self):
+        clear_front = [1.0, 0.0, 0.0]
+        similar_front = [0.98, 0.20, 0.0]
+        different_angle = [0.70, 0.714, 0.0]
+        references = self.core._curate_face_reference_embeddings(
+            {
+                "observations": [
+                    {"id": "front", "embedding": clear_front, "quality": 3.0},
+                    {"id": "similar", "embedding": similar_front, "quality": 2.9},
+                    {"id": "angle", "embedding": different_angle, "quality": 1.0},
+                ]
+            },
+            limit=2,
+        )
+
+        self.assertEqual(references, [clear_front, different_angle])
 
     def test_legacy_rule_actions_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "moved to Automation Core"):

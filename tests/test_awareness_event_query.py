@@ -130,6 +130,31 @@ class AwarenessEventQueryTests(unittest.TestCase):
         self.assertLessEqual(len(bounded), 40)
         self.assertLessEqual(estimated_tokens, 12_000)
 
+    def test_event_compaction_keeps_known_people_searchable(self):
+        compact = self.core["_events_query_compact_event_for_llm"](
+            {
+                "id": "fred-back-yard",
+                "source": "back_yard",
+                "ha_time": "2026-08-13T09:00:00",
+                "title": "Back Yard Camera",
+                "message": "A person walked through the back yard.",
+                "type": "camera_event",
+                "data": {
+                    "area": "Back Yard",
+                    "known_people": ["Fred"],
+                    "recognized_people": ["Fred"],
+                    "recognized_person_ids": ["person_fred"],
+                    "face_count": 1,
+                    "face_identity_ids": ["face_123"],
+                },
+            }
+        )
+        self.assertEqual(compact["event_id"], "fred-back-yard")
+        self.assertEqual(compact["data"]["known_people"], ["Fred"])
+        self.assertEqual(compact["data"]["recognized_people"], ["Fred"])
+        self.assertEqual(compact["data"]["recognized_person_ids"], ["person_fred"])
+        self.assertEqual(compact["data"]["face_count"], 1)
+
     def test_right_now_overrides_model_today_window(self):
         now = datetime(2026, 8, 11, 17, 22, 45)
         normalized, error = self.core["_events_query_normalize_interpretation"](

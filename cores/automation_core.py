@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib.util
 import io
 import json
 import logging
@@ -35,7 +36,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 MIN_TATER_VERSION = "98"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -141,6 +142,7 @@ _EVENT_OPTIONS = [
     {"value": "closes", "label": "Closes"},
     {"value": "motion", "label": "Detects motion"},
     {"value": "person", "label": "Detects a person"},
+    {"value": "recognized_person", "label": "Recognizes a Tater Person"},
     {"value": "vehicle", "label": "Detects a vehicle"},
     {"value": "animal", "label": "Detects an animal"},
     {"value": "package", "label": "Detects a package"},
@@ -163,6 +165,7 @@ _EVENT_ICONS = {
     "closes": "↘",
     "motion": "⌁",
     "person": "♟",
+    "recognized_person": "★",
     "vehicle": "◆",
     "animal": "♣",
     "package": "▣",
@@ -252,6 +255,79 @@ def _bool(value: Any, default: bool = False) -> bool:
     if token in _FALSE:
         return False
     return bool(default)
+
+
+_PEOPLE_API_MODULE: Any = None
+_PEOPLE_API_UNAVAILABLE = False
+
+
+def _people_api_module() -> Any:
+    global _PEOPLE_API_MODULE, _PEOPLE_API_UNAVAILABLE
+    if _PEOPLE_API_MODULE is not None:
+        return _PEOPLE_API_MODULE
+    if _PEOPLE_API_UNAVAILABLE:
+        return None
+    try:
+        import people as people_module  # type: ignore
+
+        _PEOPLE_API_MODULE = people_module
+        return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "Tater" / "people.py"
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location("tater_people_api_for_automation", candidate)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                _PEOPLE_API_MODULE = module
+                return _PEOPLE_API_MODULE
+    except Exception:
+        pass
+    _PEOPLE_API_UNAVAILABLE = True
+    return None
+
+
+def _people_person_rows(client: Any) -> List[Dict[str, Any]]:
+    module = _people_api_module()
+    load_store = getattr(module, "load_store", None) if module is not None else None
+    if not callable(load_store):
+        return []
+    try:
+        store = load_store(client or redis_client)
+    except Exception:
+        return []
+    people = list(store.get("people") or []) if isinstance(store, dict) else []
+    rows = [dict(row) for row in people if isinstance(row, dict)]
+    rows.sort(key=lambda row: (_text(row.get("display_name")).casefold(), _text(row.get("id"))))
+    return rows
+
+
+def _people_person_name(client: Any, person_id: Any) -> str:
+    wanted = _text(person_id)
+    if not wanted:
+        return ""
+    for person in _people_person_rows(client):
+        if _text(person.get("id")) == wanted:
+            return _text(person.get("display_name"))
+    return ""
+
+
+def _people_person_options(client: Any, current_person_id: Any = "") -> List[Dict[str, str]]:
+    current = _text(current_person_id)
+    options = [{"value": "", "label": "Choose a Tater Person…"}]
+    found = False
+    for person in _people_person_rows(client):
+        person_id = _text(person.get("id"))
+        display_name = _text(person.get("display_name"))
+        if not person_id or not display_name:
+            continue
+        found = found or person_id == current
+        options.append({"value": person_id, "label": display_name})
+    if current and not found:
+        options.append({"value": current, "label": f"Missing People record · {current}"})
+    return options
 
 
 def _int(value: Any, default: int = 0, *, minimum: int = 0, maximum: int = 1_000_000) -> int:
@@ -892,6 +968,8 @@ def _trigger_event_values_for_device(device: Dict[str, Any]) -> List[str]:
             "value",
         }:
             add("changed", "above", "below")
+    if "camera" in _device_categories(device):
+        add("recognized_person")
     return [row["value"] for row in _EVENT_OPTIONS if row["value"] in found]
 
 
@@ -1152,6 +1230,9 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         tts_mode = "custom" if raw_tts_text else "default"
     if not trigger_category or trigger_event not in {row["value"] for row in _EVENT_OPTIONS}:
         return None
+    trigger_person_id = _text(raw.get("trigger_person_id"))
+    if trigger_event == "recognized_person" and not trigger_person_id:
+        return None
     if action_type not in {"device", "tts", "notification", "camera_ai"}:
         return None
     now = time.time()
@@ -1176,6 +1257,7 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         "trigger_device": trigger_device,
         "trigger_room": _token(raw.get("trigger_room")),
         "trigger_event": trigger_event,
+        "trigger_person_id": trigger_person_id,
         "trigger_attribute": _text(raw.get("trigger_attribute")),
         "trigger_value": _text(raw.get("trigger_value")),
         "cooldown_seconds": _int(raw.get("cooldown_seconds"), 30, minimum=0, maximum=86400),
@@ -1446,6 +1528,9 @@ def _device_tokens(device: Dict[str, Any]) -> set[str]:
 
 def _matching_devices(event: Dict[str, Any], registry: Dict[str, Any]) -> List[Dict[str, Any]]:
     provider = _text(event.get("provider")).lower()
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if provider == "awareness" and _token(event.get("kind")) == "recognized_person":
+        provider = _text(payload.get("camera_provider")).lower()
     refs = _event_refs(event)
     ref_variants: set[str] = set()
     for ref in refs:
@@ -1653,6 +1738,7 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
     haystack = f"{kind} {state} {json.dumps(payload, default=str)[:20000]}".lower()
     signal_haystack = _event_signal_haystack(event, devices, state)
     trigger = _token(rule.get("trigger_event"))
+    trigger_person_id = _text(rule.get("trigger_person_id"))
     expected = _text(rule.get("trigger_value")).lower()
     attribute = _text(rule.get("trigger_attribute"))
     attribute_value = _path_value(payload, attribute) if attribute else None
@@ -1676,6 +1762,12 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
     elif trigger == "doorbell":
         matched = not _event_is_terminal(event) and any(
             word in signal_haystack for word in ("doorbell", "ring", "pressed", "button_press")
+        )
+    elif trigger == "recognized_person":
+        matched = (
+            kind == "recognized_person"
+            and _text(payload.get("person_id")) == trigger_person_id
+            and bool(trigger_person_id)
         )
     elif trigger in {"motion", "person", "vehicle", "animal", "package", "face", "license_plate"}:
         needles = {trigger}
@@ -1712,6 +1804,9 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
             _device_id(first_device),
         ),
         "room": _text(first_device.get("room") or first_device.get("area")),
+        "person": _text(payload.get("person_name")),
+        "person_id": _text(payload.get("person_id")),
+        "face_identity_ids": list(payload.get("face_identity_ids") or []),
         "event_seq": _sequence(event.get("seq"), 0),
     }
 
@@ -1728,6 +1823,8 @@ def _render_template(value: Any, context: Dict[str, Any]) -> str:
         "category",
         "provider",
         "vision",
+        "person",
+        "person_id",
     ):
         text = text.replace("{" + key + "}", _text(context.get(key)))
     return text
@@ -1737,6 +1834,7 @@ def _default_tts_template(trigger_event: Any) -> str:
     event = _token(trigger_event)
     return {
         "person": "A person was detected at {device}.",
+        "recognized_person": "{person} was recognized at {device}.",
         "vehicle": "A vehicle was detected at {device}.",
         "animal": "An animal was detected at {device}.",
         "package": "A package was detected at {device}.",
@@ -2452,6 +2550,7 @@ def _rule_from_form(
         "trigger_device",
         "trigger_room",
         "trigger_event",
+        "trigger_person_id",
         "trigger_attribute",
         "trigger_value",
         "cooldown_seconds",
@@ -2520,6 +2619,8 @@ def _rule_from_form(
     action_type = _token(rule.get("action_type") or "device")
     if not _token(rule.get("trigger_category")):
         raise ValueError("Choose a trigger category.")
+    if _token(rule.get("trigger_event")) == "recognized_person" and not _text(rule.get("trigger_person_id")):
+        raise ValueError("Choose the Tater Person this automation should recognize.")
     if action_type == "device":
         if not _token(rule.get("action_category")):
             raise ValueError("Choose the category Tater should control.")
@@ -2808,6 +2909,7 @@ def _editor_fields(
     show_notification = {"source_key": "action_type", "equals": "notification"}
     show_camera_ai = {"source_key": "action_type", "equals": "camera_ai"}
     show_trigger_value = {"source_key": "trigger_event", "any_of": ["equals", "contains", "above", "below"]}
+    show_recognized_person = {"source_key": "trigger_event", "equals": "recognized_person"}
     show_numeric_action = {
         "source_key": "action_operation",
         "any_of": ["set_brightness", "set_position", "set_temperature", "set_volume"],
@@ -2882,6 +2984,19 @@ def _editor_fields(
             "dependent_options": trigger_event_dependency,
             "value": _token(rule.get("trigger_event") or "changed"),
             "description": "Only events explicitly reported by the selected device's integration are shown.",
+            "full_width": True,
+        },
+        {
+            "key": "trigger_person_id",
+            "label": "Which Tater Person?",
+            "type": "select",
+            "options": _people_person_options(client, rule.get("trigger_person_id")),
+            "value": _text(rule.get("trigger_person_id")),
+            "description": (
+                "Runs only after Awareness Face ID confirms this linked Settings › People record. "
+                "The selected camera must also be enabled under Awareness › Monitored Sources."
+            ),
+            "show_when": show_recognized_person,
             "full_width": True,
         },
         {
@@ -3261,6 +3376,9 @@ def _rule_form(
     trigger_device = _find_device(registry, rule.get("trigger_device"))
     trigger_name = _text((trigger_device or {}).get("name")) or _text(rule.get("trigger_category")).replace("_", " ").title()
     trigger_event = _event_option(rule.get("trigger_event"))["label"]
+    trigger_person_name = _people_person_name(client, rule.get("trigger_person_id"))
+    if _token(rule.get("trigger_event")) == "recognized_person" and trigger_person_name:
+        trigger_event = f"Recognizes {trigger_person_name}"
     action_type = _token(rule.get("action_type"))
     if action_type == "tts":
         target_count = len(_list(rule.get("tts_targets")))

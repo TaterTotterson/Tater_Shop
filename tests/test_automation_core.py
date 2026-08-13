@@ -316,6 +316,41 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["device"], "Front Yard")
         self.assertEqual(context["device_target"], "unifi_protect|cam-front")
 
+    def test_matches_linked_person_recognition_to_selected_camera_and_person(self):
+        rule = self._tts_rule(
+            trigger_device="unifi_protect|cam-front",
+            trigger_event="recognized_person",
+            trigger_person_id="person_fred",
+            tts_text="{person} was recognized at {device}.",
+        )
+        event = {
+            "seq": 12,
+            "provider": "awareness",
+            "kind": "recognized_person",
+            "payload": {
+                "state": "recognized",
+                "person_id": "person_fred",
+                "person_name": "Fred",
+                "face_identity_ids": ["face_fred"],
+                "camera_provider": "unifi_protect",
+                "camera_target": "cam-front",
+                "camera_id": "cam-front",
+            },
+        }
+
+        matched, context = self.core._event_match(rule, event, sample_registry())
+        self.assertTrue(matched)
+        self.assertEqual(context["device"], "Front Yard")
+        self.assertEqual(context["person"], "Fred")
+        self.assertEqual(context["person_id"], "person_fred")
+        self.assertEqual(
+            self.core._render_template(rule["tts_text"], context),
+            "Fred was recognized at Front Yard.",
+        )
+
+        wrong_person = {**event, "payload": {**event["payload"], "person_id": "person_alex"}}
+        self.assertFalse(self.core._event_match(rule, wrong_person, sample_registry())[0])
+
     def test_integration_events_keep_sequences_above_one_million(self):
         self.redis.lists[self.core._INTEGRATION_EVENTS_KEY] = [
             json.dumps({"seq": 1_358_240, "provider": "unifi_protect", "kind": "newer"}),
@@ -587,7 +622,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             current_device="unifi_protect|cam-front",
         )
         values = [row["value"] for row in options]
-        self.assertEqual(values, ["motion", "person", "animal"])
+        self.assertEqual(values, ["motion", "person", "recognized_person", "animal"])
         self.assertEqual(dependency["source_key"], "trigger_device")
 
     def test_integration_step_groups_trigger_and_action_devices(self):
@@ -680,7 +715,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        self.assertEqual(self.core._trigger_event_values_for_device(device), ["motion"])
+        self.assertEqual(self.core._trigger_event_values_for_device(device), ["motion", "recognized_person"])
 
     def test_trigger_events_use_only_integration_declared_event_sources(self):
         device = {
@@ -795,7 +830,10 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             sample_registry(),
             current_device="homeassistant|binary_sensor.front_door",
         )
-        self.assertEqual([row["value"] for row in doorbell_options], ["motion", "doorbell"])
+        self.assertEqual(
+            [row["value"] for row in doorbell_options],
+            ["motion", "recognized_person", "doorbell"],
+        )
         self.assertEqual([row["value"] for row in sensor_options], ["opens", "closes"])
 
     def test_doorbell_rule_does_not_treat_doorbell_camera_motion_as_a_press(self):
@@ -940,6 +978,11 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_key["trigger_integration"]["type"], "select")
         self.assertEqual(by_key["trigger_device"]["type"], "select")
         self.assertEqual(by_key["trigger_event"]["type"], "select")
+        self.assertEqual(by_key["trigger_person_id"]["type"], "select")
+        self.assertEqual(
+            by_key["trigger_person_id"]["show_when"],
+            {"source_key": "trigger_event", "equals": "recognized_person"},
+        )
         self.assertEqual(by_key["action_type"]["type"], "select")
         self.assertEqual(by_key["tts_targets"]["type"], "multiselect")
         for key in (
@@ -981,7 +1024,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
                 "unifi_protect|cam-front"
             ]
         ]
-        self.assertEqual(trigger_values, ["motion", "person", "animal"])
+        self.assertEqual(trigger_values, ["motion", "person", "recognized_person", "animal"])
 
 
 if __name__ == "__main__":
