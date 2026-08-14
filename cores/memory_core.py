@@ -751,7 +751,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.29"
+__version__ = "1.0.30"
 
 
 load_dotenv()
@@ -1744,10 +1744,148 @@ def _message_timestamp(entry: Dict[str, Any], now_ts: float) -> float:
     return now_ts
 
 
-def _normalized_message_id(platform: str, scope_id: str, index: int) -> str:
+_MEMORY_CURSOR_VERSION = 2
+_MEMORY_CURSOR_ANCHOR_ROWS = 4
+_MEMORY_CURSOR_SCAN_MIN_ROWS = 512
+_MEMORY_CURSOR_SCAN_MAX_ROWS = 2000
+
+
+def _history_row_fingerprint(raw_entry: Any) -> str:
+    raw_text = _as_text(raw_entry)
+    return hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()[:32]
+
+
+def _normalized_message_id(
+    platform: str,
+    scope_id: str,
+    index: int,
+    raw_entry: Any = None,
+) -> str:
     p = normalize_segment(platform, default="platform")
     s = normalize_segment(scope_id, default="scope")
+    if raw_entry is not None:
+        return f"msg_{p}_{s}_{_history_row_fingerprint(raw_entry)}"
     return f"msg_{p}_{s}_{int(index)}"
+
+
+def _parse_history_cursor(raw_cursor: Any) -> Dict[str, Any]:
+    text = _as_text(raw_cursor).strip()
+    if not text:
+        return {"version": 0, "position": 0, "anchor": []}
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        version = _as_int(payload.get("version") or payload.get("v"), 0, min_value=0)
+        if version >= _MEMORY_CURSOR_VERSION:
+            raw_anchor = payload.get("anchor")
+            anchor = [
+                _as_text(value).strip()
+                for value in (raw_anchor if isinstance(raw_anchor, list) else [])
+                if _as_text(value).strip()
+            ][-_MEMORY_CURSOR_ANCHOR_ROWS:]
+            return {
+                "version": _MEMORY_CURSOR_VERSION,
+                "position": _as_int(payload.get("position"), 0, min_value=0),
+                "anchor": anchor,
+            }
+
+    # Memory Core versions through 1.0.29 stored only a numeric list index.
+    return {
+        "version": 1,
+        "position": _as_int(raw_cursor, 0, min_value=0),
+        "anchor": [],
+    }
+
+
+def _history_fingerprints(rows: Any) -> List[str]:
+    return [_history_row_fingerprint(row) for row in (rows or [])]
+
+
+def _history_cursor_start(
+    *,
+    history_key: str,
+    total_len: int,
+    cursor_state: Dict[str, Any],
+    lookback_limit: int,
+) -> int:
+    version = _as_int(cursor_state.get("version"), 0, min_value=0)
+    position = _as_int(cursor_state.get("position"), 0, min_value=0)
+
+    if version <= 0:
+        return 0
+
+    if version < _MEMORY_CURSOR_VERSION:
+        if position < total_len:
+            return position
+        # One-time bounded recovery for scopes that were already stuck at the
+        # fixed length of a capped Redis history list.
+        return max(0, total_len - lookback_limit)
+
+    anchor = [
+        _as_text(value).strip()
+        for value in (cursor_state.get("anchor") or [])
+        if _as_text(value).strip()
+    ][-_MEMORY_CURSOR_ANCHOR_ROWS:]
+    if not anchor:
+        return 0 if position <= 0 else max(0, total_len - lookback_limit)
+
+    anchor_len = len(anchor)
+    if anchor_len <= position <= total_len:
+        rows = redis_client.lrange(history_key, position - anchor_len, position - 1) or []
+        if _history_fingerprints(rows) == anchor:
+            return position
+
+    # A capped list shifted. Find the previous anchor in a bounded tail and
+    # resume immediately after it. Searching newest-to-oldest handles repeated
+    # history rows conservatively.
+    scan_count = min(
+        total_len,
+        max(
+            _MEMORY_CURSOR_SCAN_MIN_ROWS,
+            min(_MEMORY_CURSOR_SCAN_MAX_ROWS, lookback_limit * 4),
+        ),
+    )
+    scan_start = max(0, total_len - scan_count)
+    scan_rows = redis_client.lrange(history_key, scan_start, total_len - 1) or []
+    scan_fingerprints = _history_fingerprints(scan_rows)
+    last_start = len(scan_fingerprints) - anchor_len
+    for offset in range(last_start, -1, -1):
+        if scan_fingerprints[offset : offset + anchor_len] == anchor:
+            return scan_start + offset + anchor_len
+
+    # The list completely rolled over or was reset. The missing portion is no
+    # longer recoverable, but the newest bounded window still is.
+    return max(0, total_len - lookback_limit)
+
+
+def _save_history_cursor(
+    *,
+    cursor_redis_key: str,
+    history_key: str,
+    position: int,
+    total_len: int,
+) -> None:
+    safe_position = max(0, min(int(position), int(total_len)))
+    anchor_start = max(0, safe_position - _MEMORY_CURSOR_ANCHOR_ROWS)
+    anchor_rows = (
+        redis_client.lrange(history_key, anchor_start, safe_position - 1) or []
+        if safe_position > 0
+        else []
+    )
+    payload = {
+        "version": _MEMORY_CURSOR_VERSION,
+        "position": safe_position,
+        "list_length": max(0, int(total_len)),
+        "anchor": _history_fingerprints(anchor_rows),
+    }
+    redis_client.set(
+        cursor_redis_key,
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+    )
 
 
 def _normalize_history_entry(
@@ -1836,7 +1974,12 @@ def _normalize_history_entry(
         "role": role,
         "timestamp": _message_timestamp(entry, now_ts),
         "text": text,
-        "message_id": _normalized_message_id(platform, source_scope_id or scope_id, index),
+        "message_id": _normalized_message_id(
+            platform,
+            source_scope_id or scope_id,
+            index,
+            raw_entry,
+        ),
     }
 
 
@@ -2330,16 +2473,26 @@ def _process_scope(
 
     cursor_redis_key = cursor_key(platform, history_scope_id)
     raw_cursor = redis_client.get(cursor_redis_key)
-    cursor_idx = _as_int(raw_cursor, 0, min_value=0)
+    cursor_state = _parse_history_cursor(raw_cursor)
 
     total_len = _as_int(redis_client.llen(history_key), 0, min_value=0)
     if total_len <= 0:
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
-    if cursor_idx > total_len:
-        cursor_idx = max(0, total_len - lookback_limit)
+    cursor_idx = _history_cursor_start(
+        history_key=history_key,
+        total_len=total_len,
+        cursor_state=cursor_state,
+        lookback_limit=lookback_limit,
+    )
 
     if cursor_idx >= total_len:
+        _save_history_cursor(
+            cursor_redis_key=cursor_redis_key,
+            history_key=history_key,
+            position=total_len,
+            total_len=total_len,
+        )
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
     end_idx_exclusive = min(total_len, cursor_idx + lookback_limit)
@@ -2363,7 +2516,12 @@ def _process_scope(
             normalized_messages.append(item)
 
     if not normalized_messages:
-        redis_client.set(cursor_redis_key, str(end_idx_exclusive))
+        _save_history_cursor(
+            cursor_redis_key=cursor_redis_key,
+            history_key=history_key,
+            position=end_idx_exclusive,
+            total_len=total_len,
+        )
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
     _remember_scope_labels(platform, memory_scope_id, normalized_messages)
@@ -2506,7 +2664,12 @@ def _process_scope(
                 save_doc(redis_client, legacy_key, legacy_doc, now=ts_now)
                 updated_docs += 1
 
-    redis_client.set(cursor_redis_key, str(end_idx_exclusive))
+    _save_history_cursor(
+        cursor_redis_key=cursor_redis_key,
+        history_key=history_key,
+        position=end_idx_exclusive,
+        total_len=total_len,
+    )
     return {
         "processed_messages": len(normalized_messages),
         "updated_facts": updated_facts,

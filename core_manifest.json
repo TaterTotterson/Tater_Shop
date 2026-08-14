@@ -98,7 +98,7 @@
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.0.29",
+      "version": "1.0.30",
       "min_tater_version": "59",
       "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
@@ -106,7 +106,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "166f2290d8a3c09da9b91d6d17cef89fb833bd84b00c37b92fd0c76887e322df"
+      "sha256": "c06a7ea1f9abcefb67ef4818230756a5a5c1cd6de63f3fc1badd841cc9428f75"
     },
     {
       "id": "music",
