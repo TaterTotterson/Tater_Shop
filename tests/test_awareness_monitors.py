@@ -268,10 +268,12 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.redis.values.clear()
         self.redis.lists.clear()
 
-    def _add_monitor(self, kind, device, area, trigger_events=None):
+    def _add_monitor(self, kind, device, area, trigger_events=None, face_id_enabled=None):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
         if trigger_events is not None:
             values["trigger_events"] = trigger_events
+        if face_id_enabled is not None:
+            values["face_id_enabled"] = face_id_enabled
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             result = self.core.handle_htmlui_tab_action(
                 action="awareness_add_monitor",
@@ -285,7 +287,63 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor["kind"], "camera")
         self.assertEqual(monitor["device_ref"], "camera:cam-front")
         self.assertIn("binary_sensor.unifi_cam-front_smart_person", monitor["event_refs"])
+        self.assertTrue(monitor["face_id_enabled"])
         self.assertEqual(self.redis.hgetall("awareness:rules"), {})
+
+    def test_face_id_can_be_disabled_per_camera_without_disabling_monitoring(self):
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            face_id_enabled=False,
+        )
+
+        self.assertTrue(monitor["enabled"])
+        self.assertFalse(monitor["face_id_enabled"])
+
+        with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
+            self.core.handle_htmlui_tab_action(
+                action="awareness_save_monitor",
+                payload={
+                    "id": monitor["id"],
+                    "values": {
+                        "kind": "camera",
+                        "device": "unifi_protect|cam-front",
+                        "area": "Front Yard",
+                        "enabled": True,
+                        "face_id_enabled": True,
+                    },
+                },
+                redis_client=self.redis,
+            )
+
+        saved = self.core._get_monitor(self.redis, monitor["id"])
+        self.assertTrue(saved["enabled"])
+        self.assertTrue(saved["face_id_enabled"])
+
+    def test_legacy_camera_monitors_keep_face_id_enabled(self):
+        monitor = self.core._normalize_monitor(
+            {
+                "kind": "camera",
+                "provider": "unifi_protect",
+                "device_id": "cam-front",
+                "device_ref": "camera:cam-front",
+                "name": "Front Camera",
+            }
+        )
+        sensor = self.core._normalize_monitor(
+            {
+                "kind": "sensor",
+                "provider": "homeassistant",
+                "device_id": "binary_sensor.back_door",
+                "device_ref": "binary_sensor.back_door",
+                "name": "Back Door",
+                "face_id_enabled": True,
+            }
+        )
+
+        self.assertTrue(monitor["face_id_enabled"])
+        self.assertFalse(sensor["face_id_enabled"])
 
     def test_same_device_cannot_be_monitored_twice(self):
         self._add_monitor("camera", "unifi_protect|cam-front", "Front Yard")
@@ -504,6 +562,38 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["data"]["event_type"], "person")
         self.assertTrue(stored["snapshot_id"])
 
+    async def test_camera_with_face_id_disabled_does_not_schedule_a_face_burst(self):
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            face_id_enabled=False,
+        )
+        event = {
+            "entity_id": "binary_sensor.unifi_cam-front_smart_person",
+            "new_state": {"state": "on"},
+            "old_state": {"state": "off"},
+        }
+        with (
+            patch.object(
+                self.core,
+                "_capture_camera_snapshot",
+                new=AsyncMock(return_value=(b"jpeg-bytes", "image/jpeg")),
+            ),
+            patch.object(
+                self.core,
+                "_vision_describe",
+                new=AsyncMock(return_value="A person is walking toward the front door."),
+            ),
+            patch.object(self.core, "_schedule_face_burst", return_value="unexpected") as schedule,
+        ):
+            result = await self.core._execute_camera_monitor(monitor, event)
+
+        schedule.assert_not_called()
+        self.assertEqual(result["face_session_id"], "")
+        stored = json.loads(self.redis.lists["tater:automations:events:front_yard"][0])
+        self.assertNotIn("face_session_id", stored["data"])
+
     async def test_selected_sensor_event_is_queued_and_stored(self):
         monitor = self._add_monitor("sensor", "homeassistant|binary_sensor.back_door", "Back Door")
         await self.core._handle_trigger_state_change(
@@ -587,6 +677,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("trigger_entities", fields)
         self.assertNotIn("notification_targets", fields)
         self.assertEqual(fields["enabled"]["presentation"], "compact_toggle")
+        self.assertEqual(fields["face_id_enabled"]["presentation"], "compact_toggle")
+        self.assertEqual(fields["face_id_enabled"]["show_when"], {"source_key": "kind", "equals": "camera"})
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")
 
     def test_event_list_view_uses_compact_rows_instead_of_event_cards(self):
@@ -847,6 +939,11 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["selectable"] for row in fields["observation_ids"]["options"]))
         self.assertEqual(fields["target_identity_id"]["type"], "select")
         self.assertEqual(face["actions"][0]["action"], "awareness_move_face_images")
+        self.assertEqual(face["actions"][1]["action"], "awareness_remove_face_images")
+        self.assertEqual(face["actions"][1]["label"], "Remove Selected Images")
+        self.assertNotIn("remove_action", face)
+        self.assertEqual(face["run_action"], "awareness_remove_face_identity")
+        self.assertEqual(face["run_label"], "Remove Person")
         self.assertEqual(face_tab["item_group"], "face_person")
         self.assertNotIn("bulk_actions", face_tab)
 
@@ -1018,6 +1115,103 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             self.core._load_face_session(self.redis, "unknown-session-2")["identity_ids"],
             [known["id"]],
         )
+
+    def test_selected_face_images_can_be_removed_without_removing_the_person(self):
+        base = {
+            "facial_area": {"w": 100, "h": 100},
+            "confidence": 0.95,
+            "crop_b64": "ZmFjZQ==",
+        }
+        identity = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [1.0, 0.0]},
+            event_id="clear-event",
+            seen_at="2026-08-13T08:00:00",
+        )
+        identity = self.core._record_face_detection(
+            self.redis,
+            {**base, "embedding": [0.9, 0.435]},
+            event_id="blurry-event",
+            seen_at="2026-08-13T08:05:00",
+        )
+        self.core.handle_htmlui_tab_action(
+            action="awareness_save_face_identity",
+            payload={"id": identity["id"], "values": {"name": "Fred"}},
+            redis_client=self.redis,
+        )
+        for event_id in ("clear-event", "blurry-event"):
+            session_id = f"session-{event_id}"
+            self.core._save_face_session(
+                self.redis,
+                {
+                    "id": session_id,
+                    "event_id": event_id,
+                    "status": "complete",
+                    "identity_ids": [identity["id"]],
+                },
+            )
+            self.redis.lpush(
+                "tater:automations:events:front_yard",
+                json.dumps(
+                    {
+                        "id": event_id,
+                        "source": "front_yard",
+                        "ha_time": "2026-08-13T08:05:00",
+                        "data": {"face_session_id": session_id},
+                    }
+                ),
+            )
+
+        blurry = next(
+            row
+            for row in identity["observations"]
+            if row.get("event_id") == "blurry-event"
+        )
+        result = self.core.handle_htmlui_tab_action(
+            action="awareness_remove_face_images",
+            payload={
+                "id": identity["id"],
+                "values": {"observation_ids": [blurry["id"]]},
+            },
+            redis_client=self.redis,
+        )
+
+        saved = self.core._face_identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(saved["name"], "Fred")
+        self.assertEqual(len(saved["observations"]), 1)
+        self.assertEqual(saved["observations"][0]["event_id"], "clear-event")
+        self.assertEqual(saved["observation_count"], 1)
+        self.assertEqual(saved["event_count"], 1)
+        self.assertEqual(
+            self.core._load_face_session(self.redis, "session-blurry-event")["identity_ids"],
+            [],
+        )
+        self.assertEqual(
+            self.core._load_face_session(self.redis, "session-clear-event")["identity_ids"],
+            [identity["id"]],
+        )
+        stored_events = [
+            json.loads(row)
+            for row in self.redis.lists["tater:automations:events:front_yard"]
+        ]
+        stored_blurry = next(row for row in stored_events if row["id"] == "blurry-event")
+        self.assertEqual(stored_blurry["data"]["known_people"], [])
+
+        remaining_id = saved["observations"][0]["id"]
+        self.core.handle_htmlui_tab_action(
+            action="awareness_remove_face_images",
+            payload={
+                "id": identity["id"],
+                "values": {"observation_ids": [remaining_id]},
+            },
+            redis_client=self.redis,
+        )
+        saved_without_images = self.core._face_identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(saved_without_images["name"], "Fred")
+        self.assertEqual(saved_without_images["observations"], [])
+        self.assertEqual(saved_without_images["observation_count"], 0)
+        self.assertEqual(saved_without_images["event_count"], 0)
 
     def test_bulk_merge_and_selected_image_unmerge_preserve_event_links(self):
         base = {

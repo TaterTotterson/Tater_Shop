@@ -45,7 +45,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with Tater versions before Face ID.
     _face_id_runtime = None
 
-__version__ = "4.4.1"
+__version__ = "4.4.2"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
@@ -1775,6 +1775,9 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "name": name,
         "area": area or kind,
         "enabled": _bool(raw.get("enabled"), True),
+        # Preserve the behavior of camera monitors created before this setting
+        # existed. Sensors can never schedule Face ID work.
+        "face_id_enabled": kind == "camera" and _bool(raw.get("face_id_enabled"), True),
         "created_at": _as_float(raw.get("created_at"), now_ts),
         "updated_at": _as_float(raw.get("updated_at"), now_ts),
         "last_event_ts": _as_float(raw.get("last_event_ts"), 0.0),
@@ -2331,6 +2334,10 @@ def _build_monitor_from_values(
         "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "face_id_enabled": kind == "camera" and _bool(
+            _value(values, payload, "face_id_enabled", previous.get("face_id_enabled", True)),
+            True,
+        ),
         "created_at": _as_float(previous.get("created_at"), now_ts),
         "updated_at": now_ts,
     }
@@ -4330,7 +4337,7 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
         event_payload["data"]["capture_error"] = _compact(error_text, limit=180)
     _monitor_snapshot_fields(event_payload, snapshot_store)
     face_session_id = ""
-    if _face_burst_should_run(event_kind, summary):
+    if _bool(monitor.get("face_id_enabled"), True) and _face_burst_should_run(event_kind, summary):
         face_session_id = _schedule_face_burst(
             event_id=event_id,
             provider=provider,
@@ -4444,6 +4451,7 @@ def _monitor_form(
         if _text(value)
     ]
     enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
+    face_id_label = "Face ID on" if _bool(monitor.get("face_id_enabled"), True) else "Face ID off"
     last_event = _fmt_ts(monitor.get("last_event_ts"))
     return {
         "id": monitor["id"],
@@ -4451,7 +4459,8 @@ def _monitor_form(
         "title": _text(monitor.get("name")) or _text(monitor.get("area")) or "Monitored source",
         "subtitle": (
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
-            f"{', '.join(trigger_labels) or 'No triggers'} • last event: {last_event}"
+            f"{', '.join(trigger_labels) or 'No triggers'} • "
+            f"{f'{face_id_label} • ' if kind == 'camera' else ''}last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -4531,6 +4540,18 @@ def _monitor_form(
                 "label": "Monitor This Source",
                 "type": "checkbox",
                 "value": _bool(monitor.get("enabled"), True),
+            },
+            {
+                "key": "face_id_enabled",
+                "label": "Use Face ID On This Camera",
+                "type": "checkbox",
+                "presentation": "compact_toggle",
+                "value": _bool(monitor.get("face_id_enabled"), True),
+                "description": (
+                    "Run face burst snapshots and recognition for this camera. "
+                    "The Face ID model must also be enabled in Settings › Models."
+                ),
+                "show_when": {"source_key": "kind", "equals": "camera"},
             },
         ],
     }
@@ -4699,7 +4720,7 @@ def _rewrite_face_sessions_for_split(
         updated = list(current)
         if event_id not in remaining_event_ids:
             updated = [value for value in updated if value != source_id]
-        if target_id not in updated:
+        if target_id and target_id not in updated:
             updated.append(target_id)
         session["identity_ids"] = updated
         _save_face_session(redis_obj, session)
@@ -4921,6 +4942,85 @@ def _move_face_images(
     }
 
 
+def _remove_face_images(
+    client: Any,
+    identity_id: str,
+    observation_ids: List[str],
+) -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    requested = set(_text(value) for value in observation_ids if _text(value))
+    if not requested:
+        raise ValueError("Select at least one face image to remove.")
+
+    linked_events = _face_identity_linked_events(redis_obj, identity_id)
+    with _FACE_IDENTITY_LOCK:
+        identities = _face_identity_rows(redis_obj)
+        identity = dict(identities.get(identity_id) or {})
+        if not identity:
+            raise KeyError("Face identity not found.")
+
+        observations = _face_observations(identity)
+        observations_by_id = {_text(row.get("id")): row for row in observations}
+        missing = requested - set(observations_by_id)
+        if missing:
+            raise ValueError("One or more selected face images are no longer available.")
+        selected = [row for row in observations if _text(row.get("id")) in requested]
+        remaining = [row for row in observations if _text(row.get("id")) not in requested]
+
+        # A manually merged identity can retain confirmed anchor vectors. Drop
+        # anchors that came from a removed capture so its embedding no longer
+        # influences future matching.
+        selected_embeddings = [
+            embedding
+            for embedding in (row.get("embedding") for row in selected)
+            if isinstance(embedding, list) and embedding
+        ]
+        anchors = identity.get("anchor_references")
+        if isinstance(anchors, list) and selected_embeddings:
+            identity["anchor_references"] = [
+                anchor
+                for anchor in anchors
+                if not isinstance(anchor, list)
+                or not anchor
+                or all(_face_cosine_distance(anchor, selected_embedding) >= 0.005 for selected_embedding in selected_embeddings)
+            ]
+
+        original_observation_count = _as_int(identity.get("observation_count"), len(observations), minimum=0)
+        for key in (
+            "centroid",
+            "centroid_count",
+            "reference_centroids",
+            "face_b64",
+            "face_content_type",
+            "best_quality",
+        ):
+            identity.pop(key, None)
+        identity = _rebuild_face_identity_from_observations(identity, remaining, keep_name=True)
+        identity["observation_count"] = max(0, original_observation_count - len(selected))
+
+        selected_event_ids = {_text(row.get("event_id")) for row in selected if _text(row.get("event_id"))}
+        remaining_event_ids = {_text(row.get("event_id")) for row in remaining if _text(row.get("event_id"))}
+        removed_event_ids = selected_event_ids - remaining_event_ids
+        identity["event_count"] = len((set(linked_events) - removed_event_ids) | remaining_event_ids)
+        if not remaining and not identity["event_count"]:
+            for key in ("first_seen", "last_seen", "last_event_id", "last_distance"):
+                identity.pop(key, None)
+        identity = _save_face_identity(redis_obj, identity)
+
+    _rewrite_face_sessions_for_split(
+        redis_obj,
+        source_id=identity_id,
+        target_id="",
+        selected_event_ids=selected_event_ids,
+        remaining_event_ids=remaining_event_ids,
+    )
+    return {
+        "identity": identity,
+        "removed": len(selected),
+        "face_captures": len(selected),
+    }
+
+
 def _remove_face_identity(client: Any, identity_id: str) -> bool:
     redis_obj = client or redis_client
     if redis_obj is None or not identity_id:
@@ -5087,8 +5187,12 @@ def _face_identity_forms(client: Any) -> List[Dict[str, Any]]:
                 "sections_in_dropdown": False,
                 "save_action": "awareness_save_face_identity",
                 "save_label": "Save Person",
-                "remove_action": "awareness_remove_face_identity",
-                "remove_confirm": "Remove this face identity? It will no longer be attached to historical events.",
+                "run_action": "awareness_remove_face_identity",
+                "run_label": "Remove Person",
+                "run_confirm": (
+                    "Remove this entire person and all of their saved face images? "
+                    "They will no longer be attached to historical events."
+                ),
                 "actions": [
                     {
                         "action": "awareness_move_face_images",
@@ -5096,7 +5200,16 @@ def _face_identity_forms(client: Any) -> List[Dict[str, Any]]:
                         "tooltip": "Move the checked face captures to the person selected below.",
                         "working_text": "Moving selected face images...",
                         "success_text": "Selected face images moved.",
-                    }
+                    },
+                    {
+                        "action": "awareness_remove_face_images",
+                        "label": "Remove Selected Images",
+                        "tooltip": "Remove only the checked face captures while keeping this person.",
+                        "confirm": "Remove only the selected face images? This person will be kept.",
+                        "tone": "danger",
+                        "working_text": "Removing selected face images...",
+                        "success_text": "Selected face images removed.",
+                    },
                 ] if selectable_count else [],
                 "fields": [
                     {
@@ -5128,8 +5241,8 @@ def _face_identity_forms(client: Any) -> List[Dict[str, Any]]:
                         "value": [],
                         "options": gallery,
                         "description": (
-                            "Only saved face crops with recognition vectors are shown. Check the images that belong "
-                            "to someone else, choose that person below, and move them."
+                            "Only saved face crops with recognition vectors are shown. Check images to move them "
+                            "to another person or remove blurry and incorrect captures."
                         ),
                         "full_width": True,
                     },
@@ -5359,6 +5472,18 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "presentation": "compact_toggle",
                     "value": True,
                 },
+                {
+                    "key": "face_id_enabled",
+                    "label": "Use Face ID On This Camera",
+                    "type": "checkbox",
+                    "presentation": "compact_toggle",
+                    "value": True,
+                    "description": (
+                        "Run face burst snapshots and recognition for this camera. "
+                        "The Face ID model must also be enabled in Settings › Models."
+                    ),
+                    "show_when": {"source_key": "kind", "equals": "camera"},
+                },
             ],
         },
         "item_forms": [*event_forms, *face_forms, *monitor_forms],
@@ -5512,6 +5637,18 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             "moved": moved,
             "source_removed": bool(result.get("source_removed")),
             "message": f"Moved {moved} image{'s' if moved != 1 else ''} to {target_label}.",
+        }
+    if action_name == "awareness_remove_face_images":
+        identity_id = _text(body.get("id"))
+        observation_ids = _monitor_string_list(_value(values, body, "observation_ids", []))
+        result = _remove_face_images(client, identity_id, observation_ids)
+        _refresh_stored_face_events(client)
+        removed = _as_int(result.get("removed"), 0, minimum=0)
+        return {
+            "ok": True,
+            "id": identity_id,
+            "removed": removed,
+            "message": f"Removed {removed} selected image{'s' if removed != 1 else ''}. The person was kept.",
         }
     if action_name == "awareness_save_face_identity":
         identity_id = _text(body.get("id"))
