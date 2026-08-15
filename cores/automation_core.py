@@ -36,7 +36,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 MIN_TATER_VERSION = "98"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -1467,6 +1467,7 @@ def _event_refs(event: Dict[str, Any]) -> set[str]:
     refs: set[str] = set()
     id_keys = {
         "entity_id",
+        "device",
         "device_id",
         "deviceid",
         "id",

@@ -844,12 +844,12 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         motion_event = {
             "provider": "unifi_protect",
             "kind": "protect_event",
-            "payload": {"type": "cameraMotion", "camera": "doorbell-front"},
+            "payload": {"type": "cameraMotion", "device": "doorbell-front"},
         }
         press_event = {
             "provider": "unifi_protect",
             "kind": "protect_event",
-            "payload": {"type": "ring", "camera": "doorbell-front"},
+            "payload": {"type": "ring", "device": "doorbell-front"},
         }
 
         self.assertFalse(self.core._event_match(rule, motion_event, sample_registry())[0])
