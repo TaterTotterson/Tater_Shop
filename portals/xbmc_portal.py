@@ -7,8 +7,10 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+import requests
 import uvicorn
 
 from dotenv import load_dotenv
@@ -28,29 +30,27 @@ import verba_registry as pr
 from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xbmc")
 
-# -------------------- Platform defaults (overridable in WebUI) --------------------
-BIND_HOST = "0.0.0.0"
-TIMEOUT_SECONDS = 60
-
+# -------------------- Platform defaults --------------------
 DEFAULT_GLOBAL_MAX_STORE = 20
 DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2h
+BGVIDEO_FILENAME = "BGVideo.avi"
+BGVIDEO_RELEASE_URL = "https://github.com/TaterTotterson/skin.cortana.ai-xbmc/releases/latest/download/BGVideo.avi"
+BGVIDEO_CACHE_PATH = os.path.expanduser("~/.taterassistant/agent_lab/assets/xbmc/BGVideo.avi")
+BGVIDEO_MIN_BYTES = 10 * 1024 * 1024
+BGVIDEO_CHUNK_BYTES = 1024 * 1024
+BGVIDEO_MEDIA_TYPE = "video/x-msvideo"
+TTS_MAX_TEXT_CHARS = 900
 
 PORTAL_SETTINGS = {
     "category": "XBMC / Original Xbox Settings",
     "required": {
-        "bind_port": {
-            "label": "Legacy Bind Port",
-            "type": "number",
-            "default": 8790,
-            "description": "Deprecated. XBMC now uses Tater's main API path: /api/portals/xbmc_portal/api/tater-xbmc/v1"
-        },
         "API_AUTH_ENABLED": {
             "label": "Require API Key",
             "type": "select",
@@ -166,6 +166,80 @@ def _require_api_auth(x_tater_token: Optional[str]) -> None:
     if supplied != configured:
         raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token header.")
 
+
+def _valid_bgvideo_file(path: str) -> bool:
+    try:
+        return bool(path and os.path.exists(path) and os.path.getsize(path) >= BGVIDEO_MIN_BYTES)
+    except Exception:
+        return False
+
+
+def _configured_bgvideo_path() -> str:
+    return os.path.expanduser(str(os.environ.get("XBMC_BGVIDEO_PATH") or "").strip())
+
+
+def _bgvideo_url() -> str:
+    return str(os.environ.get("XBMC_BGVIDEO_URL") or BGVIDEO_RELEASE_URL).strip()
+
+
+def _find_bgvideo_file() -> str:
+    for path in (_configured_bgvideo_path(), BGVIDEO_CACHE_PATH):
+        if _valid_bgvideo_file(path):
+            return path
+    return ""
+
+
+def _bgvideo_headers(content_length: str = "") -> Dict[str, str]:
+    headers = {
+        "Cache-Control": "public, max-age=86400",
+        "Content-Disposition": "attachment; filename=%s" % BGVIDEO_FILENAME,
+    }
+    if content_length:
+        headers["Content-Length"] = content_length
+    return headers
+
+
+def _stream_and_cache_bgvideo(response):
+    temp_path = BGVIDEO_CACHE_PATH + ".part"
+    output = None
+    total = 0
+
+    try:
+        try:
+            os.makedirs(os.path.dirname(BGVIDEO_CACHE_PATH), exist_ok=True)
+            output = open(temp_path, "wb")
+        except Exception as exc:
+            logger.warning("[XBMC Bridge] BGVideo cache unavailable: %s", exc)
+
+        for chunk in response.iter_content(chunk_size=BGVIDEO_CHUNK_BYTES):
+            if not chunk:
+                continue
+            if output:
+                output.write(chunk)
+            total += len(chunk)
+            yield chunk
+
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+        if output:
+            try:
+                output.close()
+            except Exception:
+                pass
+
+            try:
+                if total >= BGVIDEO_MIN_BYTES:
+                    os.replace(temp_path, BGVIDEO_CACHE_PATH)
+                    logger.info("[XBMC Bridge] Cached BGVideo at %s", BGVIDEO_CACHE_PATH)
+                elif os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as exc:
+                logger.warning("[XBMC Bridge] BGVideo cache finalize failed: %s", exc)
+
 # -------------------- FastAPI DTOs --------------------
 class XBMCRequest(BaseModel):
     text: str
@@ -173,9 +247,143 @@ class XBMCRequest(BaseModel):
     device_id: Optional[str] = None
     area_id: Optional[str] = None
     session_id: Optional[str] = None  # we use this for Redis key
+    include_tts: Optional[bool] = None
+    tts_format: Optional[str] = None
+    include_quick_asks: Optional[bool] = None
 
 class XBMCResponse(BaseModel):
     response: str
+    quick_asks: Optional[List[str]] = None
+
+class XBMCTTSRequest(BaseModel):
+    text: str
+
+
+async def _synthesize_xbmc_tts_wav(text: str) -> bytes:
+    from speech_settings import get_speech_settings
+    from speech_tts import synthesize_preview_wav
+
+    settings = get_speech_settings() or {}
+    clean_text = str(text or "").strip()[:TTS_MAX_TEXT_CHARS]
+    return await synthesize_preview_wav(
+        text=clean_text,
+        backend=str(settings.get("tts_backend") or "").strip(),
+        model=str(settings.get("tts_model") or "").strip(),
+        voice=str(settings.get("tts_voice") or "").strip(),
+        kokoro_output_gain=settings.get("kokoro_output_gain"),
+        pocket_tts_output_gain=settings.get("pocket_tts_output_gain"),
+        acceleration=str(settings.get("acceleration") or "").strip(),
+        wyoming_host=str(settings.get("wyoming_tts_host") or "").strip(),
+        wyoming_port=settings.get("wyoming_tts_port"),
+        wyoming_voice=str(settings.get("wyoming_tts_voice") or "").strip(),
+        openai_base_url=str(settings.get("openai_tts_base_url") or "").strip(),
+        openai_api_key=str(settings.get("openai_tts_api_key") or "").strip(),
+        chatterbox_base_url=str(settings.get("chatterbox_tts_base_url") or "").strip(),
+        chatterbox_voice_mode=str(settings.get("chatterbox_tts_voice_mode") or "").strip(),
+        chatterbox_chunk_size=settings.get("chatterbox_tts_chunk_size"),
+        chatterbox_temperature=settings.get("chatterbox_tts_temperature"),
+        chatterbox_exaggeration=settings.get("chatterbox_tts_exaggeration"),
+        chatterbox_cfg_weight=settings.get("chatterbox_tts_cfg_weight"),
+        chatterbox_seed=settings.get("chatterbox_tts_seed"),
+        chatterbox_speed_factor=settings.get("chatterbox_tts_speed_factor"),
+        chatterbox_language=str(settings.get("chatterbox_tts_language") or "").strip(),
+    )
+
+
+def _clean_quick_ask(value: Any) -> str:
+    text = str(value or "").strip().replace("\r", " ").replace("\n", " ")
+    while "  " in text:
+        text = text.replace("  ", " ")
+    text = text.strip(" -\t")
+    if len(text) > 64:
+        text = text[:64].rsplit(" ", 1)[0].strip()
+    return text
+
+
+def _fallback_quick_asks(user_text: str, reply_text: str) -> List[str]:
+    combined = ("%s %s" % (user_text, reply_text)).lower()
+    if "light" in combined:
+        return ["Set the lights to blue", "Turn the lights off", "What else can you control?"]
+    if "game" in combined or "xbox" in combined:
+        return ["Tell me more about that game", "Recommend another game", "Find a multiplayer game"]
+    if "news" in combined:
+        return ["Tell me the top story", "Any Insignia updates?", "Find more Xbox news"]
+    return ["Tell me more", "What can you do next?", "Give me a quick suggestion"]
+
+
+def _extract_quick_asks(raw: str, user_text: str, reply_text: str) -> List[str]:
+    text = str(raw or "").strip()
+    parsed: Any = None
+
+    for candidate in (text, text[text.find("{"):text.rfind("}") + 1], text[text.find("["):text.rfind("]") + 1]):
+        candidate = str(candidate or "").strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+            break
+        except Exception:
+            continue
+
+    if isinstance(parsed, dict):
+        parsed = parsed.get("quick_asks") or parsed.get("suggestions") or parsed.get("replies")
+
+    asks: List[str] = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            ask = _clean_quick_ask(item)
+            if ask and ask not in asks:
+                asks.append(ask)
+            if len(asks) >= 3:
+                break
+
+    while len(asks) < 3:
+        for fallback in _fallback_quick_asks(user_text, reply_text):
+            ask = _clean_quick_ask(fallback)
+            if ask and ask not in asks:
+                asks.append(ask)
+            if len(asks) >= 3:
+                break
+        break
+
+    return asks[:3]
+
+
+async def _generate_quick_asks(user_text: str, reply_text: str) -> List[str]:
+    fallback = _fallback_quick_asks(user_text, reply_text)
+    if _llm is None:
+        return fallback
+
+    try:
+        result = await _llm.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate exactly 3 short follow-up replies for an original Xbox Cortana UI. "
+                        "They are button labels the user can send next. Keep each under 8 words. "
+                        "Return JSON only: {\"quick_asks\":[\"...\",\"...\",\"...\"]}"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "user_message": str(user_text or ""),
+                            "cortana_reply": str(reply_text or ""),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            max_tokens=160,
+            temperature=0.35,
+        )
+        raw = str(((result or {}).get("message") or {}).get("content") or "")
+        return _extract_quick_asks(raw, user_text, reply_text)
+    except Exception as exc:
+        logger.warning("[XBMC Bridge] Quick ask generation failed: %s", exc)
+        return fallback
 
 # -------------------- System prompt (XBMC / Cortana) --------------------
 def build_system_prompt() -> str:
@@ -376,6 +584,64 @@ async def health(x_tater_token: Optional[str] = Header(None)):
     _require_api_auth(x_tater_token)
     return {"ok": True, "version": "1.0"}
 
+
+@app.get("/tater-xbmc/v1/bgvideo.avi")
+def bgvideo(x_tater_token: Optional[str] = Header(None)):
+    local_path = _find_bgvideo_file()
+    if local_path:
+        return FileResponse(
+            local_path,
+            media_type=BGVIDEO_MEDIA_TYPE,
+            filename=BGVIDEO_FILENAME,
+            headers=_bgvideo_headers(),
+        )
+
+    url = _bgvideo_url()
+    try:
+        response = requests.get(
+            url,
+            stream=True,
+            timeout=(10, 60),
+            headers={"User-Agent": "Tater XBMC BGVideo Proxy"},
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("[XBMC Bridge] BGVideo release fetch failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Unable to fetch BGVideo release asset.")
+
+    return StreamingResponse(
+        _stream_and_cache_bgvideo(response),
+        media_type=BGVIDEO_MEDIA_TYPE,
+        headers=_bgvideo_headers(response.headers.get("Content-Length", "")),
+    )
+
+
+@app.post("/tater-xbmc/v1/tts.wav")
+async def tts_wav(payload: XBMCTTSRequest, x_tater_token: Optional[str] = Header(None)):
+    _require_api_auth(x_tater_token)
+
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="TTS text is required.")
+
+    try:
+        wav_bytes = await _synthesize_xbmc_tts_wav(text)
+    except Exception as exc:
+        logger.warning("[XBMC Bridge] TTS synthesis failed: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc) or "TTS synthesis failed.")
+
+    if not wav_bytes:
+        raise HTTPException(status_code=400, detail="TTS synthesis produced no audio.")
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": "attachment; filename=cortana_reply.wav",
+        },
+    )
+
 # -------------------- Main XBMC chat endpoint --------------------
 @app.post("/tater-xbmc/v1/message", response_model=XBMCResponse)
 async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = Header(None)):
@@ -465,7 +731,10 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
             {"marker": "plugin_response", "phase": "final", "content": final_text},
             history_store_limit,
         )
-        return XBMCResponse(response=final_text)
+        quick_asks = []
+        if bool(payload.include_quick_asks):
+            quick_asks = await _generate_quick_asks(text_in, final_text)
+        return XBMCResponse(response=final_text, quick_asks=quick_asks)
 
     except Exception:
         logger.exception("[XBMC Bridge] LLM error")

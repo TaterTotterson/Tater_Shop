@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 
 load_dotenv()
@@ -31,9 +31,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("homekit")
 
 # -------------------- Platform defaults --------------------
-BIND_HOST = "0.0.0.0"
-DEFAULT_PORT = 8789
-TIMEOUT_SECONDS = 60
 DEFAULT_GLOBAL_MAX_STORE = 20
 DEFAULT_GLOBAL_MAX_LLM = 8
 DEFAULT_SESSION_TTL_SECONDS = 60 * 60  # 1h
@@ -42,12 +39,6 @@ DEFAULT_SESSION_TTL_SECONDS = 60 * 60  # 1h
 PORTAL_SETTINGS = {
     "category": "HomeKit / Siri",
     "required": {
-        "bind_port": {
-            "label": "Legacy Bind Port",
-            "type": "number",
-            "default": DEFAULT_PORT,
-            "description": "Deprecated. Siri / Shortcuts now uses Tater's main API path: /api/portals/homekit_portal/api/tater-homekit/v1"
-        },
         "SESSION_TTL_SECONDS": {
             "label": "Session TTL (seconds)",
             "type": "number",
@@ -66,12 +57,6 @@ PORTAL_SETTINGS = {
             "type": "password",
             "default": "",
             "description": "Shared API key expected in the X-Tater-Token header when auth is enabled."
-        },
-        "AUTH_TOKEN": {
-            "label": "Legacy Auth Token (optional)",
-            "type": "password",
-            "default": "",
-            "description": "Backward-compatible fallback token if API Key is empty."
         },
     }
 }
