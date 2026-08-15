@@ -19,15 +19,15 @@
       "id": "homekit",
       "name": "HomeKit / Siri",
       "module_key": "homekit_portal",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "HomeKit / Siri integration portal for Tater.",
       "settings_category": "HomeKit / Siri",
-      "required_settings_count": 5,
+      "required_settings_count": 3,
       "autostart_key": "homekit_portal_running",
       "tags": [],
       "entry": "portals/homekit_portal.py",
-      "sha256": "0b82b05bcd0051d1234657181b39e9d5673f329c5103150a7fa94cb99d900b9f"
+      "sha256": "09573e3ab4217edf9c6c80659c9fa4ba16955009f33d16a327cc0fbc7b7376c7"
     },
     {
       "id": "irc",
@@ -111,15 +111,15 @@
       "id": "xbmc",
       "name": "XBMC / Original Xbox",
       "module_key": "xbmc_portal",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "XBMC / Original Xbox integration portal for Tater.",
       "settings_category": "XBMC / Original Xbox Settings",
-      "required_settings_count": 4,
+      "required_settings_count": 3,
       "autostart_key": "xbmc_portal_running",
       "tags": [],
       "entry": "portals/xbmc_portal.py",
-      "sha256": "a87bef3da65d4fedd585563251ed41949f3f606b3e5b9bc382eb08186c83eb24"
+      "sha256": "c31e62db5d6e103e296f76e19807fa6715a9389318f92c1390c5d81cc8214f5c"
     }
   ]
 }
