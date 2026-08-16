@@ -993,16 +993,30 @@ class MusicCoreTests(unittest.TestCase):
         )
 
     def test_native_client_live_volume_action_updates_active_players(self):
+        target = "voice_core:native:kitchen"
         player = {
             "status": "playing",
             "provider": "tater_tube",
             "queue": self.tracks,
             "index": 0,
             "current": self.tracks[0],
-            "targets": ["voice_core:native:kitchen"],
+            "targets": [target],
             "volume_percent": 70,
         }
         self.redis.set(self.core.PLAYER_KEY, json.dumps(player))
+        self.redis.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "player_calibrations": json.dumps(
+                    {
+                        target: {
+                            "volume_percent": 70,
+                            "sync_offset_ms": 24,
+                        }
+                    }
+                )
+            },
+        )
         with patch.object(
             self.core,
             "_reconcile_native_playback",
@@ -1021,6 +1035,27 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.core._player(self.redis)["volume_percent"], 31)
         set_volume.assert_called_once_with(player, 31)
+        calibration = self.core._player_calibrations(self.core._settings(self.redis))[target]
+        self.assertEqual(calibration["volume_percent"], 31)
+        self.assertEqual(calibration["sync_offset_ms"], 24)
+
+        with patch.object(
+            self.core,
+            "_stop_target",
+            return_value=[],
+        ), patch.object(
+            self.core,
+            "_play_track",
+            return_value={"ok": True, "sent_count": 1},
+        ) as play_track:
+            advanced = self.core._advance_player(1, client=self.redis)
+
+        self.assertEqual(advanced["current"]["id"], "track:two")
+        self.assertEqual(play_track.call_args.kwargs["volume_percent"], 31)
+        self.assertEqual(
+            play_track.call_args.kwargs["player_settings"][target]["volume_percent"],
+            31,
+        )
 
     def test_little_spud_continuation_returns_ai_tracks_without_starting_remote_player(self):
         with patch.object(
