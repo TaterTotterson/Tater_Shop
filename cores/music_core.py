@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.4.1"
+__version__ = "3.4.2"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -1610,6 +1610,37 @@ def _save_player(player: Dict[str, Any], client: Any = None) -> None:
     player["target"] = targets[0] if targets else ""
     player["updated_at"] = time.time()
     _save_json(store, PLAYER_KEY, player)
+
+
+def _persist_shared_player_volume(
+    player: Dict[str, Any],
+    volume_percent: Any,
+    *,
+    client: Any = None,
+) -> int:
+    """Keep the shared player and every selected destination at one volume."""
+    store = client or globals().get("redis_client")
+    volume = _as_int(
+        volume_percent,
+        _as_int(player.get("volume_percent"), 75, 0, 100),
+        0,
+        100,
+    )
+    player["volume_percent"] = volume
+    targets = _list(player.get("targets") or player.get("target"))
+    if targets:
+        cfg = _settings(store)
+        _save_player_calibrations(
+            store,
+            {
+                target: {
+                    **_target_calibration(target, cfg, default_volume=volume),
+                    "volume_percent": volume,
+                }
+                for target in targets
+            },
+        )
+    return volume
 
 
 def _listening_history(client: Any = None) -> List[Dict[str, Any]]:
@@ -5507,7 +5538,7 @@ def run_client_music_action(
                     if _text(value)
                 )
                 raise ValueError(warning or "The active players could not change volume.")
-        player["volume_percent"] = volume
+        _persist_shared_player_volume(player, volume, client=store)
         player["warnings"] = [
             _text(value)
             for value in list(live_result.get("warnings") or [])
@@ -6852,20 +6883,7 @@ def handle_htmlui_tab_action(
                     if _text(value)
                 )
                 raise ValueError(warning or "The active players could not change volume.")
-        player["volume_percent"] = volume
-        calibrated_targets = _list(player.get("targets") or player.get("target"))
-        if calibrated_targets:
-            cfg = _settings(store)
-            _save_player_calibrations(
-                store,
-                {
-                    target: {
-                        **_target_calibration(target, cfg, default_volume=volume),
-                        "volume_percent": volume,
-                    }
-                    for target in calibrated_targets
-                },
-            )
+        _persist_shared_player_volume(player, volume, client=store)
         warnings = [
             _text(value)
             for value in list(live_result.get("warnings") or [])
