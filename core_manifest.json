@@ -19,7 +19,7 @@
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.4.1",
+      "version": "1.4.2",
       "min_tater_version": "98",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, and announcement targets.",
       "settings_category": "Automation Core Settings",
@@ -33,7 +33,7 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "4839d9cadbf7cb2d7ccbe27e6479e02700e0244920d7f541ac208a7a55540e34"
+      "sha256": "7c275e274f47a7601c438b3ccb73610cd1350799c4529bd27dcc6641f4cc2ce8"
     },
     {
       "id": "awareness",

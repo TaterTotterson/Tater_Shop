@@ -24,7 +24,7 @@ from urllib.parse import quote
 from announcement_targets import build_announcement_target_options
 import requests
 
-from helpers import describe_image_with_local_llm, redis_client
+from helpers import describe_image_with_local_llm, redis_client, resolve_hydra_base_servers
 from integration_registry import get_integration_device_registry, run_integration_device_action
 from notify import dispatch_notification, notifier_destination_catalog
 from speech_settings import get_speech_settings
@@ -36,7 +36,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 MIN_TATER_VERSION = "98"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -2090,32 +2090,105 @@ def _snapshot_result_bytes(result: Any) -> Tuple[bytes, str]:
     return bytes(content), content_type or "image/jpeg"
 
 
+def _normalize_vision_provider(value: Any) -> str:
+    token = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {
+        "hf",
+        "huggingface",
+        "hugging_face",
+        "transformers",
+        "hf_transformers",
+        "local_transformers",
+    }:
+        return "hf_transformers"
+    if token in {
+        "llama",
+        "llamacpp",
+        "llama_cpp",
+        "llama.cpp",
+        "gguf",
+        "llama_cpp_python",
+    }:
+        return "llama_cpp"
+    if token in {
+        "mlx",
+        "mlx_lm",
+        "apple_mlx",
+        "apple_silicon",
+        "mlxlm",
+    }:
+        return "mlx_lm"
+    return "openai_compatible"
+
+
+def _is_local_vision_provider(value: Any) -> bool:
+    return _normalize_vision_provider(value) in {"hf_transformers", "llama_cpp", "mlx_lm"}
+
+
+def _base_vision_target() -> Tuple[str, str]:
+    try:
+        rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        logger.exception("[automation] failed to read base LLM settings for vision routing")
+        return "", ""
+    row = dict(rows[0]) if rows and isinstance(rows[0], dict) else {}
+    return _normalize_vision_provider(row.get("provider")), _text(row.get("model"))
+
+
+def _describe_snapshot_local(
+    image_bytes: bytes,
+    prompt: str,
+    provider: str,
+    model: str,
+) -> str:
+    result = describe_image_with_local_llm(
+        provider=provider,
+        model=model,
+        image_bytes=image_bytes,
+        filename="tater-automation-camera.jpg",
+        prompt=prompt,
+        timeout=90.0,
+    )
+    description = _text((result or {}).get("description"))
+    if not description:
+        raise RuntimeError("The local vision model returned no description.")
+    return description
+
+
 def _describe_snapshot_sync(image_bytes: bytes, content_type: str, prompt: str) -> str:
     settings = get_vision_settings(
         default_api_base="http://127.0.0.1:1234",
         default_model="qwen2.5-vl-7b-instruct",
     )
-    provider = _token(settings.get("provider") or "openai_compatible")
+    routing_mode = _token(settings.get("mode") or "api")
+    if routing_mode not in {"api", "auto", "base", "dedicated"}:
+        routing_mode = "api"
+    provider = _normalize_vision_provider(settings.get("provider") or "openai_compatible")
     model = _text(settings.get("model") or "qwen2.5-vl-7b-instruct")
-    if provider in {"hf", "huggingface", "hugging_face", "hf_transformers"}:
-        provider = "hf_transformers"
-    elif provider in {"llama", "llamacpp", "llama_cpp", "llama_cpp_python"}:
-        provider = "llama_cpp"
-    elif provider in {"mlx", "mlx_lm", "apple_mlx"}:
-        provider = "mlx_lm"
-    if provider in {"hf_transformers", "llama_cpp", "mlx_lm"}:
-        result = describe_image_with_local_llm(
-            provider=provider,
-            model=model,
-            image_bytes=image_bytes,
-            filename="tater-automation-camera.jpg",
-            prompt=prompt,
-            timeout=90.0,
-        )
-        description = _text((result or {}).get("description"))
-        if not description:
-            raise RuntimeError("The local vision model returned no description.")
-        return description
+
+    if routing_mode == "dedicated" and _is_local_vision_provider(provider):
+        return _describe_snapshot_local(image_bytes, prompt, provider, model)
+
+    if routing_mode in {"auto", "base"}:
+        base_provider, base_model = _base_vision_target()
+        if _is_local_vision_provider(base_provider) and base_model:
+            try:
+                return _describe_snapshot_local(
+                    image_bytes,
+                    prompt,
+                    base_provider,
+                    base_model,
+                )
+            except Exception:
+                if routing_mode == "base":
+                    raise
+                logger.exception(
+                    "[automation] local base vision failed; falling back to configured vision API"
+                )
+        elif routing_mode == "base":
+            raise RuntimeError(
+                "Vision is set to use the base model, but the base LLM is not a local provider."
+            )
 
     api_base = _text(settings.get("api_base") or "http://127.0.0.1:1234").rstrip("/")
     api_key = _text(settings.get("api_key"))
@@ -2207,6 +2280,7 @@ async def _execute_camera_ai(rule: Dict[str, Any], context: Dict[str, Any]) -> D
         try:
             tts_result = await _execute_tts(
                 {
+                    "tts_mode": "custom",
                     "tts_text": _text(rule.get("camera_tts_text") or "{vision}"),
                     "tts_targets": tts_targets,
                 },

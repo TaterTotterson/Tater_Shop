@@ -30,7 +30,7 @@ import verba_registry as pr
 from admin_gate import admin_denial_message, is_admin_only_plugin, origin_is_admin, resolve_admin_status
 from hydra import run_hydra_turn, resolve_agent_limits
 from verba_result import action_failure
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 
 
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +47,7 @@ BGVIDEO_MIN_BYTES = 10 * 1024 * 1024
 BGVIDEO_CHUNK_BYTES = 1024 * 1024
 BGVIDEO_MEDIA_TYPE = "video/x-msvideo"
 TTS_MAX_TEXT_CHARS = 900
+INSTALLED_GAME_CONTEXT_MAX_ITEMS = 1200
 
 PORTAL_SETTINGS = {
     "category": "XBMC / Original Xbox Settings",
@@ -250,6 +251,7 @@ class XBMCRequest(BaseModel):
     include_tts: Optional[bool] = None
     tts_format: Optional[str] = None
     include_quick_asks: Optional[bool] = None
+    installed_games: Optional[List[Dict[str, Any]]] = None
 
 class XBMCResponse(BaseModel):
     response: str
@@ -257,6 +259,53 @@ class XBMCResponse(BaseModel):
 
 class XBMCTTSRequest(BaseModel):
     text: str
+
+
+def _clean_installed_game_name(value: Any) -> str:
+    text = str(value or "").strip().replace("\r", " ").replace("\n", " ")
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text[:80].strip()
+
+
+def _installed_game_names(installed_games: Any) -> List[str]:
+    names: List[str] = []
+    seen = set()
+
+    if not isinstance(installed_games, list):
+        return names
+
+    for item in installed_games:
+        if isinstance(item, dict):
+            name = _clean_installed_game_name(item.get("name"))
+        else:
+            name = _clean_installed_game_name(item)
+
+        key = name.lower()
+        if not name or key in seen:
+            continue
+
+        names.append(name)
+        seen.add(key)
+        if len(names) >= INSTALLED_GAME_CONTEXT_MAX_ITEMS:
+            break
+
+    return names
+
+
+def _installed_games_context(installed_games: Any) -> str:
+    names = _installed_game_names(installed_games)
+    if not names:
+        return ""
+
+    game_lines = "\n".join(f"- {name}" for name in names)
+    return (
+        "\nInstalled original Xbox games available on this console:\n"
+        f"{game_lines}\n\n"
+        "When the user asks for game recommendations, prefer games from this installed list. "
+        "If you recommend an installed game, use the exact title from the list and ask whether to launch it. "
+        "The XBMC skin can launch exact installed games after the user chooses the launch quick reply.\n"
+    )
 
 
 async def _synthesize_xbmc_tts_wav(text: str) -> bytes:
@@ -349,10 +398,12 @@ def _extract_quick_asks(raw: str, user_text: str, reply_text: str) -> List[str]:
     return asks[:3]
 
 
-async def _generate_quick_asks(user_text: str, reply_text: str) -> List[str]:
+async def _generate_quick_asks(user_text: str, reply_text: str, installed_games: Any = None) -> List[str]:
     fallback = _fallback_quick_asks(user_text, reply_text)
     if _llm is None:
         return fallback
+
+    game_context = _installed_games_context(installed_games)
 
     try:
         result = await _llm.chat(
@@ -362,7 +413,9 @@ async def _generate_quick_asks(user_text: str, reply_text: str) -> List[str]:
                     "content": (
                         "Generate exactly 3 short follow-up replies for an original Xbox Cortana UI. "
                         "They are button labels the user can send next. Keep each under 8 words. "
+                        "If the reply recommends an installed game, one button may be Launch <exact title>. "
                         "Return JSON only: {\"quick_asks\":[\"...\",\"...\",\"...\"]}"
+                        f"{game_context}"
                     ),
                 },
                 {
@@ -667,6 +720,9 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
     username = str(payload.user_id or payload.device_id or "xbmc_user").strip()
 
     system_prompt = build_system_prompt()
+    game_context = _installed_games_context(payload.installed_games)
+    if game_context:
+        system_prompt += game_context
     loop_messages = await _load_history(payload.session_id, history_llm_limit)
     messages_list = loop_messages
 
@@ -733,7 +789,7 @@ async def handle_message(payload: XBMCRequest, x_tater_token: Optional[str] = He
         )
         quick_asks = []
         if bool(payload.include_quick_asks):
-            quick_asks = await _generate_quick_asks(text_in, final_text)
+            quick_asks = await _generate_quick_asks(text_in, final_text, payload.installed_games)
         return XBMCResponse(response=final_text, quick_asks=quick_asks)
 
     except Exception:

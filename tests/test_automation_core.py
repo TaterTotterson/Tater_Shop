@@ -100,6 +100,7 @@ def load_automation_core():
         "ok": True,
         "description": "A person is standing by the front door.",
     }
+    helpers.resolve_hydra_base_servers = lambda **_kwargs: []
     sys.modules["helpers"] = helpers
 
     integration_registry = types.ModuleType("integration_registry")
@@ -134,6 +135,7 @@ def load_automation_core():
 
     vision_settings = types.ModuleType("vision_settings")
     vision_settings.get_vision_settings = lambda **_kwargs: {
+        "mode": "dedicated",
         "provider": "llama_cpp",
         "model": "vision-model",
         "api_base": "",
@@ -951,7 +953,39 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             result = await self.core._execute_camera_ai(rule, {"device": "Front Yard"})
         self.assertTrue(result["ok"])
         self.assertIn("Spoke to kitchen", result["summary"])
+        self.assertEqual(speak.await_args.args[0]["tts_mode"], "custom")
+        self.assertEqual(speak.await_args.args[0]["tts_text"], "{vision}")
         self.assertEqual(speak.await_args.args[1]["vision"], "A person is standing by the door.")
+
+    def test_camera_ai_base_vision_uses_active_base_model(self):
+        with (
+            patch.object(
+                self.core,
+                "get_vision_settings",
+                return_value={
+                    "mode": "base",
+                    "provider": "hf_transformers",
+                    "model": "stale-dedicated-model",
+                    "api_base": "",
+                    "api_key": "",
+                },
+            ),
+            patch.object(
+                self.core,
+                "resolve_hydra_base_servers",
+                return_value=[{"provider": "llama_cpp", "model": "active-base-model"}],
+            ),
+            patch.object(
+                self.core,
+                "describe_image_with_local_llm",
+                return_value={"description": "A visitor is at the door."},
+            ) as describe,
+        ):
+            result = self.core._describe_snapshot_sync(b"jpeg", "image/jpeg", "Describe it")
+
+        self.assertEqual(result, "A visitor is at the door.")
+        self.assertEqual(describe.call_args.kwargs["provider"], "llama_cpp")
+        self.assertEqual(describe.call_args.kwargs["model"], "active-base-model")
 
     def test_ui_removes_quick_start_and_exposes_guided_builder(self):
         with (
