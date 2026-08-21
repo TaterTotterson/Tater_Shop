@@ -95,6 +95,8 @@ def sample_registry():
         "name": "Front Camera",
         "room": "Front Yard",
         "category_ids": ["camera"],
+        "capabilities": ["camera", "snapshot", "video_clip"],
+        "actions": ["camera_snapshot", "camera_clip"],
         "event_sources": [
             {"type": "motion", "ref": "binary_sensor.unifi_cam-front_motion"},
             {"type": "smart_person", "ref": "binary_sensor.unifi_cam-front_smart_person"},
@@ -111,7 +113,8 @@ def sample_registry():
         "room": "Front Door",
         "category_ids": ["device"],
         "type": "doorbell_camera",
-        "actions": ["camera_snapshot"],
+        "capabilities": ["camera", "snapshot", "video_clip", "doorbell"],
+        "actions": ["camera_snapshot", "camera_clip"],
         "event_sources": [
             {"type": "motion", "ref": "binary_sensor.unifi_doorbell-front_motion", "state_on": "on", "state_off": "off"},
             {"type": "doorbell", "ref": "event.unifi_doorbell-front_doorbell", "state_on": "on", "state_off": "off"},
@@ -268,12 +271,22 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.redis.values.clear()
         self.redis.lists.clear()
 
-    def _add_monitor(self, kind, device, area, trigger_events=None, face_id_enabled=None):
+    def _add_monitor(
+        self,
+        kind,
+        device,
+        area,
+        trigger_events=None,
+        face_id_enabled=None,
+        description_mode=None,
+    ):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
         if trigger_events is not None:
             values["trigger_events"] = trigger_events
         if face_id_enabled is not None:
             values["face_id_enabled"] = face_id_enabled
+        if description_mode is not None:
+            values["description_mode"] = description_mode
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             result = self.core.handle_htmlui_tab_action(
                 action="awareness_add_monitor",
@@ -288,6 +301,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor["device_ref"], "camera:cam-front")
         self.assertIn("binary_sensor.unifi_cam-front_smart_person", monitor["event_refs"])
         self.assertTrue(monitor["face_id_enabled"])
+        self.assertEqual(monitor["description_mode"], "image")
         self.assertEqual(self.redis.hgetall("awareness:rules"), {})
 
     def test_face_id_can_be_disabled_per_camera_without_disabling_monitoring(self):
@@ -344,6 +358,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(monitor["face_id_enabled"])
         self.assertFalse(sensor["face_id_enabled"])
+        self.assertEqual(monitor["description_mode"], "image")
+        self.assertEqual(sensor["description_mode"], "")
 
     def test_same_device_cannot_be_monitored_twice(self):
         self._add_monitor("camera", "unifi_protect|cam-front", "Front Yard")
@@ -409,6 +425,29 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertEqual(self.core._monitor_trigger_values_for_device(device), ["motion"])
+
+    def test_video_descriptions_are_only_offered_for_clip_capable_cameras(self):
+        registry = sample_registry()
+        options, dependency = self.core._monitor_description_mode_dependency(
+            registry,
+            current_device="unifi_protect|cam-front",
+        )
+        self.assertEqual([row["value"] for row in options], ["image", "video"])
+        door_sensor = dependency["options_by_source"].get("unifi_protect|sensor-back-door")
+        self.assertIsNone(door_sensor)
+
+        image_only = {
+            "integration_id": "homeassistant",
+            "id": "camera.image_only",
+            "ref": "camera.image_only",
+            "type": "camera",
+            "category_ids": ["camera"],
+            "capabilities": ["camera", "snapshot"],
+            "actions": ["camera_snapshot"],
+            "event_sources": [{"type": "motion", "ref": "binary_sensor.image_only_motion"}],
+        }
+        self.assertFalse(self.core._monitor_device_supports_description_mode(image_only, "video"))
+        self.assertTrue(self.core._monitor_device_supports_description_mode(image_only, "image"))
 
     def test_face_burst_gate_keeps_motion_and_uses_vision_for_smart_nonperson_events(self):
         self.assertTrue(self.core._face_burst_should_run("motion", "A quiet driveway."))
@@ -562,6 +601,85 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["data"]["event_type"], "person")
         self.assertTrue(stored["snapshot_id"])
 
+    async def test_video_camera_monitor_analyzes_clip_and_keeps_snapshot_for_history(self):
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            description_mode="video",
+        )
+        event = {
+            "entity_id": "binary_sensor.unifi_cam-front_smart_person",
+            "new_state": {
+                "state": "on",
+                "attributes": {"event_id": "evt-1", "event_start": 1_786_486_900_000},
+            },
+            "old_state": {"state": "off"},
+        }
+        with (
+            patch.object(
+                self.core,
+                "_capture_camera_snapshot",
+                new=AsyncMock(return_value=(b"jpeg-bytes", "image/jpeg")),
+            ),
+            patch.object(
+                self.core,
+                "_capture_camera_clip",
+                new=AsyncMock(
+                    return_value=(
+                        b"video-bytes",
+                        "video/mp4",
+                        {"event_id": "evt-1", "duration_seconds": 8},
+                    )
+                ),
+            ) as capture_clip,
+            patch.object(
+                self.core,
+                "_video_describe",
+                new=AsyncMock(return_value="A person walks up and leaves a package."),
+            ),
+            patch.object(self.core, "_vision_describe", new=AsyncMock()) as image_describe,
+        ):
+            result = await self.core._execute_camera_monitor(monitor, event)
+
+        self.assertEqual(result["description_mode"], "video")
+        image_describe.assert_not_awaited()
+        self.assertEqual(capture_clip.await_args.args[2]["event_id"], "evt-1")
+        stored = json.loads(self.redis.lists["tater:automations:events:front_yard"][0])
+        self.assertEqual(stored["data"]["description_mode"], "video")
+        self.assertEqual(stored["data"]["description_media"], "video")
+        self.assertEqual(stored["data"]["clip_bytes"], len(b"video-bytes"))
+        self.assertTrue(stored["clip_id"])
+        self.assertEqual(stored["data"]["clip_id"], stored["clip_id"])
+        self.assertEqual(stored["data"]["clip_stored_bytes"], len(b"video-bytes"))
+        self.assertTrue(stored["snapshot_id"])
+        media = self.core.get_htmlui_tab_media(
+            media_id=stored["clip_id"],
+            redis_client=self.redis,
+        )
+        self.assertEqual(media["bytes"], b"video-bytes")
+        self.assertEqual(media["content_type"], "video/mp4")
+        card = self.core._event_forms_from_events(self.redis, [stored], list_view=False)[0]
+        video_field = next(field for field in card["fields"] if field.get("type") == "video")
+        self.assertEqual(video_field["src"], f"/api/cores/awareness/media/{stored['clip_id']}")
+        self.assertTrue(video_field["poster"].startswith("data:image/jpeg;base64,"))
+        self.assertFalse(any(field.get("type") == "image" for field in card["fields"]))
+
+    def test_event_clip_storage_is_bounded(self):
+        with patch.object(self.core, "_clip_max_bytes", return_value=4):
+            stored = self.core._store_event_clip(
+                self.redis,
+                b"video-bytes",
+                content_type="video/mp4",
+            )
+
+        self.assertFalse(stored["stored"])
+        self.assertEqual(stored["reason"], "too_large")
+        self.assertEqual(stored["max_bytes"], 4)
+        self.assertFalse(
+            any(key.startswith("awareness:event_clip:") for key in self.redis.values)
+        )
+
     async def test_camera_with_face_id_disabled_does_not_schedule_a_face_burst(self):
         monitor = self._add_monitor(
             "camera",
@@ -642,6 +760,12 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["trigger_events"]["type"], "multiselect")
         self.assertEqual(fields["trigger_events"]["presentation"], "cards")
         self.assertEqual(fields["trigger_events"]["dependent_options"]["source_key"], "device")
+        self.assertEqual(fields["description_mode"]["presentation"], "cards")
+        self.assertEqual(fields["description_mode"]["dependent_options"]["source_key"], "device")
+        camera_media = fields["description_mode"]["dependent_options"]["options_by_source"][
+            "unifi_protect|cam-front"
+        ]
+        self.assertEqual([row["value"] for row in camera_media], ["image", "video"])
         doorbell_options = fields["trigger_events"]["dependent_options"]["options_by_source"][
             "unifi_protect|doorbell-front"
         ]

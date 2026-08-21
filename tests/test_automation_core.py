@@ -81,6 +81,7 @@ def load_automation_core():
         "announcement_targets",
         "helpers",
         "integration_registry",
+        "kernel_tools",
         "notify",
         "speech_settings",
         "speech_tts",
@@ -111,6 +112,13 @@ def load_automation_core():
     }
     integration_registry.run_integration_device_action = lambda *_args, **_kwargs: {"ok": True}
     sys.modules["integration_registry"] = integration_registry
+
+    kernel_tools = types.ModuleType("kernel_tools")
+    kernel_tools.video_analyze = lambda **_kwargs: {
+        "ok": True,
+        "data": {"description": "A person walks up to the front door."},
+    }
+    sys.modules["kernel_tools"] = kernel_tools
 
     notify = types.ModuleType("notify")
 
@@ -167,7 +175,7 @@ def sample_registry():
         "name": "Front Yard",
         "room": "Front Yard",
         "category_ids": ["camera"],
-        "actions": ["camera_snapshot"],
+        "actions": ["camera_snapshot", "camera_clip"],
         "event_sources": [
             {"type": "motion", "ref": "binary_sensor.unifi_cam-front_motion"},
             {"type": "smart_person", "ref": "binary_sensor.unifi_cam-front_smart_person"},
@@ -308,15 +316,20 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             "provider": "unifi_protect",
             "kind": "protect_event",
             "payload": {
+                "id": "protect-event-11",
                 "type": "cameraSmartDetectZone",
                 "camera": "cam-front",
                 "smartDetectTypes": ["person"],
+                "startTime": 1_786_486_908_000,
             },
         }
         matched, context = self.core._event_match(rule, event, sample_registry())
         self.assertTrue(matched)
         self.assertEqual(context["device"], "Front Yard")
         self.assertEqual(context["device_target"], "unifi_protect|cam-front")
+        self.assertEqual(context["event_id"], "protect-event-11")
+        self.assertEqual(context["event_start"], 1_786_486_908_000)
+        self.assertIsNone(context["event_end"])
 
     def test_matches_linked_person_recognition_to_selected_camera_and_person(self):
         rule = self._tts_rule(
@@ -917,6 +930,25 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
                 redis_client=self.redis,
             )
 
+    def test_camera_ai_form_saves_the_visible_camera_media_choice(self):
+        values = {
+            "name": "Video door alert",
+            "trigger_category": "camera",
+            "trigger_event": "person",
+            "action_type": "camera_ai",
+            "camera_source": "selected",
+            "camera_device": "unifi_protect|cam-front",
+            "camera_trigger_media_mode": "image",
+            "camera_selected_media_mode": "video",
+            "camera_tts_targets": ["voice_core:sat-kitchen"],
+        }
+
+        rule = self.core._rule_from_form(values, {"values": values})
+
+        self.assertEqual(rule["camera_media_mode"], "video")
+        self.assertNotIn("camera_trigger_media_mode", rule)
+        self.assertNotIn("camera_selected_media_mode", rule)
+
     async def test_camera_ai_uses_snapshot_vision_and_tts(self):
         rule = self.core._normalize_rule(
             {
@@ -956,6 +988,104 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speak.await_args.args[0]["tts_mode"], "custom")
         self.assertEqual(speak.await_args.args[0]["tts_text"], "{vision}")
         self.assertEqual(speak.await_args.args[1]["vision"], "A person is standing by the door.")
+        self.assertEqual(result["vision_requested_media"], "image")
+        self.assertEqual(result["vision_media"], "image")
+
+    async def test_camera_ai_can_analyze_an_integration_video_clip(self):
+        rule = self.core._normalize_rule(
+            {
+                "id": "camera-video-ai",
+                "name": "Camera Video AI",
+                "trigger_category": "camera",
+                "trigger_event": "person",
+                "action_type": "camera_ai",
+                "camera_source": "selected",
+                "camera_device": "unifi_protect|cam-front",
+                "camera_media_mode": "video",
+                "camera_tts_text": "{vision}",
+                "camera_tts_targets": ["voice_core:sat-kitchen"],
+            }
+        )
+        self.assertIsNotNone(rule)
+        with (
+            patch.object(self.core, "_registry", return_value=sample_registry()),
+            patch.object(
+                self.core,
+                "run_integration_device_action",
+                return_value={"ok": True, "bytes": b"mp4-video", "content_type": "video/mp4"},
+            ) as camera_action,
+            patch.object(
+                self.core,
+                "_describe_video_sync",
+                return_value="A person walks up and leaves a package.",
+            ) as describe_video,
+            patch.object(
+                self.core,
+                "_execute_tts",
+                new=AsyncMock(return_value={"ok": True, "summary": "Spoke to kitchen."}),
+            ) as speak,
+        ):
+            result = await self.core._execute_camera_ai(
+                rule,
+                {
+                    "device": "Front Yard",
+                    "event_id": "event-123",
+                    "event_start": 1_786_486_900,
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["vision_requested_media"], "video")
+        self.assertEqual(result["vision_media"], "video")
+        self.assertEqual(result["vision_warning"], "")
+        self.assertEqual(camera_action.call_args.args[:3], ("unifi_protect", "camera_clip", "cam-front"))
+        self.assertEqual(camera_action.call_args.args[3]["event_id"], "event-123")
+        self.assertEqual(camera_action.call_args.args[3]["duration_seconds"], 8)
+        self.assertEqual(describe_video.call_args.args[0], b"mp4-video")
+        self.assertEqual(
+            speak.await_args.args[1]["vision"],
+            "A person walks up and leaves a package.",
+        )
+
+    async def test_camera_ai_video_falls_back_to_image_when_camera_has_no_clip(self):
+        rule = self.core._normalize_rule(
+            {
+                "id": "camera-video-fallback",
+                "name": "Camera Video Fallback",
+                "trigger_category": "camera",
+                "trigger_event": "doorbell",
+                "action_type": "camera_ai",
+                "camera_source": "selected",
+                "camera_device": "unifi_protect|doorbell-front",
+                "camera_media_mode": "video",
+                "camera_tts_targets": ["voice_core:sat-kitchen"],
+            }
+        )
+        self.assertIsNotNone(rule)
+        with (
+            patch.object(self.core, "_registry", return_value=sample_registry()),
+            patch.object(
+                self.core,
+                "run_integration_device_action",
+                return_value={"ok": True, "bytes": b"jpeg", "content_type": "image/jpeg"},
+            ) as camera_action,
+            patch.object(
+                self.core,
+                "_describe_snapshot_sync",
+                return_value="Someone is standing at the front door.",
+            ),
+            patch.object(
+                self.core,
+                "_execute_tts",
+                new=AsyncMock(return_value={"ok": True, "summary": "Spoke to kitchen."}),
+            ),
+        ):
+            result = await self.core._execute_camera_ai(rule, {"device": "Front Doorbell"})
+
+        self.assertEqual(result["vision_requested_media"], "video")
+        self.assertEqual(result["vision_media"], "image")
+        self.assertIn("does not expose video clips", result["vision_warning"])
+        self.assertEqual(camera_action.call_args.args[1], "camera_snapshot")
 
     def test_camera_ai_base_vision_uses_active_base_model(self):
         with (
@@ -1052,6 +1182,30 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(by_key["tts_background_audio_upload"]["max_bytes"], 16 * 1024 * 1024)
+        media_fields = [
+            field
+            for field in fields
+            if field.get("key") in {"camera_trigger_media_mode", "camera_selected_media_mode"}
+        ]
+        self.assertEqual(len(media_fields), 2)
+        self.assertEqual(
+            {field["key"] for field in media_fields},
+            {"camera_trigger_media_mode", "camera_selected_media_mode"},
+        )
+        self.assertEqual(
+            {field["dependent_options"]["source_key"] for field in media_fields},
+            {"trigger_device", "camera_device"},
+        )
+        for media_field in media_fields:
+            options_by_camera = media_field["dependent_options"]["options_by_source"]
+            self.assertEqual(
+                [row["value"] for row in options_by_camera["unifi_protect|cam-front"]],
+                ["image", "video"],
+            )
+            self.assertEqual(
+                [row["value"] for row in options_by_camera["unifi_protect|doorbell-front"]],
+                ["image"],
+            )
         trigger_values = [
             row["value"]
             for row in by_key["trigger_event"]["dependent_options"]["options_by_source"][

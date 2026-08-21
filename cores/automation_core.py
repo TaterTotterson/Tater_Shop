@@ -31,18 +31,22 @@ from speech_settings import get_speech_settings
 from speech_tts import speak_announcement_targets
 from vision_settings import get_vision_settings
 try:
+    from kernel_tools import video_analyze as _shared_video_analyze
+except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
+    _shared_video_analyze = None
+try:
     from tater_paths import agent_lab_path as _tater_agent_lab_path
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 MIN_TATER_VERSION = "98"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
-    "device actions, notifications, and announcement targets."
+    "device actions, notifications, announcement targets, and camera image or video descriptions."
 )
-TAGS = ["automation", "integrations", "smart-home", "tts", "rules"]
+TAGS = ["automation", "integrations", "smart-home", "tts", "vision", "video", "rules"]
 
 CORE_SETTINGS = {
     "category": "Automation Core Settings",
@@ -155,6 +159,22 @@ _EVENT_OPTIONS = [
     {"value": "contains", "label": "Event contains text…"},
     {"value": "above", "label": "Numeric value rises above…"},
     {"value": "below", "label": "Numeric value falls below…"},
+]
+
+_CAMERA_MEDIA_MODES = {"image", "video"}
+_CAMERA_MEDIA_MODE_OPTIONS = [
+    {
+        "value": "image",
+        "label": "Image description",
+        "description": "Describe one snapshot. Faster and supported by every compatible camera.",
+        "icon": "▧",
+    },
+    {
+        "value": "video",
+        "label": "Video description",
+        "description": "Analyze a short clip to understand actions, changes, and sequence.",
+        "icon": "▶",
+    },
 ]
 
 _EVENT_ICONS = {
@@ -1105,6 +1125,88 @@ def _devices_for_category_options(
     return rows
 
 
+def _camera_supports_media_mode(device: Dict[str, Any], mode: Any) -> bool:
+    media_mode = _token(mode)
+    if media_mode not in _CAMERA_MEDIA_MODES or not _device_categories(device).intersection(
+        {"camera", "doorbell"}
+    ):
+        return False
+    actions = set(_device_actions(device))
+    capabilities = {
+        _token(value)
+        for value in [*(device.get("capabilities") or []), *(device.get("features") or [])]
+        if _token(value)
+    }
+    if media_mode == "video":
+        return bool(actions.intersection({"camera_clip", "video_clip", "clip"})) or bool(
+            capabilities.intersection({"camera_clip", "video_clip", "clip"})
+        )
+    return bool(actions.intersection({"camera_snapshot", "snapshot"})) or "snapshot" in capabilities
+
+
+def _camera_device_options(registry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict) or not any(
+            _camera_supports_media_mode(device, mode) for mode in _CAMERA_MEDIA_MODES
+        ):
+            continue
+        option = _device_option(device)
+        if not option["value"] or option["value"] in seen:
+            continue
+        seen.add(option["value"])
+        rows.append(option)
+    rows.sort(key=lambda row: (_text(row.get("label")).casefold(), _text(row.get("value"))))
+    return rows
+
+
+def _camera_media_mode_dependency(
+    registry: Dict[str, Any],
+    *,
+    source_key: str,
+    current_device: Any = "",
+    current_mode: Any = "image",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_values: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        encoded = _encode_device(device.get("integration_id"), _device_id(device))
+        if not encoded:
+            continue
+        rows = [
+            dict(option)
+            for option in _CAMERA_MEDIA_MODE_OPTIONS
+            if _camera_supports_media_mode(device, option["value"])
+        ]
+        if rows:
+            options_by_source[encoded] = rows
+            all_values.update(_text(row.get("value")) for row in rows)
+    default_options = [
+        dict(option)
+        for option in _CAMERA_MEDIA_MODE_OPTIONS
+        if _text(option.get("value")) in all_values
+    ]
+    selected = [dict(row) for row in options_by_source.get(_text(current_device), default_options)]
+    saved_mode = _token(current_mode)
+    if saved_mode in _CAMERA_MEDIA_MODES and not any(
+        _text(row.get("value")) == saved_mode for row in selected
+    ):
+        saved = next(
+            (dict(row) for row in _CAMERA_MEDIA_MODE_OPTIONS if row["value"] == saved_mode),
+            {"value": saved_mode, "label": saved_mode.title(), "icon": "◆"},
+        )
+        saved["meta"] = "Saved setting; currently unavailable"
+        selected.append(saved)
+    return selected, {
+        "source_key": source_key,
+        "options_by_source": options_by_source,
+        "default_options": default_options,
+    }
+
+
 def _homeassistant_config() -> Dict[str, str]:
     try:
         from tateros import integration_store as integration_store_module
@@ -1228,6 +1330,14 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     tts_mode = _token(raw.get("tts_mode") or ("custom" if raw_tts_text else "default"))
     if tts_mode not in {"default", "custom"}:
         tts_mode = "custom" if raw_tts_text else "default"
+    vision_prompt = _text(raw.get("vision_prompt"))
+    if not vision_prompt or vision_prompt in {
+        "Briefly describe the important activity in this image.",
+        "Briefly describe the important activity in this image. Do not invent details.",
+    }:
+        vision_prompt = (
+            "Briefly describe the important activity shown by this camera. Do not invent details."
+        )
     if not trigger_category or trigger_event not in {row["value"] for row in _EVENT_OPTIONS}:
         return None
     trigger_person_id = _text(raw.get("trigger_person_id"))
@@ -1284,7 +1394,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
         else "normal",
         "camera_source": _token(raw.get("camera_source") or "trigger"),
         "camera_device": _text(raw.get("camera_device")),
-        "vision_prompt": _text(raw.get("vision_prompt") or "Briefly describe the important activity in this image."),
+        "camera_media_mode": _token(raw.get("camera_media_mode") or "image"),
+        "vision_prompt": vision_prompt,
         "vision_fallback": _text(raw.get("vision_fallback") or "Activity was detected."),
         "camera_tts_text": _text(raw.get("camera_tts_text") or "{vision}"),
         "camera_tts_targets": _list(raw.get("camera_tts_targets")),
@@ -1323,6 +1434,8 @@ def _normalize_rule(raw: Any) -> Optional[Dict[str, Any]]:
     elif action_type == "camera_ai":
         if rule["camera_source"] not in {"trigger", "selected"}:
             rule["camera_source"] = "trigger"
+        if rule["camera_media_mode"] not in _CAMERA_MEDIA_MODES:
+            rule["camera_media_mode"] = "image"
         if rule["camera_source"] == "selected" and not rule["camera_device"]:
             return None
         if not rule["camera_tts_targets"] and not rule["camera_notification_targets"]:
@@ -1792,6 +1905,10 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
     if not matched:
         return False, {}
     first_device = devices[0] if devices else {}
+    new_state = payload.get("new_state") if isinstance(payload.get("new_state"), dict) else {}
+    state_attributes = (
+        new_state.get("attributes") if isinstance(new_state.get("attributes"), dict) else {}
+    )
     return True, {
         "provider": _text(event.get("provider")),
         "event": kind,
@@ -1809,6 +1926,39 @@ def _event_match(rule: Dict[str, Any], event: Dict[str, Any], registry: Dict[str
         "person_id": _text(payload.get("person_id")),
         "face_identity_ids": list(payload.get("face_identity_ids") or []),
         "event_seq": _sequence(event.get("seq"), 0),
+        "event_id": _text(
+            payload.get("event_id")
+            or payload.get("eventId")
+            or payload.get("id")
+            or state_attributes.get("event_id")
+            or state_attributes.get("eventId")
+        ),
+        "event_start": (
+            payload.get("event_start")
+            or payload.get("eventStart")
+            or payload.get("start")
+            or payload.get("startTime")
+            or payload.get("start_time")
+            or payload.get("startTimestamp")
+            or payload.get("timestamp")
+            or state_attributes.get("event_start")
+            or state_attributes.get("eventStart")
+            or state_attributes.get("event_ts")
+            or new_state.get("last_changed")
+            or new_state.get("last_updated")
+            or event.get("timestamp")
+            or event.get("created_at")
+        ),
+        "event_end": (
+            payload.get("event_end")
+            or payload.get("eventEnd")
+            or payload.get("end")
+            or payload.get("endTime")
+            or payload.get("end_time")
+            or payload.get("endTimestamp")
+            or state_attributes.get("event_end")
+            or state_attributes.get("eventEnd")
+        ),
     }
 
 
@@ -2090,6 +2240,46 @@ def _snapshot_result_bytes(result: Any) -> Tuple[bytes, str]:
     return bytes(content), content_type or "image/jpeg"
 
 
+def _clip_result_bytes(result: Any) -> Tuple[bytes, str]:
+    if isinstance(result, tuple) and result:
+        content = result[0]
+        content_type = _text(result[1]) if len(result) > 1 else "video/mp4"
+    elif isinstance(result, dict):
+        content = result.get("bytes") or result.get("content") or result.get("video_bytes")
+        content_type = _text(
+            result.get("content_type") or result.get("mime_type") or result.get("mimetype") or "video/mp4"
+        )
+        encoded = _text(result.get("base64"))
+        if not content and encoded:
+            content = encoded
+    else:
+        content = result
+        content_type = "video/mp4"
+    if isinstance(content, str):
+        encoded = content
+        if encoded.startswith("data:") and "," in encoded:
+            header, encoded = encoded.split(",", 1)
+            content_type = header[5:].split(";", 1)[0] or content_type
+        try:
+            content = base64.b64decode(encoded)
+        except Exception:
+            content = b""
+    if not isinstance(content, (bytes, bytearray)) or not content:
+        raise RuntimeError("The camera integration returned no video clip.")
+    return bytes(content), content_type or "video/mp4"
+
+
+def _camera_clip_payload(context: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "duration_seconds": 8,
+        "pre_event_seconds": 2,
+        "post_event_seconds": 4,
+        "event_id": _text(context.get("event_id")),
+        "event_start": context.get("event_start"),
+        "event_end": context.get("event_end"),
+    }
+
+
 def _normalize_vision_provider(value: Any) -> str:
     token = _text(value).lower().replace("-", "_").replace(" ", "_")
     if token in {
@@ -2233,6 +2423,35 @@ def _describe_snapshot_sync(image_bytes: bytes, content_type: str, prompt: str) 
     return description
 
 
+def _describe_video_sync(video_bytes: bytes, content_type: str, prompt: str) -> str:
+    if not callable(_shared_video_analyze):
+        raise RuntimeError("Video Understanding is unavailable in this Tater runtime.")
+    extension = {
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+        "video/x-matroska": "mkv",
+    }.get(_text(content_type).lower(), "mp4")
+    result = _shared_video_analyze(
+        media_ref={
+            "bytes": bytes(video_bytes or b""),
+            "name": f"tater-automation-camera.{extension}",
+            "mimetype": _text(content_type) or "video/mp4",
+        },
+        prompt=prompt,
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else {}
+        message = _text(error.get("message")) if isinstance(error, dict) else ""
+        raise RuntimeError(message or "Video Understanding could not analyze the camera clip.")
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    description = _text(
+        data.get("description") or data.get("text") or result.get("summary_for_user")
+    ).strip()
+    if not description:
+        raise RuntimeError("The video model returned no description.")
+    return description
+
+
 async def _execute_camera_ai(rule: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     registry = _registry(redis_client)
     camera = _camera_device_for_rule(rule, context, registry)
@@ -2242,36 +2461,85 @@ async def _execute_camera_ai(rule: Dict[str, Any], context: Dict[str, Any]) -> D
         )
     provider = _text(camera.get("integration_id"))
     device_id = _device_id(camera)
+    actions = set(_device_actions(camera))
     snapshot_action = next(
-        (action for action in ("camera_snapshot", "snapshot") if action in _device_actions(camera)),
+        (action for action in ("camera_snapshot", "snapshot") if action in actions),
         "",
     )
-    if not snapshot_action:
-        raise ValueError("The selected camera integration does not expose snapshots.")
-    snapshot_result = await asyncio.to_thread(
-        run_integration_device_action,
-        provider,
-        snapshot_action,
-        device_id,
-        {},
+    if not snapshot_action and _camera_supports_media_mode(camera, "image"):
+        snapshot_action = "camera_snapshot"
+    clip_action = next(
+        (action for action in ("camera_clip", "video_clip", "clip") if action in actions),
+        "",
     )
-    image_bytes, content_type = _snapshot_result_bytes(snapshot_result)
+    if not clip_action and _camera_supports_media_mode(camera, "video"):
+        clip_action = "camera_clip"
     next_context = dict(context)
     next_context["device"] = _text(camera.get("name")) or context.get("device") or "camera"
     next_context["device_target"] = _encode_device(provider, device_id)
     prompt = _render_template(rule.get("vision_prompt"), next_context)
-    vision_error = ""
-    try:
-        description = await asyncio.to_thread(
-            _describe_snapshot_sync,
-            image_bytes,
-            content_type,
-            prompt,
+    requested_media = _token(rule.get("camera_media_mode") or "image")
+    if requested_media not in _CAMERA_MEDIA_MODES:
+        requested_media = "image"
+    actual_media = requested_media
+    media_errors: List[str] = []
+    description = ""
+
+    if requested_media == "video":
+        if not clip_action:
+            media_errors.append("video: The selected camera integration does not expose video clips.")
+            actual_media = "image"
+        else:
+            try:
+                clip_result = await asyncio.to_thread(
+                    run_integration_device_action,
+                    provider,
+                    clip_action,
+                    device_id,
+                    _camera_clip_payload(next_context),
+                )
+                video_bytes, video_content_type = _clip_result_bytes(clip_result)
+                description = await asyncio.to_thread(
+                    _describe_video_sync,
+                    video_bytes,
+                    video_content_type,
+                    prompt,
+                )
+            except Exception as exc:
+                media_errors.append(f"video: {exc}")
+                actual_media = "image"
+                logger.warning("[automation] camera video failed for %s: %s", device_id, exc)
+
+    if requested_media == "image" or (actual_media == "image" and not description):
+        if not snapshot_action:
+            media_errors.append("image: The selected camera integration does not expose snapshots.")
+        else:
+            try:
+                snapshot_result = await asyncio.to_thread(
+                    run_integration_device_action,
+                    provider,
+                    snapshot_action,
+                    device_id,
+                    {},
+                )
+                image_bytes, image_content_type = _snapshot_result_bytes(snapshot_result)
+                description = await asyncio.to_thread(
+                    _describe_snapshot_sync,
+                    image_bytes,
+                    image_content_type,
+                    prompt,
+                )
+            except Exception as exc:
+                media_errors.append(f"image: {exc}")
+                logger.warning("[automation] camera image failed for %s: %s", device_id, exc)
+
+    if not description:
+        actual_media = "fallback"
+        description = (
+            _render_template(rule.get("vision_fallback"), next_context)
+            or "Camera activity was detected."
         )
-    except Exception as exc:
-        vision_error = str(exc)
-        logger.warning("[automation] camera vision failed for %s: %s", device_id, exc)
-        description = _render_template(rule.get("vision_fallback"), next_context) or "Camera activity was detected."
+    vision_error = "; ".join(media_errors)
     next_context["vision"] = description
     results: List[str] = []
     errors: List[str] = []
@@ -2312,6 +2580,8 @@ async def _execute_camera_ai(rule: Dict[str, Any], context: Dict[str, Any]) -> D
         "summary": " ".join(item for item in results if item),
         "vision": description,
         "vision_warning": vision_error,
+        "vision_requested_media": requested_media,
+        "vision_media": actual_media,
         "errors": errors,
     }
 
@@ -2650,6 +2920,7 @@ def _rule_from_form(
         "notification_priority",
         "camera_source",
         "camera_device",
+        "camera_media_mode",
         "vision_prompt",
         "vision_fallback",
         "camera_tts_text",
@@ -2662,6 +2933,17 @@ def _rule_from_form(
     rule = dict(previous)
     for field in fields:
         rule[field] = _value(values, payload, field, previous.get(field, ""))
+    camera_media_form_key = (
+        "camera_selected_media_mode"
+        if _token(rule.get("camera_source")) == "selected"
+        else "camera_trigger_media_mode"
+    )
+    rule["camera_media_mode"] = _value(
+        values,
+        payload,
+        camera_media_form_key,
+        rule.get("camera_media_mode") or previous.get("camera_media_mode") or "image",
+    )
     audio_form_keys = {
         "tts_audio_enabled",
         "tts_background_audio_source",
@@ -2932,6 +3214,22 @@ def _editor_fields(
         current_device=current_trigger_device,
         current_event=rule.get("trigger_event"),
     )
+    camera_media_mode = _token(rule.get("camera_media_mode") or "image")
+    if camera_media_mode not in _CAMERA_MEDIA_MODES:
+        camera_media_mode = "image"
+    camera_device = _text(rule.get("camera_device"))
+    trigger_camera_media_options, trigger_camera_media_dependency = _camera_media_mode_dependency(
+        registry,
+        source_key="trigger_device",
+        current_device=current_trigger_device,
+        current_mode=camera_media_mode,
+    )
+    selected_camera_media_options, selected_camera_media_dependency = _camera_media_mode_dependency(
+        registry,
+        source_key="camera_device",
+        current_device=camera_device,
+        current_mode=camera_media_mode,
+    )
     action_integration = _text(rule.get("action_integration")) or _integration_from_devices(
         action_category,
         rule.get("action_devices"),
@@ -3122,7 +3420,7 @@ def _editor_fields(
                 {
                     "value": "camera_ai",
                     "label": "Describe a Camera",
-                    "description": "Capture a camera image, describe it, then announce or notify.",
+                    "description": "Describe a camera image or short video, then announce or notify.",
                     "icon": "◎",
                 },
             ],
@@ -3329,12 +3627,38 @@ def _editor_fields(
             "label": "Camera",
             "type": "select",
             "presentation": "cards",
-            "options": _devices_for_category_options(
-                registry,
-                "camera",
-                require_actions=("camera_snapshot", "snapshot"),
-            ),
-            "value": _text(rule.get("camera_device")),
+            "options": _camera_device_options(registry),
+            "value": camera_device,
+            "show_when_all": [
+                show_camera_ai,
+                {"source_key": "camera_source", "equals": "selected"},
+            ],
+            "full_width": True,
+        },
+        {
+            "key": "camera_trigger_media_mode",
+            "label": "Describe What?",
+            "type": "select",
+            "presentation": "cards",
+            "options": trigger_camera_media_options,
+            "dependent_options": trigger_camera_media_dependency,
+            "value": camera_media_mode,
+            "description": "Only media provided by the triggering camera's integration is shown.",
+            "show_when_all": [
+                show_camera_ai,
+                {"source_key": "camera_source", "equals": "trigger"},
+            ],
+            "full_width": True,
+        },
+        {
+            "key": "camera_selected_media_mode",
+            "label": "Describe What?",
+            "type": "select",
+            "presentation": "cards",
+            "options": selected_camera_media_options,
+            "dependent_options": selected_camera_media_dependency,
+            "value": camera_media_mode,
+            "description": "Only media provided by the selected camera's integration is shown.",
             "show_when_all": [
                 show_camera_ai,
                 {"source_key": "camera_source", "equals": "selected"},
@@ -3347,7 +3671,7 @@ def _editor_fields(
             "type": "textarea",
             "value": _text(
                 rule.get("vision_prompt")
-                or "Briefly describe the important activity in this image. Do not invent details."
+                or "Briefly describe the important activity shown by this camera. Do not invent details."
             ),
             "show_when": show_camera_ai,
             "full_width": True,

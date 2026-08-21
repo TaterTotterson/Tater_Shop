@@ -23,6 +23,10 @@ from dotenv import load_dotenv
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 try:
+    from helpers import redis_blob_client as _shared_redis_blob_client
+except Exception:  # pragma: no cover - compatibility with older Tater runtimes and test harnesses.
+    _shared_redis_blob_client = None
+try:
     from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
@@ -44,14 +48,19 @@ try:
     import face_id_runtime as _face_id_runtime
 except Exception:  # pragma: no cover - compatibility with Tater versions before Face ID.
     _face_id_runtime = None
+try:
+    from kernel_tools import video_analyze as _shared_video_analyze
+except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
+    _shared_video_analyze = None
 
-__version__ = "4.4.2"
+__version__ = "4.6.0"
 CORE_DESCRIPTION = (
-    "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, "
+    "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
+    "retain their bounded event history, snapshots, and playable clips, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
     "and device actions."
 )
-TAGS = ["awareness", "cameras", "sensors", "event-history", "vision"]
+TAGS = ["awareness", "cameras", "sensors", "event-history", "vision", "video"]
 
 load_dotenv()
 
@@ -127,11 +136,29 @@ CORE_SETTINGS = {
             "default": 768,
             "description": "Maximum JPEG size to store per event snapshot.",
         },
+        "store_event_clips": {
+            "label": "Store Event Clips",
+            "type": "checkbox",
+            "default": True,
+            "description": "Keep successful camera event clips so they can be played from Event History.",
+        },
+        "event_clip_max_mb": {
+            "label": "Event Clip Max Size (MB)",
+            "type": "number",
+            "default": 32,
+            "description": "Maximum video size to retain for each Awareness event.",
+        },
         "camera_monitor_cooldown_seconds": {
             "label": "Camera Event Cooldown (sec)",
             "type": "number",
             "default": 30,
             "description": "Minimum time between snapshot and vision checks for each monitored camera.",
+        },
+        "camera_event_clip_seconds": {
+            "label": "Camera Event Clip Length (sec)",
+            "type": "number",
+            "default": 8,
+            "description": "Length of short camera clips sent to the configured Video Understanding model.",
         },
     },
 }
@@ -147,6 +174,8 @@ _EXEC_QUEUE_KEY = "awareness:monitor_queue"
 _RUNTIME_KEY = "awareness:runtime"
 _EVENTS_PREFIX = "tater:automations:events:"
 _EVENT_SNAPSHOT_PREFIX = "awareness:event_snapshot:"
+_EVENT_CLIP_PREFIX = "awareness:event_clip:"
+_EVENT_CLIP_META_PREFIX = "awareness:event_clip_meta:"
 _FACE_IDENTITIES_KEY = "awareness:face_identities"
 _FACE_SESSION_PREFIX = "awareness:face_session:"
 _FACE_BURST_FRAME_COUNT = 5
@@ -242,6 +271,21 @@ _MONITOR_TRIGGER_OPTIONS = [
     {"value": "disconnects", "label": "Disconnects / goes offline", "icon": "×"},
 ]
 _MONITOR_TRIGGER_VALUES = {row["value"] for row in _MONITOR_TRIGGER_OPTIONS}
+_MONITOR_DESCRIPTION_MODES = {"image", "video"}
+_MONITOR_DESCRIPTION_MODE_OPTIONS = [
+    {
+        "value": "image",
+        "label": "Image description",
+        "description": "Describe one snapshot. Faster and supported by every compatible camera.",
+        "icon": "▧",
+    },
+    {
+        "value": "video",
+        "label": "Video description",
+        "description": "Analyze a short clip to understand actions, changes, and sequence.",
+        "icon": "▶",
+    },
+]
 _UNIFI_SMART_TYPE_ALIASES = {
     "people": "person",
     "human": "person",
@@ -313,6 +357,8 @@ _EVENTS_QUERY_SAFE_DATA_FIELDS = {
     "confidence",
     "detected_object",
     "detected_objects",
+    "description_media",
+    "description_mode",
     "event_type",
     "face_count",
     "face_identity_ids",
@@ -753,6 +799,21 @@ def _event_snapshot_key(snapshot_id: str) -> str:
     return f"{_EVENT_SNAPSHOT_PREFIX}{_text(snapshot_id)}"
 
 
+def _event_clip_key(clip_id: str) -> str:
+    return f"{_EVENT_CLIP_PREFIX}{_text(clip_id)}"
+
+
+def _event_clip_meta_key(clip_id: str) -> str:
+    return f"{_EVENT_CLIP_META_PREFIX}{_text(clip_id)}"
+
+
+def _event_clip_blob_client(client: Any) -> Any:
+    redis_obj = client or redis_client
+    if _shared_redis_blob_client is not None and (client is None or redis_obj is redis_client):
+        return _shared_redis_blob_client
+    return redis_obj
+
+
 def _snapshot_storage_enabled(client: Any) -> bool:
     return _bool(_settings(client).get("store_event_snapshots"), True)
 
@@ -805,6 +866,72 @@ def _store_event_snapshot(client: Any, image_bytes: bytes, *, content_type: str 
         "snapshot_id": snapshot_id,
         "bytes": size,
         "content_type": payload["content_type"],
+    }
+
+
+def _clip_storage_enabled(client: Any) -> bool:
+    return _bool(_settings(client).get("store_event_clips"), True)
+
+
+def _clip_max_bytes(client: Any) -> int:
+    mb = _setting_int(client, "event_clip_max_mb", 32, minimum=1, maximum=256)
+    return int(mb) * 1024 * 1024
+
+
+def _store_event_clip(client: Any, clip_bytes: bytes, *, content_type: str = "video/mp4") -> Dict[str, Any]:
+    redis_obj = client or redis_client
+    blob_obj = _event_clip_blob_client(redis_obj)
+    size = len(clip_bytes or b"")
+    if redis_obj is None or blob_obj is None:
+        return {"stored": False, "reason": "redis_unavailable", "bytes": size}
+    if not clip_bytes:
+        return {"stored": False, "reason": "empty_video", "bytes": size}
+    if not _clip_storage_enabled(redis_obj):
+        return {"stored": False, "reason": "disabled", "bytes": size}
+    max_bytes = _clip_max_bytes(redis_obj)
+    if size > max_bytes:
+        return {
+            "stored": False,
+            "reason": "too_large",
+            "bytes": size,
+            "max_bytes": max_bytes,
+        }
+
+    clip_id = uuid.uuid4().hex
+    media_type = _text(content_type).split(";", 1)[0].strip().lower()
+    if not media_type.startswith("video/"):
+        media_type = "video/mp4"
+    metadata = {
+        "id": clip_id,
+        "content_type": media_type,
+        "bytes": size,
+        "created_at": _now_iso(),
+    }
+    clip_key = _event_clip_key(clip_id)
+    meta_key = _event_clip_meta_key(clip_id)
+    try:
+        retention = _events_retention_seconds(redis_obj)
+        if retention is None:
+            blob_obj.set(clip_key, bytes(clip_bytes))
+            redis_obj.set(meta_key, json.dumps(metadata))
+        else:
+            ttl = max(60, int(retention))
+            blob_obj.setex(clip_key, ttl, bytes(clip_bytes))
+            redis_obj.setex(meta_key, ttl, json.dumps(metadata))
+    except Exception:
+        logger.warning("[awareness] failed to store event clip %s", clip_id, exc_info=True)
+        try:
+            blob_obj.delete(clip_key)
+            redis_obj.delete(meta_key)
+        except Exception:
+            pass
+        return {"stored": False, "reason": "store_failed", "bytes": size}
+
+    return {
+        "stored": True,
+        "clip_id": clip_id,
+        "bytes": size,
+        "content_type": media_type,
     }
 
 
@@ -1760,6 +1887,9 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
                 "event_sources": event_sources,
             }
         )
+    description_mode = _text(raw.get("description_mode") or "image").lower()
+    if description_mode not in _MONITOR_DESCRIPTION_MODES:
+        description_mode = "image"
     return {
         "id": _text(raw.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -1775,6 +1905,7 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "name": name,
         "area": area or kind,
         "enabled": _bool(raw.get("enabled"), True),
+        "description_mode": description_mode if kind == "camera" else "",
         # Preserve the behavior of camera monitors created before this setting
         # existed. Sensors can never schedule Face ID work.
         "face_id_enabled": kind == "camera" and _bool(raw.get("face_id_enabled"), True),
@@ -2229,6 +2360,68 @@ def _monitor_device_options(
     }
 
 
+def _monitor_device_supports_description_mode(device: Dict[str, Any], mode: Any) -> bool:
+    mode_token = _text(mode).lower()
+    if _monitor_device_kind(device) != "camera" or mode_token not in _MONITOR_DESCRIPTION_MODES:
+        return False
+    actions = {_category_token(value) for value in device.get("actions") or [] if _category_token(value)}
+    capabilities = {
+        _category_token(value)
+        for value in [*(device.get("capabilities") or []), *(device.get("features") or [])]
+        if _category_token(value)
+    }
+    if mode_token == "video":
+        return bool(actions.intersection({"camera_clip", "video_clip", "clip"})) or bool(
+            capabilities.intersection({"camera_clip", "video_clip", "clip"})
+        )
+    return bool(actions.intersection({"camera_snapshot", "snapshot"})) or "snapshot" in capabilities
+
+
+def _monitor_description_mode_dependency(
+    registry: Dict[str, Any],
+    *,
+    current_device: Any = "",
+    current_mode: Any = "image",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    all_values: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict) or _monitor_device_kind(device) != "camera":
+            continue
+        encoded = _monitor_device_value(device)
+        if not encoded:
+            continue
+        rows = [
+            dict(option)
+            for option in _MONITOR_DESCRIPTION_MODE_OPTIONS
+            if _monitor_device_supports_description_mode(device, option["value"])
+        ]
+        if rows:
+            options_by_source[encoded] = rows
+            all_values.update(_text(row.get("value")) for row in rows)
+    default_options = [
+        dict(option)
+        for option in _MONITOR_DESCRIPTION_MODE_OPTIONS
+        if _text(option.get("value")) in all_values
+    ]
+    selected = [dict(row) for row in options_by_source.get(_text(current_device), default_options)]
+    saved_mode = _text(current_mode).lower()
+    if saved_mode in _MONITOR_DESCRIPTION_MODES and not any(
+        _text(row.get("value")) == saved_mode for row in selected
+    ):
+        saved = next(
+            (dict(row) for row in _MONITOR_DESCRIPTION_MODE_OPTIONS if row["value"] == saved_mode),
+            {"value": saved_mode, "label": saved_mode.title(), "icon": "◆"},
+        )
+        saved["meta"] = "Saved setting; currently unavailable"
+        selected.append(saved)
+    return selected, {
+        "source_key": "device",
+        "options_by_source": options_by_source,
+        "default_options": default_options,
+    }
+
+
 def _build_monitor_from_values(
     *,
     values: Dict[str, Any],
@@ -2316,6 +2509,19 @@ def _build_monitor_from_values(
             trigger_events.append(item)
     if not trigger_events:
         raise ValueError("Choose at least one event that should trigger this monitored source.")
+    description_mode = _text(
+        _value(values, payload, "description_mode", previous.get("description_mode") or "image")
+    ).lower()
+    if kind == "camera":
+        if description_mode not in _MONITOR_DESCRIPTION_MODES:
+            raise ValueError("Choose image descriptions or video descriptions for this camera.")
+        if not _monitor_device_supports_description_mode(device, description_mode):
+            media_label = "short video clips" if description_mode == "video" else "snapshots"
+            raise ValueError(
+                f"The selected camera integration does not report support for {media_label}."
+            )
+    else:
+        description_mode = ""
     now_ts = time.time()
     default_name = _text(device.get("name")) or device_id
     default_area = _text(device.get("room") or device.get("area")) or default_name
@@ -2334,6 +2540,7 @@ def _build_monitor_from_values(
         "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "description_mode": description_mode,
         "face_id_enabled": kind == "camera" and _bool(
             _value(values, payload, "face_id_enabled", previous.get("face_id_enabled", True)),
             True,
@@ -2703,6 +2910,58 @@ async def _capture_camera_snapshot(provider: str, camera_target: str) -> Tuple[b
     return await _integration_camera_snapshot(provider_token, camera_target)
 
 
+def _integration_camera_clip_sync(
+    provider: str,
+    camera_ref: str,
+    payload: Dict[str, Any],
+) -> Tuple[bytes, str, Dict[str, Any]]:
+    from integration_registry import run_integration_device_action
+
+    provider_token = _normalize_event_provider(provider)
+    device_ref = _text(camera_ref)
+    if device_ref.startswith("camera:"):
+        device_ref = _text(device_ref.split(":", 1)[1])
+    result = run_integration_device_action(
+        provider_token,
+        "camera_clip",
+        device_ref,
+        dict(payload or {}),
+    )
+    if isinstance(result, tuple) and result:
+        content = result[0]
+        content_type = _text(result[1] if len(result) > 1 else "video/mp4") or "video/mp4"
+        if isinstance(content, (bytes, bytearray)):
+            return bytes(content), content_type, {}
+    if isinstance(result, dict):
+        content = result.get("bytes") or result.get("content") or result.get("video_bytes")
+        content_type = _text(result.get("content_type") or result.get("mime_type") or "video/mp4")
+        if isinstance(content, str) and content.startswith("data:") and "," in content:
+            header, encoded = content.split(",", 1)
+            content_type = header[5:].split(";", 1)[0] or content_type
+            content = base64.b64decode(encoded)
+        if isinstance(content, (bytes, bytearray)):
+            metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in {"bytes", "content", "video_bytes"}
+            }
+            return bytes(content), content_type or "video/mp4", metadata
+    raise RuntimeError(f"{_provider_label(provider_token)} did not return clip bytes for {camera_ref}.")
+
+
+async def _capture_camera_clip(
+    provider: str,
+    camera_target: str,
+    payload: Dict[str, Any],
+) -> Tuple[bytes, str, Dict[str, Any]]:
+    return await asyncio.to_thread(
+        _integration_camera_clip_sync,
+        provider,
+        camera_target,
+        payload,
+    )
+
+
 def _vision_describe_prompts(*, query: str, ignore_vehicles: bool, mode: str) -> Tuple[str, str]:
     if mode == "doorbell":
         prompt = (
@@ -2738,6 +2997,71 @@ def _vision_describe_prompts(*, query: str, ignore_vehicles: bool, mode: str) ->
         "For camera mode when there are no people or animals, output exactly: Nothing notable."
     )
     return system_prompt, prompt
+
+
+def _video_describe_prompt(*, mode: str, query: str = "") -> str:
+    if mode == "doorbell":
+        prompt = (
+            "Write one short spoken sentence describing this doorbell event clip. "
+            "Start with 'Someone is at the door'. Describe the important visible action in order, "
+            "including a person, clothing, or package when clear. Do not list absent objects."
+        )
+    else:
+        prompt = (
+            "Write one short sentence describing this camera event clip. Focus on the most important "
+            "visible action, subjects, movement, and sequence. Mention people, animals, vehicles, or "
+            "packages only when visible, avoid guessing, and never list what is absent. "
+            "If there is no notable activity, reply exactly: Nothing notable."
+        )
+    if _text(query):
+        prompt += f" Additional context: {_text(query)}"
+    return prompt
+
+
+def _video_describe_sync(
+    *,
+    video_bytes: bytes,
+    content_type: str,
+    mode: str,
+    query: str = "",
+) -> str:
+    if not callable(_shared_video_analyze):
+        raise RuntimeError("Video Understanding is unavailable in this Tater runtime.")
+    extension = {
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+        "video/x-matroska": "mkv",
+    }.get(_text(content_type).lower(), "mp4")
+    result = _shared_video_analyze(
+        media_ref={
+            "bytes": bytes(video_bytes or b""),
+            "name": f"awareness-camera.{extension}",
+            "mimetype": _text(content_type) or "video/mp4",
+        },
+        prompt=_video_describe_prompt(mode=mode, query=query),
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else {}
+        message = _text(error.get("message")) if isinstance(error, dict) else ""
+        raise RuntimeError(message or "Video Understanding could not analyze the camera clip.")
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    return _text(data.get("description") or data.get("text") or result.get("summary_for_user")).strip()
+
+
+async def _video_describe(
+    *,
+    video_bytes: bytes,
+    content_type: str,
+    mode: str,
+    query: str = "",
+) -> str:
+    return await asyncio.to_thread(
+        _video_describe_sync,
+        video_bytes=video_bytes,
+        content_type=content_type,
+        mode=mode,
+        query=query,
+    )
 
 
 def _vision_describe_openai_sync(
@@ -3788,6 +4112,62 @@ def _load_event_snapshot_payload(client: Any, snapshot_id: str) -> Optional[Dict
     return payload if isinstance(payload, dict) else None
 
 
+def _load_event_clip_payload(client: Any, clip_id: str) -> Optional[Dict[str, Any]]:
+    cid = _text(clip_id).lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", cid):
+        return None
+    redis_obj = client or redis_client
+    blob_obj = _event_clip_blob_client(redis_obj)
+    if redis_obj is None or blob_obj is None:
+        return None
+    try:
+        raw_meta = redis_obj.get(_event_clip_meta_key(cid))
+        raw_clip = blob_obj.get(_event_clip_key(cid))
+    except Exception:
+        return None
+    if not raw_meta or raw_clip is None:
+        return None
+    try:
+        metadata = json.loads(raw_meta)
+    except Exception:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if isinstance(raw_clip, bytearray):
+        clip_bytes = bytes(raw_clip)
+    elif isinstance(raw_clip, bytes):
+        clip_bytes = raw_clip
+    else:
+        return None
+    if not clip_bytes:
+        return None
+    return {**metadata, "bytes_data": clip_bytes}
+
+
+def get_htmlui_tab_media(
+    *,
+    media_id: str,
+    redis_client=None,
+    **_kwargs,
+) -> Dict[str, Any]:
+    payload = _load_event_clip_payload(redis_client or globals().get("redis_client"), media_id)
+    if payload is None:
+        raise KeyError("Awareness event clip not found.")
+    content_type = _text(payload.get("content_type") or "video/mp4")
+    extension = {
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+        "video/x-matroska": "mkv",
+        "video/mpeg": "mpeg",
+        "video/x-msvideo": "avi",
+    }.get(content_type.lower(), "mp4")
+    return {
+        "bytes": payload["bytes_data"],
+        "content_type": content_type,
+        "filename": f"awareness-event-{_text(media_id)}.{extension}",
+    }
+
+
 def _event_snapshot_preview(client: Any, event: Dict[str, Any]) -> Dict[str, Any]:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     snapshot_id = _text(event.get("snapshot_id") or data.get("snapshot_id"))
@@ -3812,6 +4192,19 @@ def _event_snapshot_preview(client: Any, event: Dict[str, Any]) -> Dict[str, Any
     if data_b64:
         preview["data_url"] = f"data:{content_type};base64,{data_b64}"
     return preview
+
+
+def _event_clip_preview(event: Dict[str, Any]) -> Dict[str, Any]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    clip_id = _text(event.get("clip_id") or data.get("clip_id")).lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", clip_id):
+        return {}
+    return {
+        "clip_id": clip_id,
+        "bytes": _as_int(data.get("clip_stored_bytes") or data.get("clip_bytes"), 0, minimum=0),
+        "content_type": _text(data.get("clip_content_type") or "video/mp4"),
+        "url": f"/api/cores/awareness/media/{quote(clip_id)}",
+    }
 
 
 def _event_type_filters(client: Any) -> Dict[str, bool]:
@@ -3955,8 +4348,25 @@ def _event_forms_from_events(
 
         fields: List[Dict[str, Any]] = []
         snapshot = _event_snapshot_preview(client, event)
+        clip = _event_clip_preview(event)
         snapshot_id = _text(snapshot.get("snapshot_id"))
-        if (not list_view) and snapshot.get("data_url"):
+        if (not list_view) and clip.get("url"):
+            duration = _as_int(data.get("clip_duration_seconds"), 0, minimum=0)
+            fields.append(
+                {
+                    "key": f"clip_{idx}",
+                    "label": "Event Clip",
+                    "type": "video",
+                    "src": _text(clip.get("url")),
+                    "content_type": _text(clip.get("content_type") or "video/mp4"),
+                    "poster": _text(snapshot.get("data_url")),
+                    "caption": f"{duration}-second event clip" if duration else "Camera event clip",
+                    "preload": "metadata",
+                    "controls": True,
+                    "hide_label": True,
+                }
+            )
+        elif (not list_view) and snapshot.get("data_url"):
             fields.append(
                 {
                     "key": f"snapshot_{idx}",
@@ -4255,6 +4665,42 @@ def _monitor_snapshot_fields(event_payload: Dict[str, Any], snapshot_store: Dict
     event_payload["data"] = data
 
 
+def _monitor_clip_fields(event_payload: Dict[str, Any], clip_store: Dict[str, Any]) -> None:
+    data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+    if clip_store.get("stored"):
+        clip_id = _text(clip_store.get("clip_id"))
+        event_payload["clip_id"] = clip_id
+        data["clip_id"] = clip_id
+        data["clip_content_type"] = _text(clip_store.get("content_type") or "video/mp4")
+        data["clip_stored_bytes"] = _as_int(clip_store.get("bytes"), 0, minimum=0)
+    elif clip_store.get("reason"):
+        data["clip_storage_status"] = _text(clip_store.get("reason"))
+        data["clip_stored_bytes"] = 0
+    event_payload["data"] = data
+
+
+def _monitor_camera_clip_payload(event: Dict[str, Any], *, duration_seconds: int) -> Dict[str, Any]:
+    new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
+    attrs = new_state.get("attributes") if isinstance(new_state.get("attributes"), dict) else {}
+    event_start = (
+        attrs.get("event_start")
+        or attrs.get("event_ts")
+        or new_state.get("last_changed")
+        or new_state.get("last_updated")
+        or event.get("event_start")
+    )
+    event_end = attrs.get("event_end") or event.get("event_end")
+    event_id = attrs.get("event_id") or event.get("event_id")
+    return {
+        "duration_seconds": max(1, min(30, int(duration_seconds or 8))),
+        "pre_event_seconds": 2,
+        "post_event_seconds": 4,
+        "event_id": _text(event_id),
+        "event_start": event_start,
+        "event_end": event_end,
+    }
+
+
 async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
     provider = _normalize_event_provider(monitor.get("provider"))
     camera_target = _monitor_camera_target(monitor)
@@ -4274,33 +4720,77 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     if not _acquire_cooldown(cooldown_key, cooldown_seconds):
         return {"ok": True, "summary": "Camera event cooldown active.", "skipped": "cooldown"}
 
+    requested_description_mode = _text(monitor.get("description_mode") or "image").lower()
+    if requested_description_mode not in _MONITOR_DESCRIPTION_MODES:
+        requested_description_mode = "image"
+    actual_description_mode = requested_description_mode
     snapshot_store: Dict[str, Any] = {}
+    clip_store: Dict[str, Any] = {}
     jpeg: bytes = b""
     content_type = "image/jpeg"
-    error_text = ""
+    clip_bytes: bytes = b""
+    clip_content_type = "video/mp4"
+    clip_metadata: Dict[str, Any] = {}
+    errors: List[str] = []
+    summary = ""
     try:
         jpeg, content_type = await _capture_camera_snapshot(provider, camera_target)
-        vision = get_shared_vision_settings(
-            default_api_base="http://127.0.0.1:1234",
-            default_model="qwen2.5-vl-7b-instruct",
-        )
-        summary = await _vision_describe(
-            image_bytes=jpeg,
-            api_base=_text(vision.get("api_base")),
-            model=_text(vision.get("model")),
-            api_key=_text(vision.get("api_key")),
-            query="doorbell alert" if event_kind == "doorbell" else "",
-            ignore_vehicles=False,
-            mode="doorbell" if event_kind == "doorbell" else "camera",
-            vision_mode=_text(vision.get("mode")),
-            vision_provider=_text(vision.get("provider")),
-        )
-        summary = _compact(summary, limit=180) or "Nothing notable."
     except Exception as exc:
-        error_text = str(exc)
-        logger.warning("[awareness] monitored camera capture failed for %s: %s", camera_target, exc)
-        summary = ""
+        errors.append(f"snapshot: {exc}")
+        logger.warning("[awareness] monitored camera snapshot failed for %s: %s", camera_target, exc)
         snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
+
+    if requested_description_mode == "video":
+        try:
+            clip_seconds = _setting_int(
+                redis_client,
+                "camera_event_clip_seconds",
+                8,
+                minimum=1,
+                maximum=30,
+            )
+            clip_payload = _monitor_camera_clip_payload(event, duration_seconds=clip_seconds)
+            clip_bytes, clip_content_type, clip_metadata = await _capture_camera_clip(
+                provider,
+                camera_target,
+                clip_payload,
+            )
+            summary = await _video_describe(
+                video_bytes=clip_bytes,
+                content_type=clip_content_type,
+                query="doorbell alert" if event_kind == "doorbell" else "",
+                mode="doorbell" if event_kind == "doorbell" else "camera",
+            )
+        except Exception as exc:
+            errors.append(f"video: {exc}")
+            logger.warning("[awareness] monitored camera video failed for %s: %s", camera_target, exc)
+            actual_description_mode = "image"
+
+    if requested_description_mode == "image" or (actual_description_mode == "image" and not summary):
+        try:
+            if not jpeg:
+                raise RuntimeError("No camera snapshot was available.")
+            vision = get_shared_vision_settings(
+                default_api_base="http://127.0.0.1:1234",
+                default_model="qwen2.5-vl-7b-instruct",
+            )
+            summary = await _vision_describe(
+                image_bytes=jpeg,
+                api_base=_text(vision.get("api_base")),
+                model=_text(vision.get("model")),
+                api_key=_text(vision.get("api_key")),
+                query="doorbell alert" if event_kind == "doorbell" else "",
+                ignore_vehicles=False,
+                mode="doorbell" if event_kind == "doorbell" else "camera",
+                vision_mode=_text(vision.get("mode")),
+                vision_provider=_text(vision.get("provider")),
+            )
+        except Exception as exc:
+            errors.append(f"image: {exc}")
+            logger.warning("[awareness] monitored camera image description failed for %s: %s", camera_target, exc)
+
+    summary = _compact(summary, limit=180) or "Nothing notable."
+    error_text = _compact("; ".join(errors), limit=300)
 
     if _is_nothing_notable_summary(summary) and event_kind in {"activity", "motion"}:
         _clear_cooldown(cooldown_key)
@@ -4312,6 +4802,12 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
             summary = f"{event_kind.replace('_', ' ').title()} activity was detected at {area}."
     if jpeg:
         snapshot_store = _store_event_snapshot(redis_client, jpeg, content_type=content_type)
+    if clip_bytes:
+        clip_store = _store_event_clip(
+            redis_client,
+            clip_bytes,
+            content_type=clip_content_type,
+        )
 
     event_id = uuid.uuid4().hex
     event_payload: Dict[str, Any] = {
@@ -4331,11 +4827,21 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
             "trigger_entity": entity_id,
             "new_state": _text(new_state.get("state")),
             "old_state": _text(old_state.get("state")),
+            "description_mode": requested_description_mode,
+            "description_media": actual_description_mode,
         },
     }
+    if clip_bytes:
+        event_payload["data"]["clip_content_type"] = clip_content_type
+        event_payload["data"]["clip_bytes"] = len(clip_bytes)
+        for key in ("event_id", "start", "end", "duration_seconds"):
+            value = clip_metadata.get(key)
+            if value not in (None, ""):
+                event_payload["data"][f"clip_{key}"] = value
     if error_text:
         event_payload["data"]["capture_error"] = _compact(error_text, limit=180)
     _monitor_snapshot_fields(event_payload, snapshot_store)
+    _monitor_clip_fields(event_payload, clip_store)
     face_session_id = ""
     if _bool(monitor.get("face_id_enabled"), True) and _face_burst_should_run(event_kind, summary):
         face_session_id = _schedule_face_burst(
@@ -4356,6 +4862,8 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
         "event_type": event_kind,
         "warning": error_text,
         "face_session_id": face_session_id,
+        "description_mode": actual_description_mode,
+        "clip_id": _text(clip_store.get("clip_id")),
     }
 
 
@@ -4445,6 +4953,12 @@ def _monitor_form(
         current_device=selected_device,
         current_events=monitor.get("trigger_events"),
     )
+    description_mode = _text(monitor.get("description_mode") or "image").lower()
+    description_options, description_dependency = _monitor_description_mode_dependency(
+        registry,
+        current_device=selected_device,
+        current_mode=description_mode,
+    )
     trigger_labels = [
         _text(_monitor_trigger_option(value).get("label"))
         for value in monitor.get("trigger_events") or []
@@ -4452,6 +4966,7 @@ def _monitor_form(
     ]
     enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
     face_id_label = "Face ID on" if _bool(monitor.get("face_id_enabled"), True) else "Face ID off"
+    description_label = "Video descriptions" if description_mode == "video" else "Image descriptions"
     last_event = _fmt_ts(monitor.get("last_event_ts"))
     return {
         "id": monitor["id"],
@@ -4460,7 +4975,7 @@ def _monitor_form(
         "subtitle": (
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
             f"{', '.join(trigger_labels) or 'No triggers'} • "
-            f"{f'{face_id_label} • ' if kind == 'camera' else ''}last event: {last_event}"
+            f"{f'{description_label} • {face_id_label} • ' if kind == 'camera' else ''}last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -4520,6 +5035,20 @@ def _monitor_form(
                 "value": list(monitor.get("trigger_events") or []),
                 "description": "Select one or more events reported by this device. Only those events will be stored in Awareness history.",
                 "full_width": True,
+            },
+            {
+                "key": "description_mode",
+                "label": "Describe Camera Events With",
+                "type": "select",
+                "presentation": "cards",
+                "options": description_options,
+                "dependent_options": description_dependency,
+                "value": description_mode,
+                "description": (
+                    "Video is offered only when the selected integration reports that this camera can provide clips."
+                ),
+                "full_width": True,
+                "show_when": {"source_key": "kind", "equals": "camera"},
             },
             {
                 "key": "area",
@@ -5302,6 +5831,14 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         current_device=default_device,
     )
     default_trigger_events = [_text(row.get("value")) for row in default_trigger_options if _text(row.get("value"))]
+    default_description_options, description_dependency = _monitor_description_mode_dependency(
+        registry,
+        current_device=default_device,
+        current_mode="image",
+    )
+    default_description_mode = _text(
+        (default_description_options[0] if default_description_options else {}).get("value")
+    ) or "image"
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
     return {
@@ -5445,6 +5982,20 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "value": default_trigger_events,
                     "description": "Only events explicitly reported by the selected device's integration are shown.",
                     "full_width": True,
+                },
+                {
+                    "key": "description_mode",
+                    "label": "Describe Camera Events With",
+                    "type": "select",
+                    "presentation": "cards",
+                    "options": default_description_options,
+                    "dependent_options": description_dependency,
+                    "value": default_description_mode,
+                    "description": (
+                        "Use one snapshot or a short clip. Video is shown only for cameras whose integration advertises clip support."
+                    ),
+                    "full_width": True,
+                    "show_when": {"source_key": "kind", "equals": "camera"},
                 },
                 {
                     "type": "heading",
@@ -6202,6 +6753,10 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
                 attrs["event_id"] = event_id
             if event_ts > 0:
                 attrs["event_ts"] = event_ts
+                attrs["event_start"] = event_ts
+            event_end = _as_float(item.get("end"), 0.0)
+            if event_end > 0:
+                attrs["event_end"] = event_end
             await _handle_trigger_state_change(
                 provider="unifi_protect",
                 entity_id=doorbell_entity,
@@ -6230,6 +6785,16 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     if "cameramotion" in event_token and camera_id:
         motion_entity = _unifi_camera_motion_trigger(camera_id)
         attrs = {"friendly_name": camera_name}
+        event_id = _unifi_event_id(item)
+        event_ts = _unifi_camera_event_ts(item)
+        event_end = _as_float(item.get("end"), 0.0)
+        if event_id:
+            attrs["event_id"] = event_id
+        if event_ts > 0:
+            attrs["event_ts"] = event_ts
+            attrs["event_start"] = event_ts
+        if event_end > 0:
+            attrs["event_end"] = event_end
         await _handle_trigger_state_change(
             provider="unifi_protect",
             entity_id=motion_entity,
@@ -6249,6 +6814,16 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
                 "camera_name": camera_name,
                 "detection_type": smart_type,
             }
+            event_id = _unifi_event_id(item)
+            event_ts = _unifi_camera_event_ts(item)
+            event_end = _as_float(item.get("end"), 0.0)
+            if event_id:
+                attrs["event_id"] = event_id
+            if event_ts > 0:
+                attrs["event_ts"] = event_ts
+                attrs["event_start"] = event_ts
+            if event_end > 0:
+                attrs["event_end"] = event_end
             await _handle_trigger_state_change(
                 provider="unifi_protect",
                 entity_id=smart_entity,

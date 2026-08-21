@@ -19,9 +19,9 @@
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.4.2",
+      "version": "1.5.0",
       "min_tater_version": "98",
-      "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, and announcement targets.",
+      "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, announcement targets, and camera image or video descriptions.",
       "settings_category": "Automation Core Settings",
       "required_settings_count": 0,
       "autostart_key": "automation_core_running",
@@ -30,30 +30,33 @@
         "integrations",
         "smart-home",
         "tts",
+        "vision",
+        "video",
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "7c275e274f47a7601c438b3ccb73610cd1350799c4529bd27dcc6641f4cc2ce8"
+      "sha256": "2ac255d609a218955f8f2b0825fe65702518a7041e85ce4bca52dc53c039a5d0"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "4.4.2",
+      "version": "4.6.0",
       "min_tater_version": "59",
-      "description": "Choose which cameras and sensors Tater should observe, retain their bounded event history and snapshots, and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, and device actions.",
+      "description": "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, retain their bounded event history, snapshots, and playable clips, and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, and device actions.",
       "settings_category": "Awareness Core Settings",
-      "required_settings_count": 4,
+      "required_settings_count": 7,
       "autostart_key": "awareness_core_running",
       "tags": [
         "awareness",
         "cameras",
         "sensors",
         "event-history",
-        "vision"
+        "vision",
+        "video"
       ],
       "entry": "cores/awareness_core.py",
-      "sha256": "0d3bcaa8d554b9a68971d971047e969fb9859f89e391adbf0359eb0221811074"
+      "sha256": "e58753ee14dd3561f1dc725af543e971934fb7ba5460ccf7ba83390581c7c8cd"
     },
     {
       "id": "environment",
