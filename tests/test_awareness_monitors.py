@@ -270,6 +270,9 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.redis.hashes.clear()
         self.redis.values.clear()
         self.redis.lists.clear()
+        # Historical face and event fixtures use fixed timestamps; retention
+        # behavior is covered separately and must not make these tests expire.
+        self.redis.hashes["awareness_core_settings"] = {"events_retention": "forever"}
 
     def _add_monitor(
         self,
@@ -279,6 +282,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         trigger_events=None,
         face_id_enabled=None,
         description_mode=None,
+        linked_camera="",
+        linked_camera_description_mode="image",
     ):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
         if trigger_events is not None:
@@ -287,6 +292,15 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             values["face_id_enabled"] = face_id_enabled
         if description_mode is not None:
             values["description_mode"] = description_mode
+        if linked_camera:
+            provider = linked_camera.split("|", 1)[0]
+            values.update(
+                {
+                    "linked_camera_integration": f"camera::{provider}",
+                    "linked_camera": linked_camera,
+                    "linked_camera_description_mode": linked_camera_description_mode,
+                }
+            )
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             result = self.core.handle_htmlui_tab_action(
                 action="awareness_add_monitor",
@@ -522,6 +536,127 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
                 old_state={"state": "on"},
             )
         )
+
+    def test_sensor_monitor_can_optionally_link_a_capability_reported_camera(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            ["opens"],
+            linked_camera="unifi_protect|cam-front",
+            linked_camera_description_mode="video",
+        )
+
+        self.assertEqual(monitor["linked_camera_provider"], "unifi_protect")
+        self.assertEqual(monitor["linked_camera_device_id"], "cam-front")
+        self.assertEqual(monitor["linked_camera_device_ref"], "camera:cam-front")
+        self.assertEqual(monitor["linked_camera_name"], "Front Camera")
+        self.assertEqual(monitor["linked_camera_description_mode"], "video")
+
+    async def test_linked_camera_adds_snapshot_and_description_to_sensor_event(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            ["opens"],
+            linked_camera="unifi_protect|cam-front",
+        )
+        event = {
+            "entity_id": "binary_sensor.back_door",
+            "new_state": {"state": "on"},
+            "old_state": {"state": "off"},
+        }
+        with (
+            patch.object(
+                self.core,
+                "_capture_camera_snapshot",
+                new=AsyncMock(return_value=(b"linked-jpeg", "image/jpeg")),
+            ),
+            patch.object(
+                self.core,
+                "_vision_describe",
+                new=AsyncMock(return_value="A person is walking through the doorway."),
+            ),
+        ):
+            result = await self.core._execute_sensor_monitor(monitor, event)
+
+        self.assertIn("Back Door opened.", result["summary"])
+        self.assertIn("A person is walking through the doorway.", result["summary"])
+        stored = json.loads(self.redis.lists["tater:automations:events:back_door"][0])
+        self.assertEqual(stored["data"]["description_media"], "image")
+        self.assertEqual(stored["data"]["camera_entity"], "cam-front")
+        self.assertTrue(stored["snapshot_id"])
+
+    async def test_linked_camera_video_is_stored_on_the_sensor_event(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            ["opens"],
+            linked_camera="unifi_protect|cam-front",
+            linked_camera_description_mode="video",
+        )
+        event = {
+            "entity_id": "binary_sensor.back_door",
+            "new_state": {"state": "on", "last_changed": "2026-08-20T21:00:00Z"},
+            "old_state": {"state": "off"},
+        }
+        with (
+            patch.object(
+                self.core,
+                "_capture_camera_snapshot",
+                new=AsyncMock(return_value=(b"linked-jpeg", "image/jpeg")),
+            ),
+            patch.object(
+                self.core,
+                "_capture_camera_clip",
+                new=AsyncMock(
+                    return_value=(
+                        b"linked-video",
+                        "video/mp4",
+                        {"duration_seconds": 8},
+                    )
+                ),
+            ),
+            patch.object(
+                self.core,
+                "_video_describe",
+                new=AsyncMock(return_value="A person opens the door and walks inside."),
+            ),
+        ):
+            result = await self.core._execute_sensor_monitor(monitor, event)
+
+        stored = json.loads(self.redis.lists["tater:automations:events:back_door"][0])
+        self.assertEqual(result["description_mode"], "video")
+        self.assertEqual(stored["data"]["description_media"], "video")
+        self.assertTrue(stored["clip_id"])
+        self.assertEqual(stored["data"]["clip_duration_seconds"], 8)
+
+    async def test_linked_camera_failure_does_not_drop_the_sensor_event(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            ["opens"],
+            linked_camera="unifi_protect|cam-front",
+        )
+        event = {
+            "entity_id": "binary_sensor.back_door",
+            "new_state": {"state": "on"},
+            "old_state": {"state": "off"},
+        }
+        with patch.object(
+            self.core,
+            "_capture_camera_snapshot",
+            new=AsyncMock(side_effect=RuntimeError("camera offline")),
+        ):
+            result = await self.core._execute_sensor_monitor(monitor, event)
+
+        self.assertEqual(result["summary"], "Back Door opened.")
+        stored = json.loads(self.redis.lists["tater:automations:events:back_door"][0])
+        self.assertEqual(stored["message"], "Back Door opened.")
+        self.assertIn("camera offline", stored["data"]["capture_error"])
+        self.assertEqual(stored["data"]["snapshot_status"], "capture_failed")
 
     def test_unifi_door_source_uses_open_and_close_events(self):
         monitor = self._add_monitor(
@@ -766,6 +901,24 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             "unifi_protect|cam-front"
         ]
         self.assertEqual([row["value"] for row in camera_media], ["image", "video"])
+        self.assertEqual(fields["linked_camera_integration"]["options"][0]["value"], "")
+        self.assertEqual(fields["linked_camera_integration"]["options"][0]["label"], "No camera")
+        self.assertEqual(
+            fields["linked_camera"]["dependent_options"]["source_key"],
+            "linked_camera_integration",
+        )
+        linked_unifi_cameras = fields["linked_camera"]["dependent_options"]["options_by_source"][
+            "camera::unifi_protect"
+        ]
+        self.assertIn("unifi_protect|cam-front", [row["value"] for row in linked_unifi_cameras])
+        self.assertEqual(
+            fields["linked_camera_description_mode"]["dependent_options"]["source_key"],
+            "linked_camera",
+        )
+        linked_camera_modes = fields["linked_camera_description_mode"]["dependent_options"][
+            "options_by_source"
+        ]["unifi_protect|cam-front"]
+        self.assertEqual([row["value"] for row in linked_camera_modes], ["image", "video"])
         doorbell_options = fields["trigger_events"]["dependent_options"]["options_by_source"][
             "unifi_protect|doorbell-front"
         ]
@@ -800,8 +953,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hue_sensors[0]["description"], "Motion sensor • Hall • Philips Hue")
         self.assertNotIn("trigger_entities", fields)
         self.assertNotIn("notification_targets", fields)
-        self.assertEqual(fields["enabled"]["presentation"], "compact_toggle")
-        self.assertEqual(fields["face_id_enabled"]["presentation"], "compact_toggle")
+        self.assertNotIn("presentation", fields["enabled"])
+        self.assertNotIn("presentation", fields["face_id_enabled"])
         self.assertEqual(fields["face_id_enabled"]["show_when"], {"source_key": "kind", "equals": "camera"})
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")
 

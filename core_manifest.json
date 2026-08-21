@@ -41,9 +41,9 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "4.6.0",
+      "version": "4.7.0",
       "min_tater_version": "59",
-      "description": "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, retain their bounded event history, snapshots, and playable clips, and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, and device actions.",
+      "description": "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, and device actions.",
       "settings_category": "Awareness Core Settings",
       "required_settings_count": 7,
       "autostart_key": "awareness_core_running",
@@ -56,7 +56,7 @@
         "video"
       ],
       "entry": "cores/awareness_core.py",
-      "sha256": "e58753ee14dd3561f1dc725af543e971934fb7ba5460ccf7ba83390581c7c8cd"
+      "sha256": "6fe1f2bbdd2c3a81f31032c6365a150808b6c8d4635214d30baecef15ed4209f"
     },
     {
       "id": "environment",

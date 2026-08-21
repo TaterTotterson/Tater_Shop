@@ -53,10 +53,10 @@ try:
 except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
     _shared_video_analyze = None
 
-__version__ = "4.6.0"
+__version__ = "4.7.0"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
-    "retain their bounded event history, snapshots, and playable clips, "
+    "optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, "
     "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
     "and device actions."
 )
@@ -128,7 +128,7 @@ CORE_SETTINGS = {
             "label": "Store Event Snapshots",
             "type": "checkbox",
             "default": True,
-            "description": "Store camera/doorbell snapshot images in Redis for future event gallery UI.",
+            "description": "Store camera, doorbell, and sensor-linked snapshots for Event History.",
         },
         "event_snapshot_max_kb": {
             "label": "Snapshot Max Size (KB)",
@@ -140,7 +140,7 @@ CORE_SETTINGS = {
             "label": "Store Event Clips",
             "type": "checkbox",
             "default": True,
-            "description": "Keep successful camera event clips so they can be played from Event History.",
+            "description": "Keep successful camera and sensor-linked clips so they can be played from Event History.",
         },
         "event_clip_max_mb": {
             "label": "Event Clip Max Size (MB)",
@@ -1890,6 +1890,26 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
     description_mode = _text(raw.get("description_mode") or "image").lower()
     if description_mode not in _MONITOR_DESCRIPTION_MODES:
         description_mode = "image"
+    linked_camera_provider = _normalize_event_provider(raw.get("linked_camera_provider"))
+    linked_camera_device_id = _text(raw.get("linked_camera_device_id"))
+    linked_camera_device_ref = _text(raw.get("linked_camera_device_ref") or linked_camera_device_id)
+    linked_camera_name = _text(raw.get("linked_camera_name"))
+    linked_camera_description_mode = _text(
+        raw.get("linked_camera_description_mode") or "image"
+    ).lower()
+    if linked_camera_description_mode not in _MONITOR_DESCRIPTION_MODES:
+        linked_camera_description_mode = "image"
+    if (
+        kind != "sensor"
+        or linked_camera_provider == "all"
+        or not linked_camera_device_id
+        or not linked_camera_device_ref
+    ):
+        linked_camera_provider = ""
+        linked_camera_device_id = ""
+        linked_camera_device_ref = ""
+        linked_camera_name = ""
+        linked_camera_description_mode = ""
     return {
         "id": _text(raw.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -1906,6 +1926,11 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "area": area or kind,
         "enabled": _bool(raw.get("enabled"), True),
         "description_mode": description_mode if kind == "camera" else "",
+        "linked_camera_provider": linked_camera_provider,
+        "linked_camera_device_id": linked_camera_device_id,
+        "linked_camera_device_ref": linked_camera_device_ref,
+        "linked_camera_name": linked_camera_name,
+        "linked_camera_description_mode": linked_camera_description_mode,
         # Preserve the behavior of camera monitors created before this setting
         # existed. Sensors can never schedule Face ID work.
         "face_id_enabled": kind == "camera" and _bool(raw.get("face_id_enabled"), True),
@@ -2382,6 +2407,8 @@ def _monitor_description_mode_dependency(
     *,
     current_device: Any = "",
     current_mode: Any = "image",
+    source_key: str = "device",
+    include_default_options: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     options_by_source: Dict[str, List[Dict[str, Any]]] = {}
     all_values: set[str] = set()
@@ -2404,9 +2431,10 @@ def _monitor_description_mode_dependency(
         for option in _MONITOR_DESCRIPTION_MODE_OPTIONS
         if _text(option.get("value")) in all_values
     ]
-    selected = [dict(row) for row in options_by_source.get(_text(current_device), default_options)]
+    selected_default = default_options if include_default_options else []
+    selected = [dict(row) for row in options_by_source.get(_text(current_device), selected_default)]
     saved_mode = _text(current_mode).lower()
-    if saved_mode in _MONITOR_DESCRIPTION_MODES and not any(
+    if (include_default_options or _text(current_device)) and saved_mode in _MONITOR_DESCRIPTION_MODES and not any(
         _text(row.get("value")) == saved_mode for row in selected
     ):
         saved = next(
@@ -2416,9 +2444,112 @@ def _monitor_description_mode_dependency(
         saved["meta"] = "Saved setting; currently unavailable"
         selected.append(saved)
     return selected, {
-        "source_key": "device",
+        "source_key": _text(source_key) or "device",
         "options_by_source": options_by_source,
-        "default_options": default_options,
+        "default_options": default_options if include_default_options else [],
+    }
+
+
+def _monitor_linked_camera_devices(registry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for device in registry.get("devices") or []:
+        if not isinstance(device, dict) or _monitor_device_kind(device) != "camera":
+            continue
+        if not any(
+            _monitor_device_supports_description_mode(device, mode)
+            for mode in _MONITOR_DESCRIPTION_MODES
+        ):
+            continue
+        value = _monitor_device_value(device)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        rows.append(device)
+    return rows
+
+
+def _monitor_linked_camera_integration_options(
+    registry: Dict[str, Any],
+    *,
+    current_provider: Any = "",
+) -> List[Dict[str, Any]]:
+    providers: Dict[str, Dict[str, Any]] = {}
+    for device in _monitor_linked_camera_devices(registry):
+        provider = _normalize_event_provider(device.get("integration_id"))
+        if provider == "all":
+            continue
+        row = providers.setdefault(
+            provider,
+            {
+                "value": _monitor_integration_value("camera", provider),
+                "label": _text(device.get("integration_name")) or _provider_label(provider),
+                "count": 0,
+                "icon": "◎",
+            },
+        )
+        row["count"] = _as_int(row.get("count"), 0, minimum=0) + 1
+    options = [
+        {
+            "value": "",
+            "label": "No camera",
+            "description": "Save the sensor event without visual context.",
+            "icon": "◇",
+        }
+    ]
+    for row in sorted(
+        providers.values(),
+        key=lambda item: (_text(item.get("label")).casefold(), _text(item.get("value"))),
+    ):
+        count = _as_int(row.pop("count", 0), 0, minimum=0)
+        row["description"] = f"{count} camera{'' if count == 1 else 's'} available"
+        options.append(row)
+    current = _normalize_event_provider(current_provider)
+    current_value = _monitor_integration_value("camera", current)
+    if current_value and not any(_text(row.get("value")) == current_value for row in options):
+        options.append(
+            {
+                "value": current_value,
+                "label": f"{_provider_label(current)} (saved)",
+                "description": "The saved camera integration is currently unavailable.",
+                "icon": "◆",
+            }
+        )
+    return options
+
+
+def _monitor_linked_camera_device_options(
+    registry: Dict[str, Any],
+    *,
+    current_integration: Any = "",
+    current_device: Any = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    options_by_integration: Dict[str, List[Dict[str, Any]]] = {}
+    for device in _monitor_linked_camera_devices(registry):
+        provider = _normalize_event_provider(device.get("integration_id"))
+        integration_value = _monitor_integration_value("camera", provider)
+        if not integration_value:
+            continue
+        options_by_integration.setdefault(integration_value, []).append(
+            _monitor_device_option(device)
+        )
+    for rows in options_by_integration.values():
+        rows.sort(key=lambda row: (_text(row.get("label")).casefold(), _text(row.get("value"))))
+    selected = [dict(row) for row in options_by_integration.get(_text(current_integration), [])]
+    saved_device = _text(current_device)
+    if saved_device and not any(_text(row.get("value")) == saved_device for row in selected):
+        selected.append(
+            {
+                "value": saved_device,
+                "label": f"{saved_device} (saved)",
+                "description": "This saved camera is currently unavailable.",
+                "icon": "◆",
+            }
+        )
+    return selected, {
+        "source_key": "linked_camera_integration",
+        "options_by_source": options_by_integration,
+        "default_options": [],
     }
 
 
@@ -2522,6 +2653,85 @@ def _build_monitor_from_values(
             )
     else:
         description_mode = ""
+    linked_camera_provider = ""
+    linked_camera_device_id = ""
+    linked_camera_device_ref = ""
+    linked_camera_name = ""
+    linked_camera_description_mode = ""
+    if kind == "sensor":
+        selected_linked_integration = _text(
+            _value(
+                values,
+                payload,
+                "linked_camera_integration",
+                _monitor_integration_value("camera", previous.get("linked_camera_provider")),
+            )
+        )
+        selected_linked_camera = _text(
+            _value(
+                values,
+                payload,
+                "linked_camera",
+                _provider_ref(
+                    previous.get("linked_camera_provider"),
+                    previous.get("linked_camera_device_id"),
+                )
+                if _text(previous.get("linked_camera_device_id"))
+                else "",
+            )
+        )
+        if not selected_linked_integration:
+            selected_linked_camera = ""
+        if selected_linked_camera:
+            linked_device = _find_monitor_device(registry, selected_linked_camera)
+            if not linked_device or _monitor_device_kind(linked_device) != "camera":
+                raise ValueError("Choose an available camera to add visual context to this sensor.")
+            linked_camera_provider = _normalize_event_provider(linked_device.get("integration_id"))
+            actual_linked_integration = _monitor_integration_value(
+                "camera",
+                linked_camera_provider,
+            )
+            if (
+                selected_linked_integration
+                and selected_linked_integration != actual_linked_integration
+            ):
+                raise ValueError("The linked camera is not from the chosen camera integration.")
+            linked_camera_device_id = _text(linked_device.get("id") or linked_device.get("ref"))
+            linked_camera_device_ref = _text(
+                linked_device.get("ref") or linked_camera_device_id
+            )
+            linked_camera_name = _text(linked_device.get("name")) or linked_camera_device_id
+            linked_camera_description_mode = _text(
+                _value(
+                    values,
+                    payload,
+                    "linked_camera_description_mode",
+                    previous.get("linked_camera_description_mode") or "image",
+                )
+            ).lower()
+            if linked_camera_description_mode not in _MONITOR_DESCRIPTION_MODES:
+                linked_camera_description_mode = next(
+                    (
+                        mode
+                        for mode in ("image", "video")
+                        if _monitor_device_supports_description_mode(linked_device, mode)
+                    ),
+                    "",
+                )
+            if not linked_camera_description_mode:
+                raise ValueError("The linked camera does not report snapshot or clip support.")
+            if not _monitor_device_supports_description_mode(
+                linked_device,
+                linked_camera_description_mode,
+            ):
+                media_label = (
+                    "short video clips"
+                    if linked_camera_description_mode == "video"
+                    else "snapshots"
+                )
+                raise ValueError(
+                    f"The linked camera integration does not report support for {media_label}."
+                )
     now_ts = time.time()
     default_name = _text(device.get("name")) or device_id
     default_area = _text(device.get("room") or device.get("area")) or default_name
@@ -2541,6 +2751,11 @@ def _build_monitor_from_values(
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
         "description_mode": description_mode,
+        "linked_camera_provider": linked_camera_provider,
+        "linked_camera_device_id": linked_camera_device_id,
+        "linked_camera_device_ref": linked_camera_device_ref,
+        "linked_camera_name": linked_camera_name,
+        "linked_camera_description_mode": linked_camera_description_mode,
         "face_id_enabled": kind == "camera" and _bool(
             _value(values, payload, "face_id_enabled", previous.get("face_id_enabled", True)),
             True,
@@ -4651,6 +4866,16 @@ def _monitor_camera_target(monitor: Dict[str, Any]) -> str:
     return target
 
 
+def _monitor_linked_camera_target(monitor: Dict[str, Any]) -> str:
+    return _monitor_camera_target(
+        {
+            "provider": monitor.get("linked_camera_provider"),
+            "device_ref": monitor.get("linked_camera_device_ref"),
+            "device_id": monitor.get("linked_camera_device_id"),
+        }
+    )
+
+
 def _monitor_snapshot_fields(event_payload: Dict[str, Any], snapshot_store: Dict[str, Any]) -> None:
     data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
     if snapshot_store.get("stored"):
@@ -4881,6 +5106,137 @@ def _monitor_sensor_type(monitor: Dict[str, Any]) -> str:
     return "device"
 
 
+async def _capture_sensor_linked_camera(
+    monitor: Dict[str, Any],
+    event: Dict[str, Any],
+    *,
+    sensor_summary: str,
+) -> Dict[str, Any]:
+    provider = _normalize_event_provider(monitor.get("linked_camera_provider"))
+    camera_target = _monitor_linked_camera_target(monitor)
+    if provider == "all" or not camera_target:
+        return {"configured": False}
+
+    requested_mode = _text(
+        monitor.get("linked_camera_description_mode") or "image"
+    ).lower()
+    if requested_mode not in _MONITOR_DESCRIPTION_MODES:
+        requested_mode = "image"
+    actual_mode = requested_mode
+    camera_summary = ""
+    jpeg: bytes = b""
+    image_content_type = "image/jpeg"
+    clip_bytes: bytes = b""
+    clip_content_type = "video/mp4"
+    clip_metadata: Dict[str, Any] = {}
+    snapshot_store: Dict[str, Any] = {}
+    clip_store: Dict[str, Any] = {}
+    errors: List[str] = []
+    description_completed = False
+    context = f"This camera was captured because this sensor event occurred: {sensor_summary}"
+
+    try:
+        jpeg, image_content_type = await _capture_camera_snapshot(provider, camera_target)
+    except Exception as exc:
+        errors.append(f"snapshot: {exc}")
+        logger.warning(
+            "[awareness] linked sensor camera snapshot failed for %s: %s",
+            camera_target,
+            exc,
+        )
+        snapshot_store = {"stored": False, "reason": "capture_failed", "bytes": 0}
+
+    if requested_mode == "video":
+        try:
+            clip_seconds = _setting_int(
+                redis_client,
+                "camera_event_clip_seconds",
+                8,
+                minimum=1,
+                maximum=30,
+            )
+            clip_payload = _monitor_camera_clip_payload(event, duration_seconds=clip_seconds)
+            clip_bytes, clip_content_type, clip_metadata = await _capture_camera_clip(
+                provider,
+                camera_target,
+                clip_payload,
+            )
+            camera_summary = await _video_describe(
+                video_bytes=clip_bytes,
+                content_type=clip_content_type,
+                query=context,
+                mode="camera",
+            )
+            description_completed = True
+        except Exception as exc:
+            errors.append(f"video: {exc}")
+            logger.warning(
+                "[awareness] linked sensor camera video failed for %s: %s",
+                camera_target,
+                exc,
+            )
+            actual_mode = "image"
+
+    if requested_mode == "image" or (actual_mode == "image" and not camera_summary):
+        try:
+            if not jpeg:
+                raise RuntimeError("No linked camera snapshot was available.")
+            vision = get_shared_vision_settings(
+                default_api_base="http://127.0.0.1:1234",
+                default_model="qwen2.5-vl-7b-instruct",
+            )
+            camera_summary = await _vision_describe(
+                image_bytes=jpeg,
+                api_base=_text(vision.get("api_base")),
+                model=_text(vision.get("model")),
+                api_key=_text(vision.get("api_key")),
+                query=context,
+                ignore_vehicles=False,
+                mode="camera",
+                vision_mode=_text(vision.get("mode")),
+                vision_provider=_text(vision.get("provider")),
+            )
+            description_completed = True
+        except Exception as exc:
+            errors.append(f"image: {exc}")
+            logger.warning(
+                "[awareness] linked sensor camera image description failed for %s: %s",
+                camera_target,
+                exc,
+            )
+
+    camera_summary = _compact(camera_summary, limit=180)
+    if description_completed and not camera_summary:
+        camera_summary = "Nothing notable."
+    if jpeg:
+        snapshot_store = _store_event_snapshot(
+            redis_client,
+            jpeg,
+            content_type=image_content_type,
+        )
+    if clip_bytes:
+        clip_store = _store_event_clip(
+            redis_client,
+            clip_bytes,
+            content_type=clip_content_type,
+        )
+    return {
+        "configured": True,
+        "provider": provider,
+        "camera_target": camera_target,
+        "camera_name": _text(monitor.get("linked_camera_name")) or camera_target,
+        "requested_mode": requested_mode,
+        "actual_mode": actual_mode,
+        "summary": camera_summary,
+        "snapshot_store": snapshot_store,
+        "clip_store": clip_store,
+        "clip_bytes": len(clip_bytes),
+        "clip_content_type": clip_content_type,
+        "clip_metadata": clip_metadata,
+        "warning": _compact("; ".join(errors), limit=300),
+    }
+
+
 async def _execute_sensor_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
     entity_id = _text(event.get("entity_id") or monitor.get("device_ref") or monitor.get("device_id"))
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
@@ -4902,8 +5258,18 @@ async def _execute_sensor_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     else:
         summary = f"{name} changed to {new_value or 'unknown'}."
         action_token = "changed"
-    summary = _compact(summary, limit=180)
-    event_payload = {
+    sensor_summary = _compact(summary, limit=180)
+    camera_media = await _capture_sensor_linked_camera(
+        monitor,
+        event,
+        sensor_summary=sensor_summary,
+    )
+    camera_summary = _text(camera_media.get("summary"))
+    summary = sensor_summary
+    if camera_media.get("configured") and camera_summary:
+        summary = _compact(f"{sensor_summary} Camera: {camera_summary}", limit=360)
+    event_payload: Dict[str, Any] = {
+        "id": uuid.uuid4().hex,
         "source": _slug(area),
         "title": name,
         "type": f"{sensor_type}_sensor_{action_token}",
@@ -4921,8 +5287,59 @@ async def _execute_sensor_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
             "old_state": old_value,
         },
     }
+    if camera_media.get("configured"):
+        event_payload["data"].update(
+            {
+                "camera_entity": _text(camera_media.get("camera_target")),
+                "camera_provider": _text(camera_media.get("provider")),
+                "camera_name": _text(camera_media.get("camera_name")),
+                "description_mode": _text(camera_media.get("requested_mode")),
+                "description_media": _text(camera_media.get("actual_mode")),
+            }
+        )
+        clip_bytes = _as_int(camera_media.get("clip_bytes"), 0, minimum=0)
+        clip_metadata = (
+            camera_media.get("clip_metadata")
+            if isinstance(camera_media.get("clip_metadata"), dict)
+            else {}
+        )
+        if clip_bytes:
+            event_payload["data"]["clip_content_type"] = _text(
+                camera_media.get("clip_content_type") or "video/mp4"
+            )
+            event_payload["data"]["clip_bytes"] = clip_bytes
+            for key in ("event_id", "start", "end", "duration_seconds"):
+                value = clip_metadata.get(key)
+                if value not in (None, ""):
+                    event_payload["data"][f"clip_{key}"] = value
+        warning = _text(camera_media.get("warning"))
+        if warning:
+            event_payload["data"]["capture_error"] = warning
+        _monitor_snapshot_fields(
+            event_payload,
+            camera_media.get("snapshot_store")
+            if isinstance(camera_media.get("snapshot_store"), dict)
+            else {},
+        )
+        _monitor_clip_fields(
+            event_payload,
+            camera_media.get("clip_store")
+            if isinstance(camera_media.get("clip_store"), dict)
+            else {},
+        )
     _append_event(redis_client, source=area, payload=event_payload)
-    return {"ok": True, "summary": summary, "event_type": action_token}
+    return {
+        "ok": True,
+        "summary": summary,
+        "event_type": action_token,
+        "warning": _text(camera_media.get("warning")),
+        "description_mode": _text(camera_media.get("actual_mode")),
+        "clip_id": _text(
+            (camera_media.get("clip_store") or {}).get("clip_id")
+            if isinstance(camera_media.get("clip_store"), dict)
+            else ""
+        ),
+    }
 
 
 async def _execute_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
@@ -4959,6 +5376,37 @@ def _monitor_form(
         current_device=selected_device,
         current_mode=description_mode,
     )
+    linked_camera_provider = _text(monitor.get("linked_camera_provider"))
+    linked_camera_integration = _monitor_integration_value(
+        "camera",
+        linked_camera_provider,
+    )
+    linked_camera_device = (
+        _provider_ref(linked_camera_provider, monitor.get("linked_camera_device_id"))
+        if _text(monitor.get("linked_camera_device_id"))
+        else ""
+    )
+    linked_camera_integration_options = _monitor_linked_camera_integration_options(
+        registry,
+        current_provider=linked_camera_provider,
+    )
+    linked_camera_options, linked_camera_dependency = _monitor_linked_camera_device_options(
+        registry,
+        current_integration=linked_camera_integration,
+        current_device=linked_camera_device,
+    )
+    linked_camera_description_mode = _text(
+        monitor.get("linked_camera_description_mode") or "image"
+    ).lower()
+    linked_description_options, linked_description_dependency = (
+        _monitor_description_mode_dependency(
+            registry,
+            current_device=linked_camera_device,
+            current_mode=linked_camera_description_mode,
+            source_key="linked_camera",
+            include_default_options=False,
+        )
+    )
     trigger_labels = [
         _text(_monitor_trigger_option(value).get("label"))
         for value in monitor.get("trigger_events") or []
@@ -4967,6 +5415,15 @@ def _monitor_form(
     enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
     face_id_label = "Face ID on" if _bool(monitor.get("face_id_enabled"), True) else "Face ID off"
     description_label = "Video descriptions" if description_mode == "video" else "Image descriptions"
+    linked_camera_label = ""
+    if linked_camera_device:
+        linked_mode_label = (
+            "video" if linked_camera_description_mode == "video" else "image"
+        )
+        linked_camera_label = (
+            f"Camera: {_text(monitor.get('linked_camera_name')) or linked_camera_device} "
+            f"({linked_mode_label}) • "
+        )
     last_event = _fmt_ts(monitor.get("last_event_ts"))
     return {
         "id": monitor["id"],
@@ -4975,7 +5432,8 @@ def _monitor_form(
         "subtitle": (
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
             f"{', '.join(trigger_labels) or 'No triggers'} • "
-            f"{f'{description_label} • {face_id_label} • ' if kind == 'camera' else ''}last event: {last_event}"
+            f"{f'{description_label} • {face_id_label} • ' if kind == 'camera' else linked_camera_label}"
+            f"last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -5051,6 +5509,52 @@ def _monitor_form(
                 "show_when": {"source_key": "kind", "equals": "camera"},
             },
             {
+                "type": "heading",
+                "label": "Optional Camera Context",
+                "description": (
+                    "Pair this sensor with a camera to add a snapshot or clip and a visual description "
+                    "to each captured sensor event."
+                ),
+                "show_when": {"source_key": "kind", "equals": "sensor"},
+            },
+            {
+                "key": "linked_camera_integration",
+                "label": "Camera Integration",
+                "type": "select",
+                "presentation": "cards",
+                "options": linked_camera_integration_options,
+                "value": linked_camera_integration,
+                "description": "Choose No camera to keep sensor events text-only.",
+                "full_width": True,
+                "show_when": {"source_key": "kind", "equals": "sensor"},
+            },
+            {
+                "key": "linked_camera",
+                "label": "Camera",
+                "type": "select",
+                "presentation": "cards",
+                "options": linked_camera_options,
+                "dependent_options": linked_camera_dependency,
+                "value": linked_camera_device,
+                "description": "The selected camera captures when this sensor event fires.",
+                "full_width": True,
+                "show_when": {"source_key": "kind", "equals": "sensor"},
+            },
+            {
+                "key": "linked_camera_description_mode",
+                "label": "Describe Sensor Events With",
+                "type": "select",
+                "presentation": "cards",
+                "options": linked_description_options,
+                "dependent_options": linked_description_dependency,
+                "value": linked_camera_description_mode if linked_camera_device else "",
+                "description": (
+                    "Video appears only when the linked camera's integration reports clip support."
+                ),
+                "full_width": True,
+                "show_when": {"source_key": "kind", "equals": "sensor"},
+            },
+            {
                 "key": "area",
                 "label": "Area",
                 "type": "text",
@@ -5074,7 +5578,6 @@ def _monitor_form(
                 "key": "face_id_enabled",
                 "label": "Use Face ID On This Camera",
                 "type": "checkbox",
-                "presentation": "compact_toggle",
                 "value": _bool(monitor.get("face_id_enabled"), True),
                 "description": (
                     "Run face burst snapshots and recognition for this camera. "
@@ -5839,6 +6342,17 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     default_description_mode = _text(
         (default_description_options[0] if default_description_options else {}).get("value")
     ) or "image"
+    linked_camera_integration_options = _monitor_linked_camera_integration_options(registry)
+    linked_camera_options, linked_camera_dependency = _monitor_linked_camera_device_options(
+        registry,
+    )
+    linked_description_options, linked_description_dependency = _monitor_description_mode_dependency(
+        registry,
+        current_device="",
+        current_mode="image",
+        source_key="linked_camera",
+        include_default_options=False,
+    )
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
     return {
@@ -5999,7 +6513,54 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 },
                 {
                     "type": "heading",
-                    "label": "2. Name The Place",
+                    "label": "2. Optional Camera Context",
+                    "description": (
+                        "When a sensor fires, Awareness can capture a camera and add its media and "
+                        "description to the same sensor event."
+                    ),
+                    "show_when": {"source_key": "kind", "equals": "sensor"},
+                },
+                {
+                    "key": "linked_camera_integration",
+                    "label": "Camera Integration",
+                    "type": "select",
+                    "presentation": "cards",
+                    "options": linked_camera_integration_options,
+                    "value": "",
+                    "description": "This is optional. Choose No camera for a text-only sensor event.",
+                    "full_width": True,
+                    "show_when": {"source_key": "kind", "equals": "sensor"},
+                },
+                {
+                    "key": "linked_camera",
+                    "label": "Which Camera?",
+                    "type": "select",
+                    "presentation": "cards",
+                    "options": linked_camera_options,
+                    "dependent_options": linked_camera_dependency,
+                    "value": "",
+                    "description": "This camera captures whenever the selected sensor event fires.",
+                    "full_width": True,
+                    "show_when": {"source_key": "kind", "equals": "sensor"},
+                },
+                {
+                    "key": "linked_camera_description_mode",
+                    "label": "Describe Sensor Events With",
+                    "type": "select",
+                    "presentation": "cards",
+                    "options": linked_description_options,
+                    "dependent_options": linked_description_dependency,
+                    "value": "",
+                    "description": (
+                        "Choose an image or a short clip after selecting a camera. Video is offered "
+                        "only when that integration reports clip support."
+                    ),
+                    "full_width": True,
+                    "show_when": {"source_key": "kind", "equals": "sensor"},
+                },
+                {
+                    "type": "heading",
+                    "label": "Name The Place",
                     "description": "This makes event history easy to browse and ask Tater about.",
                 },
                 {
@@ -6020,14 +6581,12 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "key": "enabled",
                     "label": "Start Monitoring Now",
                     "type": "checkbox",
-                    "presentation": "compact_toggle",
                     "value": True,
                 },
                 {
                     "key": "face_id_enabled",
                     "label": "Use Face ID On This Camera",
                     "type": "checkbox",
-                    "presentation": "compact_toggle",
                     "value": True,
                     "description": (
                         "Run face burst snapshots and recognition for this camera. "
