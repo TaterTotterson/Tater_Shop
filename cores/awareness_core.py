@@ -61,7 +61,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
     _shared_video_analyze = None
 
-__version__ = "4.10.0"
+__version__ = "4.11.0"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
     "optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, "
@@ -155,12 +155,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 32,
             "description": "Maximum video size to retain for each Awareness event.",
-        },
-        "camera_monitor_cooldown_seconds": {
-            "label": "Camera Event Cooldown (sec)",
-            "type": "number",
-            "default": 30,
-            "description": "Minimum time between snapshot and vision checks for each monitored camera.",
         },
         "camera_event_clip_seconds": {
             "label": "Camera Event Clip Length (sec)",
@@ -294,6 +288,29 @@ _MONITOR_DESCRIPTION_MODE_OPTIONS = [
         "icon": "▶",
     },
 ]
+_MONITOR_COOLDOWN_OPTIONS = [
+    {
+        "value": "0",
+        "label": "No cooldown",
+        "description": "Capture every matching event.",
+    },
+    {
+        "value": "10",
+        "label": "10 seconds",
+        "description": "Briefly suppress repeated activity from this source.",
+    },
+    {
+        "value": "30",
+        "label": "30 seconds (Recommended)",
+        "description": "Recommended for most cameras and camera-linked sensors.",
+    },
+    {"value": "60", "label": "1 minute", "description": "Reduce frequent activity bursts."},
+    {"value": "120", "label": "2 minutes", "description": "Allow one event every two minutes."},
+    {"value": "300", "label": "5 minutes", "description": "Useful for consistently busy areas."},
+    {"value": "600", "label": "10 minutes", "description": "Strongly limit repeated processing."},
+    {"value": "1800", "label": "30 minutes", "description": "Capture only occasional updates."},
+]
+_MONITOR_DEFAULT_COOLDOWN_SECONDS = 30
 _UNIFI_SMART_TYPE_ALIASES = {
     "people": "person",
     "human": "person",
@@ -2285,6 +2302,23 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         linked_camera_device_ref = ""
         linked_camera_name = ""
         linked_camera_description_mode = ""
+    cooldown_default = (
+        _setting_int(
+            redis_client,
+            "camera_monitor_cooldown_seconds",
+            _MONITOR_DEFAULT_COOLDOWN_SECONDS,
+            minimum=0,
+            maximum=86400,
+        )
+        if kind == "camera"
+        else 0
+    )
+    cooldown_seconds = _as_int(
+        raw.get("cooldown_seconds"),
+        cooldown_default,
+        minimum=0,
+        maximum=86400,
+    )
     return {
         "id": _text(raw.get("id")) or str(uuid.uuid4()),
         "kind": kind,
@@ -2300,6 +2334,7 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "name": name,
         "area": area or kind,
         "enabled": _bool(raw.get("enabled"), True),
+        "cooldown_seconds": cooldown_seconds,
         "notifications_enabled": _bool(raw.get("notifications_enabled"), False),
         "notification_destinations": _normalize_notification_destinations(
             raw.get("notification_destinations")
@@ -2382,7 +2417,10 @@ def _remove_monitor(client: Any, monitor_id: Any) -> bool:
     mid = _text(monitor_id)
     if redis_obj is None or not mid:
         return False
-    return bool(redis_obj.hdel(_MONITORS_KEY, mid))
+    removed = bool(redis_obj.hdel(_MONITORS_KEY, mid))
+    if removed:
+        _clear_cooldown(redis_obj, _monitor_cooldown_key(mid))
+    return removed
 
 
 def _monitor_registry(client: Any, *, refresh: bool = False) -> Dict[str, Any]:
@@ -3130,6 +3168,17 @@ def _build_monitor_from_values(
     )
     if notifications_enabled and not notification_destinations:
         raise ValueError("Choose at least one destination for Awareness notifications.")
+    cooldown_seconds = _as_int(
+        _value(
+            values,
+            payload,
+            "cooldown_seconds",
+            previous.get("cooldown_seconds", _MONITOR_DEFAULT_COOLDOWN_SECONDS),
+        ),
+        _MONITOR_DEFAULT_COOLDOWN_SECONDS,
+        minimum=0,
+        maximum=86400,
+    )
     now_ts = time.time()
     default_name = _text(device.get("name")) or device_id
     default_area = _text(device.get("room") or device.get("area")) or default_name
@@ -3148,6 +3197,7 @@ def _build_monitor_from_values(
         "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "cooldown_seconds": cooldown_seconds,
         "notifications_enabled": notifications_enabled,
         "notification_destinations": notification_destinations,
         "description_mode": description_mode,
@@ -3397,21 +3447,28 @@ def _friendly_entity_name(entity_id: str, state_obj: Dict[str, Any]) -> str:
     return token or entity_id
 
 
-def _acquire_cooldown(key: str, cooldown_seconds: int) -> bool:
+def _monitor_cooldown_key(monitor_or_id: Any) -> str:
+    monitor_id = _text(monitor_or_id.get("id")) if isinstance(monitor_or_id, dict) else _text(monitor_or_id)
+    return f"awareness:monitor:cooldown:{monitor_id}"
+
+
+def _acquire_cooldown(client: Any, key: str, cooldown_seconds: int) -> bool:
     seconds = max(0, int(cooldown_seconds))
     if seconds <= 0:
         return True
+    redis_obj = client or redis_client
     try:
         token = str(int(time.time()))
-        return bool(redis_client.set(key, token, ex=seconds, nx=True))
+        return bool(redis_obj.set(key, token, ex=seconds, nx=True))
     except Exception:
         # Fail-open so transient Redis issues do not block alerts entirely.
         logger.debug("[awareness] failed to acquire cooldown key %s", key, exc_info=True)
         return True
 
-def _clear_cooldown(key: str) -> None:
+def _clear_cooldown(client: Any, key: str) -> None:
+    redis_obj = client or redis_client
     try:
-        redis_client.delete(key)
+        redis_obj.delete(key)
     except Exception:
         logger.debug("[awareness] failed to clear cooldown key %s", key, exc_info=True)
 
@@ -5622,17 +5679,6 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     new_state = event.get("new_state") if isinstance(event.get("new_state"), dict) else {}
     old_state = event.get("old_state") if isinstance(event.get("old_state"), dict) else {}
     event_kind = _monitor_event_type(monitor, entity_id, new_state, old_state)
-    cooldown_seconds = _setting_int(
-        redis_client,
-        "camera_monitor_cooldown_seconds",
-        30,
-        minimum=0,
-        maximum=86400,
-    )
-    cooldown_key = f"awareness:monitor:camera_cooldown:{_text(monitor.get('id'))}"
-    if not _acquire_cooldown(cooldown_key, cooldown_seconds):
-        return {"ok": True, "summary": "Camera event cooldown active.", "skipped": "cooldown"}
-
     requested_description_mode = _text(monitor.get("description_mode") or "image").lower()
     if requested_description_mode not in _MONITOR_DESCRIPTION_MODES:
         requested_description_mode = "image"
@@ -5711,7 +5757,7 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     error_text = _compact("; ".join(errors), limit=300)
 
     if _is_nothing_notable_summary(summary) and event_kind in {"activity", "motion"}:
-        _clear_cooldown(cooldown_key)
+        _clear_cooldown(redis_client, _monitor_cooldown_key(monitor))
         return {"ok": True, "summary": summary, "skipped": "nothing_notable"}
     if not summary or _is_nothing_notable_summary(summary):
         if event_kind == "doorbell":
@@ -6127,6 +6173,15 @@ def _monitor_form(
         if _bool(monitor.get("notifications_enabled"), False)
         else "Notifications off"
     )
+    cooldown_seconds = _as_int(monitor.get("cooldown_seconds"), 0, minimum=0, maximum=86400)
+    cooldown_label = next(
+        (
+            _text(option.get("label"))
+            for option in _MONITOR_COOLDOWN_OPTIONS
+            if _as_int(option.get("value"), -1) == cooldown_seconds
+        ),
+        f"{cooldown_seconds} seconds" if cooldown_seconds else "No cooldown",
+    )
     description_label = "Video descriptions" if description_mode == "video" else "Image descriptions"
     linked_camera_label = ""
     if linked_camera_device:
@@ -6146,7 +6201,7 @@ def _monitor_form(
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
             f"{', '.join(trigger_labels) or 'No triggers'} • "
             f"{f'{description_label} • {face_id_label} • ' if kind == 'camera' else linked_camera_label}"
-            f"{notification_label} • last event: {last_event}"
+            f"Cooldown: {cooldown_label} • {notification_label} • last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -6205,6 +6260,18 @@ def _monitor_form(
                 "dependent_options": trigger_dependency,
                 "value": list(monitor.get("trigger_events") or []),
                 "description": "Select one or more events reported by this device. Only those events will be stored in Awareness history.",
+                "full_width": True,
+            },
+            {
+                "key": "cooldown_seconds",
+                "label": "Event Cooldown",
+                "type": "select",
+                "options": _MONITOR_COOLDOWN_OPTIONS,
+                "value": str(cooldown_seconds),
+                "description": (
+                    "Ignore additional matching events from this source for the selected time. "
+                    "The cooldown is applied before snapshots, clips, vision, Face ID, notifications, or queueing."
+                ),
                 "full_width": True,
             },
             {
@@ -7236,6 +7303,18 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "full_width": True,
                 },
                 {
+                    "key": "cooldown_seconds",
+                    "label": "Event Cooldown",
+                    "type": "select",
+                    "options": _MONITOR_COOLDOWN_OPTIONS,
+                    "value": str(_MONITOR_DEFAULT_COOLDOWN_SECONDS),
+                    "description": (
+                        "Ignore additional matching events from this source for the selected time. "
+                        "It is applied before bursts can stack snapshots, clips, vision, Face ID, or notifications."
+                    ),
+                    "full_width": True,
+                },
+                {
                     "key": "description_mode",
                     "label": "Describe Camera Events With",
                     "type": "select",
@@ -7765,6 +7844,24 @@ async def _handle_trigger_state_change(
             f"{entity_id}:{_text(new_state.get('state')).lower()}"
         )
         if redis_client.set(dedupe_key, "1", ex=2, nx=True) is None:
+            continue
+        cooldown_seconds = _as_int(
+            monitor.get("cooldown_seconds"),
+            0,
+            minimum=0,
+            maximum=86400,
+        )
+        if not _acquire_cooldown(
+            redis_client,
+            _monitor_cooldown_key(monitor),
+            cooldown_seconds,
+        ):
+            logger.debug(
+                "[awareness] suppressed monitor event during cooldown monitor=%s seconds=%d entity=%s",
+                _text(monitor.get("id")),
+                cooldown_seconds,
+                entity_id,
+            )
             continue
         _enqueue_monitor_event(
             redis_client,

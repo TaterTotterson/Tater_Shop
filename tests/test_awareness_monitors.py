@@ -286,6 +286,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         linked_camera_description_mode="image",
         notifications_enabled=None,
         notification_destinations=None,
+        cooldown_seconds=None,
     ):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
         if trigger_events is not None:
@@ -298,6 +299,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             values["notifications_enabled"] = notifications_enabled
         if notification_destinations is not None:
             values["notification_destinations"] = notification_destinations
+        if cooldown_seconds is not None:
+            values["cooldown_seconds"] = cooldown_seconds
         if linked_camera:
             provider = linked_camera.split("|", 1)[0]
             values.update(
@@ -324,6 +327,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor["description_mode"], "image")
         self.assertFalse(monitor["notifications_enabled"])
         self.assertEqual(monitor["notification_destinations"], [])
+        self.assertEqual(monitor["cooldown_seconds"], 30)
         self.assertEqual(self.redis.hgetall("awareness:rules"), {})
 
     def test_notification_delivery_requires_at_least_one_destination(self):
@@ -443,6 +447,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sensor["face_id_enabled"])
         self.assertEqual(monitor["description_mode"], "image")
         self.assertEqual(sensor["description_mode"], "")
+        self.assertEqual(monitor["cooldown_seconds"], 30)
+        self.assertEqual(sensor["cooldown_seconds"], 0)
 
     def test_same_device_cannot_be_monitored_twice(self):
         self._add_monitor("camera", "unifi_protect|cam-front", "Front Yard")
@@ -1163,6 +1169,53 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["type"], "door_sensor_open")
         self.assertEqual(event["message"], "Back Door opened.")
 
+    async def test_source_cooldown_suppresses_bursts_before_the_queue(self):
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            cooldown_seconds=30,
+        )
+        await self.core._handle_trigger_state_change(
+            provider="homeassistant",
+            entity_id="binary_sensor.back_door",
+            new_state={"state": "on"},
+            old_state={"state": "off"},
+        )
+        await self.core._handle_trigger_state_change(
+            provider="homeassistant",
+            entity_id="binary_sensor.back_door",
+            new_state={"state": "off"},
+            old_state={"state": "on"},
+        )
+
+        self.assertEqual(self.core._queue_depth(self.redis), 1)
+        job = self.core._dequeue_execution(self.redis)
+        self.assertEqual(job["monitor_id"], monitor["id"])
+        self.assertEqual(job["event"]["new_state"]["state"], "on")
+
+    async def test_no_cooldown_allows_distinct_sensor_edges_to_queue(self):
+        self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            cooldown_seconds=0,
+        )
+        await self.core._handle_trigger_state_change(
+            provider="homeassistant",
+            entity_id="binary_sensor.back_door",
+            new_state={"state": "on"},
+            old_state={"state": "off"},
+        )
+        await self.core._handle_trigger_state_change(
+            provider="homeassistant",
+            entity_id="binary_sensor.back_door",
+            new_state={"state": "off"},
+            old_state={"state": "on"},
+        )
+
+        self.assertEqual(self.core._queue_depth(self.redis), 2)
+
     async def test_sensor_monitor_delivers_its_completed_event_when_notifications_are_enabled(self):
         destination = self.core._encode_notification_destination("little_spud", {"device_id": "phone"})
         monitor = self._add_monitor(
@@ -1222,6 +1275,13 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["trigger_events"]["type"], "multiselect")
         self.assertEqual(fields["trigger_events"]["presentation"], "cards")
         self.assertEqual(fields["trigger_events"]["dependent_options"]["source_key"], "device")
+        self.assertEqual(fields["cooldown_seconds"]["type"], "select")
+        self.assertEqual(fields["cooldown_seconds"]["value"], "30")
+        self.assertEqual(
+            [row["value"] for row in fields["cooldown_seconds"]["options"]],
+            ["0", "10", "30", "60", "120", "300", "600", "1800"],
+        )
+        self.assertIn("before", fields["cooldown_seconds"]["description"])
         self.assertEqual(fields["description_mode"]["presentation"], "cards")
         self.assertEqual(fields["description_mode"]["dependent_options"]["source_key"], "device")
         camera_media = fields["description_mode"]["dependent_options"]["options_by_source"][
