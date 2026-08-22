@@ -41,7 +41,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 
 
 load_dotenv()
@@ -54,6 +54,8 @@ NOTIFY_QUEUE_KEY = "notifyq:discord"
 NOTIFY_POLL_INTERVAL = 0.5
 ROOM_LABEL_PREFIX = "tater:room_label"
 ROOM_META_PREFIX = "tater:room_meta"
+DISCORD_DESTINATION_INVENTORY_KEY = "tater:discord:destination_inventory:v1"
+DISCORD_DESTINATION_INVENTORY_SCHEMA_VERSION = 1
 DISCORD_SETTINGS_KEY = "discord_portal_settings"
 RESPONSE_CHANNEL_MAP_FIELD = "response_channel_ids_by_guild"
 RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC = 2.0
@@ -236,6 +238,198 @@ def _save_discord_room_context(channel: Any) -> None:
     meta = _discord_channel_meta(channel)
     if meta:
         _save_room_meta("discord", channel_id, meta)
+
+
+def _discord_channel_is_sendable(channel: Any) -> bool:
+    guild = getattr(channel, "guild", None)
+    member = getattr(guild, "me", None)
+    if guild is None or member is None:
+        return False
+    try:
+        permissions = channel.permissions_for(member)
+    except Exception:
+        return False
+    return bool(
+        getattr(permissions, "view_channel", False)
+        and getattr(permissions, "send_messages", False)
+    )
+
+
+def _discord_channel_type(channel: Any) -> str:
+    try:
+        if bool(channel.is_news()):
+            return "announcement"
+    except Exception:
+        pass
+    return "text"
+
+
+def _discord_sendable_channels(
+    guilds: Iterable[Any],
+    *,
+    excluded_channel_ids: Optional[Iterable[Any]] = None,
+    excluded_guild_ids: Optional[Iterable[Any]] = None,
+) -> List[Any]:
+    excluded_channels = {str(value or "").strip() for value in (excluded_channel_ids or [])}
+    excluded_guilds = {str(value or "").strip() for value in (excluded_guild_ids or [])}
+    rows: List[Any] = []
+    for guild in list(guilds or []):
+        guild_id = str(getattr(guild, "id", "") or "").strip()
+        if not guild_id or guild_id in excluded_guilds or bool(getattr(guild, "unavailable", False)):
+            continue
+        for channel in list(getattr(guild, "text_channels", []) or []):
+            channel_id = str(getattr(channel, "id", "") or "").strip()
+            if not channel_id or channel_id in excluded_channels:
+                continue
+            if _discord_channel_is_sendable(channel):
+                rows.append(channel)
+    rows.sort(
+        key=lambda channel: (
+            str(getattr(getattr(channel, "guild", None), "name", "") or "").lower(),
+            int(getattr(channel, "position", 0) or 0),
+            str(getattr(channel, "name", "") or "").lower(),
+            str(getattr(channel, "id", "") or ""),
+        )
+    )
+    return rows
+
+
+def _discord_destination_inventory_payload(channels: Iterable[Any]) -> Dict[str, Any]:
+    destinations: List[Dict[str, str]] = []
+    for channel in list(channels or []):
+        channel_id = str(getattr(channel, "id", "") or "").strip()
+        channel_label = _discord_channel_label(channel)
+        meta = _discord_channel_meta(channel)
+        if not channel_id or not channel_label or not meta.get("guild_id"):
+            continue
+        destinations.append(
+            {
+                "channel_id": channel_id,
+                "channel": channel_label,
+                "guild_id": meta["guild_id"],
+                **({"guild_name": meta["guild_name"]} if meta.get("guild_name") else {}),
+                "channel_type": _discord_channel_type(channel),
+            }
+        )
+    return {
+        "schema_version": DISCORD_DESTINATION_INVENTORY_SCHEMA_VERSION,
+        "updated_at": float(time.time()),
+        "destinations": destinations,
+    }
+
+
+def _redis_key_text(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="ignore").strip()
+    return str(value or "").strip()
+
+
+def _scan_redis_keys(pattern: str) -> List[str]:
+    try:
+        iterator = redis_client.scan_iter(match=pattern)
+    except Exception:
+        return []
+    return sorted({_redis_key_text(key) for key in iterator if _redis_key_text(key)})
+
+
+def _archive_discord_history(source_key: str, archive_key: str) -> bool:
+    try:
+        items = list(redis_client.lrange(source_key, 0, -1) or [])
+    except Exception:
+        items = []
+    try:
+        pipeline = redis_client.pipeline()
+        if items:
+            pipeline.rpush(archive_key, *items)
+        pipeline.delete(source_key)
+        pipeline.execute()
+        return True
+    except Exception:
+        try:
+            if items:
+                redis_client.rpush(archive_key, *items)
+            redis_client.delete(source_key)
+            return True
+        except Exception:
+            return False
+
+
+def _reconcile_discord_destination_records(
+    active_channel_ids: Iterable[Any],
+    *,
+    protected_guild_ids: Optional[Iterable[Any]] = None,
+) -> int:
+    """Retire Redis discovery records for Discord rooms the bot can no longer send to."""
+    active_ids = {str(value or "").strip() for value in active_channel_ids if str(value or "").strip()}
+    protected_guilds = {
+        str(value or "").strip()
+        for value in (protected_guild_ids or [])
+        if str(value or "").strip()
+    }
+    known_ids: set[str] = set()
+    for prefix in (
+        f"{ROOM_LABEL_PREFIX}:discord:",
+        f"{ROOM_META_PREFIX}:discord:",
+    ):
+        for key in _scan_redis_keys(f"{prefix}*"):
+            room_id = key.split(prefix, 1)[-1].strip()
+            if room_id:
+                known_ids.add(room_id)
+
+    retired = 0
+    for room_id in sorted(known_ids - active_ids):
+        if protected_guilds:
+            try:
+                raw_meta = redis_client.get(_room_meta_key("discord", room_id))
+                parsed_meta = json.loads(_redis_key_text(raw_meta)) if raw_meta else {}
+            except Exception:
+                parsed_meta = {}
+            room_guild_id = str(parsed_meta.get("guild_id") or "").strip() if isinstance(parsed_meta, dict) else ""
+            if room_guild_id in protected_guilds:
+                continue
+        try:
+            redis_client.delete(
+                _room_label_key("discord", room_id),
+                _room_meta_key("discord", room_id),
+            )
+        except Exception:
+            continue
+        history_key = f"tater:channel:{room_id}:history"
+        archive_key = f"tater:archive:discord_channel_history:v1:{room_id}"
+        _archive_discord_history(history_key, archive_key)
+        retired += 1
+
+    # Older Discord portals used a second history namespace. The current portal
+    # does not read it, and leaving it discoverable resurrects obsolete rooms.
+    for history_key in _scan_redis_keys("tater:discord:*:history"):
+        room_token = history_key[len("tater:discord:") : -len(":history")].strip()
+        if not room_token:
+            continue
+        archive_key = f"tater:archive:discord_legacy_history:v1:{room_token}"
+        if _archive_discord_history(history_key, archive_key):
+            retired += 1
+    return retired
+
+
+def _filter_response_channel_map(
+    channel_map: Dict[Any, Iterable[Any]],
+    active_channel_ids: Iterable[Any],
+) -> Dict[int, set[int]]:
+    active_ids = {
+        int(str(value).strip())
+        for value in active_channel_ids
+        if str(value or "").strip().isdigit()
+    }
+    out: Dict[int, set[int]] = {}
+    for raw_guild_id, raw_channel_ids in (channel_map or {}).items():
+        try:
+            guild_id = int(raw_guild_id)
+        except Exception:
+            continue
+        channels = {channel_id for channel_id in parse_response_channel_ids(raw_channel_ids) if channel_id in active_ids}
+        if guild_id > 0 and channels:
+            out[guild_id] = channels
+    return out
 
 
 def parse_response_channel_ids(raw: Any) -> set[int]:
@@ -951,6 +1145,61 @@ class discord_portal(commands.Bot):
         self.max_response_length = max_response_length
         self._notify_worker_task = None
 
+    def _sync_destination_inventory(
+        self,
+        *,
+        excluded_channel_ids: Optional[Iterable[Any]] = None,
+        excluded_guild_ids: Optional[Iterable[Any]] = None,
+    ) -> int:
+        channels = _discord_sendable_channels(
+            self.guilds,
+            excluded_channel_ids=excluded_channel_ids,
+            excluded_guild_ids=excluded_guild_ids,
+        )
+        for channel in channels:
+            _save_discord_room_context(channel)
+        payload = _discord_destination_inventory_payload(channels)
+        active_channel_ids = [row["channel_id"] for row in payload["destinations"]]
+        excluded_guild_tokens = {
+            str(value or "").strip() for value in (excluded_guild_ids or []) if str(value or "").strip()
+        }
+        protected_guild_ids = [
+            str(getattr(guild, "id", "") or "").strip()
+            for guild in list(self.guilds or [])
+            if bool(getattr(guild, "unavailable", False))
+            and str(getattr(guild, "id", "") or "").strip() not in excluded_guild_tokens
+        ]
+        try:
+            redis_client.set(
+                DISCORD_DESTINATION_INVENTORY_KEY,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+        except Exception:
+            logger.warning("[discord] destination inventory sync failed", exc_info=True)
+            return 0
+        retired_count = _reconcile_discord_destination_records(
+            active_channel_ids,
+            protected_guild_ids=protected_guild_ids,
+        )
+        filtered_response_map = _filter_response_channel_map(
+            self.response_channel_ids_by_guild,
+            active_channel_ids,
+        )
+        if filtered_response_map != self.response_channel_ids_by_guild:
+            self.response_channel_ids_by_guild = filtered_response_map
+            self._response_channel_map_raw_cache = serialize_response_channel_map(filtered_response_map)
+            try:
+                redis_client.hset(
+                    DISCORD_SETTINGS_KEY,
+                    RESPONSE_CHANNEL_MAP_FIELD,
+                    self._response_channel_map_raw_cache,
+                )
+            except Exception:
+                logger.warning("[discord] stale response-channel cleanup failed", exc_info=True)
+        if retired_count:
+            logger.info("[discord] retired %d stale destination record(s)", retired_count)
+        return len(payload["destinations"])
+
     def set_response_channel_map(self, channel_map: Any) -> dict[int, set[int]]:
         parsed = parse_response_channel_map(channel_map)
         self.response_channel_ids_by_guild = {int(k): set(v) for k, v in parsed.items()}
@@ -1190,17 +1439,42 @@ class discord_portal(commands.Bot):
             name=first.lower(), state=last, type=discord.ActivityType.custom
         )
         await self.change_presence(activity=activity)
-        try:
-            for guild in list(self.guilds or []):
-                for channel in list(getattr(guild, "text_channels", []) or []):
-                    _save_discord_room_context(channel)
-        except Exception:
-            pass
+        destination_count = self._sync_destination_inventory()
         guild_override_count = len(self.response_channel_ids_by_guild)
         logger.info(
             "Bot is ready. People-admin gate enabled, "
-            f"Guild-specific response configs: {guild_override_count}"
+            f"Guild-specific response configs: {guild_override_count}, "
+            f"notification destinations: {destination_count}"
         )
+
+    async def on_guild_channel_create(self, channel: Any):
+        self._sync_destination_inventory()
+
+    async def on_guild_channel_update(self, before: Any, after: Any):
+        self._sync_destination_inventory()
+
+    async def on_guild_channel_delete(self, channel: Any):
+        self._sync_destination_inventory(
+            excluded_channel_ids=[getattr(channel, "id", "")],
+        )
+
+    async def on_guild_join(self, guild: Any):
+        self._sync_destination_inventory()
+
+    async def on_guild_remove(self, guild: Any):
+        self._sync_destination_inventory(
+            excluded_guild_ids=[getattr(guild, "id", "")],
+        )
+
+    async def on_guild_available(self, guild: Any):
+        self._sync_destination_inventory()
+
+    async def on_guild_role_update(self, before: Any, after: Any):
+        self._sync_destination_inventory()
+
+    async def on_member_update(self, before: Any, after: Any):
+        if int(getattr(after, "id", 0) or 0) == int(getattr(self.user, "id", 0) or 0):
+            self._sync_destination_inventory()
 
     async def generate_error_message(self, prompt: str, fallback: str, message: discord.Message):
         try:

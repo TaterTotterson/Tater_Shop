@@ -3,10 +3,12 @@
 
 import asyncio
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
 from typing import Any, Dict
+from unittest.mock import patch
 
 
 SHOP_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,217 @@ class DiscordAttachmentTests(unittest.TestCase):
             ),
             "audio/wav",
         )
+
+
+class _DiscordPermissions:
+    def __init__(self, *, view_channel: bool = True, send_messages: bool = True):
+        self.view_channel = view_channel
+        self.send_messages = send_messages
+
+
+class _DiscordGuild:
+    def __init__(self, guild_id: int, name: str, *, unavailable: bool = False):
+        self.id = guild_id
+        self.name = name
+        self.unavailable = unavailable
+        self.me = object()
+        self.text_channels = []
+
+
+class _DiscordInventoryChannel:
+    def __init__(
+        self,
+        channel_id: int,
+        name: str,
+        guild: _DiscordGuild,
+        *,
+        news: bool = False,
+        view_channel: bool = True,
+        send_messages: bool = True,
+        position: int = 0,
+    ):
+        self.id = channel_id
+        self.name = name
+        self.guild = guild
+        self.position = position
+        self._news = news
+        self._permissions = _DiscordPermissions(
+            view_channel=view_channel,
+            send_messages=send_messages,
+        )
+
+    def permissions_for(self, member):
+        return self._permissions
+
+    def is_news(self):
+        return self._news
+
+
+class DiscordDestinationInventoryTests(unittest.TestCase):
+    def test_inventory_includes_text_and_announcement_channels(self):
+        guild = _DiscordGuild(10, "Tater Town")
+        general = _DiscordInventoryChannel(101, "general", guild, position=2)
+        announcements = _DiscordInventoryChannel(102, "announcements", guild, news=True, position=1)
+        guild.text_channels = [general, announcements]
+
+        channels = discord_portal._discord_sendable_channels([guild])
+        payload = discord_portal._discord_destination_inventory_payload(channels)
+
+        self.assertEqual(
+            [row["channel_id"] for row in payload["destinations"]],
+            ["102", "101"],
+        )
+        self.assertEqual(payload["destinations"][0]["channel_type"], "announcement")
+        self.assertEqual(payload["destinations"][1]["channel_type"], "text")
+        self.assertEqual(payload["destinations"][0]["guild_name"], "Tater Town")
+
+    def test_inventory_excludes_channels_the_bot_cannot_send_to(self):
+        guild = _DiscordGuild(10, "Tater Town")
+        guild.text_channels = [
+            _DiscordInventoryChannel(101, "general", guild),
+            _DiscordInventoryChannel(102, "read-only", guild, send_messages=False),
+            _DiscordInventoryChannel(103, "hidden", guild, view_channel=False),
+        ]
+
+        channels = discord_portal._discord_sendable_channels([guild])
+
+        self.assertEqual([channel.id for channel in channels], [101])
+
+    def test_inventory_can_exclude_deleted_channel_or_departed_guild(self):
+        first = _DiscordGuild(10, "First")
+        second = _DiscordGuild(20, "Second")
+        first.text_channels = [_DiscordInventoryChannel(101, "general", first)]
+        second.text_channels = [_DiscordInventoryChannel(201, "general", second)]
+
+        without_channel = discord_portal._discord_sendable_channels(
+            [first, second],
+            excluded_channel_ids=[101],
+        )
+        without_guild = discord_portal._discord_sendable_channels(
+            [first, second],
+            excluded_guild_ids=[20],
+        )
+
+        self.assertEqual([channel.id for channel in without_channel], [201])
+        self.assertEqual([channel.id for channel in without_guild], [101])
+
+
+class _DiscordRedisPipeline:
+    def __init__(self, client):
+        self.client = client
+        self.operations = []
+
+    def rpush(self, key, *values):
+        self.operations.append(("rpush", key, values))
+        return self
+
+    def delete(self, *keys):
+        self.operations.append(("delete", keys))
+        return self
+
+    def execute(self):
+        for operation in self.operations:
+            if operation[0] == "rpush":
+                _, key, values = operation
+                self.client.rpush(key, *values)
+            else:
+                _, keys = operation
+                self.client.delete(*keys)
+        return []
+
+
+class _DiscordInventoryRedis:
+    def __init__(self):
+        self.values = {}
+        self.lists = {}
+        self.hashes = {}
+
+    def set(self, key, value):
+        self.values[str(key)] = value
+        return True
+
+    def get(self, key):
+        return self.values.get(str(key))
+
+    def scan_iter(self, match):
+        import fnmatch
+
+        for key in sorted(set(self.values) | set(self.lists)):
+            if fnmatch.fnmatch(key, match):
+                yield key
+
+    def lrange(self, key, start, end):
+        return list(self.lists.get(str(key)) or [])
+
+    def rpush(self, key, *values):
+        self.lists.setdefault(str(key), []).extend(values)
+        return len(self.lists[str(key)])
+
+    def delete(self, *keys):
+        for key in keys:
+            self.values.pop(str(key), None)
+            self.lists.pop(str(key), None)
+        return len(keys)
+
+    def hset(self, key, field, value):
+        self.hashes.setdefault(str(key), {})[str(field)] = value
+        return 1
+
+    def pipeline(self):
+        return _DiscordRedisPipeline(self)
+
+
+class DiscordDestinationReconciliationTests(unittest.TestCase):
+    def test_reconcile_removes_stale_records_and_archives_history(self):
+        client = _DiscordInventoryRedis()
+        client.values["tater:room_label:discord:101"] = "#current"
+        client.values["tater:room_meta:discord:101"] = json.dumps({"guild_id": "10"})
+        client.values["tater:room_label:discord:202"] = "#retired"
+        client.values["tater:room_meta:discord:202"] = json.dumps({"guild_id": "20"})
+        client.lists["tater:channel:101:history"] = ["current message"]
+        client.lists["tater:channel:202:history"] = ["retired message"]
+        client.lists["tater:discord:old-room:history"] = ["legacy message"]
+
+        with patch.object(discord_portal, "redis_client", client):
+            retired = discord_portal._reconcile_discord_destination_records(["101"])
+
+        self.assertEqual(retired, 2)
+        self.assertIn("tater:room_label:discord:101", client.values)
+        self.assertNotIn("tater:room_label:discord:202", client.values)
+        self.assertEqual(client.lists["tater:channel:101:history"], ["current message"])
+        self.assertNotIn("tater:channel:202:history", client.lists)
+        self.assertEqual(
+            client.lists["tater:archive:discord_channel_history:v1:202"],
+            ["retired message"],
+        )
+        self.assertEqual(
+            client.lists["tater:archive:discord_legacy_history:v1:old-room"],
+            ["legacy message"],
+        )
+
+    def test_response_channel_map_keeps_only_live_channels(self):
+        filtered = discord_portal._filter_response_channel_map(
+            {10: {101, 102}, 20: {201}},
+            ["102", "201"],
+        )
+
+        self.assertEqual(filtered, {10: {102}, 20: {201}})
+
+    def test_reconcile_preserves_rooms_from_temporarily_unavailable_guild(self):
+        client = _DiscordInventoryRedis()
+        client.values["tater:room_label:discord:202"] = "#temporarily-unavailable"
+        client.values["tater:room_meta:discord:202"] = json.dumps({"guild_id": "20"})
+        client.lists["tater:channel:202:history"] = ["preserve me"]
+
+        with patch.object(discord_portal, "redis_client", client):
+            retired = discord_portal._reconcile_discord_destination_records(
+                [],
+                protected_guild_ids=["20"],
+            )
+
+        self.assertEqual(retired, 0)
+        self.assertIn("tater:room_label:discord:202", client.values)
+        self.assertEqual(client.lists["tater:channel:202:history"], ["preserve me"])
 
 
 class _DiscordMessage:
