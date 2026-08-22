@@ -377,6 +377,10 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         enabled = next(field for field in fields if field.get("key") == "notifications_enabled")
         targets = next(field for field in fields if field.get("key") == "notification_destinations")
         self.assertFalse(enabled["value"])
+        self.assertIn("Face ID results", enabled["description"])
+        self.assertFalse(
+            any(field.get("label") == "Optional Notifications" for field in fields)
+        )
         self.assertEqual(targets["show_when"], {"source_key": "notifications_enabled", "equals": True})
         self.assertIn(
             {"value": destination, "label": "Little Spud: Spud Phone"},
@@ -966,6 +970,50 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["message"], "Back Door opened.")
         self.assertEqual(stored["data"]["notification_status"], "failed")
         self.assertIn("push service offline", stored["data"]["notification_errors"])
+
+    async def test_display_notification_includes_the_saved_snapshot_for_video_preview(self):
+        destination = self.core._encode_notification_destination("display", {})
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        snapshot = self.core._store_event_snapshot(
+            self.redis,
+            b"saved-poster",
+            content_type="image/jpeg",
+        )
+        clip = self.core._store_event_clip(
+            self.redis,
+            b"saved-video",
+            content_type="video/mp4",
+        )
+        event = {
+            "id": "display-video-event",
+            "source": "front_yard",
+            "title": "Front Yard Camera",
+            "type": "camera_event",
+            "message": "A person crossed the yard.",
+            "snapshot_id": snapshot["snapshot_id"],
+            "clip_id": clip["clip_id"],
+            "data": {
+                "snapshot_id": snapshot["snapshot_id"],
+                "clip_id": clip["clip_id"],
+            },
+        }
+        dispatch = AsyncMock(return_value="Queued notification for display")
+
+        with patch.object(self.core, "dispatch_notification", new=dispatch):
+            result = await self.core._dispatch_awareness_event_notification(monitor, event)
+
+        self.assertTrue(result["ok"])
+        request = dispatch.await_args.kwargs
+        self.assertEqual(request["platform"], "display")
+        self.assertEqual(request["targets"], {})
+        self.assertEqual(request["meta"]["snapshot_id"], snapshot["snapshot_id"])
+        self.assertEqual(request["attachments"][0]["type"], "video")
 
     def test_event_clip_storage_is_bounded(self):
         with patch.object(self.core, "_clip_max_bytes", return_value=4):

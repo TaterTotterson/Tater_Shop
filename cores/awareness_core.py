@@ -61,7 +61,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
     _shared_video_analyze = None
 
-__version__ = "4.9.0"
+__version__ = "4.10.0"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
     "optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, "
@@ -4967,6 +4967,8 @@ async def _dispatch_awareness_event_notification(
     attachments = _notification_attachments_for_event(redis_client, event)
     title = _compact(event.get("title"), limit=120) or "Tater Awareness"
     event_id = _text(event.get("id"))
+    event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    snapshot_id = _text(event.get("snapshot_id") or event_data.get("snapshot_id"))
     monitor_id = _text(monitor.get("id"))
     event_type = _text(event.get("type") or "event")
     sent = 0
@@ -4976,6 +4978,12 @@ async def _dispatch_awareness_event_notification(
         if not destination:
             continue
         try:
+            notification_meta: Dict[str, Any] = {
+                "priority": "normal",
+                "tags": ["awareness", event_type],
+            }
+            if destination["platform"] == "display" and snapshot_id:
+                notification_meta["snapshot_id"] = snapshot_id
             result = await dispatch_notification(
                 platform=destination["platform"],
                 title=title,
@@ -4988,7 +4996,7 @@ async def _dispatch_awareness_event_notification(
                     "monitor_id": monitor_id,
                     "event_id": event_id,
                 },
-                meta={"priority": "normal", "tags": ["awareness", event_type]},
+                meta=notification_meta,
                 attachments=attachments or None,
             )
             result_text = _text(result)
@@ -6291,18 +6299,14 @@ def _monitor_form(
                 "show_when": {"source_key": "kind", "equals": "camera"},
             },
             {
-                "type": "heading",
-                "label": "Optional Notifications",
-                "description": (
-                    "Send the completed Awareness event using its existing description and media. "
-                    "Face ID results are included when Face ID runs for the event."
-                ),
-            },
-            {
                 "key": "notifications_enabled",
                 "label": "Notify For This Source",
                 "type": "checkbox",
                 "value": _bool(monitor.get("notifications_enabled"), False),
+                "description": (
+                    "Send the completed Awareness event using its existing description and media. "
+                    "Face ID results are included when Face ID runs for the event."
+                ),
             },
             {
                 "key": "notification_destinations",
@@ -7329,18 +7333,14 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                     "show_when": {"source_key": "kind", "equals": "camera"},
                 },
                 {
-                    "type": "heading",
-                    "label": "Optional Notifications",
-                    "description": (
-                        "Send this source's completed event with the same description and stored image or clip. "
-                        "Face ID results are included when available."
-                    ),
-                },
-                {
                     "key": "notifications_enabled",
                     "label": "Notify For This Source",
                     "type": "checkbox",
                     "value": False,
+                    "description": (
+                        "Send this source's completed event with the same description and stored image or clip. "
+                        "Face ID results are included when available."
+                    ),
                 },
                 {
                     "key": "notification_destinations",
