@@ -284,6 +284,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         description_mode=None,
         linked_camera="",
         linked_camera_description_mode="image",
+        notifications_enabled=None,
+        notification_destinations=None,
     ):
         values = {"kind": kind, "device": device, "area": area, "enabled": True}
         if trigger_events is not None:
@@ -292,6 +294,10 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             values["face_id_enabled"] = face_id_enabled
         if description_mode is not None:
             values["description_mode"] = description_mode
+        if notifications_enabled is not None:
+            values["notifications_enabled"] = notifications_enabled
+        if notification_destinations is not None:
+            values["notification_destinations"] = notification_destinations
         if linked_camera:
             provider = linked_camera.split("|", 1)[0]
             values.update(
@@ -316,7 +322,66 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("binary_sensor.unifi_cam-front_smart_person", monitor["event_refs"])
         self.assertTrue(monitor["face_id_enabled"])
         self.assertEqual(monitor["description_mode"], "image")
+        self.assertFalse(monitor["notifications_enabled"])
+        self.assertEqual(monitor["notification_destinations"], [])
         self.assertEqual(self.redis.hgetall("awareness:rules"), {})
+
+    def test_notification_delivery_requires_at_least_one_destination(self):
+        with (
+            patch.object(self.core, "_monitor_registry", return_value=sample_registry()),
+            self.assertRaisesRegex(ValueError, "Choose at least one destination"),
+        ):
+            self.core.handle_htmlui_tab_action(
+                action="awareness_add_monitor",
+                payload={
+                    "values": {
+                        "kind": "sensor",
+                        "device": "homeassistant|binary_sensor.back_door",
+                        "area": "Back Door",
+                        "enabled": True,
+                        "notifications_enabled": True,
+                    }
+                },
+                redis_client=self.redis,
+            )
+
+    def test_awareness_ui_lists_connected_notification_destinations(self):
+        destination = self.core._encode_notification_destination(
+            "little_spud",
+            {"device_id": "spud-phone", "device_name": "Spud Phone"},
+        )
+        catalog = {
+            "platforms": [
+                {
+                    "platform": "little_spud",
+                    "label": "Little Spud",
+                    "requires_target": True,
+                    "destinations": [
+                        {
+                            "label": "Spud Phone",
+                            "targets": {
+                                "device_id": "spud-phone",
+                                "device_name": "Spud Phone",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        with (
+            patch.object(self.core, "_monitor_registry", return_value=sample_registry()),
+            patch.object(self.core, "notifier_destination_catalog", return_value=catalog),
+        ):
+            manager = self.core._awareness_manager_ui(self.redis)
+        fields = manager["add_form"]["fields"]
+        enabled = next(field for field in fields if field.get("key") == "notifications_enabled")
+        targets = next(field for field in fields if field.get("key") == "notification_destinations")
+        self.assertFalse(enabled["value"])
+        self.assertEqual(targets["show_when"], {"source_key": "notifications_enabled", "equals": True})
+        self.assertIn(
+            {"value": destination, "label": "Little Spud: Spud Phone"},
+            targets["options"],
+        )
 
     def test_face_id_can_be_disabled_per_camera_without_disabling_monitoring(self):
         monitor = self._add_monitor(
@@ -729,9 +794,11 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
                 "_vision_describe",
                 new=AsyncMock(return_value="A person is walking toward the front door."),
             ),
+            patch.object(self.core, "_schedule_face_burst", return_value="face-image") as schedule,
         ):
             result = await self.core._execute_camera_monitor(monitor, event)
         self.assertEqual(result["event_type"], "person")
+        self.assertEqual(schedule.call_args.kwargs["video_bytes"], b"")
         stored = json.loads(self.redis.lists["tater:automations:events:front_yard"][0])
         self.assertEqual(stored["data"]["event_type"], "person")
         self.assertTrue(stored["snapshot_id"])
@@ -774,11 +841,15 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="A person walks up and leaves a package."),
             ),
             patch.object(self.core, "_vision_describe", new=AsyncMock()) as image_describe,
+            patch.object(self.core, "_schedule_face_burst", return_value="face-video") as schedule,
         ):
             result = await self.core._execute_camera_monitor(monitor, event)
 
         self.assertEqual(result["description_mode"], "video")
         image_describe.assert_not_awaited()
+        self.assertEqual(schedule.call_args.kwargs["video_bytes"], b"video-bytes")
+        self.assertEqual(schedule.call_args.kwargs["video_content_type"], "video/mp4")
+        self.assertEqual(schedule.call_args.kwargs["video_duration_seconds"], 8.0)
         self.assertEqual(capture_clip.await_args.args[2]["event_id"], "evt-1")
         stored = json.loads(self.redis.lists["tater:automations:events:front_yard"][0])
         self.assertEqual(stored["data"]["description_mode"], "video")
@@ -796,9 +867,105 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media["content_type"], "video/mp4")
         card = self.core._event_forms_from_events(self.redis, [stored], list_view=False)[0]
         video_field = next(field for field in card["fields"] if field.get("type") == "video")
-        self.assertEqual(video_field["src"], f"/api/cores/awareness/media/{stored['clip_id']}")
+        self.assertEqual(video_field["src"], f"/api/cores/awareness_core/media/{stored['clip_id']}")
         self.assertTrue(video_field["poster"].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(video_field["reset_to_poster"])
         self.assertFalse(any(field.get("type") == "image" for field in card["fields"]))
+
+    async def test_notification_reuses_saved_description_media_and_face_id_results(self):
+        destination = self.core._encode_notification_destination(
+            "little_spud",
+            {"device_id": "spud-phone"},
+        )
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        snapshot = self.core._store_event_snapshot(
+            self.redis,
+            b"saved-jpeg",
+            content_type="image/jpeg",
+        )
+        self.core._save_face_identity(
+            self.redis,
+            {"id": "face-fred", "name": "Fred"},
+        )
+        self.core._save_face_session(
+            self.redis,
+            {
+                "id": "face-session",
+                "event_id": "event-with-face",
+                "status": "complete",
+                "identity_ids": ["face-fred"],
+            },
+        )
+        event = {
+            "id": "event-with-face",
+            "source": "front_yard",
+            "title": "Front Yard Camera",
+            "type": "camera_event",
+            "message": "A person walked up and left a package.",
+            "ha_time": "2026-08-21T10:00:00",
+            "snapshot_id": snapshot["snapshot_id"],
+            "data": {
+                "area": "Front Yard",
+                "snapshot_id": snapshot["snapshot_id"],
+                "face_session_id": "face-session",
+            },
+        }
+        self.core._append_event(self.redis, source="Front Yard", payload=event)
+        dispatch = AsyncMock(return_value="Queued notification for Little Spud")
+
+        with patch.object(self.core, "dispatch_notification", new=dispatch):
+            result = await self.core._dispatch_awareness_event_notification(monitor, event)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_count"], 1)
+        request = dispatch.await_args.kwargs
+        self.assertEqual(request["content"], "A person walked up and left a package.\n\nFace ID: Fred recognized.")
+        self.assertEqual(request["targets"], {"device_id": "spud-phone"})
+        self.assertEqual(request["attachments"][0]["type"], "image")
+        self.assertEqual(request["attachments"][0]["bytes"], b"saved-jpeg")
+        stored = json.loads(self.redis.lists["tater:automations:events:front_yard"][0])
+        self.assertEqual(stored["data"]["notification_status"], "sent")
+        self.assertEqual(stored["data"]["notification_sent_count"], 1)
+
+    async def test_notification_failure_does_not_remove_or_fail_the_awareness_event(self):
+        destination = self.core._encode_notification_destination("ntfy", {"topic": "home"})
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        event = {
+            "id": "sensor-event",
+            "source": "back_door",
+            "title": "Back Door",
+            "type": "door_sensor_opened",
+            "message": "Back Door opened.",
+            "ha_time": "2026-08-21T10:00:00",
+            "data": {"area": "Back Door"},
+        }
+        self.core._append_event(self.redis, source="Back Door", payload=event)
+
+        with patch.object(
+            self.core,
+            "dispatch_notification",
+            new=AsyncMock(side_effect=RuntimeError("push service offline")),
+        ):
+            result = await self.core._dispatch_awareness_event_notification(monitor, event)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["sent_count"], 0)
+        stored = json.loads(self.redis.lists["tater:automations:events:back_door"][0])
+        self.assertEqual(stored["message"], "Back Door opened.")
+        self.assertEqual(stored["data"]["notification_status"], "failed")
+        self.assertIn("push service offline", stored["data"]["notification_errors"])
 
     def test_event_clip_storage_is_bounded(self):
         with patch.object(self.core, "_clip_max_bytes", return_value=4):
@@ -814,6 +981,91 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(key.startswith("awareness:event_clip:") for key in self.redis.values)
         )
+
+    def test_notification_prefers_the_saved_clip_over_the_snapshot(self):
+        snapshot = self.core._store_event_snapshot(self.redis, b"poster", content_type="image/jpeg")
+        clip = self.core._store_event_clip(self.redis, b"clip-bytes", content_type="video/mp4")
+        event = {
+            "id": "video-event",
+            "snapshot_id": snapshot["snapshot_id"],
+            "clip_id": clip["clip_id"],
+            "data": {},
+        }
+
+        attachments = self.core._notification_attachments_for_event(self.redis, event)
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["type"], "video")
+        self.assertEqual(attachments[0]["mimetype"], "video/mp4")
+        self.assertEqual(attachments[0]["bytes"], b"clip-bytes")
+
+    def test_event_clip_is_remuxed_for_fast_start_playback(self):
+        def mp4_box(box_type, payload=b""):
+            return (8 + len(payload)).to_bytes(4, "big") + box_type + payload
+
+        source = mp4_box(b"ftyp", b"isom") + mp4_box(b"mdat", b"video") + mp4_box(b"moov", b"index")
+        prepared = mp4_box(b"ftyp", b"isom") + mp4_box(b"moov", b"index") + mp4_box(b"mdat", b"video")
+
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(prepared)
+            return types.SimpleNamespace(returncode=0, stderr=b"")
+
+        with (
+            patch.object(self.core, "_event_clip_ffmpeg_path", return_value="/usr/bin/ffmpeg"),
+            patch.object(self.core.subprocess, "run", side_effect=fake_run) as run,
+        ):
+            result, content_type, metadata = self.core._prepare_event_clip_for_playback(
+                source,
+                "video/mp4",
+            )
+
+        self.assertEqual(result, prepared)
+        self.assertEqual(content_type, "video/mp4")
+        self.assertTrue(metadata["playback_fast_start"])
+        self.assertTrue(metadata["playback_prepared"])
+        self.assertEqual(metadata["playback_original_bytes"], len(source))
+        self.assertIn("+faststart", run.call_args.args[0])
+
+    def test_event_clip_keeps_original_when_ffmpeg_is_unavailable(self):
+        def mp4_box(box_type, payload=b""):
+            return (8 + len(payload)).to_bytes(4, "big") + box_type + payload
+
+        source = mp4_box(b"ftyp", b"isom") + mp4_box(b"mdat", b"video") + mp4_box(b"moov", b"index")
+        with patch.object(self.core, "_event_clip_ffmpeg_path", return_value=""):
+            result, content_type, metadata = self.core._prepare_event_clip_for_playback(
+                source,
+                "video/mp4",
+            )
+
+        self.assertEqual(result, source)
+        self.assertEqual(content_type, "video/mp4")
+        self.assertFalse(metadata["playback_fast_start"])
+        self.assertFalse(metadata["playback_prepared"])
+
+    def test_face_id_frames_are_sampled_across_the_event_clip(self):
+        def fake_run(command, **_kwargs):
+            output_pattern = command[-1]
+            for index in range(1, 6):
+                Path(output_pattern.replace("%03d", f"{index:03d}")).write_bytes(
+                    f"frame-{index}".encode()
+                )
+            return types.SimpleNamespace(returncode=0, stderr=b"")
+
+        with (
+            patch.object(self.core, "_event_clip_ffmpeg_path", return_value="/usr/bin/ffmpeg"),
+            patch.object(self.core.subprocess, "run", side_effect=fake_run) as run,
+        ):
+            frames = self.core._extract_face_frames_from_clip(
+                b"video-bytes",
+                "video/mp4",
+                duration_seconds=8,
+                frame_count=5,
+            )
+
+        self.assertEqual(frames, [f"frame-{index}".encode() for index in range(1, 6)])
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("-vf") + 1], "fps=0.625000")
+        self.assertEqual(command[command.index("-frames:v") + 1], "5")
 
     async def test_camera_with_face_id_disabled_does_not_schedule_a_face_burst(self):
         monitor = self._add_monitor(
@@ -862,6 +1114,33 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         event = json.loads(rows[0])
         self.assertEqual(event["type"], "door_sensor_open")
         self.assertEqual(event["message"], "Back Door opened.")
+
+    async def test_sensor_monitor_delivers_its_completed_event_when_notifications_are_enabled(self):
+        destination = self.core._encode_notification_destination("little_spud", {"device_id": "phone"})
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        deliver = AsyncMock(return_value={"ok": True, "sent_count": 1})
+        with patch.object(self.core, "_deliver_awareness_event_notification", new=deliver):
+            result = await self.core._execute_sensor_monitor(
+                monitor,
+                {
+                    "entity_id": "binary_sensor.back_door",
+                    "new_state": {"state": "on"},
+                    "old_state": {"state": "off"},
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        delivered_monitor, delivered_event = deliver.await_args.args
+        self.assertEqual(delivered_monitor["id"], monitor["id"])
+        self.assertEqual(delivered_event["message"], "Back Door opened.")
+        stored = json.loads(self.redis.lists["tater:automations:events:back_door"][0])
+        self.assertEqual(stored["id"], delivered_event["id"])
 
     def test_new_event_returns_history_to_the_latest_page(self):
         self.core._runtime_set(self.redis, events_page=4)
@@ -1077,6 +1356,144 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capture.await_count, 4)
         self.assertEqual(saved["frames_captured"], 5)
         self.assertEqual(saved["frames_checked"], 5)
+        self.assertEqual(saved["status"], "no_faces")
+
+    async def test_face_burst_sends_enabled_notification_after_event_enrichment(self):
+        destination = self.core._encode_notification_destination("little_spud", {"device_id": "phone"})
+        monitor = self._add_monitor(
+            "camera",
+            "unifi_protect|cam-front",
+            "Front Yard",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        event = {
+            "id": "face-notification-event",
+            "source": "front_yard",
+            "title": "Front Yard Camera",
+            "type": "camera_event",
+            "message": "A person is at the front door.",
+            "ha_time": "2026-08-21T10:00:00",
+            "data": {
+                "area": "Front Yard",
+                "monitor_id": monitor["id"],
+                "face_session_id": "face-notification-session",
+                "face_status": "pending",
+            },
+        }
+        self.core._append_event(self.redis, source="Front Yard", payload=event)
+        session = {
+            "id": "face-notification-session",
+            "event_id": "face-notification-event",
+            "monitor_id": monitor["id"],
+            "area": "Front Yard",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        deliver = AsyncMock(return_value={"ok": True, "sent_count": 1})
+        runtime = types.SimpleNamespace(analyze_image=lambda _image, _client: [])
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_FACE_BURST_FRAME_COUNT", 1),
+            patch.object(self.core, "_dispatch_awareness_event_notification", new=deliver),
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"frame",
+                initial_content_type="image/jpeg",
+            )
+
+        delivered_event = deliver.await_args.args[1]
+        self.assertEqual(delivered_event["data"]["face_status"], "no_faces")
+        self.assertEqual(delivered_event["data"]["face_count"], 0)
+
+    async def test_face_id_uses_clip_frames_without_capturing_a_snapshot_burst(self):
+        analyzed = []
+        runtime = types.SimpleNamespace(
+            MATCH_THRESHOLD=0.30,
+            analyze_image=lambda image, _client: analyzed.append(image) or [],
+        )
+        session = {
+            "id": "clip-session",
+            "event_id": "clip-event",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        frames = [f"clip-frame-{index}".encode() for index in range(5)]
+        capture = AsyncMock()
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_extract_face_frames_from_clip", return_value=frames) as extract,
+            patch.object(self.core, "_capture_camera_snapshot", new=capture),
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"poster-frame",
+                initial_content_type="image/jpeg",
+                video_bytes=b"video-bytes",
+                video_content_type="video/mp4",
+                video_duration_seconds=8,
+            )
+
+        extract.assert_called_once_with(
+            b"video-bytes",
+            "video/mp4",
+            duration_seconds=8,
+            frame_count=5,
+        )
+        capture.assert_not_awaited()
+        self.assertEqual(analyzed, frames)
+        saved = self.core._load_face_session(self.redis, "clip-session")
+        self.assertEqual(saved["frame_source"], "video_clip")
+        self.assertEqual(saved["frames_captured"], 5)
+        self.assertEqual(saved["frames_checked"], 5)
+        self.assertEqual(saved["status"], "no_faces")
+
+    async def test_face_id_clip_failure_falls_back_to_snapshot_burst(self):
+        runtime = types.SimpleNamespace(
+            MATCH_THRESHOLD=0.30,
+            analyze_image=lambda _image, _client: [],
+        )
+        session = {
+            "id": "clip-fallback-session",
+            "event_id": "clip-fallback-event",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        capture = AsyncMock(return_value=(b"next-frame", "image/jpeg"))
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_FACE_BURST_FRAME_COUNT", 2),
+            patch.object(self.core, "_FACE_BURST_INTERVAL_SECONDS", 0.001),
+            patch.object(
+                self.core,
+                "_extract_face_frames_from_clip",
+                side_effect=RuntimeError("clip decode failed"),
+            ),
+            patch.object(self.core, "_capture_camera_snapshot", new=capture),
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"poster-frame",
+                initial_content_type="image/jpeg",
+                video_bytes=b"bad-video",
+            )
+
+        self.assertEqual(capture.await_count, 1)
+        saved = self.core._load_face_session(self.redis, "clip-fallback-session")
+        self.assertEqual(saved["frame_source"], "snapshot_burst")
+        self.assertEqual(saved["frames_captured"], 2)
+        self.assertEqual(saved["frames_checked"], 2)
+        self.assertEqual(saved["clip_frame_error"], "clip decode failed")
         self.assertEqual(saved["status"], "no_faces")
 
     async def test_face_burst_emits_linked_person_event_for_automation(self):

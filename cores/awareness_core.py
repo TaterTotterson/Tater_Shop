@@ -10,6 +10,9 @@ import logging
 import math
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -45,6 +48,11 @@ except Exception:  # pragma: no cover - keeps older Tater runtimes from failing 
 from tateros import integration_store as integration_store_module
 from vision_settings import get_vision_settings as get_shared_vision_settings
 try:
+    from notify import dispatch_notification, notifier_destination_catalog
+except Exception:  # pragma: no cover - compatibility with Tater versions before shared notifications.
+    dispatch_notification = None
+    notifier_destination_catalog = None
+try:
     import face_id_runtime as _face_id_runtime
 except Exception:  # pragma: no cover - compatibility with Tater versions before Face ID.
     _face_id_runtime = None
@@ -53,14 +61,14 @@ try:
 except Exception:  # pragma: no cover - compatibility with Tater versions before video understanding.
     _shared_video_analyze = None
 
-__version__ = "4.7.0"
+__version__ = "4.9.0"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
     "optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, "
-    "and answer questions about past activity. Use Automation Core for triggers, notifications, announcements, "
-    "and device actions."
+    "answer questions about past activity, and optionally deliver the completed event with media and Face ID context. "
+    "Use Automation Core for custom notification text, announcements, and device actions."
 )
-TAGS = ["awareness", "cameras", "sensors", "event-history", "vision", "video"]
+TAGS = ["awareness", "cameras", "sensors", "event-history", "vision", "video", "notifications"]
 
 load_dotenv()
 
@@ -878,6 +886,185 @@ def _clip_max_bytes(client: Any) -> int:
     return int(mb) * 1024 * 1024
 
 
+def _mp4_top_level_boxes(video_bytes: bytes) -> Dict[str, int]:
+    content = bytes(video_bytes or b"")
+    total = len(content)
+    cursor = 0
+    boxes: Dict[str, int] = {}
+    while cursor + 8 <= total:
+        size = int.from_bytes(content[cursor : cursor + 4], "big")
+        box_type = content[cursor + 4 : cursor + 8].decode("ascii", "ignore")
+        header_size = 8
+        if size == 1:
+            if cursor + 16 > total:
+                break
+            size = int.from_bytes(content[cursor + 8 : cursor + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = total - cursor
+        if size < header_size or cursor + size > total:
+            break
+        if box_type and box_type not in boxes:
+            boxes[box_type] = cursor
+        cursor += size
+    return boxes
+
+
+def _mp4_is_fast_start(video_bytes: bytes) -> bool:
+    boxes = _mp4_top_level_boxes(video_bytes)
+    moov_offset = boxes.get("moov", -1)
+    mdat_offset = boxes.get("mdat", -1)
+    return moov_offset >= 0 and (mdat_offset < 0 or moov_offset < mdat_offset)
+
+
+def _event_clip_ffmpeg_path() -> str:
+    configured = _text(os.getenv("TATER_FFMPEG_PATH") or os.getenv("FFMPEG_PATH"))
+    if configured:
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+        candidate = Path(configured).expanduser()
+        if candidate.is_file():
+            return str(candidate)
+    resolved = shutil.which("ffmpeg")
+    if resolved:
+        return resolved
+    try:
+        import imageio_ffmpeg
+
+        bundled = _text(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        bundled = ""
+    return bundled if bundled and Path(bundled).is_file() else ""
+
+
+def _prepare_event_clip_for_playback(
+    video_bytes: bytes,
+    content_type: str,
+) -> Tuple[bytes, str, Dict[str, Any]]:
+    content = bytes(video_bytes or b"")
+    media_type = _text(content_type).split(";", 1)[0].strip().lower() or "video/mp4"
+    looks_like_mp4 = media_type in {"video/mp4", "video/m4v"} or content[4:8] == b"ftyp"
+    if not content or not looks_like_mp4:
+        return content, media_type, {"playback_fast_start": False, "playback_prepared": False}
+    if _mp4_is_fast_start(content):
+        return content, "video/mp4", {"playback_fast_start": True, "playback_prepared": False}
+
+    ffmpeg = _event_clip_ffmpeg_path()
+    if not ffmpeg:
+        return content, media_type, {"playback_fast_start": False, "playback_prepared": False}
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="tater-awareness-clip-") as temp_dir:
+            source_path = Path(temp_dir) / "source.mp4"
+            output_path = Path(temp_dir) / "playback.mp4"
+            source_path.write_bytes(content)
+            completed = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source_path),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a?",
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if completed.returncode != 0 or not output_path.is_file():
+                logger.debug(
+                    "[awareness] event clip fast-start remux failed: %s",
+                    _compact(completed.stderr, limit=240),
+                )
+                return content, media_type, {
+                    "playback_fast_start": False,
+                    "playback_prepared": False,
+                }
+            prepared = output_path.read_bytes()
+    except Exception as exc:
+        logger.debug("[awareness] event clip fast-start remux failed: %s", exc)
+        return content, media_type, {"playback_fast_start": False, "playback_prepared": False}
+
+    if not prepared or not _mp4_is_fast_start(prepared):
+        return content, media_type, {"playback_fast_start": False, "playback_prepared": False}
+    return prepared, "video/mp4", {
+        "playback_fast_start": True,
+        "playback_prepared": True,
+        "playback_original_bytes": len(content),
+    }
+
+
+def _extract_face_frames_from_clip(
+    video_bytes: bytes,
+    content_type: str,
+    *,
+    duration_seconds: float = 0,
+    frame_count: int = _FACE_BURST_FRAME_COUNT,
+) -> List[bytes]:
+    content = bytes(video_bytes or b"")
+    target_count = max(1, min(12, int(frame_count or _FACE_BURST_FRAME_COUNT)))
+    if not content:
+        raise ValueError("The event clip was empty.")
+    ffmpeg = _event_clip_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg is unavailable for Face ID clip frames.")
+
+    media_type = _text(content_type).split(";", 1)[0].strip().lower()
+    suffix = {
+        "video/webm": ".webm",
+        "video/quicktime": ".mov",
+        "video/x-matroska": ".mkv",
+        "video/mpeg": ".mpeg",
+        "video/x-msvideo": ".avi",
+    }.get(media_type, ".mp4")
+    duration = max(0.0, _as_float(duration_seconds, 0.0))
+    sample_rate = (target_count / duration) if duration > 0 else 1.0
+
+    with tempfile.TemporaryDirectory(prefix="tater-awareness-face-clip-") as temp_dir:
+        source_path = Path(temp_dir) / f"source{suffix}"
+        output_pattern = Path(temp_dir) / "face-frame-%03d.jpg"
+        source_path.write_bytes(content)
+        completed = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source_path),
+                "-an",
+                "-vf",
+                f"fps={sample_rate:.6f}",
+                "-frames:v",
+                str(target_count),
+                "-q:v",
+                "2",
+                str(output_pattern),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        frame_paths = sorted(Path(temp_dir).glob("face-frame-*.jpg"))
+        frames = [path.read_bytes() for path in frame_paths if path.stat().st_size > 0]
+        if completed.returncode != 0 or not frames:
+            detail = _compact(completed.stderr, limit=240)
+            raise RuntimeError(detail or "FFmpeg did not extract Face ID frames from the event clip.")
+        return frames[:target_count]
+
+
 def _store_event_clip(client: Any, clip_bytes: bytes, *, content_type: str = "video/mp4") -> Dict[str, Any]:
     redis_obj = client or redis_client
     blob_obj = _event_clip_blob_client(redis_obj)
@@ -1599,32 +1786,57 @@ async def _run_face_burst(
     camera_target: str,
     initial_image: bytes,
     initial_content_type: str,
+    video_bytes: bytes = b"",
+    video_content_type: str = "video/mp4",
+    video_duration_seconds: float = 0,
 ) -> None:
     del initial_content_type
     identity_ids: List[str] = []
     errors: List[str] = []
     frames_checked = 0
     faces_detected = 0
-    frames: List[bytes] = [initial_image]
-    session["status"] = "capturing"
-    _save_face_session(redis_client, session)
-
-    capture_started = time.monotonic()
-    for frame_index in range(1, _FACE_BURST_FRAME_COUNT):
-        if not _face_id_enabled(redis_client):
-            session["status"] = "disabled"
-            session["error"] = "Face ID was disabled before the burst completed."
-            break
-        capture_at = capture_started + (frame_index * _FACE_BURST_INTERVAL_SECONDS)
-        await asyncio.sleep(max(0.0, capture_at - time.monotonic()))
+    frames: List[bytes] = []
+    if video_bytes:
+        session["status"] = "extracting"
+        session["frame_source"] = "video_clip"
+        _save_face_session(redis_client, session)
         try:
-            image_bytes, _content_type = await _capture_camera_snapshot(provider, camera_target)
-            if image_bytes:
-                frames.append(image_bytes)
+            frames = await asyncio.to_thread(
+                _extract_face_frames_from_clip,
+                video_bytes,
+                video_content_type,
+                duration_seconds=video_duration_seconds,
+                frame_count=_FACE_BURST_FRAME_COUNT,
+            )
         except Exception as exc:
             errors.append(_compact(str(exc), limit=180))
+            session["clip_frame_error"] = errors[-1]
         session["frames_captured"] = len(frames)
         _save_face_session(redis_client, session)
+
+    if not frames:
+        session["status"] = "capturing"
+        session["frame_source"] = "snapshot_burst"
+        frames = [initial_image] if initial_image else []
+        session["frames_captured"] = len(frames)
+        _save_face_session(redis_client, session)
+
+        capture_started = time.monotonic()
+        for frame_index in range(len(frames), _FACE_BURST_FRAME_COUNT):
+            if not _face_id_enabled(redis_client):
+                session["status"] = "disabled"
+                session["error"] = "Face ID was disabled before analysis completed."
+                break
+            capture_at = capture_started + (frame_index * _FACE_BURST_INTERVAL_SECONDS)
+            await asyncio.sleep(max(0.0, capture_at - time.monotonic()))
+            try:
+                image_bytes, _content_type = await _capture_camera_snapshot(provider, camera_target)
+                if image_bytes:
+                    frames.append(image_bytes)
+            except Exception as exc:
+                errors.append(_compact(str(exc), limit=180))
+            session["frames_captured"] = len(frames)
+            _save_face_session(redis_client, session)
 
     if session.get("status") != "disabled":
         session["status"] = "analyzing"
@@ -1634,7 +1846,7 @@ async def _run_face_burst(
     for image_bytes in frames:
         if not _face_id_enabled(redis_client):
             session["status"] = "disabled"
-            session["error"] = "Face ID was disabled before the burst completed."
+            session["error"] = "Face ID was disabled before analysis completed."
             break
         frames_checked += 1
         try:
@@ -1664,7 +1876,7 @@ async def _run_face_burst(
                 "identity_ids": identity_ids,
                 "frames_checked": frames_checked,
                 "faces_detected": faces_detected,
-                "frames_total": _FACE_BURST_FRAME_COUNT,
+                "frames_total": len(frames),
             }
         )
         _save_face_session(redis_client, session)
@@ -1687,6 +1899,27 @@ async def _run_face_burst(
         emitted = _publish_recognized_person_events(redis_client, session)
         session["automation_events_emitted"] = len(emitted)
         _save_face_session(redis_client, session)
+    await _dispatch_face_session_notification(session)
+
+
+async def _dispatch_face_session_notification(session: Dict[str, Any]) -> None:
+    monitor_id = _text(session.get("monitor_id"))
+    if not monitor_id:
+        return
+    try:
+        monitor = _get_monitor(redis_client, monitor_id)
+        event = _load_stored_event_by_id(
+            redis_client,
+            source=_text(session.get("area")),
+            event_id=_text(session.get("event_id")),
+        )
+        if monitor and event:
+            await _deliver_awareness_event_notification(monitor, event)
+    except Exception:
+        logger.exception(
+            "[awareness] failed to deliver the post-Face-ID notification for monitor %s",
+            monitor_id,
+        )
 
 
 def _schedule_face_burst(
@@ -1697,8 +1930,12 @@ def _schedule_face_burst(
     area: str,
     initial_image: bytes,
     initial_content_type: str,
+    video_bytes: bytes = b"",
+    video_content_type: str = "video/mp4",
+    video_duration_seconds: float = 0,
+    monitor_id: str = "",
 ) -> str:
-    if not initial_image or not _face_id_enabled(redis_client) or _face_id_runtime is None:
+    if (not initial_image and not video_bytes) or not _face_id_enabled(redis_client) or _face_id_runtime is None:
         return ""
     camera_key = f"{provider}:{camera_target}"
     active = _FACE_BURST_BY_CAMERA.get(camera_key)
@@ -1708,6 +1945,7 @@ def _schedule_face_burst(
     session = {
         "id": session_id,
         "event_id": event_id,
+        "monitor_id": _text(monitor_id),
         "area": area,
         "provider": provider,
         "camera_target": camera_target,
@@ -1715,6 +1953,7 @@ def _schedule_face_burst(
         "identity_ids": [],
         "frames_checked": 0,
         "frames_total": _FACE_BURST_FRAME_COUNT,
+        "frame_source": "video_clip" if video_bytes else "snapshot_burst",
         "created_at": _now_iso(),
     }
     _save_face_session(redis_client, session)
@@ -1725,6 +1964,9 @@ def _schedule_face_burst(
             camera_target=camera_target,
             initial_image=initial_image,
             initial_content_type=initial_content_type,
+            video_bytes=video_bytes,
+            video_content_type=video_content_type,
+            video_duration_seconds=video_duration_seconds,
         )
     )
     _FACE_BURST_TASKS.add(task)
@@ -1738,8 +1980,17 @@ def _schedule_face_burst(
             completed.result()
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception as exc:
             logger.exception("[awareness] Face ID burst failed for %s", camera_key)
+            failed_session = _load_face_session(redis_client, session_id) or dict(session)
+            failed_session["status"] = "error"
+            failed_session["error"] = _compact(str(exc), limit=180) or "Face ID analysis failed."
+            failed_session["completed_at"] = _now_iso()
+            _save_face_session(redis_client, failed_session)
+            _refresh_stored_face_events(redis_client, event_id=event_id)
+            fallback = asyncio.create_task(_dispatch_face_session_notification(failed_session))
+            _FACE_BURST_TASKS.add(fallback)
+            fallback.add_done_callback(_FACE_BURST_TASKS.discard)
 
     task.add_done_callback(_done)
     return session_id
@@ -1840,6 +2091,130 @@ def _monitor_string_list(value: Any) -> List[str]:
     return out
 
 
+def _encode_notification_destination(platform: Any, targets: Any = None) -> str:
+    platform_name = _text(platform).strip().lower()
+    if not platform_name:
+        return ""
+    target_map = targets if isinstance(targets, dict) else {}
+    cleaned_targets = {
+        _text(key): _text(value)
+        for key, value in target_map.items()
+        if _text(key) and _text(value)
+    }
+    return json.dumps(
+        {"platform": platform_name, "targets": cleaned_targets},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _decode_notification_destination(value: Any) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(_text(value))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    platform = _text(payload.get("platform")).strip().lower()
+    if not platform:
+        return None
+    raw_targets = payload.get("targets") if isinstance(payload.get("targets"), dict) else {}
+    targets = {
+        _text(key): _text(item)
+        for key, item in raw_targets.items()
+        if _text(key) and _text(item)
+    }
+    return {"platform": platform, "targets": targets}
+
+
+def _normalize_notification_destinations(value: Any) -> List[str]:
+    rows: List[str] = []
+    seen: set[str] = set()
+    for raw in _monitor_string_list(value):
+        destination = _decode_notification_destination(raw)
+        if not destination:
+            continue
+        encoded = _encode_notification_destination(
+            destination.get("platform"),
+            destination.get("targets"),
+        )
+        if not encoded or encoded in seen:
+            continue
+        seen.add(encoded)
+        rows.append(encoded)
+    return rows
+
+
+def _notification_destination_label(platform: str, targets: Dict[str, Any]) -> str:
+    for key in (
+        "label",
+        "device_name",
+        "device_id",
+        "channel",
+        "channel_id",
+        "room_alias",
+        "room_id",
+        "chat_id",
+        "service",
+        "device_service",
+        "scope",
+    ):
+        value = _text(targets.get(key))
+        if value:
+            return value
+    return "Defaults"
+
+
+def _notification_destination_options(client: Any, current_values: Any = None) -> List[Dict[str, str]]:
+    if not callable(notifier_destination_catalog):
+        return []
+    try:
+        catalog = notifier_destination_catalog(redis_client=client or redis_client, limit=250)
+    except Exception:
+        logger.debug("[awareness] notification destination discovery failed", exc_info=True)
+        catalog = {"platforms": []}
+    options: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for platform_row in catalog.get("platforms") or []:
+        if not isinstance(platform_row, dict):
+            continue
+        platform = _text(platform_row.get("platform")).strip().lower()
+        platform_label = _text(platform_row.get("label")) or platform.replace("_", " ").title()
+        if not platform:
+            continue
+        if not _bool(platform_row.get("requires_target"), False):
+            value = _encode_notification_destination(platform, {})
+            options.append({"value": value, "label": f"{platform_label}: defaults"})
+            seen.add(value)
+        for destination in platform_row.get("destinations") or []:
+            if not isinstance(destination, dict):
+                continue
+            targets = destination.get("targets") if isinstance(destination.get("targets"), dict) else {}
+            value = _encode_notification_destination(platform, targets)
+            if not value or value in seen:
+                continue
+            label = _text(destination.get("label")) or _notification_destination_label(platform, targets)
+            options.append({"value": value, "label": f"{platform_label}: {label}"})
+            seen.add(value)
+    for saved in _normalize_notification_destinations(current_values):
+        if saved in seen:
+            continue
+        destination = _decode_notification_destination(saved) or {}
+        platform = _text(destination.get("platform"))
+        label = _notification_destination_label(
+            platform,
+            destination.get("targets") if isinstance(destination.get("targets"), dict) else {},
+        )
+        options.append(
+            {
+                "value": saved,
+                "label": f"{platform.replace('_', ' ').title()}: {label} (saved)",
+            }
+        )
+        seen.add(saved)
+    return options
+
+
 def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
@@ -1925,6 +2300,10 @@ def _normalize_monitor(raw: Any) -> Optional[Dict[str, Any]]:
         "name": name,
         "area": area or kind,
         "enabled": _bool(raw.get("enabled"), True),
+        "notifications_enabled": _bool(raw.get("notifications_enabled"), False),
+        "notification_destinations": _normalize_notification_destinations(
+            raw.get("notification_destinations")
+        ),
         "description_mode": description_mode if kind == "camera" else "",
         "linked_camera_provider": linked_camera_provider,
         "linked_camera_device_id": linked_camera_device_id,
@@ -2732,6 +3111,25 @@ def _build_monitor_from_values(
                 raise ValueError(
                     f"The linked camera integration does not report support for {media_label}."
                 )
+    notifications_enabled = _bool(
+        _value(
+            values,
+            payload,
+            "notifications_enabled",
+            previous.get("notifications_enabled", False),
+        ),
+        False,
+    )
+    notification_destinations = _normalize_notification_destinations(
+        _value(
+            values,
+            payload,
+            "notification_destinations",
+            previous.get("notification_destinations") or [],
+        )
+    )
+    if notifications_enabled and not notification_destinations:
+        raise ValueError("Choose at least one destination for Awareness notifications.")
     now_ts = time.time()
     default_name = _text(device.get("name")) or device_id
     default_area = _text(device.get("room") or device.get("area")) or default_name
@@ -2750,6 +3148,8 @@ def _build_monitor_from_values(
         "name": _text(_value(values, payload, "name", previous.get("name") or default_name)) or default_name,
         "area": _text(_value(values, payload, "area", previous.get("area") or default_area)) or default_area,
         "enabled": _bool(_value(values, payload, "enabled", previous.get("enabled", True)), True),
+        "notifications_enabled": notifications_enabled,
+        "notification_destinations": notification_destinations,
         "description_mode": description_mode,
         "linked_camera_provider": linked_camera_provider,
         "linked_camera_device_id": linked_camera_device_id,
@@ -3146,7 +3546,11 @@ def _integration_camera_clip_sync(
         content = result[0]
         content_type = _text(result[1] if len(result) > 1 else "video/mp4") or "video/mp4"
         if isinstance(content, (bytes, bytearray)):
-            return bytes(content), content_type, {}
+            prepared, prepared_type, playback = _prepare_event_clip_for_playback(
+                bytes(content),
+                content_type,
+            )
+            return prepared, prepared_type, playback
     if isinstance(result, dict):
         content = result.get("bytes") or result.get("content") or result.get("video_bytes")
         content_type = _text(result.get("content_type") or result.get("mime_type") or "video/mp4")
@@ -3160,7 +3564,11 @@ def _integration_camera_clip_sync(
                 for key, value in result.items()
                 if key not in {"bytes", "content", "video_bytes"}
             }
-            return bytes(content), content_type or "video/mp4", metadata
+            prepared, prepared_type, playback = _prepare_event_clip_for_playback(
+                bytes(content),
+                content_type or "video/mp4",
+            )
+            return prepared, prepared_type, {**metadata, **playback}
     raise RuntimeError(f"{_provider_label(provider_token)} did not return clip bytes for {camera_ref}.")
 
 
@@ -4359,6 +4767,277 @@ def _load_event_clip_payload(client: Any, clip_id: str) -> Optional[Dict[str, An
     return {**metadata, "bytes_data": clip_bytes}
 
 
+def _load_stored_event_by_id(
+    client: Any,
+    *,
+    source: Any,
+    event_id: Any,
+) -> Optional[Dict[str, Any]]:
+    redis_obj = client or redis_client
+    target_id = _text(event_id)
+    if redis_obj is None or not target_id:
+        return None
+    keys: List[str] = []
+    source_name = _text(source)
+    if source_name:
+        keys.append(_event_key(source_name))
+    try:
+        discovered = list(redis_obj.scan_iter(match=f"{_EVENTS_PREFIX}*"))
+    except Exception:
+        discovered = []
+    for raw_key in discovered:
+        key = _text(raw_key)
+        if key and key not in keys:
+            keys.append(key)
+    for key in keys:
+        try:
+            rows = redis_obj.lrange(key, 0, -1) or []
+        except Exception:
+            continue
+        for row in rows:
+            try:
+                event = json.loads(row) if isinstance(row, (str, bytes, bytearray)) else row
+            except Exception:
+                continue
+            if isinstance(event, dict) and _text(event.get("id")) == target_id:
+                return event
+    return None
+
+
+def _update_stored_event_notification(
+    client: Any,
+    event: Dict[str, Any],
+    *,
+    status: str,
+    sent_count: int,
+    errors: List[str],
+) -> None:
+    redis_obj = client or redis_client
+    if redis_obj is None or not isinstance(event, dict):
+        return
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    next_data = dict(data)
+    next_data.update(
+        {
+            "notification_status": _text(status),
+            "notification_sent_count": max(0, int(sent_count or 0)),
+            "notification_at": _now_iso(),
+        }
+    )
+    cleaned_errors = [_compact(error, limit=180) for error in errors if _text(error)]
+    if cleaned_errors:
+        next_data["notification_errors"] = cleaned_errors
+    else:
+        next_data.pop("notification_errors", None)
+    event["data"] = next_data
+
+    event_id = _text(event.get("id"))
+    source = _text(event.get("source") or next_data.get("area"))
+    if not event_id or not source:
+        return
+    key = _event_key(source)
+    try:
+        rows = redis_obj.lrange(key, 0, -1) or []
+    except Exception:
+        return
+    for index, row in enumerate(rows):
+        try:
+            stored = json.loads(row) if isinstance(row, (str, bytes, bytearray)) else row
+        except Exception:
+            continue
+        if not isinstance(stored, dict) or _text(stored.get("id")) != event_id:
+            continue
+        stored["data"] = next_data
+        try:
+            redis_obj.lset(key, index, json.dumps(stored))
+        except Exception:
+            logger.debug("[awareness] failed to save notification status for %s", event_id, exc_info=True)
+        return
+
+
+def _notification_media_extension(content_type: Any, *, fallback: str) -> str:
+    media_type = _text(content_type).split(";", 1)[0].strip().lower()
+    extensions = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+        "video/x-matroska": "mkv",
+        "video/mpeg": "mpeg",
+        "video/x-msvideo": "avi",
+    }
+    return extensions.get(media_type, fallback)
+
+
+def _notification_attachments_for_event(client: Any, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    event_id = _text(event.get("id")) or "event"
+    clip_id = _text(event.get("clip_id") or data.get("clip_id"))
+    clip = _load_event_clip_payload(client, clip_id) if clip_id else None
+    if clip:
+        content_type = _text(clip.get("content_type") or "video/mp4")
+        return [
+            {
+                "type": "video",
+                "name": f"awareness-{event_id}.{_notification_media_extension(content_type, fallback='mp4')}",
+                "mimetype": content_type,
+                "bytes": clip["bytes_data"],
+            }
+        ]
+
+    snapshot_id = _text(event.get("snapshot_id") or data.get("snapshot_id"))
+    snapshot = _load_event_snapshot_payload(client, snapshot_id) if snapshot_id else None
+    if not snapshot:
+        return []
+    content_type = _text(snapshot.get("content_type") or "image/jpeg")
+    try:
+        image_bytes = base64.b64decode(_text(snapshot.get("data_b64")), validate=True)
+    except Exception:
+        return []
+    if not image_bytes:
+        return []
+    return [
+        {
+            "type": "image",
+            "name": f"awareness-{event_id}.{_notification_media_extension(content_type, fallback='jpg')}",
+            "mimetype": content_type,
+            "bytes": image_bytes,
+        }
+    ]
+
+
+def _notification_face_line(client: Any, event: Dict[str, Any]) -> str:
+    context = _face_event_context(client, event)
+    names: List[str] = []
+    seen: set[str] = set()
+    for value in context.get("known_people") or []:
+        name = " ".join(_text(value).split())
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        names.append(name)
+    unknown_count = _as_int(context.get("unknown_face_count"), 0, minimum=0)
+    parts: List[str] = []
+    if names:
+        if len(names) == 1:
+            people_text = names[0]
+        elif len(names) == 2:
+            people_text = f"{names[0]} and {names[1]}"
+        else:
+            people_text = f"{', '.join(names[:-1])}, and {names[-1]}"
+        parts.append(f"{people_text} recognized")
+    if unknown_count:
+        parts.append(
+            f"{unknown_count} unknown {'person' if unknown_count == 1 else 'people'} detected"
+        )
+    return f"Face ID: {'; '.join(parts)}." if parts else ""
+
+
+async def _dispatch_awareness_event_notification(
+    monitor: Dict[str, Any],
+    event: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not _bool(monitor.get("notifications_enabled"), False):
+        return {"ok": True, "skipped": "disabled", "sent_count": 0}
+
+    destinations = _normalize_notification_destinations(monitor.get("notification_destinations"))
+    if not callable(dispatch_notification) or not destinations:
+        reason = (
+            "Shared notification delivery is unavailable."
+            if not callable(dispatch_notification)
+            else "No notification destination is configured."
+        )
+        _update_stored_event_notification(
+            redis_client,
+            event,
+            status="failed",
+            sent_count=0,
+            errors=[reason],
+        )
+        logger.warning("[awareness] %s", reason)
+        return {"ok": False, "sent_count": 0, "errors": [reason]}
+
+    content = _compact(event.get("message"), limit=1200) or "Awareness recorded an event."
+    face_line = _notification_face_line(redis_client, event)
+    if face_line:
+        content = f"{content}\n\n{face_line}"
+    attachments = _notification_attachments_for_event(redis_client, event)
+    title = _compact(event.get("title"), limit=120) or "Tater Awareness"
+    event_id = _text(event.get("id"))
+    monitor_id = _text(monitor.get("id"))
+    event_type = _text(event.get("type") or "event")
+    sent = 0
+    errors: List[str] = []
+    for encoded in destinations:
+        destination = _decode_notification_destination(encoded)
+        if not destination:
+            continue
+        try:
+            result = await dispatch_notification(
+                platform=destination["platform"],
+                title=title,
+                content=content,
+                targets=destination["targets"],
+                origin={
+                    "platform": "awareness_core",
+                    "source": "awareness_core",
+                    "scope": monitor_id,
+                    "monitor_id": monitor_id,
+                    "event_id": event_id,
+                },
+                meta={"priority": "normal", "tags": ["awareness", event_type]},
+                attachments=attachments or None,
+            )
+            result_text = _text(result)
+            if not result_text or result_text.lower().startswith("queued notification"):
+                sent += 1
+            else:
+                errors.append(result_text)
+        except Exception as exc:
+            errors.append(_compact(str(exc), limit=180) or "Notification delivery failed.")
+
+    status = "sent" if sent else "failed"
+    _update_stored_event_notification(
+        redis_client,
+        event,
+        status=status,
+        sent_count=sent,
+        errors=errors,
+    )
+    if errors:
+        logger.warning(
+            "[awareness] notification delivery completed with %s error(s) for event %s",
+            len(errors),
+            event_id,
+        )
+    return {"ok": sent > 0, "sent_count": sent, "errors": errors}
+
+
+async def _deliver_awareness_event_notification(
+    monitor: Dict[str, Any],
+    event: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        return await _dispatch_awareness_event_notification(monitor, event)
+    except Exception as exc:
+        reason = _compact(str(exc), limit=180) or "Notification delivery failed."
+        logger.exception(
+            "[awareness] notification delivery failed without affecting event %s",
+            _text(event.get("id")),
+        )
+        _update_stored_event_notification(
+            redis_client,
+            event,
+            status="failed",
+            sent_count=0,
+            errors=[reason],
+        )
+        return {"ok": False, "sent_count": 0, "errors": [reason]}
+
+
 def get_htmlui_tab_media(
     *,
     media_id: str,
@@ -4418,7 +5097,7 @@ def _event_clip_preview(event: Dict[str, Any]) -> Dict[str, Any]:
         "clip_id": clip_id,
         "bytes": _as_int(data.get("clip_stored_bytes") or data.get("clip_bytes"), 0, minimum=0),
         "content_type": _text(data.get("clip_content_type") or "video/mp4"),
-        "url": f"/api/cores/awareness/media/{quote(clip_id)}",
+        "url": f"/api/cores/awareness_core/media/{quote(clip_id)}",
     }
 
 
@@ -4578,6 +5257,7 @@ def _event_forms_from_events(
                     "caption": f"{duration}-second event clip" if duration else "Camera event clip",
                     "preload": "metadata",
                     "controls": True,
+                    "reset_to_poster": True,
                     "hide_label": True,
                 }
             )
@@ -4956,6 +5636,7 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
     clip_bytes: bytes = b""
     clip_content_type = "video/mp4"
     clip_metadata: Dict[str, Any] = {}
+    clip_duration_seconds = 0.0
     errors: List[str] = []
     summary = ""
     try:
@@ -4979,6 +5660,10 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
                 provider,
                 camera_target,
                 clip_payload,
+            )
+            clip_duration_seconds = _as_float(
+                clip_metadata.get("duration_seconds"),
+                float(clip_seconds),
             )
             summary = await _video_describe(
                 video_bytes=clip_bytes,
@@ -5076,11 +5761,17 @@ async def _execute_camera_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
             area=area,
             initial_image=jpeg,
             initial_content_type=content_type,
+            video_bytes=clip_bytes if requested_description_mode == "video" else b"",
+            video_content_type=clip_content_type,
+            video_duration_seconds=clip_duration_seconds,
+            monitor_id=_text(monitor.get("id")),
         )
     if face_session_id:
         event_payload["data"]["face_session_id"] = face_session_id
         event_payload["data"]["face_status"] = "pending"
     _append_event(redis_client, source=area, payload=event_payload)
+    if not face_session_id:
+        await _deliver_awareness_event_notification(monitor, event_payload)
     return {
         "ok": True,
         "summary": summary,
@@ -5328,6 +6019,7 @@ async def _execute_sensor_monitor(monitor: Dict[str, Any], event: Dict[str, Any]
             else {},
         )
     _append_event(redis_client, source=area, payload=event_payload)
+    await _deliver_awareness_event_notification(monitor, event_payload)
     return {
         "ok": True,
         "summary": summary,
@@ -5352,6 +6044,7 @@ async def _execute_monitor(monitor: Dict[str, Any], event: Dict[str, Any]) -> Di
 def _monitor_form(
     monitor: Dict[str, Any],
     registry: Dict[str, Any],
+    client: Any = None,
 ) -> Dict[str, Any]:
     kind = _text(monitor.get("kind") or "camera")
     selected_device = _provider_ref(monitor.get("provider"), monitor.get("device_id"))
@@ -5407,6 +6100,13 @@ def _monitor_form(
             include_default_options=False,
         )
     )
+    notification_destinations = _normalize_notification_destinations(
+        monitor.get("notification_destinations")
+    )
+    notification_options = _notification_destination_options(
+        client or redis_client,
+        notification_destinations,
+    )
     trigger_labels = [
         _text(_monitor_trigger_option(value).get("label"))
         for value in monitor.get("trigger_events") or []
@@ -5414,6 +6114,11 @@ def _monitor_form(
     ]
     enabled_label = "Monitoring" if _bool(monitor.get("enabled"), True) else "Paused"
     face_id_label = "Face ID on" if _bool(monitor.get("face_id_enabled"), True) else "Face ID off"
+    notification_label = (
+        "Notifications on"
+        if _bool(monitor.get("notifications_enabled"), False)
+        else "Notifications off"
+    )
     description_label = "Video descriptions" if description_mode == "video" else "Image descriptions"
     linked_camera_label = ""
     if linked_camera_device:
@@ -5433,7 +6138,7 @@ def _monitor_form(
             f"{enabled_label} • {kind.title()} • {_provider_label(monitor.get('provider'))} • "
             f"{', '.join(trigger_labels) or 'No triggers'} • "
             f"{f'{description_label} • {face_id_label} • ' if kind == 'camera' else linked_camera_label}"
-            f"last event: {last_event}"
+            f"{notification_label} • last event: {last_event}"
         ),
         "save_action": "awareness_save_monitor",
         "remove_action": "awareness_remove_monitor",
@@ -5584,6 +6289,31 @@ def _monitor_form(
                     "The Face ID model must also be enabled in Settings › Models."
                 ),
                 "show_when": {"source_key": "kind", "equals": "camera"},
+            },
+            {
+                "type": "heading",
+                "label": "Optional Notifications",
+                "description": (
+                    "Send the completed Awareness event using its existing description and media. "
+                    "Face ID results are included when Face ID runs for the event."
+                ),
+            },
+            {
+                "key": "notifications_enabled",
+                "label": "Notify For This Source",
+                "type": "checkbox",
+                "value": _bool(monitor.get("notifications_enabled"), False),
+            },
+            {
+                "key": "notification_destinations",
+                "label": "Send Notifications To",
+                "type": "multiselect",
+                "presentation": "cards",
+                "options": notification_options,
+                "value": notification_destinations,
+                "description": "Choose one or more notification destinations already connected to Tater.",
+                "full_width": True,
+                "show_when": {"source_key": "notifications_enabled", "equals": True},
             },
         ],
     }
@@ -6306,7 +7036,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
     event_forms = list(event_page.get("items") or [])
     face_forms = _face_identity_forms(client)
     monitor_forms = [
-        _monitor_form(monitor, registry)
+        _monitor_form(monitor, registry, client)
         for monitor in sorted(
             monitors.values(),
             key=lambda row: (_text(row.get("kind")), _text(row.get("name")).casefold(), _text(row.get("id"))),
@@ -6353,6 +7083,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         source_key="linked_camera",
         include_default_options=False,
     )
+    notification_options = _notification_destination_options(client)
     event_filters = _event_type_filters(client)
     event_list_view = _event_list_view_enabled(client)
     return {
@@ -6440,7 +7171,10 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 {
                     "type": "heading",
                     "label": "1. Choose What Awareness Should Watch",
-                    "description": "Pick one camera or sensor. Automations and notifications stay in Automation Core.",
+                    "description": (
+                        "Pick one camera or sensor. Awareness can optionally send its completed events; "
+                        "use Automation Core for custom workflows."
+                    ),
                 },
                 {
                     "key": "kind",
@@ -6593,6 +7327,31 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                         "The Face ID model must also be enabled in Settings › Models."
                     ),
                     "show_when": {"source_key": "kind", "equals": "camera"},
+                },
+                {
+                    "type": "heading",
+                    "label": "Optional Notifications",
+                    "description": (
+                        "Send this source's completed event with the same description and stored image or clip. "
+                        "Face ID results are included when available."
+                    ),
+                },
+                {
+                    "key": "notifications_enabled",
+                    "label": "Notify For This Source",
+                    "type": "checkbox",
+                    "value": False,
+                },
+                {
+                    "key": "notification_destinations",
+                    "label": "Send Notifications To",
+                    "type": "multiselect",
+                    "presentation": "cards",
+                    "options": notification_options,
+                    "value": [],
+                    "description": "Choose one or more notification destinations already connected to Tater.",
+                    "full_width": True,
+                    "show_when": {"source_key": "notifications_enabled", "equals": True},
                 },
             ],
         },
