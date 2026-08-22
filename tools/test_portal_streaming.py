@@ -29,6 +29,35 @@ telegram_portal = _load_portal("telegram")
 matrix_portal = _load_portal("matrix")
 
 
+class DiscordAttachmentTests(unittest.TestCase):
+    def test_discord_mp3_alias_is_normalized_for_audio_understanding(self):
+        self.assertEqual(
+            discord_portal._normalize_discord_attachment_mimetype(
+                "sm64_super_mario_64_theme.mp3",
+                "audio/mpeg3",
+            ),
+            "audio/mpeg",
+        )
+
+    def test_discord_octet_stream_uses_filename_mimetype(self):
+        self.assertEqual(
+            discord_portal._normalize_discord_attachment_mimetype(
+                "song.mp3",
+                "application/octet-stream",
+            ),
+            "audio/mpeg",
+        )
+
+    def test_discord_supported_mimetype_is_preserved(self):
+        self.assertEqual(
+            discord_portal._normalize_discord_attachment_mimetype(
+                "clip.wav",
+                "audio/wav; charset=binary",
+            ),
+            "audio/wav",
+        )
+
+
 class _DiscordMessage:
     def __init__(self, content: str, *, edit_failures: int = 0, delete_fails: bool = False):
         self.content = content

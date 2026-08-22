@@ -4,6 +4,7 @@ import json
 import asyncio
 import inspect
 import logging
+import mimetypes
 import re
 from contextlib import asynccontextmanager, suppress
 import discord
@@ -40,7 +41,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.9"
+__version__ = "1.0.10"
 
 
 load_dotenv()
@@ -88,6 +89,27 @@ PORTAL_SETTINGS = {
 # Attachment storage (NO base64 in history)
 # -------------------------
 ATTACH_PREFIX = "tater:blob:discord"
+
+DISCORD_ATTACHMENT_MIMETYPE_ALIASES = {
+    "audio/mpeg3": "audio/mpeg",
+    "audio/mp3": "audio/mpeg",
+    "audio/x-mp3": "audio/mpeg",
+    "audio/x-mpeg": "audio/mpeg",
+    "audio/x-mpeg3": "audio/mpeg",
+    "audio/x-mpeg-3": "audio/mpeg",
+}
+
+
+def _normalize_discord_attachment_mimetype(filename: Any, content_type: Any) -> str:
+    """Return a canonical MIME type for Discord attachment metadata."""
+    raw_mimetype = str(content_type or "").split(";", 1)[0].strip().lower()
+    normalized = DISCORD_ATTACHMENT_MIMETYPE_ALIASES.get(raw_mimetype, raw_mimetype)
+    if normalized not in {"", "application/octet-stream", "binary/octet-stream"}:
+        return normalized
+
+    guessed = str(mimetypes.guess_type(str(filename or "").strip())[0] or "").strip().lower()
+    guessed = DISCORD_ATTACHMENT_MIMETYPE_ALIASES.get(guessed, guessed)
+    return guessed or normalized or "application/octet-stream"
 
 
 def _blob_key():
@@ -1282,16 +1304,18 @@ class discord_portal(commands.Bot):
         if message.attachments:
             for attachment in message.attachments:
                 try:
-                    if not attachment.content_type:
-                        continue
+                    attachment_mimetype = _normalize_discord_attachment_mimetype(
+                        attachment.filename,
+                        attachment.content_type,
+                    )
 
                     file_bytes = await attachment.read()
 
-                    if attachment.content_type.startswith("image/"):
+                    if attachment_mimetype.startswith("image/"):
                         file_type = "image"
-                    elif attachment.content_type.startswith("audio/"):
+                    elif attachment_mimetype.startswith("audio/"):
                         file_type = "audio"
-                    elif attachment.content_type.startswith("video/"):
+                    elif attachment_mimetype.startswith("video/"):
                         file_type = "video"
                     else:
                         file_type = "file"
@@ -1301,7 +1325,7 @@ class discord_portal(commands.Bot):
                     file_obj = {
                         "type": file_type,
                         "name": attachment.filename,
-                        "mimetype": attachment.content_type,
+                        "mimetype": attachment_mimetype,
                         "blob_key": blob_key,
                         "size": len(file_bytes),
                     }
@@ -1318,7 +1342,7 @@ class discord_portal(commands.Bot):
                             "type": file_type,
                             "blob_key": blob_key,
                             "name": attachment.filename or f"{file_type}.bin",
-                            "mimetype": attachment.content_type or "application/octet-stream",
+                            "mimetype": attachment_mimetype,
                             "source": "discord_attachment",
                             "size": len(file_bytes),
                         }
