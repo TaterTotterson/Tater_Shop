@@ -191,7 +191,7 @@
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.4.2",
+      "version": "1.4.3",
       "min_tater_version": "59",
       "description": "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server catalog, explain each pick and the group as a whole, create a separate global Main Menu Message from cross-module activity, and voice both with the user's TTS settings.",
       "settings_category": "Tater Tube Core Settings",
@@ -207,7 +207,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "1fdffd8c67f4784cd750d9119c967ecc8bc1adf67e14a1bd39da4721e02d356b"
+      "sha256": "3a48a61419e1b31a7c41611de82b804bddc2f8d99829f46ead2e66347e7c31c4"
     }
   ]
 }

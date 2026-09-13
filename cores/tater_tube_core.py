@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import requests
 
@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
@@ -75,10 +75,13 @@ CORE_SETTINGS = {
             "description": "How long a recommendation batch remains visible on players.",
         },
         "candidate_limit": {
-            "label": "Catalog Candidate Limit",
+            "label": "Recommendation Shortlist Size",
             "type": "number",
             "default": 200,
-            "description": "Maximum launchable catalog items sent to the recommendation model.",
+            "description": (
+                "Size of the rotating movie, series, and genre-balanced shortlist sent to the model. "
+                "Tater Tube Server considers the full catalog before building it."
+            ),
         },
         "prompt_context_enabled": {
             "label": "Prompt Context Enabled",
@@ -119,7 +122,7 @@ MUSIC_RECOMMENDATIONS_KEY = "music_core_recommendations_v1"
 DEFAULT_PROFILE_ID = "household"
 REQUEST_TIMEOUT_SECONDS = 25
 TTS_MAX_TEXT_CHARS = 800
-GENERATION_SCHEMA_VERSION = 4
+GENERATION_SCHEMA_VERSION = 5
 TATER_PICKS_ACTIVITY_SOURCES = {
     "local",
     "local_media",
@@ -223,6 +226,7 @@ def _local_moment(now: Optional[datetime] = None) -> Dict[str, Any]:
         "weekday": current.strftime("%A"),
         "time_of_day": time_of_day,
         "day_kind": "weekend" if current.weekday() >= 5 else "weekday",
+        "weekend_morning": current.weekday() >= 5 and 5 <= hour < 12,
         "season": season,
         "nearby_occasion": _nearby_occasion(current),
     }
@@ -692,7 +696,7 @@ def _compact_activity_events(
     }
 
 
-def _compact_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _compact_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [
         {
             "id": _text(candidate.get("id")),
@@ -701,9 +705,36 @@ def _compact_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, str]
             "source": _text(candidate.get("source")),
             "year": _text(candidate.get("year")),
             "description": _text(candidate.get("description"))[:300],
+            "genres": [
+                _text(genre)[:80]
+                for genre in (candidate.get("genres") or [])
+                if _text(genre)
+            ][:12],
         }
         for candidate in candidates
     ]
+
+
+def _previous_recommendation_picks(payload: Any) -> List[Dict[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = _text(item.get("candidate_id"))
+        if not candidate_id or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "title": _text(item.get("title"))[:240],
+                "media_type": _text(item.get("media_type"))[:40],
+            }
+        )
+    return rows[:12]
 
 
 def _main_menu_fallback(
@@ -881,10 +912,24 @@ def _generate_recommendations_impl(
     server_events = _server_pick_activity(context)
     global_events = _combined_activity(context, redis_obj)
 
+    count = _as_int(cfg.get("recommendation_count"), 8, 1, 12)
     candidate_limit = _as_int(cfg.get("candidate_limit"), 200, 20, 500)
+    local_moment = _local_moment()
+    previous_cache = _load_json(redis_obj, RECOMMENDATIONS_KEY, {})
+    previous_picks = _previous_recommendation_picks(previous_cache)
+    candidate_query = {
+        "limit": candidate_limit,
+        "profile_id": _profile_id(cfg),
+        "seed": f"{time.time_ns()}-{_profile_id(cfg)}",
+        "weekend_morning": "1" if local_moment.get("weekend_morning") else "0",
+    }
+    if previous_picks:
+        candidate_query["exclude_ids"] = ",".join(
+            row["candidate_id"] for row in previous_picks
+        )
     candidate_data = _api_request(
         "GET",
-        f"tater/core/candidates?limit={candidate_limit}&profile_id={_profile_id(cfg)}",
+        f"tater/core/candidates?{urlencode(candidate_query)}",
         settings=cfg,
         redis_obj=redis_obj,
     )
@@ -893,7 +938,15 @@ def _generate_recommendations_impl(
     if not candidates:
         raise ValueError("Tater Tube Server has no launchable recommendation candidates.")
 
-    count = _as_int(cfg.get("recommendation_count"), 8, 1, 12)
+    previous_ids = {row["candidate_id"] for row in previous_picks}
+    unseen_candidates = [
+        candidate
+        for candidate in candidates
+        if _text(candidate.get("id")) not in previous_ids
+    ]
+    if len(unseen_candidates) >= count:
+        candidates = unseen_candidates
+
     compact_server_events, server_patterns = _compact_activity_events(server_events)
     compact_candidates = _compact_candidates(candidates)
 
@@ -911,9 +964,17 @@ def _generate_recommendations_impl(
             "session; duration_ms is the full title length and progress is only the timeline position. "
             "A short watch, a seek near the end, or a late live-channel tune-in does not mean the whole "
             "title was watched, even if its state is completed. Do not infer watched time when it is absent. "
-            "Let the supplied local moment gently influence the mood: weekday versus weekend, time "
-            "of day, season, or a nearby holiday can matter, but only choose a seasonal title when it actually "
-            "exists in the supplied catalog. Write summary as a polished Tater Link message for a TV home-screen "
+            "The server built this rotating shortlist from the entire catalog, balancing media types and genres. "
+            "When both movies and series are available, choose a useful mix of both; for eight picks, normally "
+            "include at least two series and two movies when enough relevant candidates exist. Avoid repeating "
+            "the previous batch when alternatives exist. If weekend_morning is true, cartoons, animation, family, "
+            "and kids titles are a high priority: for eight picks, include at least three when three suitable "
+            "candidates exist, while keeping the rest varied. Let the supplied local moment influence selection: "
+            "weekday versus weekend, time of day, season, or a nearby holiday can matter, but only choose a "
+            "seasonal title when it actually exists in the supplied catalog. The generated text is cached for "
+            "several hours, so summary, picks_briefing, and item reasons must remain accurate throughout that "
+            "window: never mention a weekday, morning, afternoon, evening, tonight, today, or the current time. "
+            "Write summary as a polished Tater Link message for a TV home-screen "
             "hero: one or two short friendly sentences under 38 words, naming at most one exact selected title. "
             "Also write picks_briefing as a distinct collection-level explanation to speak when Tater's Picks "
             "opens. In two or three natural sentences under 75 words, explain why these recommendations work "
@@ -928,7 +989,8 @@ def _generate_recommendations_impl(
         ),
         {
             "profile_id": _profile_id(cfg),
-            "local_moment": _local_moment(),
+            "local_moment": local_moment,
+            "previous_recommendation_picks": previous_picks,
             "server_viewing_patterns": server_patterns,
             "recent_server_viewing": compact_server_events,
             "server_catalog_candidates": compact_candidates,

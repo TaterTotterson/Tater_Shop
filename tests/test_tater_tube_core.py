@@ -66,8 +66,17 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
         self.assertEqual(moment["weekday"], "Sunday")
         self.assertEqual(moment["time_of_day"], "evening")
         self.assertEqual(moment["day_kind"], "weekend")
+        self.assertFalse(moment["weekend_morning"])
         self.assertEqual(moment["season"], "winter")
         self.assertEqual(moment["nearby_occasion"], "winter holiday season")
+
+    def test_local_moment_marks_weekend_mornings(self):
+        moment = self.core._local_moment(
+            datetime(2026, 9, 13, 8, 30, tzinfo=timezone.utc)
+        )
+        self.assertEqual(moment["weekday"], "Sunday")
+        self.assertEqual(moment["time_of_day"], "morning")
+        self.assertTrue(moment["weekend_morning"])
 
     def test_sends_a_url_encoded_unicode_name_header(self):
         response = types.SimpleNamespace(
@@ -294,6 +303,130 @@ class TaterTubeCoreAssistantNameTests(unittest.TestCase):
         self.assertIn("Server Movie", global_titles)
         saved_main_menu = json.loads(client.get(self.core.MAIN_MENU_MESSAGE_KEY))
         self.assertEqual(saved_main_menu["suggestion"]["kind"], "play")
+
+    def test_recommendations_rotate_previous_picks_and_request_weekend_balance(self):
+        client = FakeRedis()
+        client.hset(
+            self.core.SETTINGS_KEY,
+            mapping={
+                "server_url": "http://tube.local",
+                "token": "secret",
+                "recommendation_count": "1",
+            },
+        )
+        client.set(self.core.CONTEXT_KEY, json.dumps({"events": []}))
+        client.set(
+            self.core.RECOMMENDATIONS_KEY,
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "candidate_id": "old-movie",
+                            "title": "Yesterday's Pick",
+                            "media_type": "movie",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        class FakeLLM:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                system = kwargs["messages"][0]["content"]
+                payload = json.loads(kwargs["messages"][1]["content"])
+                self.calls.append((system, payload))
+                if "server_catalog_candidates" in payload:
+                    return {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "summary": "A colorful mix is ready.",
+                                    "picks_briefing": "These animated adventures and comedies make a playful mix.",
+                                    "items": [
+                                        {
+                                            "candidate_id": "new-series",
+                                            "reason": "A lively animated adventure.",
+                                        }
+                                    ],
+                                }
+                            )
+                        }
+                    }
+                return {
+                    "message": {
+                        "content": json.dumps(
+                            {"message": "Try New Series.", "suggestion": {"title": "New Series"}}
+                        )
+                    }
+                }
+
+        candidate_paths = []
+
+        def fake_api(method, path, **kwargs):
+            if path.startswith("tater/core/candidates"):
+                candidate_paths.append(path)
+                return {
+                    "candidates": [
+                        {
+                            "id": "new-series",
+                            "title": "New Series",
+                            "media_type": "series",
+                            "source": "local_media",
+                            "genres": ["Animation", "Family"],
+                        },
+                        {
+                            "id": "old-movie",
+                            "title": "Yesterday's Pick",
+                            "media_type": "movie",
+                            "source": "local_media",
+                            "genres": ["Comedy"],
+                        },
+                    ]
+                }
+            if path == "tater/core/recommendations":
+                return {"batch_id": "batch-2"}
+            raise AssertionError((method, path, kwargs))
+
+        weekend_morning = {
+            "local_datetime": "2026-09-13T08:30-05:00",
+            "weekday": "Sunday",
+            "time_of_day": "morning",
+            "day_kind": "weekend",
+            "weekend_morning": True,
+            "season": "fall",
+            "nearby_occasion": "",
+        }
+        loop = asyncio.new_event_loop()
+        llm = FakeLLM()
+        try:
+            with patch.object(self.core, "_api_request", side_effect=fake_api), patch.object(
+                self.core, "_local_moment", return_value=weekend_morning
+            ):
+                self.core._generate_recommendations_impl(loop, llm, client)
+        finally:
+            loop.close()
+
+        self.assertEqual(len(candidate_paths), 1)
+        self.assertIn("weekend_morning=1", candidate_paths[0])
+        self.assertIn("exclude_ids=old-movie", candidate_paths[0])
+        pick_system, pick_payload = llm.calls[0]
+        self.assertIn("cartoons, animation, family", pick_system)
+        self.assertIn("never mention a weekday", pick_system)
+        self.assertEqual(
+            pick_payload["previous_recommendation_picks"][0]["candidate_id"],
+            "old-movie",
+        )
+        self.assertEqual(
+            [row["id"] for row in pick_payload["server_catalog_candidates"]],
+            ["new-series"],
+        )
+        self.assertEqual(
+            pick_payload["server_catalog_candidates"][0]["genres"],
+            ["Animation", "Family"],
+        )
 
     def test_recommendation_generation_requires_a_distinct_picks_briefing(self):
         client = FakeRedis()
