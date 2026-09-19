@@ -22,6 +22,14 @@ The manifests are the source of the store inventory:
 - `portal_manifest.json` for portals.
 - `core_manifest.json` for cores.
 
+The curated repository directories power the **Trusted repositories** picker in Tater:
+
+- `verba_repositories.json` for third-party Verba manifests.
+- `portal_repositories.json` for third-party Portal manifests.
+- `core_repositories.json` for third-party Core manifests.
+
+Each directory uses schema `1` and contains a `repositories` list. A repository entry includes a stable `id`, display `name`, repository name, description, author name/profile URL, raw `manifest_url`, project `homepage`, and optional tags. Publishing a directory change makes it available to Tater clients without an app update; selecting an entry adds that manifest to the normal Store catalog.
+
 The README is intentionally not an inventory table. It is the authoring guide for adding new shop packages.
 
 ## Repo Layout
