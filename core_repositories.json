@@ -19,6 +19,28 @@
         "voice",
         "face id"
       ]
+    },
+    {
+      "id": "heapsoftware-tater-personal-music-core",
+      "name": "Personal Music Core",
+      "repository": "Tater-Personal-Music-Core",
+      "description": "Per-person music libraries, playback, recommendations, smart shuffle, sleep timers, and Follow-Me audio for Tater.",
+      "author": {
+        "name": "heapsoftware",
+        "url": "https://github.com/heapsoftware"
+      },
+      "manifest_url": "https://raw.githubusercontent.com/heapsoftware/Tater-Personal-Music-Core/main/core_manifest.json",
+      "homepage": "https://github.com/heapsoftware/Tater-Personal-Music-Core",
+      "tags": [
+        "music",
+        "per-person",
+        "emby",
+        "jellyfin",
+        "subsonic",
+        "plex",
+        "multi-room",
+        "follow-me"
+      ]
     }
   ]
 }
