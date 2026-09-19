@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.5.0"
+__version__ = "3.5.1"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -5996,13 +5996,6 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                     "empty_message": f"Play some music to help {assistant_name} build recommendations.",
                 },
                 {"key": "providers", "label": "Tater Tube", "source": "items", "item_group": "providers"},
-                {
-                    "key": "airplay",
-                    "label": "AirPlay",
-                    "source": "items",
-                    "item_group": "airplay",
-                    "empty_message": "AirPlay Receiver is unavailable in this Tater build.",
-                },
                 {"key": "settings", "label": "Settings", "source": "items", "item_group": "settings"},
             ],
             "item_fields_dropdown": True,

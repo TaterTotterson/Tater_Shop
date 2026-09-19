@@ -1941,7 +1941,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertNotIn("player", tabs)
         self.assertEqual(tabs["playlist"]["source"], "player_queue")
         self.assertEqual(tabs["recommendations"]["item_group"], "recommendations")
-        self.assertEqual(tabs["airplay"]["item_group"], "airplay")
+        self.assertNotIn("airplay", tabs)
         self.assertEqual(
             [row["key"] for row in tabs["library"]["groups"]],
             ["search", "genres", "artists", "albums"],
@@ -3120,7 +3120,9 @@ class MusicCoreTests(unittest.TestCase):
     def test_airplay_receiver_settings_are_owned_by_tater(self):
         payload = self.core.get_htmlui_tab_data(redis_client=self.redis)
         forms = payload["ui"]["item_forms"]
+        manager_tabs = payload["ui"]["manager_tabs"]
         self.assertFalse(any(row.get("id") == "settings:airplay_receiver" for row in forms))
+        self.assertFalse(any(row.get("key") == "airplay" for row in manager_tabs))
         self.assertFalse(any("airplay_receiver" in key for key in self.core.CORE_SETTINGS["required"]))
 
         result = self.core.handle_htmlui_tab_action(
