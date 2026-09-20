@@ -6,6 +6,10 @@ import asyncio
 import secrets
 import copy
 import logging
+import re
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 import base64
@@ -28,6 +32,7 @@ logger.setLevel(logging.INFO)
 WEBUI_FILE_BLOB_PREFIX = "webui:file:"
 SOURCE_IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 SOURCE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+DISCORD_DEFAULT_UPLOAD_LIMIT = 20 * 1024 * 1024
 
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -44,7 +49,7 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImageVideoPlugin(ToolVerba):
     name = "comfyui_image_video"
     verba_name = "ComfyUI Animate Image"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_video","arguments":{"prompt":"<Describe how you want the animation to move or behave>"}}'
     description = "Animates the most recent image in chat into a looping WebP or MP4 using ComfyUI."
@@ -80,7 +85,7 @@ class ComfyUIImageVideoPlugin(ToolVerba):
         }
     }
     waiting_prompt_template = "Generate a playful, friendly message saying you’re bringing their image to life now! Only output that message."
-    platforms = ["webui", "little_spud", "macos"]
+    platforms = ["discord", "webui", "little_spud", "macos"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -652,6 +657,197 @@ class ComfyUIImageVideoPlugin(ToolVerba):
             os.remove(p)
         os.rmdir(tmp_dir)
 
+    @staticmethod
+    def _discord_upload_limit(message=None) -> int:
+        candidates = []
+        guild = getattr(message, "guild", None)
+        if guild is not None:
+            candidates.append(getattr(guild, "filesize_limit", None))
+        channel = getattr(message, "channel", None)
+        channel_guild = getattr(channel, "guild", None)
+        if channel_guild is not None:
+            candidates.append(getattr(channel_guild, "filesize_limit", None))
+
+        for value in candidates:
+            try:
+                limit = int(value)
+            except (TypeError, ValueError):
+                continue
+            if limit > 0:
+                return limit
+        return DISCORD_DEFAULT_UPLOAD_LIMIT
+
+    @staticmethod
+    def _discord_safe_target(upload_limit: int) -> int:
+        limit = max(1, int(upload_limit or DISCORD_DEFAULT_UPLOAD_LIMIT))
+        # Leave room for Discord's multipart envelope and boundary accounting.
+        reserve = min(
+            1024 * 1024,
+            max(16 * 1024, int(limit * 0.05)),
+            max(1, limit // 10),
+        )
+        return max(1, limit - reserve)
+
+    @staticmethod
+    def _ffmpeg_executable() -> str:
+        configured = str(os.environ.get("TATER_FFMPEG_PATH") or "").strip()
+        if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+            return configured
+        discovered = shutil.which("ffmpeg")
+        if discovered:
+            return discovered
+        raise RuntimeError("FFmpeg is required to prepare large animations for Discord.")
+
+    @staticmethod
+    def _ffprobe_executable(ffmpeg_path: str) -> str:
+        configured = str(os.environ.get("TATER_FFPROBE_PATH") or "").strip()
+        if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+            return configured
+        sibling = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe")
+        if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+            return sibling
+        return shutil.which("ffprobe") or ""
+
+    @staticmethod
+    def _probe_video(input_path: str, ffmpeg_path: str) -> tuple[float, bool]:
+        ffprobe_path = ComfyUIImageVideoPlugin._ffprobe_executable(ffmpeg_path)
+        if ffprobe_path:
+            probe = subprocess.run(
+                [
+                    ffprobe_path,
+                    "-v", "error",
+                    "-show_entries", "format=duration:stream=codec_type",
+                    "-of", "json",
+                    input_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if probe.returncode == 0:
+                try:
+                    payload = json.loads(probe.stdout or "{}")
+                    duration = float((payload.get("format") or {}).get("duration") or 0)
+                    has_audio = any(
+                        str(stream.get("codec_type") or "").lower() == "audio"
+                        for stream in (payload.get("streams") or [])
+                        if isinstance(stream, dict)
+                    )
+                    if duration > 0:
+                        return duration, has_audio
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+
+        probe = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-i", input_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr or "")
+        if not match:
+            raise RuntimeError("Could not determine the animation duration.")
+        hours, minutes, seconds = match.groups()
+        duration = (int(hours) * 3600) + (int(minutes) * 60) + float(seconds)
+        if duration <= 0:
+            raise RuntimeError("The animation has no playable duration.")
+        has_audio = bool(re.search(r"Stream #.*Audio:", probe.stderr or ""))
+        return duration, has_audio
+
+    @staticmethod
+    def _run_ffmpeg(command: list[str], *, timeout: int = 1200) -> None:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "FFmpeg failed").strip()
+            raise RuntimeError(detail[-1200:])
+
+    @staticmethod
+    def _compress_video_for_discord(binary: bytes, target_bytes: int) -> tuple[bytes, dict]:
+        if not isinstance(binary, (bytes, bytearray)) or not binary:
+            raise RuntimeError("The generated animation is empty.")
+        source = bytes(binary)
+        target = max(1, int(target_bytes))
+        if len(source) <= target:
+            return source, {"compressed": False, "original_size": len(source), "delivered_size": len(source)}
+
+        ffmpeg_path = ComfyUIImageVideoPlugin._ffmpeg_executable()
+        with tempfile.TemporaryDirectory(prefix="tater-discord-video-") as tmp_dir:
+            input_path = os.path.join(tmp_dir, "source.mp4")
+            output_path = os.path.join(tmp_dir, "discord.mp4")
+            passlog_path = os.path.join(tmp_dir, "ffmpeg-pass")
+            with open(input_path, "wb") as handle:
+                handle.write(source)
+
+            duration, has_audio = ComfyUIImageVideoPlugin._probe_video(input_path, ffmpeg_path)
+            # Budget conservatively so container overhead cannot push the final file over the cap.
+            total_kbps = max(96, int((target * 8 * 0.88) / duration / 1000))
+            audio_kbps = 64 if has_audio and total_kbps >= 192 else (48 if has_audio else 0)
+            base_video_kbps = max(48, total_kbps - audio_kbps - 24)
+            rate_scale = 1.0
+            attempts = (720, 720, 540, 480, 360)
+            last_size = len(source)
+
+            for attempt, max_height in enumerate(attempts, start=1):
+                max_width = ((max_height * 16 // 9) // 2) * 2
+                video_kbps = max(40, int(base_video_kbps * rate_scale))
+                video_options = [
+                    "-map", "0:v:0",
+                    "-vf", (
+                        f"scale=w=min({max_width}\\,iw):h=min({max_height}\\,ih):"
+                        "force_original_aspect_ratio=decrease:force_divisible_by=2"
+                    ),
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-pix_fmt", "yuv420p",
+                    "-b:v", f"{video_kbps}k",
+                    "-passlogfile", passlog_path,
+                ]
+                ComfyUIImageVideoPlugin._run_ffmpeg(
+                    [
+                        ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", input_path,
+                        *video_options,
+                        "-pass", "1",
+                        "-an", "-f", "null", os.devnull,
+                    ]
+                )
+
+                second_pass = [
+                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", input_path,
+                    *video_options,
+                    "-pass", "2",
+                ]
+                if has_audio:
+                    second_pass.extend(["-map", "0:a:0?", "-c:a", "aac", "-b:a", f"{audio_kbps}k"])
+                else:
+                    second_pass.append("-an")
+                second_pass.extend(["-movflags", "+faststart", output_path])
+                ComfyUIImageVideoPlugin._run_ffmpeg(second_pass)
+
+                with open(output_path, "rb") as handle:
+                    candidate = handle.read()
+                last_size = len(candidate)
+                if candidate and last_size <= target:
+                    return candidate, {
+                        "compressed": True,
+                        "original_size": len(source),
+                        "delivered_size": last_size,
+                        "attempts": attempt,
+                    }
+
+                ratio = target / max(1, last_size)
+                rate_scale *= max(0.35, min(0.80, ratio * 0.88))
+
+        raise RuntimeError(
+            f"Could not reduce the animation below {target} bytes (smallest result: {last_size} bytes)."
+        )
+
     # ---------------------------
     # Core generation (sync)
     # ---------------------------
@@ -921,13 +1117,93 @@ class ComfyUIImageVideoPlugin(ToolVerba):
             )
 
     # --- Discord Handler ---
-    async def handle_discord(self, message, args, llm_client):
-        return action_failure(
-            code="unsupported_platform",
-            message="`comfyui_image_video` is only available in WebUI due to file size limitations.",
-            say_hint="Explain this plugin is webui-only.",
-            available_on=["webui"],
+    async def handle_discord(
+        self,
+        message=None,
+        args=None,
+        llm_client=None,
+        context=None,
+        *unused_args,
+        **unused_kwargs,
+    ):
+        ctx = dict(context) if isinstance(context, dict) else {}
+        if message is not None and "message" not in ctx:
+            ctx["message"] = message
+
+        result = await self._generate(args or {}, llm_client, context=ctx)
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result
+
+        artifacts = result.get("artifacts")
+        if not isinstance(artifacts, list):
+            return result
+
+        upload_limit = self._discord_upload_limit(message)
+        target_size = self._discord_safe_target(upload_limit)
+        updated_artifacts = []
+        compression_details = None
+        try:
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    updated_artifacts.append(artifact)
+                    continue
+                binary = artifact.get("bytes")
+                is_video = (
+                    str(artifact.get("type") or "").lower() == "video"
+                    or str(artifact.get("mimetype") or "").lower().startswith("video/")
+                )
+                if not is_video or not isinstance(binary, (bytes, bytearray)):
+                    updated_artifacts.append(artifact)
+                    continue
+
+                delivered, details = await asyncio.to_thread(
+                    self._compress_video_for_discord,
+                    bytes(binary),
+                    target_size,
+                )
+                updated = dict(artifact)
+                updated.update(
+                    {
+                        "bytes": delivered,
+                        "size": len(delivered),
+                        "type": "video",
+                        "mimetype": "video/mp4",
+                    }
+                )
+                if details.get("compressed"):
+                    updated["name"] = "animated-discord.mp4"
+                    compression_details = details
+                updated_artifacts.append(updated)
+        except Exception as exc:
+            logger.exception("Could not prepare animation for Discord: %s", exc)
+            return action_failure(
+                code="discord_video_too_large",
+                message=(
+                    "The animation was generated, but Tater could not reduce it below this "
+                    "Discord server's upload limit. Try a shorter animation or a lower resolution."
+                ),
+                diagnosis={"detail": str(exc)},
+                say_hint=(
+                    "Explain that the generated video exceeded Discord's upload limit and "
+                    "suggest a shorter or lower-resolution animation."
+                ),
+            )
+
+        updated_result = dict(result)
+        updated_result["artifacts"] = updated_artifacts
+        facts = dict(result.get("facts") or {})
+        facts.update(
+            {
+                "discord_upload_limit": upload_limit,
+                "discord_target_size": target_size,
+                "discord_compressed": bool(compression_details),
+            }
         )
+        if compression_details:
+            facts["original_size"] = compression_details["original_size"]
+            facts["delivered_size"] = compression_details["delivered_size"]
+        updated_result["facts"] = facts
+        return updated_result
 
     # --- WebUI Handler ---
     async def handle_webui(self, args, llm_client, context=None):
@@ -942,9 +1218,9 @@ class ComfyUIImageVideoPlugin(ToolVerba):
     async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
         return action_failure(
             code="unsupported_platform",
-            message="`comfyui_image_video` is only available in WebUI.",
-            say_hint="Explain this plugin is webui-only.",
-            available_on=["webui"],
+            message="`comfyui_image_video` is not available in IRC.",
+            say_hint="Explain which supported portal can deliver the animation.",
+            available_on=list(self.platforms),
         )
 
 verba = ComfyUIImageVideoPlugin()

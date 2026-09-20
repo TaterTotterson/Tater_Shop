@@ -173,10 +173,11 @@
     {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "portals": [
+        "discord",
         "webui",
         "little_spud",
         "macos"
@@ -185,7 +186,7 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "verba/comfyui_image_video.py",
-      "sha256": "5ba90c999459de368a3b295cf4c82925b5d2d0ea3e22770a1e86d9bf14399798"
+      "sha256": "ae494ef43f7891d813313a854570c3e4e08dc5ae4969e5dfbc499b8ca0794414"
     },
     {
       "id": "comfyui_music_video",
