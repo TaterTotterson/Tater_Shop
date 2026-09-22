@@ -5,7 +5,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import face_identity_stub
 
@@ -1467,6 +1467,56 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["frames_captured"], 5)
         self.assertEqual(saved["frames_checked"], 5)
         self.assertEqual(saved["status"], "no_faces")
+
+    async def test_face_burst_uses_shared_consensus_once_for_all_frames(self):
+        analyze = Mock()
+        runtime = types.SimpleNamespace(MATCH_THRESHOLD=0.30, analyze_image=analyze)
+        session = {
+            "id": "consensus-session",
+            "event_id": "consensus-event",
+            "area": "Front Yard",
+            "status": "pending",
+            "identity_ids": [],
+        }
+        capture = AsyncMock(side_effect=[(b"frame-two", "image/jpeg"), (b"frame-three", "image/jpeg")])
+        recognition = {
+            "status": "recognized",
+            "warning": "",
+            "faces_detected": 3,
+            "identity_ids": ["face_spud"],
+            "people": ["Spud Lord"],
+            "person_ids": ["person_spud"],
+        }
+        with (
+            patch.object(self.core, "_face_id_enabled", return_value=True),
+            patch.object(self.core, "_face_id_runtime", runtime),
+            patch.object(self.core, "_FACE_BURST_FRAME_COUNT", 3),
+            patch.object(self.core, "_FACE_BURST_INTERVAL_SECONDS", 0.001),
+            patch.object(self.core, "_capture_camera_snapshot", new=capture),
+            patch.object(
+                self.core._shared_face_identity,
+                "recognize_images",
+                create=True,
+                return_value=recognition,
+            ) as recognize,
+        ):
+            await self.core._run_face_burst(
+                session=session,
+                provider="unifi_protect",
+                camera_target="cam-front",
+                initial_image=b"frame-one",
+                initial_content_type="image/jpeg",
+            )
+
+        self.assertEqual(recognize.call_count, 1)
+        self.assertEqual(recognize.call_args.args[0], [b"frame-one", b"frame-two", b"frame-three"])
+        analyze.assert_not_called()
+        saved = self.core._load_face_session(self.redis, "consensus-session")
+        self.assertEqual(saved["frames_checked"], 3)
+        self.assertEqual(saved["faces_detected"], 3)
+        self.assertEqual(saved["identity_ids"], ["face_spud"])
+        self.assertEqual(saved["recognized_people"], ["Spud Lord"])
+        self.assertEqual(saved["status"], "complete")
 
     async def test_face_burst_sends_enabled_notification_after_event_enrichment(self):
         destination = self.core._encode_notification_destination("little_spud", {"device_id": "phone"})

@@ -1731,6 +1731,57 @@ async def _run_face_burst(
         session["frames_captured"] = len(frames)
         _save_face_session(redis_client, session)
 
+    batch_recognizer = getattr(_shared_face_identity, "recognize_images", None)
+    if callable(batch_recognizer) and frames and session.get("status") != "disabled":
+        batch_frames = list(frames)
+        frames_checked = len(batch_frames)
+        try:
+            recognition = await asyncio.to_thread(
+                batch_recognizer,
+                batch_frames,
+                event_id=_text(session.get("event_id")),
+                seen_at=_now_iso(),
+                source={
+                    "owner": "awareness",
+                    "provider": provider,
+                    "camera_target": camera_target,
+                    "area": _text(session.get("area")),
+                },
+                record=True,
+                redis_client=redis_client,
+            )
+            status = _text(recognition.get("status"))
+            warning = _text(recognition.get("warning"))
+            if status in {"error", "not_ready"} and warning:
+                errors.append(_compact(warning, limit=180))
+            faces_detected = max(0, int(recognition.get("faces_detected") or 0))
+            for identity_id in recognition.get("identity_ids") or []:
+                identity_id = _text(identity_id)
+                if identity_id and identity_id not in identity_ids:
+                    identity_ids.append(identity_id)
+            for person_name in recognition.get("people") or []:
+                person_name = _text(person_name)
+                if person_name and person_name.casefold() not in {name.casefold() for name in remote_recognized_people}:
+                    remote_recognized_people.append(person_name)
+            for person_id in recognition.get("person_ids") or []:
+                person_id = _text(person_id)
+                if person_id and person_id not in remote_recognized_person_ids:
+                    remote_recognized_person_ids.append(person_id)
+        except Exception as exc:
+            errors.append(_compact(str(exc), limit=180))
+        session.update(
+            {
+                "identity_ids": identity_ids,
+                "frames_checked": frames_checked,
+                "faces_detected": faces_detected,
+                "frames_total": len(batch_frames),
+            }
+        )
+        _save_face_session(redis_client, session)
+        # The shared service has already analyzed and recorded the complete burst.
+        # Leave the loop below as a compatibility path for older Tater versions.
+        frames = []
+
     remote_face_id = bool(
         callable(_spud_link_should_use_hub)
         and _spud_link_should_use_hub("face_id", redis_conn=redis_client)
