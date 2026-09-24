@@ -116,7 +116,7 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "3.5.1",
+      "version": "3.5.2",
       "min_tater_version": "99.5",
       "description": "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
@@ -134,7 +134,7 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "0e807cad68cea6aea87142fcc0e06196a93435419c8d2bccd1a4aaf1296bca40"
+      "sha256": "71e1121980d5a6cc1a7660a2552cb5fa647e897baec42b218e747a68180ce94a"
     },
     {
       "id": "personal",

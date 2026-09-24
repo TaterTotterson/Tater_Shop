@@ -140,7 +140,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
             "awareness": "4.12.0",
             "guardian": "1.3.12",
             "memory": "1.0.30",
-            "music": "3.4.6",
+            "music": "3.5.2",
             "personal": "1.0.56",
             "rss": "1.0.12",
             "tater_tube": "1.4.3",

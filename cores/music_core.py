@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import io
 import json
 import logging
 import math
+import os
 import random
+import shutil
 import struct
+import subprocess
 import threading
 import time
 import uuid
@@ -30,7 +34,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.5.1"
+__version__ = "3.5.2"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -156,6 +160,9 @@ ARTWORK_READ_TIMEOUT_SECONDS = 5.0
 ARTWORK_INFLIGHT_WAIT_TIMEOUT_SECONDS = 6.0
 ARTWORK_FAILURE_CACHE_SECONDS = 15.0
 ARTWORK_MAX_CONCURRENT_FETCHES = 4
+NATIVE_MP3_BITRATE_KBPS = 192
+NATIVE_MP3_SAMPLE_RATE_HZ = 48000
+NATIVE_MP3_STREAM_TTL_SECONDS = 8 * 60 * 60
 DEFAULT_SYNC_INTERVAL_SECONDS = 900
 MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
@@ -169,6 +176,9 @@ CONTINUATION_BATCH_TRACKS = 12
 MAX_CONTINUATION_CANDIDATES = 200
 PROVIDER_LABELS = {"tater_tube": "Tater Tube Server"}
 CATALOG_PROVIDER_IDS = {"tater_tube"}
+
+_native_mp3_stream_lock = threading.RLock()
+_native_mp3_streams: Dict[str, Dict[str, Any]] = {}
 GENERIC_SEARCH_WORDS = {
     "a",
     "an",
@@ -627,8 +637,166 @@ def _is_sonos_target(value: Any) -> bool:
 
 
 def _uses_audio_sync_transcode(targets: Any) -> bool:
-    """Use one normalized PCM source for every Music Core playback target."""
-    return bool(_list(targets))
+    """Keep legacy PCM normalization only for groups without native satellites."""
+    target_ids = _list(targets)
+    return bool(target_ids) and not any(_is_native_target(target) for target in target_ids)
+
+
+def _uses_native_mp3_stream(targets: Any) -> bool:
+    return any(_is_native_target(target) for target in _list(targets))
+
+
+def _native_mp3_ffmpeg_binary() -> str:
+    bundled = ""
+    with contextlib.suppress(Exception):
+        import imageio_ffmpeg
+
+        bundled = _text(imageio_ffmpeg.get_ffmpeg_exe())
+    candidates = (
+        _text(os.getenv("TATER_FFMPEG_PATH") or os.getenv("FFMPEG_PATH")),
+        bundled,
+        _text(shutil.which("ffmpeg")),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    )
+    for candidate in candidates:
+        path = Path(candidate).expanduser() if candidate else None
+        if path and path.is_file() and os.access(path, os.X_OK):
+            return str(path.resolve())
+    return ""
+
+
+def _tater_service_base_url(peer_base: Any = "") -> str:
+    with contextlib.suppress(Exception):
+        from speech_tts import _service_base_url_for_peer
+
+        return _text(_service_base_url_for_peer(peer_base)).rstrip("/")
+    host = _text(os.getenv("VOICE_CORE_PUBLIC_HOST") or os.getenv("HTMLUI_HOST"))
+    if host and host not in {"0.0.0.0", "::"}:
+        if host.startswith(("http://", "https://")):
+            return host.rstrip("/")
+        port = _as_int(os.getenv("HTMLUI_PORT"), 8501, 1, 65535)
+        return f"http://{host}:{port}"
+    return f"http://127.0.0.1:{_as_int(os.getenv('HTMLUI_PORT'), 8501, 1, 65535)}"
+
+
+def _prune_native_mp3_streams_locked(*, now_ts: Optional[float] = None) -> None:
+    now = float(now_ts if now_ts is not None else time.time())
+    for stream_id, row in list(_native_mp3_streams.items()):
+        if not isinstance(row, dict) or _as_float(row.get("expires_ts")) <= now:
+            _native_mp3_streams.pop(stream_id, None)
+
+
+def _register_native_mp3_stream(
+    source_url: Any,
+    *,
+    filename: Any,
+    duration_seconds: Any = 0.0,
+    start_position_seconds: Any = 0.0,
+) -> str:
+    source = _text(source_url)
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("Music Core needs an HTTP source before it can make a native MP3 stream.")
+    if not _native_mp3_ffmpeg_binary():
+        raise RuntimeError("Music Core could not find FFmpeg for native satellite MP3 playback.")
+
+    duration = max(0.0, _as_float(duration_seconds))
+    start_position = max(0.0, _as_float(start_position_seconds))
+    ttl = max(30 * 60.0, min(float(NATIVE_MP3_STREAM_TTL_SECONDS), duration + 30 * 60.0))
+    stream_id = uuid.uuid4().hex
+    with _native_mp3_stream_lock:
+        _prune_native_mp3_streams_locked()
+        _native_mp3_streams[stream_id] = {
+            "source_url": source,
+            "filename": Path(_text(filename) or "music-track.mp3").stem + ".sync.mp3",
+            "start_position_seconds": start_position,
+            "expires_ts": time.time() + ttl,
+        }
+    base_url = _tater_service_base_url(source)
+    return f"{base_url}/api/cores/music_core/webhook/native-mp3?stream_id={quote(stream_id)}"
+
+
+def _native_mp3_stream_row(stream_id: Any) -> Dict[str, Any]:
+    token = _text(stream_id)
+    if not token:
+        return {}
+    with _native_mp3_stream_lock:
+        _prune_native_mp3_streams_locked()
+        row = _native_mp3_streams.get(token)
+        return dict(row) if isinstance(row, dict) else {}
+
+
+def _native_mp3_stream_command(row: Dict[str, Any]) -> List[str]:
+    binary = _native_mp3_ffmpeg_binary()
+    if not binary:
+        raise RuntimeError("Music Core could not find FFmpeg for native satellite MP3 playback.")
+    command = [binary, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    start_position = max(0.0, _as_float(row.get("start_position_seconds")))
+    if start_position > 0:
+        command.extend(("-ss", f"{start_position:.3f}"))
+    command.extend(
+        (
+            "-i",
+            _text(row.get("source_url")),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-map_metadata",
+            "-1",
+            "-ar",
+            str(NATIVE_MP3_SAMPLE_RATE_HZ),
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            f"{NATIVE_MP3_BITRATE_KBPS}k",
+            "-write_xing",
+            "0",
+            "-f",
+            "mp3",
+            "pipe:1",
+        )
+    )
+    return command
+
+
+def _native_mp3_body(row: Dict[str, Any]) -> Iterable[bytes]:
+    process = subprocess.Popen(
+        _native_mp3_stream_command(row),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        if process.stdout is None:
+            raise RuntimeError("FFmpeg did not expose its MP3 output stream.")
+        while True:
+            chunk = process.stdout.read(128 * 1024)
+            if not chunk:
+                break
+            yield chunk
+        return_code = process.wait()
+        if return_code != 0:
+            logger.warning("[Music] native MP3 encoder exited with status %s", return_code)
+    finally:
+        if process.stdout is not None:
+            with contextlib.suppress(Exception):
+                process.stdout.close()
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    process.kill()
+                with contextlib.suppress(Exception):
+                    process.wait(timeout=1.0)
 
 
 def _mixed_sync_from_player_settings(
@@ -3180,20 +3348,37 @@ def _play_track(
     selected_player_settings = (
         player_settings if isinstance(player_settings, dict) else {}
     )
+    native_mp3_stream = _uses_native_mp3_stream(target_ids)
     audio_sync_transcode = _uses_audio_sync_transcode(target_ids)
-    source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
-    if not source_url:
+    provider_source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
+    if not provider_source_url:
         raise RuntimeError(f"No stream is available for {_track_label(track)}.")
-    from media_playback import play_media_url_targets
 
     duration = max(0.0, _as_float(track.get("duration_seconds")))
     source_path = Path(_text(track.get("path")) or "music-track")
-    playback_media_type = "audio/wav" if audio_sync_transcode else _track_media_type(track)
-    playback_filename = (
-        f"{source_path.stem}.sync.wav"
-        if audio_sync_transcode
-        else source_path.name
-    )
+    start_position = max(0.0, _as_float(start_position_seconds))
+    if native_mp3_stream:
+        source_url = _register_native_mp3_stream(
+            provider_source_url,
+            filename=source_path.name,
+            duration_seconds=duration,
+            start_position_seconds=start_position,
+        )
+        playback_media_type = "audio/mpeg"
+        playback_filename = f"{source_path.stem}.sync.mp3"
+        transport_start_position = 0.0
+    else:
+        source_url = provider_source_url
+        playback_media_type = "audio/wav" if audio_sync_transcode else _track_media_type(track)
+        playback_filename = (
+            f"{source_path.stem}.sync.wav"
+            if audio_sync_transcode
+            else source_path.name
+        )
+        transport_start_position = start_position
+
+    from media_playback import play_media_url_targets
+
     result = play_media_url_targets(
         target_ids,
         source_url,
@@ -3206,21 +3391,21 @@ def _play_track(
         album=_text(track.get("album")),
         duration_seconds=duration,
         volume_percent=volume_percent,
-        start_position_seconds=max(0.0, _as_float(start_position_seconds)),
+        start_position_seconds=transport_start_position,
         mixed_sync_adjustment_ms=_as_int(mixed_sync_adjustment_ms, 0, -750, 3000),
         target_volume_percent={
             target: _as_int(values.get("volume_percent"), volume_percent, 0, 100)
-            for target, values in dict(player_settings or {}).items()
+            for target, values in selected_player_settings.items()
             if _text(target) and isinstance(values, dict)
         },
         target_sync_offset_ms={
             target: _as_int(values.get("sync_offset_ms"), 0, -1000, 1000)
-            for target, values in dict(player_settings or {}).items()
+            for target, values in selected_player_settings.items()
             if _text(target) and isinstance(values, dict)
         },
         target_transport_mode={
             target: _player_transport_mode(values.get("transport_mode"))
-            for target, values in dict(player_settings or {}).items()
+            for target, values in selected_player_settings.items()
             if _text(target)
             and isinstance(values, dict)
             and target.casefold().startswith(("sonos:", "integration:sonos:"))
@@ -3234,6 +3419,11 @@ def _play_track(
     result["audio_sync_transcode_used"] = audio_sync_transcode
     if audio_sync_transcode:
         result["audio_sync_transcode_profile"] = "audio_sync"
+    result["native_mp3_stream_used"] = native_mp3_stream
+    if native_mp3_stream:
+        result["native_mp3_stream_profile"] = (
+            f"mp3_{NATIVE_MP3_SAMPLE_RATE_HZ // 1000}k_{NATIVE_MP3_BITRATE_KBPS}k"
+        )
     return result
 
 
@@ -6736,6 +6926,31 @@ def _fallback_track_artwork(track: Dict[str, Any]) -> Dict[str, Any]:
     return {"body": svg.encode("utf-8"), "content_type": "image/svg+xml"}
 
 
+def _native_mp3_stream_response(query: Optional[Dict[str, Any]] = None) -> Any:
+    params = query if isinstance(query, dict) else {}
+    row = _native_mp3_stream_row(params.get("stream_id"))
+    if not row:
+        raise KeyError("Native MP3 stream was not found or has expired.")
+    filename = Path(_text(row.get("filename")) or "music-track.sync.mp3").name
+    header_filename = "".join(
+        character
+        if 32 <= ord(character) < 127 and character not in {'"', "\\"}
+        else "_"
+        for character in filename
+    ) or "music-track.sync.mp3"
+    from starlette.responses import StreamingResponse
+
+    return StreamingResponse(
+        _native_mp3_body(row),
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="{header_filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 def handle_core_webhook(
     *,
     webhook: str,
@@ -6743,7 +6958,10 @@ def handle_core_webhook(
     redis_client=None,
     **_kwargs,
 ) -> Any:
-    if _text(webhook).lower() != "artwork":
+    hook = _text(webhook).lower()
+    if hook == "native-mp3":
+        return _native_mp3_stream_response(query)
+    if hook != "artwork":
         raise KeyError(f"Unsupported Music Core webhook: {webhook}")
     params = query if isinstance(query, dict) else {}
     provider_id = _provider_id(

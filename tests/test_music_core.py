@@ -70,6 +70,8 @@ class MusicCoreTests(unittest.TestCase):
             self.core._artwork_cache.clear()
             self.core._artwork_inflight.clear()
             self.core._artwork_failure_until.clear()
+        with self.core._native_mp3_stream_lock:
+            self.core._native_mp3_streams.clear()
         self.redis = FakeRedis()
         self.redis.hset(
             self.core.SETTINGS_KEY,
@@ -1707,7 +1709,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(queued["continuation_pending"])
         self.core._continuation_thread = None
 
-    def test_play_track_forwards_mixed_targets_with_audio_sync_transcode(self):
+    def test_play_track_forwards_mixed_targets_with_native_mp3_stream(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1716,7 +1718,12 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "integration:homeassistant:media_player.living_room",
         ]
-        with patch.dict(sys.modules, {"media_playback": playback}):
+        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_register_native_mp3_stream",
+            return_value=native_mp3_url,
+        ) as register:
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1737,8 +1744,9 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["start_position_seconds"],
-            37,
+            0,
         )
+        self.assertEqual(register.call_args.kwargs["start_position_seconds"], 37)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["mixed_sync_adjustment_ms"],
             125,
@@ -1752,6 +1760,36 @@ class MusicCoreTests(unittest.TestCase):
             {targets[0]: -20, targets[1]: 80},
         )
         source_url = playback.play_media_url_targets.call_args.args[1]
+        self.assertEqual(source_url, native_mp3_url)
+        provider_url = register.call_args.args[0]
+        self.assertNotIn("transcode=1", provider_url)
+        self.assertNotIn("profile=audio_sync", provider_url)
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["media_type"],
+            "audio/mpeg",
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["filename"],
+            "09 Three Little Birds.sync.mp3",
+        )
+        self.assertFalse(result["audio_sync_transcode_used"])
+        self.assertTrue(result["native_mp3_stream_used"])
+
+    def test_play_track_keeps_audio_sync_wav_for_non_native_target(self):
+        playback = types.ModuleType("media_playback")
+        playback.play_media_url_targets = Mock(
+            return_value={"ok": True, "sent_count": 1}
+        )
+        targets = ["integration:homeassistant:media_player.living_room"]
+        with patch.dict(sys.modules, {"media_playback": playback}):
+            result = self.core._play_track(
+                self.tracks[0],
+                targets,
+                volume_percent=55,
+                client=self.redis,
+            )
+
+        source_url = playback.play_media_url_targets.call_args.args[1]
         self.assertIn("transcode=1", source_url)
         self.assertIn("profile=audio_sync", source_url)
         self.assertEqual(
@@ -1759,8 +1797,46 @@ class MusicCoreTests(unittest.TestCase):
             "audio/wav",
         )
         self.assertTrue(result["audio_sync_transcode_used"])
+        self.assertFalse(result["native_mp3_stream_used"])
 
-    def test_play_track_uses_audio_sync_transcode_for_native_and_airplay(self):
+    def test_native_mp3_registration_is_opaque_and_builds_streaming_encoder(self):
+        provider_url = "http://tube.local/private/song.flac?player_token=secret"
+        with patch.object(
+            self.core,
+            "_native_mp3_ffmpeg_binary",
+            return_value="/usr/bin/ffmpeg",
+        ), patch.object(
+            self.core,
+            "_tater_service_base_url",
+            return_value="http://tater.local:8501",
+        ):
+            stream_url = self.core._register_native_mp3_stream(
+                provider_url,
+                filename="song.flac",
+                duration_seconds=180,
+                start_position_seconds=12.5,
+            )
+            stream_id = stream_url.rsplit("=", 1)[-1]
+            row = self.core._native_mp3_stream_row(stream_id)
+            command = self.core._native_mp3_stream_command(row)
+
+        self.assertTrue(
+            stream_url.startswith(
+                "http://tater.local:8501/api/cores/music_core/webhook/native-mp3?stream_id="
+            )
+        )
+        self.assertNotIn("secret", stream_url)
+        self.assertEqual(row["source_url"], provider_url)
+        self.assertEqual(row["filename"], "song.sync.mp3")
+        self.assertEqual(command[0], "/usr/bin/ffmpeg")
+        self.assertIn("-ss", command)
+        self.assertIn("12.500", command)
+        self.assertIn("libmp3lame", command)
+        self.assertIn("192k", command)
+        self.assertIn("48000", command)
+        self.assertEqual(command[-2:], ["mp3", "pipe:1"])
+
+    def test_play_track_uses_native_mp3_stream_for_native_and_airplay(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1769,7 +1845,12 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "sonos:RINCON_LIVING",
         ]
-        with patch.dict(sys.modules, {"media_playback": playback}):
+        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_register_native_mp3_stream",
+            return_value=native_mp3_url,
+        ):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1787,14 +1868,14 @@ class MusicCoreTests(unittest.TestCase):
 
         kwargs = playback.play_media_url_targets.call_args.kwargs
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertIn("transcode=1", source_url)
-        self.assertIn("profile=audio_sync", source_url)
-        self.assertEqual(kwargs["media_type"], "audio/wav")
-        self.assertEqual(kwargs["filename"], "09 Three Little Birds.sync.wav")
-        self.assertTrue(result["audio_sync_transcode_used"])
-        self.assertEqual(result["audio_sync_transcode_profile"], "audio_sync")
+        self.assertEqual(source_url, native_mp3_url)
+        self.assertEqual(kwargs["media_type"], "audio/mpeg")
+        self.assertEqual(kwargs["filename"], "09 Three Little Birds.sync.mp3")
+        self.assertFalse(result["audio_sync_transcode_used"])
+        self.assertTrue(result["native_mp3_stream_used"])
+        self.assertEqual(result["native_mp3_stream_profile"], "mp3_48k_192k")
 
-    def test_play_track_uses_audio_sync_for_native_sonos_transport(self):
+    def test_play_track_uses_native_mp3_for_native_sonos_transport(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1803,7 +1884,12 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "sonos:RINCON_LIVING",
         ]
-        with patch.dict(sys.modules, {"media_playback": playback}):
+        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_register_native_mp3_stream",
+            return_value=native_mp3_url,
+        ):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1820,21 +1906,26 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertIn("transcode=1", source_url)
-        self.assertIn("profile=audio_sync", source_url)
+        self.assertEqual(source_url, native_mp3_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/wav",
+            "audio/mpeg",
         )
-        self.assertTrue(result["audio_sync_transcode_used"])
+        self.assertFalse(result["audio_sync_transcode_used"])
+        self.assertTrue(result["native_mp3_stream_used"])
 
-    def test_play_track_uses_audio_sync_for_native_stereo_pair(self):
+    def test_play_track_uses_native_mp3_for_native_stereo_pair(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 1}
         )
         targets = ["voice_core:stereo:office"]
-        with patch.dict(sys.modules, {"media_playback": playback}):
+        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_register_native_mp3_stream",
+            return_value=native_mp3_url,
+        ):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1843,13 +1934,17 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertIn("transcode=1", source_url)
-        self.assertIn("profile=audio_sync", source_url)
+        self.assertEqual(source_url, native_mp3_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/wav",
+            "audio/mpeg",
         )
-        self.assertTrue(result["audio_sync_transcode_used"])
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["filename"],
+            "09 Three Little Birds.sync.mp3",
+        )
+        self.assertFalse(result["audio_sync_transcode_used"])
+        self.assertTrue(result["native_mp3_stream_used"])
 
     def test_hydra_exposes_play_search_control_status_and_browse(self):
         self.assertTrue(self.core.CORE_SETTINGS["hydra_tools_require_running"])
