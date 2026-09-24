@@ -51,6 +51,30 @@
       "sha256": "f65b7a42bbaea9a2baa09315e42e3379ed55eeeecc8b67b3e57607b6da3d54cc"
     },
     {
+      "id": "ble_device_enrollment",
+      "name": "Enroll My Device",
+      "version": "1.0.0",
+      "min_tater_version": "99",
+      "description": "Enroll a phone or watch for private room-presence tracking.",
+      "portals": [
+        "voice_core",
+        "webui",
+        "macos",
+        "little_spud"
+      ],
+      "notifier": false,
+      "settings_category": "BLE Presence",
+      "tags": [
+        "bluetooth",
+        "ble",
+        "presence",
+        "watch",
+        "phone"
+      ],
+      "entry": "verba/ble_device_enrollment.py",
+      "sha256": "b74ee1a1df611d65339dee8856ed0f18ab8984496e51029b7a89a654f178e7ce"
+    },
+    {
       "id": "broadcast",
       "name": "Broadcast",
       "version": "1.3.0",
