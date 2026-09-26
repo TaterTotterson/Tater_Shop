@@ -1261,7 +1261,7 @@
     {
       "id": "room_vision",
       "name": "Room Vision",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Ask Tater what it sees using a camera-equipped satellite in your room. Identify objects, get outfit feedback, and check whether your clothing suits the current weather.",
       "portals": [
@@ -1279,7 +1279,7 @@
         "echo-show"
       ],
       "entry": "verba/room_vision.py",
-      "sha256": "8d7af77c07bd3efbf185d46b05b85f51c94b24dab7ac6853c87ddf7d652a4a97"
+      "sha256": "7a64b349bda5ff6dd3938c122515fde5e8212143788ca5f6d0cd34b3aac2a256"
     },
     {
       "id": "roon_music",

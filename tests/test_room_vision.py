@@ -39,6 +39,25 @@ class RoomVisionTests(unittest.TestCase):
         cls.module = load_room_vision()
         cls.plugin = cls.module.RoomVisionPlugin()
 
+    def test_description_routes_questions_that_require_seeing_something_now(self):
+        description = self.plugin.description.lower()
+        for phrase in (
+            "requires seeing something",
+            "what is this?",
+            "what am i holding?",
+            "how do i look?",
+            "even when the user does not mention a camera",
+            "named security camera",
+            "reachy mini",
+        ):
+            self.assertIn(phrase, description)
+
+        routing = self.plugin.when_to_use.lower()
+        self.assertIn("requires seeing something", routing)
+        self.assertIn("even if they never mention a camera", routing)
+        self.assertIn("weather-only or other nonvisual questions", routing)
+        self.assertNotIn("select only", routing)
+
     def test_selects_requesting_show_then_same_room_and_never_other_room(self):
         candidates = [
             {"selector": "native:office-show", "device_id": "office-show", "room": "Office"},

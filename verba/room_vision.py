@@ -16,22 +16,26 @@ class RoomVisionPlugin(ToolVerba):
     name = "room_vision"
     verba_name = "Room Vision"
     pretty_name = "Room Vision"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "98.4"
     settings_category = "Room Vision"
     description = (
-        "Use an Echo Show or another camera-capable Tater satellite in the asking satellite's room to answer "
-        "current visual questions about objects, appearance, outfits, and clothing for the weather."
+        "Call Room Vision whenever a voice-satellite user's question requires seeing something near them right "
+        "now—for example: 'what is this?', 'what am I holding?', 'what do you see?', 'how do I look?', outfit or "
+        "clothing feedback, or whether their visible clothing suits the current weather. Use it even when the user "
+        "does not mention a camera, Echo Show, or Room Vision; it automatically takes a fresh snapshot from the "
+        "asking Echo Show or another camera-capable Tater satellite in the same room. Do not use it for a named "
+        "security camera or Reachy Mini; use their dedicated tools instead."
     )
     verba_dec = (
         "Ask Tater what it sees using a camera-equipped satellite in your room. Identify objects, get outfit "
         "feedback, and check whether your clothing suits the current weather."
     )
     when_to_use = (
-        "Use when someone asks a voice satellite a current visual question such as 'what is this?', "
-        "'what do you see?', 'how do my clothes look?', 'does this outfit match?', or 'am I dressed warmly "
-        "enough outside?'. Select only the asking camera satellite or a camera satellite assigned to the same "
-        "room. Do not use for a named security camera or for a Reachy Mini; those have dedicated verbas."
+        "Use whenever answering the voice-satellite user requires seeing something near them right now, including "
+        "identifying what they are showing or holding, describing what is visible, appearance or outfit feedback, "
+        "and judging whether visible clothing suits the weather. Use it even if they never mention a camera. Do "
+        "not use it for weather-only or other nonvisual questions, a named security camera, or Reachy Mini."
     )
     how_to_use = (
         "Pass the user's complete visual question unchanged in query. Room Vision captures one fresh, ephemeral "
