@@ -1724,6 +1724,47 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["recognized_person_ids"], ["person_fred"])
         self.assertEqual(saved["automation_events_emitted"], 1)
 
+    async def test_unifi_sensor_websocket_event_does_not_treat_camera_id_as_sensor_id(self):
+        handle_change = AsyncMock()
+        with (
+            patch.object(self.core, "_monitor_registry", return_value=sample_registry()),
+            patch.object(self.core, "_handle_trigger_state_change", new=handle_change),
+        ):
+            handled = await self.core._handle_unifi_ws_event(
+                {
+                    "id": "protect-event-1",
+                    "type": "sensorOpened",
+                    "device": "cam-front",
+                    "start": 1_790_423_123_456,
+                }
+            )
+
+        self.assertFalse(handled)
+        handle_change.assert_not_awaited()
+
+    async def test_unifi_sensor_websocket_event_uses_resolved_sensor_id(self):
+        handle_change = AsyncMock()
+        with (
+            patch.object(self.core, "_monitor_registry", return_value=sample_registry()),
+            patch.object(self.core, "_handle_trigger_state_change", new=handle_change),
+        ):
+            handled = await self.core._handle_unifi_ws_event(
+                {
+                    "id": "protect-event-2",
+                    "type": "sensorOpened",
+                    "device": "cam-front",
+                    "sensor": "sensor-back-door",
+                    "sensorName": "Back Door",
+                    "start": 1_790_423_123_456,
+                }
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            handle_change.await_args.kwargs["entity_id"],
+            "binary_sensor.unifi_sensor_sensor-back-door",
+        )
+
     @unittest.skip("Face sorting is covered by Tater's shared Face ID service tests.")
     def test_unknown_face_can_be_manually_sorted_into_a_known_person(self):
         base = {

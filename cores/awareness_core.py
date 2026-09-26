@@ -70,7 +70,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.3"
+__version__ = "4.12.4"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -7979,16 +7979,16 @@ async def _handle_unifi_ws_event(item: Dict[str, Any]) -> bool:
     is_ring_event = doorbell_like_event and not doorbell_skip_reason
     is_sensor_event = ("sensor" in event_token)
     is_smart_event = ("smartdetect" in event_token)
+    camera_names, sensor_names = _unifi_name_maps()
 
     if not camera_id and (doorbell_like_event or is_smart_event or ("camera" in event_token and not is_sensor_event)):
         camera_id = device_id
-    if not sensor_id and is_sensor_event:
+    if not sensor_id and is_sensor_event and _text(device_id).lower() in sensor_names:
         sensor_id = device_id
 
     camera_id = _text(camera_id).lower()
     sensor_id = _text(sensor_id).lower()
 
-    camera_names, sensor_names = _unifi_name_maps()
     camera_name = camera_names.get(camera_id) if camera_id else ""
     sensor_name = sensor_names.get(sensor_id) if sensor_id else ""
     if not camera_name:

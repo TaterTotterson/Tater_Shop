@@ -16,7 +16,7 @@ class RoomVisionPlugin(ToolVerba):
     name = "room_vision"
     verba_name = "Room Vision"
     pretty_name = "Room Vision"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "98.4"
     settings_category = "Room Vision"
     description = (
