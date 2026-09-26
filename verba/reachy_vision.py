@@ -24,8 +24,9 @@ class ReachyVisionPlugin(ToolVerba):
         "to answer appearance, outfit, object, and what-do-you-see questions."
     )
     verba_dec = (
-        "Use when someone asks Tater to look at them or something in front of Reachy, including 'how do I look?', "
-        "'do you like what I'm wearing?', 'what am I wearing?', 'look at this', or 'what do you see?'. "
+        "Use only when the request originates from a Reachy satellite or explicitly asks Reachy to look at the "
+        "user or something in front of it, including 'Reachy, how do I look?' or 'what does Reachy see?'. "
+        "For the same visual questions on an Echo Show or another room satellite, use Room Vision instead. "
         "Do not use for named home-security cameras; use Camera Control for those."
     )
     when_to_use = verba_dec

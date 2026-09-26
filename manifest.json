@@ -1241,7 +1241,7 @@
       "name": "Reachy Vision",
       "version": "1.0.0",
       "min_tater_version": "98.4",
-      "description": "Use when someone asks Tater to look at them or something in front of Reachy, including 'how do I look?', 'do you like what I'm wearing?', 'what am I wearing?', 'look at this', or 'what do you see?'. Do not use for named home-security cameras; use Camera Control for those.",
+      "description": "Use only when the request originates from a Reachy satellite or explicitly asks Reachy to look at the user or something in front of it, including 'Reachy, how do I look?' or 'what does Reachy see?'. For the same visual questions on an Echo Show or another room satellite, use Room Vision instead. Do not use for named home-security cameras; use Camera Control for those.",
       "portals": [
         "voice_core"
       ],
@@ -1256,7 +1256,30 @@
         "outfit"
       ],
       "entry": "verba/reachy_vision.py",
-      "sha256": "e68b4eac15bc19bc03b3023d700bb1f8b6d2ee9d6927ab9acc5be15d7582f0ce"
+      "sha256": "7d7b751caf0f27735830f7f3e144c59755776732c2bcd41e814851ec51c8a4d7"
+    },
+    {
+      "id": "room_vision",
+      "name": "Room Vision",
+      "version": "1.0.0",
+      "min_tater_version": "98.4",
+      "description": "Use when someone asks a voice satellite a current visual question such as 'what is this?', 'what do you see?', 'how do my clothes look?', 'does this outfit match?', or 'am I dressed warmly enough outside?'. Select only the asking camera satellite or a camera satellite assigned to the same room. Do not use for a named security camera or for a Reachy Mini; those have dedicated verbas.",
+      "portals": [
+        "voice_core"
+      ],
+      "notifier": false,
+      "settings_category": "Room Vision",
+      "tags": [
+        "room",
+        "camera",
+        "snapshot",
+        "vision",
+        "appearance",
+        "outfit",
+        "echo-show"
+      ],
+      "entry": "verba/room_vision.py",
+      "sha256": "8a646a36b1f4bb64503fab7b1373cfa99709b3308eefc6465f64f14b5d4f21ab"
     },
     {
       "id": "roon_music",
