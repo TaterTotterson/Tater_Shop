@@ -24,12 +24,15 @@ class RoomVisionPlugin(ToolVerba):
         "current visual questions about objects, appearance, outfits, and clothing for the weather."
     )
     verba_dec = (
+        "Ask Tater what it sees using a camera-equipped satellite in your room. Identify objects, get outfit "
+        "feedback, and check whether your clothing suits the current weather."
+    )
+    when_to_use = (
         "Use when someone asks a voice satellite a current visual question such as 'what is this?', "
         "'what do you see?', 'how do my clothes look?', 'does this outfit match?', or 'am I dressed warmly "
         "enough outside?'. Select only the asking camera satellite or a camera satellite assigned to the same "
         "room. Do not use for a named security camera or for a Reachy Mini; those have dedicated verbas."
     )
-    when_to_use = verba_dec
     how_to_use = (
         "Pass the user's complete visual question unchanged in query. Room Vision captures one fresh, ephemeral "
         "still image from the asking Show or a camera-capable satellite in the same room and asks Tater's configured "

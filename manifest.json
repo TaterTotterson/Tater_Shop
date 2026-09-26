@@ -1263,7 +1263,7 @@
       "name": "Room Vision",
       "version": "1.0.0",
       "min_tater_version": "98.4",
-      "description": "Use when someone asks a voice satellite a current visual question such as 'what is this?', 'what do you see?', 'how do my clothes look?', 'does this outfit match?', or 'am I dressed warmly enough outside?'. Select only the asking camera satellite or a camera satellite assigned to the same room. Do not use for a named security camera or for a Reachy Mini; those have dedicated verbas.",
+      "description": "Ask Tater what it sees using a camera-equipped satellite in your room. Identify objects, get outfit feedback, and check whether your clothing suits the current weather.",
       "portals": [
         "voice_core"
       ],
@@ -1279,7 +1279,7 @@
         "echo-show"
       ],
       "entry": "verba/room_vision.py",
-      "sha256": "8a646a36b1f4bb64503fab7b1373cfa99709b3308eefc6465f64f14b5d4f21ab"
+      "sha256": "41daa8ea7b29930257cd852275a8d2a2823bb384c39d20405b81b7d78b49054b"
     },
     {
       "id": "roon_music",
