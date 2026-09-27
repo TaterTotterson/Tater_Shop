@@ -42,7 +42,7 @@ class TaterVisionTests(unittest.TestCase):
     def test_metadata_routes_all_current_visual_questions_to_tater_vision(self):
         self.assertEqual(self.plugin.name, "tater_vision")
         self.assertEqual(self.plugin.verba_name, "Tater Vision")
-        self.assertEqual(self.plugin.version, "1.1.3")
+        self.assertEqual(self.plugin.version, "1.1.4")
         expected_platforms = {
             "voice_core", "homeassistant", "webui", "little_spud", "macos", "xbmc", "homekit",
             "discord", "telegram", "matrix", "irc", "meshtastic",
@@ -293,6 +293,76 @@ class TaterVisionTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(reason, "named_area")
         self.assertEqual(room, "Garage")
+
+    def test_natural_outdoor_areas_select_the_matching_camera_group(self):
+        candidates = [
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "back-porch",
+                "name": "Back Porch", "room": "Back Porch",
+            },
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "back-yard",
+                "name": "Back Yard", "room": "Back Yard",
+            },
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "doorbell",
+                "name": "Doorbell", "room": "Doorbell",
+            },
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "front-door",
+                "name": "Front Door", "room": "Front Door",
+            },
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "garage",
+                "name": "Garage", "room": "Garage",
+            },
+            {
+                "source": "native_satellite", "selector": "native:game-show", "device_id": "game-show",
+                "name": "Game Room Show", "room": "Game Room",
+            },
+        ]
+
+        for query in ("look out front", "front yard"):
+            selected, reason, room = self.plugin._select_cameras(candidates, {}, query, "", [])
+            self.assertEqual({row["device_id"] for row in selected}, {"doorbell", "front-door", "garage"})
+            self.assertEqual(reason, "semantic_area")
+            self.assertEqual(room, "Front")
+
+        selected, reason, room = self.plugin._select_cameras(
+            candidates,
+            {},
+            "can you look outside and see what the weather looks like",
+            "",
+            [],
+        )
+        self.assertEqual(
+            {row["device_id"] for row in selected},
+            {"back-porch", "back-yard", "doorbell", "front-door", "garage"},
+        )
+        self.assertEqual(reason, "semantic_area")
+        self.assertEqual(room, "Outside")
+
+    def test_outside_in_an_outfit_question_still_uses_the_asking_room_camera(self):
+        candidates = [
+            {
+                "source": "native_satellite", "selector": "native:game-show", "device_id": "game-show",
+                "name": "Game Room Show", "room": "Game Room",
+            },
+            {
+                "source": "integration", "integration_id": "protect", "device_id": "front-door",
+                "name": "Front Door", "room": "Front Door",
+            },
+        ]
+        selected, reason, room = self.plugin._select_cameras(
+            candidates,
+            {"device_id": "native:game-show"},
+            "Am I dressed warmly enough outside?",
+            "Game Room",
+            ["Game Room", "Front Door"],
+        )
+        self.assertEqual([row["device_id"] for row in selected], ["game-show"])
+        self.assertEqual(reason, "asking_room")
+        self.assertEqual(room, "Game Room")
 
     def test_returns_safe_failure_without_same_room_camera(self):
         native_satellite = types.ModuleType("tater_voice.native_satellite")

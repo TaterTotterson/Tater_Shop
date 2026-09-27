@@ -18,7 +18,7 @@ class TaterVisionPlugin(ToolVerba):
     name = "tater_vision"
     verba_name = "Tater Vision"
     pretty_name = "Tater Vision"
-    version = "1.1.3"
+    version = "1.1.4"
     min_tater_version = "98.4"
     settings_category = "Tater Vision"
     description = (
@@ -42,9 +42,10 @@ class TaterVisionPlugin(ToolVerba):
     )
     how_to_use = (
         "Pass the user's complete visual question unchanged in query. Tater Vision resolves a named location from "
-        "known camera assignments; otherwise it uses trusted room context when the platform provides it. On a "
-        "platform without room context, include a room, area, or camera name. It captures fresh, ephemeral stills "
-        "from the relevant cameras and asks Tater's configured vision model to answer the question."
+        "known camera assignments and natural outdoor areas such as outside, out front, front yard, out back, and "
+        "backyard; otherwise it uses trusted room context when the platform provides it. On a platform without room "
+        "context, include a room, area, or camera name. It captures fresh, ephemeral stills from the relevant cameras "
+        "and asks Tater's configured vision model to answer the question."
     )
     platforms = [
         "voice_core",
@@ -221,6 +222,75 @@ class TaterVisionPlugin(ToolVerba):
         return values
 
     @classmethod
+    def _camera_location_words(cls, camera: Dict[str, Any]) -> str:
+        values = [cls._camera_room(camera), *cls._camera_aliases(camera)]
+        return cls._normalized_words(" ".join(value for value in values if value))
+
+    @classmethod
+    def _semantic_outdoor_area(cls, query: str) -> Tuple[str, str] | None:
+        normalized = cls._normalized_words(query)
+        if not normalized:
+            return None
+
+        if re.search(
+            r"(?:^| )(?:out front|front yard|front lawn|front of (?:the )?(?:house|home)|front exterior)(?: |$)",
+            normalized,
+        ):
+            return "front", "Front"
+        if re.search(
+            r"(?:^| )(?:out back|back yard|backyard|rear yard|back lawn|back of (?:the )?(?:house|home)|rear exterior)(?: |$)",
+            normalized,
+        ):
+            return "back", "Back"
+
+        mentions_outside = bool(
+            re.search(r"(?:^| )(?:outside|outdoors|exterior)(?: |$)", normalized)
+            or re.search(r"(?:^| )around (?:the )?(?:house|home)(?: |$)", normalized)
+        )
+        appearance_question = bool(
+            re.search(
+                r"(?:^| )(?:wear|wearing|wore|outfit|clothes|clothing|dressed|dress|jacket|coat)(?: |$)",
+                normalized,
+            )
+        )
+        outdoor_view_request = bool(
+            re.search(
+                r"(?:^| )(?:look|see|show|check|view|inspect|watch)(?: (?:at|around|through))? (?:the )?outside(?: |$)",
+                normalized,
+            )
+            or re.search(r"(?:^| )(?:weather|conditions|happening|going on) (?:out|outside)(?: |$)", normalized)
+            or re.search(r"(?:^| )(?:what|who|anything|anyone|someone|animal|animals|dog|dogs|cat|cats) .* outside(?: |$)", normalized)
+        )
+        if mentions_outside and (outdoor_view_request or not appearance_question):
+            return "outside", "Outside"
+
+        if re.search(r"(?:^| )(?:the )?(?:yard|lawn)(?: |$)", normalized):
+            return "yard", "Yard"
+        return None
+
+    @classmethod
+    def _camera_matches_semantic_area(cls, camera: Dict[str, Any], area: str) -> bool:
+        words = cls._camera_location_words(camera)
+        tokens = set(words.split())
+        if not tokens:
+            return False
+
+        front_tokens = {"front", "doorbell", "entry", "entrance", "driveway", "garage"}
+        back_tokens = {"back", "rear", "backyard", "patio", "deck"}
+        outdoor_tokens = front_tokens | back_tokens | {
+            "yard", "lawn", "porch", "outside", "outdoor", "exterior", "gate", "side",
+        }
+        if area == "front":
+            return bool(tokens.intersection(front_tokens)) and not bool(tokens.intersection({"back", "rear"}))
+        if area == "back":
+            return bool(tokens.intersection(back_tokens)) and not bool(tokens.intersection({"front"}))
+        if area == "yard":
+            return bool(tokens.intersection({"yard", "backyard", "lawn"}))
+        if area == "outside":
+            return bool(tokens.intersection(outdoor_tokens))
+        return False
+
+    @classmethod
     def _origin_room(cls, origin: Dict[str, Any], status: Any) -> str:
         direct = cls._text(origin.get("area_name") or origin.get("room_name") or origin.get("room"))
         if direct:
@@ -319,6 +389,16 @@ class TaterVisionPlugin(ToolVerba):
                 == best_length
             ]
             return selected[:MAX_CAMERAS_PER_REQUEST], "named_camera", cls._camera_room(selected[0])
+
+        semantic_area = cls._semantic_outdoor_area(query)
+        if semantic_area:
+            area, label = semantic_area
+            selected = [
+                candidate
+                for candidate in candidates
+                if cls._camera_matches_semantic_area(candidate, area)
+            ]
+            return selected[:MAX_CAMERAS_PER_REQUEST], "semantic_area", label
 
         normalized_origin_room = cls._normalized_words(origin_room)
         if not normalized_origin_room:
