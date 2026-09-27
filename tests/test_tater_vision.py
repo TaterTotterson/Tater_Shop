@@ -42,7 +42,14 @@ class TaterVisionTests(unittest.TestCase):
     def test_metadata_routes_all_current_visual_questions_to_tater_vision(self):
         self.assertEqual(self.plugin.name, "tater_vision")
         self.assertEqual(self.plugin.verba_name, "Tater Vision")
-        self.assertEqual(self.plugin.version, "1.1.2")
+        self.assertEqual(self.plugin.version, "1.1.3")
+        expected_platforms = {
+            "voice_core", "homeassistant", "webui", "little_spud", "macos", "xbmc", "homekit",
+            "discord", "telegram", "matrix", "irc", "meshtastic",
+        }
+        self.assertEqual(set(self.plugin.platforms), expected_platforms)
+        for platform in expected_platforms:
+            self.assertTrue(callable(getattr(self.plugin, f"handle_{platform}", None)), platform)
         description = self.plugin.description.lower()
         for phrase in (
             "tater's visual-question tool",
@@ -50,7 +57,8 @@ class TaterVisionTests(unittest.TestCase):
             "how do i look?",
             "are there any dogs in the backyard?",
             "what did you see when you looked?",
-            "derives the asking satellite's room",
+            "trusted room context",
+            "ask which room, area, or camera to use",
         ):
             self.assertIn(phrase, description)
         self.assertNotIn("camera control", description)
@@ -255,10 +263,9 @@ class TaterVisionTests(unittest.TestCase):
             "integration_registry": integration_registry,
             "kernel_tools": kernel_tools,
         }):
-            result = asyncio.run(self.plugin.handle_voice_core({
+            result = asyncio.run(self.plugin.handle_webui({
                 "query": "Are there any dogs in the backyard?",
-                "origin": {"platform": "voice_core", "device_id": "native:game-speaker"},
-            }))
+            }, None))
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["facts"]["selection_reason"], "named_area")

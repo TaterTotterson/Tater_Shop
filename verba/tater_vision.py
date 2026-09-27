@@ -18,7 +18,7 @@ class TaterVisionPlugin(ToolVerba):
     name = "tater_vision"
     verba_name = "Tater Vision"
     pretty_name = "Tater Vision"
-    version = "1.1.2"
+    version = "1.1.3"
     min_tater_version = "98.4"
     settings_category = "Tater Vision"
     description = (
@@ -26,14 +26,13 @@ class TaterVisionPlugin(ToolVerba):
         "object, room, or named camera-covered area right now—including 'what is this?', 'how do I look?', "
         "'is the dog in the game room?', 'are there any dogs in the backyard?', and conversational follow-ups such "
         "as 'what did you see when you looked?'. If the user names a room or area, it automatically uses the cameras "
-        "covering that location. If no location is named, it automatically derives the asking satellite's room and "
-        "uses a camera-capable satellite or camera assigned there. Do not ask the user to choose a camera unless an "
-        "explicitly named location truly has no camera."
+        "covering that location. If no location is named, use trusted room context supplied by a satellite or other "
+        "room-aware platform; when no room context exists, ask which room, area, or camera to use."
     )
     verba_dec = (
         "Give Tater eyes in camera-equipped rooms and areas. Ask what you're holding, how an outfit looks, whether "
         "a pet is nearby, or what's happening around your home. Tater automatically chooses a camera from the "
-        "location you name or the room where you ask."
+        "location you name or, on a room-aware device, the room where you ask."
     )
     when_to_use = (
         "Use for every question whose answer requires current visual evidence from a Tater satellite camera or an "
@@ -43,10 +42,24 @@ class TaterVisionPlugin(ToolVerba):
     )
     how_to_use = (
         "Pass the user's complete visual question unchanged in query. Tater Vision resolves a named location from "
-        "known camera assignments; otherwise it resolves the trusted origin device to its room. It captures fresh, "
-        "ephemeral stills from the relevant cameras and asks Tater's configured vision model to answer the question."
+        "known camera assignments; otherwise it uses trusted room context when the platform provides it. On a "
+        "platform without room context, include a room, area, or camera name. It captures fresh, ephemeral stills "
+        "from the relevant cameras and asks Tater's configured vision model to answer the question."
     )
-    platforms = ["voice_core"]
+    platforms = [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic",
+    ]
     tags = ["tater", "room", "area", "camera", "snapshot", "vision", "appearance", "outfit", "echo-show"]
     routing_keywords = [
         "what is this",
@@ -83,8 +96,11 @@ class TaterVisionPlugin(ToolVerba):
         '{"function":"tater_vision","arguments":{"query":"Are there any dogs in the backyard?"}}',
         '{"function":"tater_vision","arguments":{"query":"Is the dog in the game room?"}}',
     ]
-    common_needs = ["A connected camera-capable satellite or integrated camera assigned to the relevant room or area."]
-    missing_info_prompts = ["There is no camera assigned to the place Tater needs to see."]
+    common_needs = [
+        "A connected camera assigned to the relevant room or area, plus a named location when the platform does not "
+        "provide trusted room context."
+    ]
+    missing_info_prompts = ["Which room, area, or camera should Tater look through?"]
     waiting_prompt_template = (
         "Write a short, friendly message saying Tater is taking a quick look with the room camera. "
         "Do not claim to have seen anything yet. Only output that message."
@@ -467,39 +483,37 @@ class TaterVisionPlugin(ToolVerba):
             + weather_note
         )
 
-    async def handle_voice_core(self, args=None, llm_client=None, context=None):
-        del llm_client, context
+    async def _handle(self, args=None, llm_client=None, context=None, *, platform: str = ""):
+        del llm_client
         payload = self._normalize_args(args or {})
+        call_context = context if isinstance(context, dict) else {}
         origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
-        query = self._text(payload.get("query") or payload.get("text") or origin.get("request_text"))
+        if not origin and isinstance(call_context.get("origin"), dict):
+            origin = dict(call_context.get("origin") or {})
+            payload["origin"] = origin
+        query = self._text(
+            payload.get("query")
+            or payload.get("text")
+            or payload.get("request")
+            or origin.get("request_text")
+            or call_context.get("request_text")
+            or call_context.get("body")
+            or call_context.get("raw_message")
+        )
         if not query:
             return action_failure(
                 code="missing_query",
                 message="Please provide the visual question for Tater Vision.",
                 needs=["Ask what Tater should look at or comment on."],
-                say_hint="Ask what the user wants the room camera to look at.",
-            )
-        origin_platform = self._text(origin.get("platform")).lower()
-        origin_entrypoint = self._text(origin.get("entrypoint")).lower()
-        if origin_platform != "voice_core" and not (
-            origin_platform == "homeassistant" and origin_entrypoint == "voice_core"
-        ):
-            return action_failure(
-                code="voice_satellite_required",
-                message="Tater Vision currently accepts requests from the voice satellite pipeline.",
-                say_hint="Explain that this feature must be requested through a voice satellite.",
+                say_hint="Ask what the user wants Tater to look at.",
             )
 
         try:
             from tater_voice import native_satellite
 
             status = await native_satellite.status()
-        except Exception as exc:
-            return action_failure(
-                code="room_camera_discovery_failed",
-                message=f"Could not check room cameras: {exc}",
-                say_hint="Explain that Tater could not check for a camera in this room.",
-            )
+        except Exception:
+            status = {"clients": {}}
 
         native_cameras = self._camera_satellites(status)
         try:
@@ -530,11 +544,27 @@ class TaterVisionPlugin(ToolVerba):
             known_rooms,
         )
         if not cameras and selection_reason == "origin_room_unknown":
+            voice_origin = self._text(platform).lower() == "voice_core" or (
+                self._text(origin.get("platform")).lower() == "homeassistant"
+                and self._text(origin.get("entrypoint")).lower() == "voice_core"
+            )
             return action_failure(
-                code="origin_room_unknown",
-                message="Tater could not determine which room the asking satellite is assigned to.",
-                needs=["Assign the asking satellite to a room in Tater."],
-                say_hint="Explain that the asking satellite needs a room assignment before Tater can choose a nearby camera.",
+                code="origin_room_unknown" if voice_origin else "camera_location_required",
+                message=(
+                    "Tater could not determine which room the asking satellite is assigned to."
+                    if voice_origin
+                    else "Tater Vision needs a room, area, or camera name for this request."
+                ),
+                needs=(
+                    ["Assign the asking satellite to a room in Tater."]
+                    if voice_origin
+                    else ["Name the room, area, or camera Tater should use."]
+                ),
+                say_hint=(
+                    "Explain that the asking satellite needs a room assignment before Tater can choose a nearby camera."
+                    if voice_origin
+                    else "Ask which room, area, or camera Tater should look through."
+                ),
             )
         if not cameras:
             return action_failure(
@@ -665,6 +695,77 @@ class TaterVisionPlugin(ToolVerba):
                 "Combine multiple views when needed, and do not add details the vision model did not report."
             ),
         )
+
+    async def handle_webui(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, context=context, platform="webui")
+
+    async def handle_homeassistant(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, context=context, platform="homeassistant")
+
+    async def handle_voice_core(self, args=None, llm_client=None, context=None):
+        return await self._handle(args, llm_client, context=context, platform="voice_core")
+
+    async def handle_macos(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, context=context, platform="macos")
+
+    async def handle_little_spud(self, args=None, llm_client=None, context=None):
+        return await self._handle(args, llm_client, context=context, platform="little_spud")
+
+    async def handle_xbmc(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, context=context, platform="xbmc")
+
+    async def handle_homekit(self, args, llm_client, context=None):
+        return await self._handle(args, llm_client, context=context, platform="homekit")
+
+    async def handle_discord(self, message, args, llm_client, context=None):
+        payload = self._normalize_args(args or {})
+        if not self._text(payload.get("query")):
+            content = self._text(getattr(message, "content", ""))
+            if content:
+                payload["query"] = content
+        return await self._handle(payload, llm_client, context=context, platform="discord")
+
+    async def handle_telegram(self, update, context, args, llm_client):
+        payload = self._normalize_args(args or {})
+        if not self._text(payload.get("query")):
+            message = getattr(update, "message", None)
+            text = self._text(getattr(message, "text", ""))
+            if text:
+                payload["query"] = text
+        return await self._handle(
+            payload,
+            llm_client,
+            context=context if isinstance(context, dict) else None,
+            platform="telegram",
+        )
+
+    async def handle_matrix(self, client, room, sender, body, args, llm_client, context=None):
+        del client, room, sender
+        payload = self._normalize_args(args or {})
+        if not self._text(payload.get("query")) and self._text(body):
+            payload["query"] = self._text(body)
+        return await self._handle(payload, llm_client, context=context, platform="matrix")
+
+    async def handle_irc(self, bot, channel, user, message, args, llm_client, context=None):
+        del bot, channel, user
+        payload = self._normalize_args(args or {})
+        if not self._text(payload.get("query")) and self._text(message):
+            payload["query"] = self._text(message)
+        return await self._handle(payload, llm_client, context=context, platform="irc")
+
+    async def handle_meshtastic(self, packet, args, llm_client, context=None):
+        payload = self._normalize_args(args or {})
+        if not self._text(payload.get("query")) and isinstance(packet, dict):
+            decoded = packet.get("decoded") if isinstance(packet.get("decoded"), dict) else {}
+            text = self._text(
+                packet.get("text")
+                or packet.get("message")
+                or decoded.get("text")
+                or decoded.get("payload")
+            )
+            if text:
+                payload["query"] = text
+        return await self._handle(payload, llm_client, context=context, platform="meshtastic")
 
 
 verba = TaterVisionPlugin()

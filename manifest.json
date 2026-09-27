@@ -1400,11 +1400,22 @@
     {
       "id": "tater_vision",
       "name": "Tater Vision",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "98.4",
-      "description": "Give Tater eyes in camera-equipped rooms and areas. Ask what you're holding, how an outfit looks, whether a pet is nearby, or what's happening around your home. Tater automatically chooses a camera from the location you name or the room where you ask.",
+      "description": "Give Tater eyes in camera-equipped rooms and areas. Ask what you're holding, how an outfit looks, whether a pet is nearby, or what's happening around your home. Tater automatically chooses a camera from the location you name or, on a room-aware device, the room where you ask.",
       "portals": [
-        "voice_core"
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
       ],
       "notifier": false,
       "settings_category": "Tater Vision",
@@ -1420,7 +1431,7 @@
         "echo-show"
       ],
       "entry": "verba/tater_vision.py",
-      "sha256": "73b7c07b1e0f22d4bd9d986d3e46a028a6cd1877a1f1b2054694627ee937693b"
+      "sha256": "ea47061604300fbe32655ad8b9cf9d9b8885950dbdd962b9caac687737196fbd"
     },
     {
       "id": "temperature_status",
