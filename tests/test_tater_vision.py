@@ -42,7 +42,7 @@ class TaterVisionTests(unittest.TestCase):
     def test_metadata_routes_all_current_visual_questions_to_tater_vision(self):
         self.assertEqual(self.plugin.name, "tater_vision")
         self.assertEqual(self.plugin.verba_name, "Tater Vision")
-        self.assertEqual(self.plugin.version, "1.1.0")
+        self.assertEqual(self.plugin.version, "1.1.1")
         description = self.plugin.description.lower()
         for phrase in (
             "tater's visual-question tool",
@@ -59,6 +59,16 @@ class TaterVisionTests(unittest.TestCase):
         self.assertIn("named locations", routing)
         self.assertIn("follow-ups", routing)
         self.assertIn("weather-only or other nonvisual questions", routing)
+
+        manifest_description = self.plugin.verba_dec.lower()
+        for phrase in (
+            "asks you to look at, see, identify, describe, inspect, or visually check something",
+            "whenever you need to see the current room or area to answer correctly",
+            "follow-ups about something you just looked at",
+            "asking satellite's room",
+            "do not use for historical event searches",
+        ):
+            self.assertIn(phrase, manifest_description)
 
     def test_selects_every_camera_in_named_or_asking_room_and_never_other_room(self):
         candidates = [

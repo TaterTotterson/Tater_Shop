@@ -18,7 +18,7 @@ class TaterVisionPlugin(ToolVerba):
     name = "tater_vision"
     verba_name = "Tater Vision"
     pretty_name = "Tater Vision"
-    version = "1.1.0"
+    version = "1.1.1"
     min_tater_version = "98.4"
     settings_category = "Tater Vision"
     description = (
@@ -31,8 +31,13 @@ class TaterVisionPlugin(ToolVerba):
         "explicitly named location truly has no camera."
     )
     verba_dec = (
-        "Tater's eyes for people, objects, rooms, and outdoor areas. It automatically chooses cameras by the named "
-        "location or by the room where you asked, then answers the visual question."
+        "Use when the user asks you to look at, see, identify, describe, inspect, or visually check something, or "
+        "whenever you need to see the current room or area to answer correctly. This includes things shown to you, "
+        "people or animals in a room or outside area, appearance questions, current activity, and follow-ups about "
+        "something you just looked at. Use the cameras covering a location named by the user; if they do not name "
+        "one, use a camera in the asking satellite's room. Do not use for historical event searches or questions "
+        "that do not "
+        "require seeing anything."
     )
     when_to_use = (
         "Use for every question whose answer requires current visual evidence from a Tater satellite camera or an "
