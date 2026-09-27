@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -2827,10 +2827,19 @@ def _acquire_cooldown(client: Any, rule: Dict[str, Any]) -> bool:
     return client.set(key, "1", ex=max(1, seconds), nx=True) is not None
 
 
-async def _process_event(client: Any, event: Dict[str, Any]) -> int:
-    registry = _registry(client)
+async def _process_event(
+    client: Any,
+    event: Dict[str, Any],
+    *,
+    registry: Optional[Dict[str, Any]] = None,
+    rules: Optional[Sequence[Dict[str, Any]]] = None,
+) -> int:
+    if registry is None:
+        registry = _registry(client)
+    if rules is None:
+        rules = tuple(_load_rules(client).values())
     matched_count = 0
-    for rule in _load_rules(client).values():
+    for rule in rules:
         if not _bool(rule.get("enabled"), True):
             continue
         matched, context = _event_match(rule, event, registry)
@@ -2863,10 +2872,20 @@ async def _event_loop(stop_event: Optional[object]) -> None:
         if not events:
             await asyncio.sleep(0.25)
             continue
+        # Building the matching registry overlays thousands of live integration
+        # states. Reuse it, along with the rule snapshot, for this ordered batch
+        # instead of rebuilding both for every event in a busy integration burst.
+        registry = _registry(redis_client)
+        rules = tuple(_load_rules(redis_client).values())
         for event in events:
             seq = _sequence(event.get("seq"), last_seq)
             try:
-                await _process_event(redis_client, event)
+                await _process_event(
+                    redis_client,
+                    event,
+                    registry=registry,
+                    rules=rules,
+                )
             except Exception as exc:
                 logger.warning("[automation] event %s failed: %s", seq, exc)
                 _runtime_set(redis_client, last_error=str(exc))

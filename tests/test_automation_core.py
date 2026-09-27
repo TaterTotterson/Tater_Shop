@@ -397,6 +397,33 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             9_007_199_254_740_993,
         )
 
+    async def test_event_loop_reuses_registry_and_rules_for_each_batch(self):
+        class StopAfterOneBatch:
+            def __init__(self):
+                self.checks = 0
+
+            def is_set(self):
+                self.checks += 1
+                return self.checks > 1
+
+        events = [
+            {"seq": 21, "provider": "unifi_protect", "kind": "motion", "payload": {}},
+            {"seq": 22, "provider": "unifi_protect", "kind": "motion", "payload": {}},
+        ]
+        rule = self._tts_rule()
+        with (
+            patch.object(self.core, "_integration_events", return_value=events),
+            patch.object(self.core, "_registry", return_value=sample_registry()) as load_registry,
+            patch.object(self.core, "_load_rules", return_value={rule["id"]: rule}) as load_rules,
+            patch.object(self.core, "_event_match", return_value=(False, {})) as event_match,
+        ):
+            await self.core._event_loop(StopAfterOneBatch())
+
+        load_registry.assert_called_once_with(self.redis)
+        load_rules.assert_called_once_with(self.redis)
+        self.assertEqual(event_match.call_count, 2)
+        self.assertEqual(self.redis.get(self.core._CURSOR_KEY), "22")
+
     def test_ignores_terminal_unifi_detection_update(self):
         rule = self._tts_rule(trigger_device="unifi_protect|cam-front")
         event = {
