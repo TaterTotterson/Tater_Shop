@@ -19,7 +19,7 @@
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.6.2",
+      "version": "1.6.3",
       "min_tater_version": "164",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, announcement targets, camera image or video descriptions, and optional Face ID-aware greetings using Tater's shared People profiles.",
       "settings_category": "Automation Core Settings",
@@ -35,7 +35,7 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "c5a0c5426a5f34c9b319bd0c37c3598a980066117b816b7e773c700803e850e8"
+      "sha256": "cdb12b6e4a1abcde92fb5319c599b7434222a43aa9401ab641f2eed538961fe5"
     },
     {
       "id": "awareness",

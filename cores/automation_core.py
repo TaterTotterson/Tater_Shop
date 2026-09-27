@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -76,6 +76,7 @@ _RUNTIME_KEY = "automation:runtime"
 _CURSOR_KEY = "automation:integration_runtime:last_seq"
 _INTEGRATION_EVENTS_KEY = "tater:integration_runtime:events"
 _INTEGRATION_EVENT_SEQ_KEY = "tater:integration_runtime:event_seq"
+_INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY = "tater:integration_runtime:device_registry:generation"
 _EVENT_SEQUENCE_MAX = 9_223_372_036_854_775_807
 _LEGACY_CURSOR_CLAMP = 1_000_000
 _HISTORY_LIMIT = 200
@@ -84,6 +85,9 @@ _BACKGROUND_AUDIO_MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 _BACKGROUND_AUDIO_PRESET_SECONDS = 12
 _BACKGROUND_AUDIO_PRESET_SAMPLE_RATE = 24000
 _CAMERA_FACE_ID_TIMEOUT_SECONDS = 8.0
+_EVENT_REGISTRY_CACHE: Optional[Dict[str, Any]] = None
+_EVENT_REGISTRY_CACHE_GENERATION = ""
+_EVENT_REGISTRY_CACHE_LOCK = threading.RLock()
 _BACKGROUND_AUDIO_PRESETS: Tuple[Dict[str, str], ...] = (
     {
         "id": "morning_glow",
@@ -724,13 +728,44 @@ def _device_room(device: Dict[str, Any]) -> str:
     return _token(device.get("room") or device.get("area") or "unassigned")
 
 
-def _registry(client: Any = None, *, refresh: bool = False) -> Dict[str, Any]:
+def _registry(
+    client: Any = None,
+    *,
+    refresh: bool = False,
+    overlay_runtime_state: bool = True,
+) -> Dict[str, Any]:
     try:
-        result = get_integration_device_registry(client or redis_client, refresh=refresh)
+        try:
+            result = get_integration_device_registry(
+                client or redis_client,
+                refresh=refresh,
+                overlay_runtime_state=overlay_runtime_state,
+            )
+        except TypeError as exc:
+            if overlay_runtime_state or "overlay_runtime_state" not in str(exc):
+                raise
+            # Compatibility with Tater releases before lightweight inventory
+            # reads were added. The core still works, but pays the older load.
+            result = get_integration_device_registry(client or redis_client, refresh=refresh)
     except Exception:
         logger.debug("[automation] device registry unavailable", exc_info=True)
         return {"devices": [], "categories": [], "rooms": [], "category_definitions": []}
     return result if isinstance(result, dict) else {"devices": [], "categories": [], "rooms": []}
+
+
+def _event_registry(client: Any) -> Dict[str, Any]:
+    global _EVENT_REGISTRY_CACHE, _EVENT_REGISTRY_CACHE_GENERATION
+    try:
+        generation = _text(client.get(_INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY))
+    except Exception:
+        generation = ""
+    with _EVENT_REGISTRY_CACHE_LOCK:
+        if _EVENT_REGISTRY_CACHE is not None and generation == _EVENT_REGISTRY_CACHE_GENERATION:
+            return _EVENT_REGISTRY_CACHE
+        registry = _registry(client, overlay_runtime_state=False)
+        _EVENT_REGISTRY_CACHE = registry
+        _EVENT_REGISTRY_CACHE_GENERATION = generation
+        return registry
 
 
 def _category_rows(
@@ -1773,7 +1808,16 @@ def _event_states(event: Dict[str, Any]) -> Tuple[str, str]:
     ).lower()
     kind = _text(event.get("kind")).lower()
     if not state:
-        if any(word in kind for word in ("connected", "seen")):
+        event_type = _token(
+            payload.get("type")
+            or payload.get("eventType")
+            or payload.get("event_type")
+        )
+        if event_type in {"sensoropened", "sensor_opened"}:
+            state = "open"
+        elif event_type in {"sensorclosed", "sensor_closed"}:
+            state = "closed"
+        elif any(word in kind for word in ("connected", "seen")):
             state = "connected"
         elif any(word in kind for word in ("disconnected", "missing")):
             state = "disconnected"
@@ -2867,15 +2911,18 @@ async def _event_loop(stop_event: Optional[object]) -> None:
             last_event_seq=last_seq,
             cursor_recovered_from=_LEGACY_CURSOR_CLAMP,
         )
+    # Warm the lightweight device inventory when the core starts so the first
+    # real-world event does not pay the registry decoding cost.
+    registry = _event_registry(redis_client)
     while not (stop_event and stop_event.is_set()):
         events = _integration_events(redis_client, last_seq)
         if not events:
             await asyncio.sleep(0.25)
             continue
-        # Building the matching registry overlays thousands of live integration
-        # states. Reuse it, along with the rule snapshot, for this ordered batch
-        # instead of rebuilding both for every event in a busy integration burst.
-        registry = _registry(redis_client)
+        # Reuse the inventory until its generation changes. Incoming events
+        # carry the live state needed for matching; the large all-device runtime
+        # state overlay is unnecessary here.
+        registry = _event_registry(redis_client)
         rules = tuple(_load_rules(redis_client).values())
         for event in events:
             seq = _sequence(event.get("seq"), last_seq)

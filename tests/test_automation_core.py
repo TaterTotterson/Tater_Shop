@@ -296,6 +296,8 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.redis.hashes.clear()
         self.redis.values.clear()
         self.redis.lists.clear()
+        self.core._EVENT_REGISTRY_CACHE = None
+        self.core._EVENT_REGISTRY_CACHE_GENERATION = ""
 
     def _tts_rule(self, **overrides):
         payload = {
@@ -419,10 +421,61 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.core._event_loop(StopAfterOneBatch())
 
-        load_registry.assert_called_once_with(self.redis)
+        load_registry.assert_called_once_with(self.redis, overlay_runtime_state=False)
         load_rules.assert_called_once_with(self.redis)
         self.assertEqual(event_match.call_count, 2)
         self.assertEqual(self.redis.get(self.core._CURSOR_KEY), "22")
+
+    def test_event_registry_reuses_inventory_until_generation_changes(self):
+        self.redis.set(self.core._INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY, "7")
+        with patch.object(self.core, "_registry", side_effect=lambda *_args, **_kwargs: sample_registry()) as load_registry:
+            first = self.core._event_registry(self.redis)
+            second = self.core._event_registry(self.redis)
+            self.redis.set(self.core._INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY, "8")
+            third = self.core._event_registry(self.redis)
+
+        self.assertIs(first, second)
+        self.assertIsNot(second, third)
+        self.assertEqual(load_registry.call_count, 2)
+        load_registry.assert_called_with(self.redis, overlay_runtime_state=False)
+
+    def test_direct_unifi_sensor_open_event_matches_without_poll(self):
+        sensor = {
+            "integration_id": "unifi_protect",
+            "id": "sensor-back",
+            "ref": "sensor:sensor-back",
+            "name": "Back Door",
+            "room": "Kitchen",
+            "category_ids": ["entry_sensor"],
+            "event_sources": [{"type": "contact", "ref": "sensor:sensor-back"}],
+        }
+        registry = {
+            "devices": [sensor],
+            "categories": [{"id": "entry_sensor", "devices": [sensor]}],
+            "rooms": [],
+        }
+        rule = self._tts_rule(
+            trigger_category="entry_sensor",
+            trigger_device="unifi_protect|sensor-back",
+            trigger_event="opens",
+        )
+        event = {
+            "seq": 23,
+            "provider": "unifi_protect",
+            "kind": "protect_event",
+            "payload": {
+                "id": "event-open",
+                "type": "sensorOpened",
+                "sensor": "sensor-back",
+                "sensorName": "Back Door",
+            },
+        }
+
+        matched, context = self.core._event_match(rule, event, registry)
+
+        self.assertTrue(matched)
+        self.assertEqual(context["state"], "open")
+        self.assertEqual(context["device"], "Back Door")
 
     def test_ignores_terminal_unifi_detection_update(self):
         rule = self._tts_rule(trigger_device="unifi_protect|cam-front")
