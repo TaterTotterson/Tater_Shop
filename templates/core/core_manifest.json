@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "name": "Example Core Repository",
+  "cores": [
+    {
+      "id": "example",
+      "name": "Example Core",
+      "module_key": "example_core",
+      "version": "1.0.0",
+      "min_tater_version": "187",
+      "description": "Maintain a small set of example items and expose their status to Hydra.",
+      "settings_category": "Example Core Settings",
+      "required_settings_count": 1,
+      "autostart_key": "example_core_running",
+      "tags": [
+        "example"
+      ],
+      "entry": "cores/example_core.py",
+      "sha256": "f56f626548fbf220aa154fd23b209484b4aa9ffc64cc8a3a3b114624188b9087"
+    }
+  ]
+}

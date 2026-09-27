@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "Example Portal Repository",
+  "portals": [
+    {
+      "id": "example",
+      "name": "Example Portal",
+      "module_key": "example_portal",
+      "version": "1.0.0",
+      "min_tater_version": "187",
+      "description": "Example transport Portal for Tater.",
+      "settings_category": "Example Portal Settings",
+      "required_settings_count": 2,
+      "autostart_key": "example_portal_running",
+      "tags": [
+        "example",
+        "chat"
+      ],
+      "entry": "portals/example_portal.py",
+      "sha256": "2acf570cda179e468a850d3c4ae10c3118d94a4f42c5743fd5ec1da45001ea2b"
+    }
+  ]
+}

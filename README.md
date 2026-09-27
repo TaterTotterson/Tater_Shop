@@ -14,584 +14,86 @@
   </a>
 </p>
 
-Tater Shop is the modular source repo for Tater verbas, portals, and cores. Tater reads the generated manifests in this repo and downloads selected modules into the local runtime.
+Tater Shop is the modular source repository for Tater Verbas, Portals, and Cores. Tater reads its generated manifests and installs each selected extension as a single Python module.
 
-The manifests are the source of the store inventory:
+## Choose an extension type
 
-- `manifest.json` for verbas.
-- `portal_manifest.json` for portals.
-- `core_manifest.json` for cores.
+| Type | Use it for | Authoring guide | Starter template |
+| --- | --- | --- | --- |
+| **Verba** | A focused tool Hydra may call to answer or act on a request | [Build a Verba](docs/verba-authoring.md) | [Verba template](templates/verba) |
+| **Portal** | A transport that receives messages from a platform and delivers Tater's responses | [Build a Portal](docs/portal-authoring.md) | [Portal template](templates/portal) |
+| **Core** | A background service, Core-owned Hydra tools, context, or a custom Vue-rendered management tab | [Build a Core](docs/core-authoring.md) | [Core template](templates/core) |
 
-The curated repository directories power the **Trusted repositories** picker in Tater:
+If you are publishing extensions from your own GitHub repository, also read [Repository manifests and publishing](docs/repository-manifests.md).
 
-- `verba_repositories.json` for third-party Verba manifests.
-- `portal_repositories.json` for third-party Portal manifests.
-- `core_repositories.json` for third-party Core manifests.
+## Quick start
 
-Each directory uses schema `1` and contains a `repositories` list. A repository entry includes a stable `id`, display `name`, repository name, description, author name/profile URL, raw `manifest_url`, project `homepage`, and optional tags. Publishing a directory change makes it available to Tater clients without an app update; selecting an entry adds that manifest to the normal Store catalog.
+1. Copy the closest starter template into your repository.
+2. Give the module and its stable ID a unique lowercase `snake_case` name.
+3. Replace the example behavior and metadata.
+4. Generate the corresponding manifest.
+5. Validate the repository before publishing.
+6. Add the raw manifest URL under the matching **Repositories** tab in Tater.
 
-The README is intentionally not an inventory table. It is the authoring guide for adding new shop packages.
-
-## Repo Layout
-
-- `verba/`: Hydra-callable tools, usually one user-facing skill or action per file.
-- `portals/`: platform runtimes such as Discord, Matrix, IRC, HomeKit, or macOS.
-- `cores/`: background services, web UI panels, Hydra kernel tools, and shared context providers.
-- `tools/`: manifest generators for the three shop package types.
-
-## Build A Verba
-
-A verba is a tool Hydra can route to. Verbas should be narrow, predictable, and explicit about when they should be used.
-
-Create `verba/example_lookup.py`:
-
-```python
-import json
-import logging
-import re
-from typing import Any, Dict
-
-from verba_base import ToolVerba
-from verba_result import action_failure, action_success
-
-logger = logging.getLogger("example_lookup")
-
-
-class ExampleLookupPlugin(ToolVerba):
-    name = "example_lookup"
-    verba_name = "Example Lookup"
-    pretty_name = "Example Lookup"
-    version = "1.0.0"
-    min_tater_version = "59"
-
-    usage = '{"function":"example_lookup","arguments":{"query":"check the example status"}}'
-    description = "Look up an example value."
-    verba_dec = "Look up an example value."
-    when_to_use = "Use when the user asks for the example lookup."
-    how_to_use = "Pass one natural-language lookup request in query."
-    common_needs = []
-    missing_info_prompts = ["What should I look up?"]
-    example_calls = [
-        '{"function":"example_lookup","arguments":{"query":"check the example status"}}',
-        '{"function":"example_lookup","arguments":{"query":"look up the current example value"}}',
-    ]
-
-    settings_category = "Example Lookup"
-    platforms = ["webui", "macos", "voice_core", "discord", "telegram", "matrix", "irc", "meshtastic"]
-    tags = ["example"]
-    routing_keywords = ["example lookup", "example status"]
-    allowed_actions = {"status", "value", "details"}
-
-    required_settings = {
-        "EXAMPLE_TIMEOUT_SECONDS": {
-            "label": "Timeout Seconds",
-            "type": "number",
-            "default": 10,
-            "description": "Timeout for example requests.",
-        },
-    }
-
-    @staticmethod
-    def _query(args: Dict[str, Any]) -> str:
-        return str((args or {}).get("query") or (args or {}).get("request") or "").strip()
-
-    @classmethod
-    def _infer_action(cls, query: str) -> str:
-        text = str(query or "").lower()
-        if "status" in text:
-            return "status"
-        if "detail" in text or "describe" in text:
-            return "details"
-        if "value" in text or "lookup" in text or "look up" in text:
-            return "value"
-        return ""
-
-    @staticmethod
-    def _json_object_from_text(text: str) -> Dict[str, Any]:
-        raw = str(text or "").strip()
-        if not raw:
-            return {}
-        try:
-            data = json.loads(raw)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            pass
-        match = re.search(r"\{.*\}", raw, flags=re.S)
-        if not match:
-            return {}
-        try:
-            data = json.loads(match.group(0))
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    async def _interpret_query(self, query: str, llm_client=None) -> Dict[str, Any]:
-        action = self._infer_action(query)
-        if action:
-            return {"action": action, "target": query}
-        if not llm_client:
-            return {}
-
-        prompt = f"""
-Interpret this Example Lookup request.
-Allowed actions: status, value, details.
-Return JSON with keys: action, target.
-Use an empty string for unknown fields.
-
-Request: {query}
-""".strip()
-        try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
-            raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
-            data = self._json_object_from_text(raw)
-        except Exception as exc:
-            logger.warning("[example_lookup] interpretation failed: %s", exc)
-            return {}
-
-        action = str(data.get("action") or "").strip().lower()
-        if action not in self.allowed_actions:
-            return {}
-        return {"action": action, "target": str(data.get("target") or query).strip()}
-
-    async def _handle(self, args: Dict[str, Any], llm_client=None) -> Dict[str, Any]:
-        query = self._query(args)
-        if not query:
-            return action_failure(
-                code="missing_query",
-                message="No example lookup query was provided.",
-                needs=["Provide a query."],
-                say_hint="Ask what the user wants to look up.",
-            )
-
-        intent = await self._interpret_query(query, llm_client)
-        action = str(intent.get("action") or "").strip()
-        if action not in self.allowed_actions:
-            return action_failure(
-                code="unknown_action",
-                message="Could not determine the Example Lookup action.",
-                needs=["Ask for status, value, or details."],
-                say_hint="Ask the user which lookup action they want.",
-            )
-
-        result = {
-            "action": action,
-            "target": str(intent.get("target") or query).strip(),
-            "value": "example result",
-        }
-        return action_success(
-            facts=result,
-            summary_for_user=f"Example lookup returned: {result['value']}.",
-            say_hint="Summarize the example lookup result.",
-        )
-
-    async def handle_webui(self, args, llm_client):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_macos(self, args, llm_client, context=None):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_discord(self, message, args, llm_client):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_telegram(self, update, args, llm_client):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_matrix(self, client, room, sender, body, args, llm_client=None, **kwargs):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_irc(self, bot, channel, user, raw_message, args, llm_client):
-        return await self._handle(args or {}, llm_client)
-
-    async def handle_meshtastic(self, args=None, llm_client=None, context=None, **kwargs):
-        return await self._handle(args or {}, llm_client)
-
-
-verba = ExampleLookupPlugin()
-```
-
-### Verba Contract
-
-The manifest generator reads class attributes from the class instantiated by the
-module-level `verba = ...` assignment, including attributes inherited from a
-local base class:
-
-- `name`: stable tool id. Use lowercase snake case.
-- `verba_name` or `pretty_name`: display name.
-- `version`: bump when behavior changes.
-- `min_tater_version`: minimum supported Tater version.
-- `description` and `verba_dec`: short store and routing description.
-- `platforms` or `portals`: supported surfaces.
-- `settings_category`: settings bucket shown in Tater.
-- `required_settings`: settings fields for the UI.
-- `tags`: optional store and routing tags.
-
-Use prose for `when_to_use` and `how_to_use`. Use JSON tool-call strings for `usage` and `example_calls`, but keep the main request payload natural-language: prefer one field such as `query` or `request` containing what the user asked. The metadata and examples teach the routing model when to choose the verba and what argument shape to pass; the verba still owns the domain-specific interpretation after it receives that natural-language request.
-
-Each `verba/*.py` file is downloaded independently and must be a complete
-runtime artifact. It may import stable APIs supplied by Tater, such as
-`verba_base`, `verba_result`, and `integration_registry`, but it must not import
-another Shop Verba or depend on an unlisted companion file.
-
-For flexible verbas, accept one user request in `query`, extract the natural-language request, try a small deterministic match, then use an internal `llm_client` call to choose from a constrained set of actions when code alone is not enough. After that, validate the result, resolve settings and known entities, fetch or act on real API data, and dispatch to the real action. If the request cannot be mapped to a known action, return `action_failure(...)` with the missing information instead of guessing.
-
-```python
-usage = '{"function":"example_lookup","arguments":{"query":"check the example status"}}'
-
-async def _handle(self, args, llm_client):
-    query = self._query(args)
-    if not query:
-        return action_failure(...)
-
-    intent = await self._interpret_query(query, llm_client)
-    action = intent.get("action")
-
-    if action not in {"status", "value", "details"}:
-        return action_failure(...)
-
-    # Validate settings/entities, resolve any API data needed, then execute.
-```
-
-Handlers are platform-specific. Keep one private `_handle()` method when possible and let platform handlers normalize into it. Return `action_success(...)` or `action_failure(...)` so every portal can narrate results consistently.
-
-## Build A Portal
-
-A portal is a runtime bridge for one platform. It receives platform events, builds an origin/context payload, calls Hydra, and sends the response back to the platform.
-
-Create `portals/example_portal.py`:
-
-```python
-"""Example integration portal for Tater."""
-
-import logging
-import time
-from typing import Any, Dict
-
-from helpers import get_llm_client_from_env, redis_client
-from hydra import run_hydra_turn
-
-__version__ = "1.0.0"
-MIN_TATER_VERSION = "59"
-PORTAL_DESCRIPTION = "Example integration portal for Tater."
-TAGS = ["example"]
-
-logger = logging.getLogger("example_portal")
-
-PORTAL_SETTINGS = {
-    "category": "Example Portal Settings",
-    "tags": TAGS,
-    "required": {
-        "poll_interval_seconds": {
-            "label": "Poll Interval Seconds",
-            "type": "number",
-            "default": 5,
-            "description": "How often the example portal polls for messages.",
-        },
-    },
-}
-
-
-def _settings() -> Dict[str, str]:
-    return redis_client.hgetall("example_portal_settings") or {}
-
-
-def _poll_interval() -> float:
-    try:
-        return max(1.0, float(_settings().get("poll_interval_seconds") or 5))
-    except Exception:
-        return 5.0
-
-
-def run(stop_event=None) -> None:
-    llm_client = get_llm_client_from_env()
-    logger.info("[example_portal] started")
-    try:
-        while not (stop_event and stop_event.is_set()):
-            # Replace this with platform polling, websocket handling, or API processing.
-            time.sleep(_poll_interval())
-
-            # Example Hydra call shape:
-            # result = await run_hydra_turn(
-            #     user_text="hello",
-            #     llm_client=llm_client,
-            #     platform="example",
-            #     origin={"platform": "example", "user_id": "user", "room_id": "room"},
-            # )
-            # Send result text/artifacts back to the platform.
-    finally:
-        logger.info("[example_portal] stopped")
-```
-
-### Portal Contract
-
-The portal manifest generator reads:
-
-- File name: `*_portal.py`.
-- `__version__` or `VERSION`.
-- `MIN_TATER_VERSION`.
-- `PORTAL_DESCRIPTION` or `DESCRIPTION`.
-- `TAGS`.
-- `PORTAL_SETTINGS`.
-- `run(stop_event=None)`.
-
-Use `PORTAL_SETTINGS["required"]` for settings fields. Keep credentials in `password` fields. Make `run()` cooperative: it must check `stop_event.is_set()` and exit cleanly.
-
-Portals should not implement business logic that belongs in a verba or core. Their job is transport, identity/origin normalization, message history, platform-specific formatting, and delivery.
-
-## Build A Core
-
-A core is a background service. Cores can also expose custom Web UI tabs, Hydra kernel tools, and context/prompt fragments.
-
-Create `cores/example_core.py`:
-
-```python
-import logging
-import time
-from typing import Any, Dict, List, Optional
-
-from helpers import redis_client
-
-__version__ = "1.0.0"
-MIN_TATER_VERSION = "59"
-CORE_DESCRIPTION = "Example background core for Tater."
-TAGS = ["example"]
-
-logger = logging.getLogger("example_core")
-
-CORE_SETTINGS = {
-    "category": "Example Core Settings",
-    "hydra_tools_require_running": False,
-    "required": {
-        "poll_interval_seconds": {
-            "label": "Poll Interval Seconds",
-            "type": "number",
-            "default": 30,
-            "description": "How often Example Core refreshes data.",
-        },
-    },
-    "tags": TAGS,
-}
-
-CORE_WEBUI_TAB = {
-    "label": "Example",
-    "order": 50,
-    "requires_running": False,
-}
-
-
-def _settings(client: Any = None) -> Dict[str, Any]:
-    store = client or redis_client
-    return store.hgetall("example_core_settings") or {}
-
-
-def _poll_interval(client: Any = None) -> float:
-    try:
-        return max(5.0, float(_settings(client).get("poll_interval_seconds") or 30))
-    except Exception:
-        return 30.0
-
-
-def run(stop_event=None) -> None:
-    logger.info("[example_core] started")
-    try:
-        while not (stop_event and stop_event.is_set()):
-            redis_client.hset("example_core:status", mapping={"last_seen": str(time.time())})
-            interval = _poll_interval()
-            deadline = time.time() + interval
-            while time.time() < deadline:
-                if stop_event and stop_event.is_set():
-                    break
-                time.sleep(0.5)
-    finally:
-        logger.info("[example_core] stopped")
-
-
-def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
-    client = redis_client or globals().get("redis_client")
-    status = client.hgetall("example_core:status") or {}
-    return {
-        "summary": "Example Core status.",
-        "stats": [
-            {"label": "Last Seen", "value": status.get("last_seen") or "never"},
-        ],
-        "empty_message": "No example data yet.",
-        "ui": {
-            "kind": "settings_manager",
-            "title": "Example Core",
-            "manager_tabs": [
-                {"key": "overview", "label": "Overview", "source": "items"},
-                {"key": "create", "label": "Create", "source": "add_form"},
-            ],
-            "default_tab": "overview",
-            "add_form": {
-                "action": "example_create",
-                "submit_label": "Create",
-                "fields": [
-                    {"key": "name", "label": "Name", "type": "text", "required": True},
-                ],
-            },
-            "item_forms": [
-                {
-                    "id": "example",
-                    "title": "Example Item",
-                    "subtitle": "Stored by Example Core",
-                    "fields": [
-                        {"key": "name", "label": "Name", "type": "text", "value": "Example"},
-                    ],
-                    "actions": [
-                        {"action": "example_save", "label": "Save"},
-                        {"action": "example_delete", "label": "Delete", "danger": True},
-                    ],
-                }
-            ],
-        },
-    }
-
-
-def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
-    client = redis_client or globals().get("redis_client")
-    values = (payload or {}).get("values") if isinstance((payload or {}).get("values"), dict) else {}
-    if action == "example_create":
-        name = str(values.get("name") or "").strip()
-        if not name:
-            raise ValueError("Name is required.")
-        client.hset("example_core:item", mapping={"name": name})
-        return {"ok": True, "message": "Created example item."}
-    raise KeyError(f"Unsupported Example Core UI action: {action}")
-
-
-def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
-    return [
-        {
-            "id": "example_status",
-            "description": "Read Example Core status.",
-            "usage": '{"function":"example_status","arguments":{}}',
-        }
-    ]
-
-
-async def run_hydra_kernel_tool(
-    *,
-    tool_id: str,
-    args: Optional[Dict[str, Any]] = None,
-    platform: str = "",
-    scope: str = "",
-    origin: Optional[Dict[str, Any]] = None,
-    llm_client: Any = None,
-    redis_client: Any = None,
-    **_kwargs,
-) -> Optional[Dict[str, Any]]:
-    if tool_id != "example_status":
-        return None
-    client = redis_client or globals().get("redis_client")
-    status = client.hgetall("example_core:status") or {}
-    return {
-        "tool": "example_status",
-        "ok": True,
-        "status": status,
-        "summary_for_user": "Example Core is available.",
-    }
-```
-
-### Core Contract
-
-The core manifest generator reads:
-
-- File name: `*_core.py`.
-- `__version__` or `VERSION`.
-- `MIN_TATER_VERSION`.
-- `CORE_DESCRIPTION` or `DESCRIPTION`.
-- `CORE_SETTINGS`.
-- `CORE_WEBUI_TAB`.
-- `TAGS`.
-- `run(stop_event=None)`.
-
-`CORE_SETTINGS` drives the Settings UI and runtime behavior. Set `hydra_tools_require_running` to `False` when Hydra tools are useful even if the background loop is stopped.
-
-### Core Web UI
-
-`CORE_WEBUI_TAB` makes a tab available in Tater's Web UI. `get_htmlui_tab_data()` returns the payload for that tab. For richer management screens, return `ui.kind = "settings_manager"`.
-
-Common `settings_manager` keys:
-
-- `title`: panel title.
-- `stats`: top-level summary counters from the outer payload.
-- `manager_tabs`: tab definitions with `key`, `label`, `source`, and optional `item_group`.
-- `add_form`: create form with `action`, `submit_label`, and `fields`.
-- `item_forms`: existing item cards/forms.
-- `stats_refresh_button`: show a refresh button.
-- `item_fields_dropdown`, `item_fields_popup`, `item_sections_in_dropdown`: controls how item fields are displayed.
-
-An item card may include an `actions` list when it needs several independent
-controls. Each entry accepts `action`, `label`, and optional `tone`, `confirm`,
-`working_text`, and `success_text` values. Tater sends the card id and its
-current field values to `handle_htmlui_tab_action()` for each button.
-
-Common field types:
-
-- `text`
-- `textarea`
-- `number`
-- `password`
-- `checkbox`
-- `select`
-- `multiselect`
-- `hidden`
-
-UI actions call `handle_htmlui_tab_action(action=..., payload=..., redis_client=...)`. Raise `ValueError` for invalid input and `KeyError` for unsupported actions.
-
-### Hydra Kernel Tools
-
-Cores can add tools directly to Hydra without creating a separate verba:
-
-- `get_hydra_kernel_tools(platform="", **kwargs)` returns tool definitions.
-- `run_hydra_kernel_tool(tool_id=..., args=..., platform=..., scope=..., origin=..., llm_client=..., redis_client=...)` executes one tool.
-
-Use kernel tools for core-owned data and workflows, such as memory lookup, event history, weather conditions, or scheduling. Return structured dictionaries with `ok`, relevant data, and `summary_for_user`.
-
-Optional context hooks:
-
-- `get_hydra_system_prompt_fragments(...)`: add core-owned prompt context.
-- `get_hydra_memory_context_payload(...)` or similar core-specific payload helpers: expose compact context to Hydra.
-
-Keep kernel tools narrow. They should be safe to call repeatedly and should not require a portal-specific transport.
-
-## Manifest Generation
-
-After editing shop files, regenerate the relevant manifest:
+For work inside this repository:
 
 ```bash
-python3 tools/sync_device_verba_runtime.py  # after editing the embedded device runtime
 python3 tools/generate_manifest.py
 python3 tools/generate_core_manifest.py
 python3 tools/generate_portal_manifest.py
+python3 tools/validate_package.py --root .
 ```
 
-The GitHub workflow also regenerates these manifests on push. README generation is intentionally removed.
+The GitHub workflow regenerates the official manifests on push and validates the result.
+
+## Repository layout
+
+- `verba/`: official Hydra-callable tools.
+- `portals/`: official platform runtimes.
+- `cores/`: official background services and Core UI providers.
+- `tools/`: manifest generators, validators, and maintenance utilities.
+- `templates/`: small, working starting points for external authors.
+- `tests/`: contract and behavior tests for official extensions.
+- `manifest.json`: official Verba catalog.
+- `portal_manifest.json`: official Portal catalog.
+- `core_manifest.json`: official Core catalog.
+- `*_repositories.json`: curated third-party repositories shown in Tater's **Trusted repositories** picker.
+
+## Important packaging rules
+
+- Every installed extension is one UTF-8 Python file. Tater does not install a package-specific `requirements.txt`, companion Python modules, or asset folders.
+- Imports may use Python's standard library and stable APIs or dependencies already shipped by Tater. Handle optional imports gracefully.
+- An extension runs inside the Tater process. It is not sandboxed and can access Tater's Redis connection, filesystem permissions, and network access. Only install code you trust.
+- Manifest `entry` paths are resolved relative to the manifest URL. Keep the manifest at the repository root when using paths such as `cores/example_core.py`.
+- Manifest IDs are global within their extension type. The first configured repository containing an ID wins, so third-party authors should choose distinctive IDs.
+- Use semantic versions for extension `version` values and bump the version whenever users should receive an update.
+- `MIN_TATER_VERSION` / `min_tater_version` is currently advisory catalog metadata. It uses Tater's compatible build identifier rather than the public release label; it does not replace testing against the oldest supported Tater build.
 
 ## Validation
 
-Compile-check changed modules:
+Compile-check a changed module, regenerate its manifest, then validate the repository:
 
 ```bash
 python3 -m py_compile verba/example_lookup.py
-python3 -m py_compile portals/example_portal.py
-python3 -m py_compile cores/example_core.py
+python3 tools/generate_manifest.py
+python3 tools/validate_package.py --root . --kind verba
 ```
 
-Regenerate manifests and inspect the diff. The generated manifest entry should include the expected `id`, `name`, `version`, `description`, `entry`, and `sha256`.
+Use `core` or `portal` for the other package types. The validator checks IDs, versions, filenames, entries, checksums, Python syntax, and the required static contract without importing or executing extension code.
 
-## Design Rules
+## Publishing your own repository
 
-- Keep package ids stable and lowercase snake case.
-- Bump `version` or `__version__` whenever behavior changes.
-- Keep imports lightweight. Do not perform network calls or long discovery during import.
-- Put provider credentials in settings or integrations, not hardcoded constants.
-- Prefer shared integrations for external device APIs.
-- Prefer a generic core or kernel tool when behavior should work across providers.
-- Prefer a provider-specific verba when the tool is intentionally tied to one integration.
-- Make `run(stop_event=None)` loops cooperative and quick to stop.
-- Return structured results so portals can narrate consistently.
-- Keep UI payloads compact and stable; large histories should be paged, filtered, or summarized.
+A third-party repository needs only its extension file or files and the matching generated manifest. Users add the raw manifest URL in Tater's Verba, Portal, or Core **Repositories** tab. See the [publishing guide](docs/repository-manifests.md) for complete examples and the trusted-repository submission format.
+
+## Design principles
+
+- Keep tools and actions narrow, predictable, and safe to retry.
+- Do not perform network calls or long discovery during module import.
+- Keep Core and Portal loops cooperative and quick to stop.
+- Store credentials in settings, never in source code.
+- Use shared Tater integrations instead of creating duplicate provider connections when one is available.
+- Return structured results and concise user-facing messages.
+- Keep UI payloads bounded; paginate or summarize long histories.
+- Keep IDs stable after release. Renaming an ID creates a different package.
+
+For questions or extension reviews, join the [Tater Assistant Discord](https://discord.gg/w52namKyXT).

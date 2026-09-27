@@ -1,14 +1,13 @@
 # tools/generate_manifest.py
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-VERBA_DIR = ROOT / "verba"
-MANIFEST_PATH = ROOT / "manifest.json"
+DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
 
 FIELDS = {
@@ -160,17 +159,16 @@ def extract_verba_meta(py_file: Path) -> dict:
     }
 
 
-def main():
-    if not VERBA_DIR.exists():
-        raise SystemExit(f"Missing verba dir: {VERBA_DIR}")
-
+def build_manifest(verba_dir: Path, root: Path) -> tuple[dict, list[dict[str, str]]]:
+    if not verba_dir.exists():
+        raise FileNotFoundError(f"Missing verba dir: {verba_dir}")
     verbas = []
     errors = []
-    for py_file in sorted(VERBA_DIR.glob("*.py")):
+    for py_file in sorted(verba_dir.glob("*.py")):
         if py_file.name.startswith("_"):
             continue
 
-        rel_entry = str(py_file.relative_to(ROOT)).replace("\\", "/")
+        rel_entry = str(py_file.relative_to(root)).replace("\\", "/")
         try:
             meta = extract_verba_meta(py_file)
             meta["entry"] = rel_entry
@@ -179,8 +177,26 @@ def main():
         except Exception as e:
             errors.append({"file": py_file.name, "error": str(e)})
 
-    manifest = {"schema": SCHEMA_VERSION, "verbas": verbas}
-    MANIFEST_PATH.write_text(
+    return {"schema": SCHEMA_VERSION, "verbas": verbas}, errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate Verba manifest for Tater Shop")
+    parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Extension repository root")
+    parser.add_argument("--verba-dir", default="", help="Verba source directory (default: <root>/verba)")
+    parser.add_argument("--output", default="", help="Manifest path (default: <root>/manifest.json)")
+    parser.add_argument("--name", default="", help="Optional repository display name stored in the manifest")
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser().resolve()
+    verba_dir = Path(args.verba_dir).expanduser().resolve() if args.verba_dir else root / "verba"
+    manifest_path = Path(args.output).expanduser().resolve() if args.output else root / "manifest.json"
+
+    manifest, errors = build_manifest(verba_dir=verba_dir, root=root)
+    repository_name = str(args.name or "").strip()
+    if repository_name:
+        manifest = {"schema": manifest["schema"], "name": repository_name, "verbas": manifest["verbas"]}
+    manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8"
     )
@@ -189,10 +205,11 @@ def main():
         print("Manifest build errors:")
         for err in errors:
             print(f" - {err['file']}: {err['error']}")
-        raise SystemExit(1)
+        return 1
 
-    print(f"Wrote {MANIFEST_PATH} with {len(verbas)} verbas")
+    print(f"Wrote {manifest_path} with {len(manifest['verbas'])} verbas")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -9,6 +9,8 @@ on:
       - "tools/generate_manifest.py"
       - "tools/generate_core_manifest.py"
       - "tools/generate_portal_manifest.py"
+      - "tools/validate_package.py"
+      - "templates/**"
       - ".github/workflows/build-manifest.yml"
   workflow_dispatch:
 
@@ -35,6 +37,13 @@ jobs:
 
       - name: Generate portal manifest
         run: python tools/generate_portal_manifest.py
+
+      - name: Validate extension packages
+        run: |
+          python tools/validate_package.py --root .
+          python tools/validate_package.py --root templates/verba
+          python tools/validate_package.py --root templates/core
+          python tools/validate_package.py --root templates/portal
 
       - name: Commit manifests if changed
         run: |

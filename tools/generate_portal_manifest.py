@@ -188,22 +188,28 @@ def build_manifest(portals_dir: Path, root: Path, min_tater_version_default: str
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    default_root = Path(__file__).resolve().parents[1]
 
     parser = argparse.ArgumentParser(description="Generate portal manifest for Tater Shop")
-    parser.add_argument("--portals-dir", default=str(root / "portals"))
-    parser.add_argument("--output", default=str(root / "portal_manifest.json"))
+    parser.add_argument("--root", default=str(default_root), help="Extension repository root")
+    parser.add_argument("--portals-dir", default="", help="Portal source directory (default: <root>/portals)")
+    parser.add_argument("--output", default="", help="Manifest path (default: <root>/portal_manifest.json)")
+    parser.add_argument("--name", default="", help="Optional repository display name stored in the manifest")
     parser.add_argument("--min-tater-version", default="59")
     args = parser.parse_args()
 
-    portals_dir = Path(args.portals_dir).resolve()
-    output_path = Path(args.output).resolve()
+    root = Path(args.root).expanduser().resolve()
+    portals_dir = Path(args.portals_dir).expanduser().resolve() if args.portals_dir else root / "portals"
+    output_path = Path(args.output).expanduser().resolve() if args.output else root / "portal_manifest.json"
 
     manifest, errors = build_manifest(
         portals_dir=portals_dir,
         root=root,
         min_tater_version_default=str(args.min_tater_version),
     )
+    repository_name = str(args.name or "").strip()
+    if repository_name:
+        manifest = {"schema": manifest["schema"], "name": repository_name, "portals": manifest["portals"]}
 
     output_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 

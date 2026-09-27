@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "name": "Example Verba Repository",
+  "verbas": [
+    {
+      "id": "example_lookup",
+      "name": "Example Lookup",
+      "version": "1.0.0",
+      "min_tater_version": "187",
+      "description": "Return a small example status or value.",
+      "portals": [
+        "webui",
+        "macos",
+        "voice_core",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "example"
+      ],
+      "entry": "verba/example_lookup.py",
+      "sha256": "b35167b0b8012e7c28698626628796ef58921e0261ebef11879af0317a0cf387"
+    }
+  ]
+}

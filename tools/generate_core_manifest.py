@@ -188,22 +188,28 @@ def build_manifest(cores_dir: Path, root: Path, min_tater_version_default: str) 
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    default_root = Path(__file__).resolve().parents[1]
 
     parser = argparse.ArgumentParser(description="Generate core manifest for Tater Shop")
-    parser.add_argument("--cores-dir", default=str(root / "cores"))
-    parser.add_argument("--output", default=str(root / "core_manifest.json"))
+    parser.add_argument("--root", default=str(default_root), help="Extension repository root")
+    parser.add_argument("--cores-dir", default="", help="Core source directory (default: <root>/cores)")
+    parser.add_argument("--output", default="", help="Manifest path (default: <root>/core_manifest.json)")
+    parser.add_argument("--name", default="", help="Optional repository display name stored in the manifest")
     parser.add_argument("--min-tater-version", default="59")
     args = parser.parse_args()
 
-    cores_dir = Path(args.cores_dir).resolve()
-    output_path = Path(args.output).resolve()
+    root = Path(args.root).expanduser().resolve()
+    cores_dir = Path(args.cores_dir).expanduser().resolve() if args.cores_dir else root / "cores"
+    output_path = Path(args.output).expanduser().resolve() if args.output else root / "core_manifest.json"
 
     manifest, errors = build_manifest(
         cores_dir=cores_dir,
         root=root,
         min_tater_version_default=str(args.min_tater_version),
     )
+    repository_name = str(args.name or "").strip()
+    if repository_name:
+        manifest = {"schema": manifest["schema"], "name": repository_name, "cores": manifest["cores"]}
 
     output_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
