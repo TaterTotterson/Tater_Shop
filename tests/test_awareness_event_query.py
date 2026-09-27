@@ -180,11 +180,11 @@ class AwarenessEventQueryTests(unittest.TestCase):
         self.assertEqual(normalized["time_end"], now)
         self.assertEqual(normalized["time_label"], "the last 10 minutes")
 
-    def test_tool_description_routes_live_views_to_camera_control(self):
+    def test_tool_description_routes_live_views_to_tater_vision(self):
         description = self.core["get_hydra_kernel_tools"]()[0]["description"].lower()
         self.assertIn("stored awareness event history", description)
         self.assertIn("right now", description)
-        self.assertIn("camera_control", description)
+        self.assertIn("tater_vision", description)
 
 
 if __name__ == "__main__":

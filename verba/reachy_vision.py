@@ -16,7 +16,7 @@ class ReachyVisionPlugin(ToolVerba):
     name = "reachy_vision"
     verba_name = "Reachy Vision"
     pretty_name = "Reachy Vision"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "98.4"
     settings_category = "Reachy Vision"
     description = (
@@ -26,8 +26,8 @@ class ReachyVisionPlugin(ToolVerba):
     verba_dec = (
         "Use only when the request originates from a Reachy satellite or explicitly asks Reachy to look at the "
         "user or something in front of it, including 'Reachy, how do I look?' or 'what does Reachy see?'. "
-        "For the same visual questions on an Echo Show or another room satellite, use Room Vision instead. "
-        "Do not use for named home-security cameras; use Camera Control for those."
+        "For visual questions about an Echo Show, another room satellite, or a named home-security camera area, "
+        "use Tater Vision instead."
     )
     when_to_use = verba_dec
     how_to_use = (

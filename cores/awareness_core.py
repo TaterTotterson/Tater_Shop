@@ -70,7 +70,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.4"
+__version__ = "4.12.5"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -8370,7 +8370,7 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
                 "Search stored Awareness event history for past activity around the home, including doors, windows, "
                 "garage, and camera-covered areas. Use it for questions such as what happened, when something happened, "
                 "counts, timelines, or summaries over a stated period. Do not use it to determine what is visibly "
-                "happening right now or for a live/current camera view; use camera_control for a fresh camera snapshot."
+                "happening right now or for a live/current camera view; use tater_vision for a fresh visual answer."
             ),
             "usage": '{"function":"events_query","arguments":{"query":"what happened in the front yard today?"}}',
         },

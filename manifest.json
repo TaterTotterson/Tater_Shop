@@ -101,38 +101,6 @@
       "sha256": "868e83240567ab1858c51657873b3169cf9a2f1ef27f9c1b61e59e35c22e2ddd"
     },
     {
-      "id": "camera_control",
-      "name": "Camera Control",
-      "version": "1.0.3",
-      "min_tater_version": "98.4",
-      "description": "Use for requests about cameras, doorbells, snapshots, camera images, or current visible activity in a named camera-covered area, including questions like 'what's happening in the front yard?', 'who is at the door?', or 'is anyone on the porch?'",
-      "portals": [
-        "voice_core",
-        "homeassistant",
-        "webui",
-        "little_spud",
-        "macos",
-        "xbmc",
-        "homekit",
-        "discord",
-        "telegram",
-        "matrix",
-        "irc",
-        "meshtastic"
-      ],
-      "notifier": false,
-      "settings_category": "Device Control",
-      "tags": [
-        "camera",
-        "snapshot",
-        "vision",
-        "device",
-        "integration"
-      ],
-      "entry": "verba/camera_control.py",
-      "sha256": "03110c5a9eb855f9588d7f8bcfac55db53340d0208edf993f925f46a48433b95"
-    },
-    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
       "version": "1.0.27",
@@ -269,9 +237,9 @@
     {
       "id": "device_control",
       "name": "Device Control",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "min_tater_version": "98.4",
-      "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, media players, remotes, scenes, and scripts. Use Camera Control for cameras and snapshots.",
+      "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, media players, remotes, scenes, and scripts. Use Tater Vision for visual camera questions.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -297,7 +265,7 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "ad942527c21964919d1be651085d07c3790c287e8d564e2c7669b2f7971e87a0"
+      "sha256": "5a24ec0258dea24944e7e277bf1bd949606389a3f795176e4c4fa6e601d27e3e"
     },
     {
       "id": "discord_admin_response_mode",
@@ -1239,9 +1207,9 @@
     {
       "id": "reachy_vision",
       "name": "Reachy Vision",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "98.4",
-      "description": "Use only when the request originates from a Reachy satellite or explicitly asks Reachy to look at the user or something in front of it, including 'Reachy, how do I look?' or 'what does Reachy see?'. For the same visual questions on an Echo Show or another room satellite, use Room Vision instead. Do not use for named home-security cameras; use Camera Control for those.",
+      "description": "Use only when the request originates from a Reachy satellite or explicitly asks Reachy to look at the user or something in front of it, including 'Reachy, how do I look?' or 'what does Reachy see?'. For visual questions about an Echo Show, another room satellite, or a named home-security camera area, use Tater Vision instead.",
       "portals": [
         "voice_core"
       ],
@@ -1256,30 +1224,7 @@
         "outfit"
       ],
       "entry": "verba/reachy_vision.py",
-      "sha256": "7d7b751caf0f27735830f7f3e144c59755776732c2bcd41e814851ec51c8a4d7"
-    },
-    {
-      "id": "room_vision",
-      "name": "Room Vision",
-      "version": "1.0.2",
-      "min_tater_version": "98.4",
-      "description": "Ask Tater what it sees using a camera-equipped satellite in your room. Identify objects, get outfit feedback, and check whether your clothing suits the current weather.",
-      "portals": [
-        "voice_core"
-      ],
-      "notifier": false,
-      "settings_category": "Room Vision",
-      "tags": [
-        "room",
-        "camera",
-        "snapshot",
-        "vision",
-        "appearance",
-        "outfit",
-        "echo-show"
-      ],
-      "entry": "verba/room_vision.py",
-      "sha256": "7a64b349bda5ff6dd3938c122515fde5e8212143788ca5f6d0cd34b3aac2a256"
+      "sha256": "cb7a31a9e4b0edcb2f1c08ad00a558c63b89342ebf8121b086f3c23b5668ecd1"
     },
     {
       "id": "roon_music",
@@ -1451,6 +1396,31 @@
       ],
       "entry": "verba/tater_tube_support.py",
       "sha256": "ec0dee27ce17a707b4685cdd323431263c2831d8141a25e5ad20e2e0e18b9fcf"
+    },
+    {
+      "id": "tater_vision",
+      "name": "Tater Vision",
+      "version": "1.1.0",
+      "min_tater_version": "98.4",
+      "description": "Tater's eyes for people, objects, rooms, and outdoor areas. It automatically chooses cameras by the named location or by the room where you asked, then answers the visual question.",
+      "portals": [
+        "voice_core"
+      ],
+      "notifier": false,
+      "settings_category": "Tater Vision",
+      "tags": [
+        "tater",
+        "room",
+        "area",
+        "camera",
+        "snapshot",
+        "vision",
+        "appearance",
+        "outfit",
+        "echo-show"
+      ],
+      "entry": "verba/tater_vision.py",
+      "sha256": "4d98cfcbbcdde438b362adea4130a09d5b7a6bca6453d01b2cdee7c2894149c2"
     },
     {
       "id": "temperature_status",

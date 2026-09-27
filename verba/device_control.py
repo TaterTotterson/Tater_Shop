@@ -1428,7 +1428,7 @@ class DeviceControlPlugin(_DeviceVerbaRuntime):
     name = "device_control"
     verba_name = "Device Control"
     pretty_name = "Device Control"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [
@@ -1448,14 +1448,14 @@ class DeviceControlPlugin(_DeviceVerbaRuntime):
     description = (
         "Use for any request to control or check smart-home devices across integrations, "
         "including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, "
-        "media players, remotes, scenes, and scripts. Use Camera Control for cameras and snapshots."
+        "media players, remotes, scenes, and scripts. Use Tater Vision for visual camera questions."
     )
     verba_dec = description
     when_to_use = (
         "Use for any request to control or inspect an integrated smart-home device. "
         "Choose this tool from the requested action and target name; do not guess the device's "
-        "technical category from words such as lights, plug, or switch. For cameras, snapshots, "
-        "or requests about what a camera sees, use Camera Control instead."
+        "technical category from words such as lights, plug, or switch. For requests about what a camera sees, "
+        "use Tater Vision instead."
     )
     how_to_use = (
         "Pass the user's natural-language request unchanged in query. The verba searches every "
