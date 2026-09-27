@@ -1400,9 +1400,9 @@
     {
       "id": "tater_vision",
       "name": "Tater Vision",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "98.4",
-      "description": "Use when the user asks you to look at, see, identify, describe, inspect, or visually check something, or whenever you need to see the current room or area to answer correctly. This includes things shown to you, people or animals in a room or outside area, appearance questions, current activity, and follow-ups about something you just looked at. Use the cameras covering a location named by the user; if they do not name one, use a camera in the asking satellite's room. Do not use for historical event searches or questions that do not require seeing anything.",
+      "description": "Give Tater eyes in camera-equipped rooms and areas. Ask what you're holding, how an outfit looks, whether a pet is nearby, or what's happening around your home. Tater automatically chooses a camera from the location you name or the room where you ask.",
       "portals": [
         "voice_core"
       ],
@@ -1420,7 +1420,7 @@
         "echo-show"
       ],
       "entry": "verba/tater_vision.py",
-      "sha256": "af32be43c23f34205c34fadceb4032fc67bb205d72d5057271d6ed055b85f146"
+      "sha256": "73b7c07b1e0f22d4bd9d986d3e46a028a6cd1877a1f1b2054694627ee937693b"
     },
     {
       "id": "temperature_status",
