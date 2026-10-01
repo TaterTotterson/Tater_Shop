@@ -5,7 +5,7 @@
       "id": "ai_task",
       "name": "AI Task Scheduler Core",
       "module_key": "ai_task_core",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "min_tater_version": "98",
       "description": "AI Task Scheduler Core integration core for Tater.",
       "settings_category": "AI Task Scheduler Core Settings",
@@ -13,13 +13,13 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "701a046048a0c3fd987ce48f14d6e348454b1dd4c1d63b09d77f403d217d0aa6"
+      "sha256": "bd0c9b76cc1b88f8139d72cacd091791320c9e0bf5ec3167d07617e563277878"
     },
     {
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.6.3",
+      "version": "1.6.4",
       "min_tater_version": "164",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, announcement targets, camera image or video descriptions, and optional Face ID-aware greetings using Tater's shared People profiles.",
       "settings_category": "Automation Core Settings",
@@ -35,7 +35,7 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "cdb12b6e4a1abcde92fb5319c599b7434222a43aa9401ab641f2eed538961fe5"
+      "sha256": "0dceade8711065955ddaed9b2da089032121a40471aba38bd8ad0a052013fbdc"
     },
     {
       "id": "awareness",

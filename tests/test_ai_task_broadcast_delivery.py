@@ -95,6 +95,7 @@ class AiTaskBroadcastDeliveryTests(unittest.TestCase):
                         "loop": True,
                         "volume_percent": 140,
                     },
+                    "foreground": {"start_delay_ms": 45000},
                     "ducking": {
                         "target_percent": -5,
                         "attack_ms": 20000,
@@ -106,6 +107,7 @@ class AiTaskBroadcastDeliveryTests(unittest.TestCase):
         self.assertEqual(delivery["scope"], "selected")
         self.assertEqual(delivery["targets"], ["voice_core:native:kitchen"])
         self.assertEqual(delivery["audio_scene"]["background"]["volume_percent"], 100)
+        self.assertEqual(delivery["audio_scene"]["foreground"]["start_delay_ms"], 30000)
         self.assertEqual(delivery["audio_scene"]["ducking"]["target_percent"], 0)
         self.assertEqual(delivery["audio_scene"]["ducking"]["attack_ms"], 10000)
         self.assertEqual(delivery["audio_scene"]["ducking"]["release_ms"], 350)
@@ -342,6 +344,10 @@ class AiTaskBroadcastFormTests(unittest.TestCase):
         )
         self.assertIn("upload", source_values)
         self.assertIn("custom", source_values)
+        lead_in = by_key["tts_start_delay_seconds"]
+        self.assertEqual(lead_in["type"], "range")
+        self.assertEqual(lead_in["max"], 30)
+        self.assertEqual(lead_in["step"], 0.25)
 
     def test_uploaded_audio_is_stored_in_agent_lab_audio_folder(self) -> None:
         redis = FakeRedis()
@@ -452,6 +458,7 @@ class AiTaskBroadcastFormTests(unittest.TestCase):
                     "broadcast_audio_enabled": True,
                     "background_audio_url": "https://example.test/morning.mp3",
                     "background_volume_percent": 60,
+                    "tts_start_delay_seconds": 2.5,
                     "ducking_target_percent": 35,
                     "ducking_attack_ms": 150,
                     "ducking_release_ms": 350,
@@ -475,6 +482,10 @@ class AiTaskBroadcastFormTests(unittest.TestCase):
         self.assertEqual(
             reminder["delivery"]["audio_scene"]["ducking"]["target_percent"],
             35,
+        )
+        self.assertEqual(
+            reminder["delivery"]["audio_scene"]["foreground"]["start_delay_ms"],
+            2500,
         )
 
 

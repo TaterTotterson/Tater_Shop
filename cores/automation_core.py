@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.6.3"
+__version__ = "1.6.4"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -574,6 +574,7 @@ def _background_audio_source_from_url(url: Any) -> str:
 def _normalize_tts_audio_scene(raw: Any) -> Dict[str, Any]:
     scene = raw if isinstance(raw, dict) else {}
     background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
     ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
     finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
     background_url = _text(background.get("url") or scene.get("background_url"))
@@ -584,6 +585,13 @@ def _normalize_tts_audio_scene(raw: Any) -> Dict[str, Any]:
             "url": background_url,
             "loop": _bool(background.get("loop"), True),
             "volume_percent": _int(background.get("volume_percent"), 60, maximum=100),
+        },
+        "foreground": {
+            "start_delay_ms": _int(
+                foreground.get("start_delay_ms", scene.get("tts_start_delay_ms")),
+                0,
+                maximum=30000,
+            ),
         },
         "ducking": {
             "target_percent": _int(ducking.get("target_percent"), 35, maximum=100),
@@ -3035,6 +3043,14 @@ def _value(values: Dict[str, Any], payload: Dict[str, Any], key: str, default: A
     return value
 
 
+def _seconds_to_milliseconds(value: Any, default_ms: int = 0) -> int:
+    try:
+        parsed = int(round(float(value) * 1000.0))
+    except Exception:
+        parsed = int(default_ms)
+    return max(0, min(30000, parsed))
+
+
 def _tts_audio_scene_from_form(
     values: Dict[str, Any],
     payload: Dict[str, Any],
@@ -3044,6 +3060,9 @@ def _tts_audio_scene_from_form(
     current = _normalize_tts_audio_scene(existing)
     current_background = (
         current.get("background") if isinstance(current.get("background"), dict) else {}
+    )
+    current_foreground = (
+        current.get("foreground") if isinstance(current.get("foreground"), dict) else {}
     )
     current_ducking = current.get("ducking") if isinstance(current.get("ducking"), dict) else {}
     current_finish = current.get("finish") if isinstance(current.get("finish"), dict) else {}
@@ -3105,6 +3124,17 @@ def _tts_audio_scene_from_form(
                     ),
                     60,
                     maximum=100,
+                ),
+            },
+            "foreground": {
+                "start_delay_ms": _seconds_to_milliseconds(
+                    _value(
+                        values,
+                        payload,
+                        "tts_start_delay_seconds",
+                        _int(current_foreground.get("start_delay_ms"), 0, maximum=30000)
+                        / 1000.0,
+                    )
                 ),
             },
             "ducking": {
@@ -3273,6 +3303,7 @@ def _rule_from_form(
 def _announcement_audio_fields(rule: Dict[str, Any], show_tts: Dict[str, Any]) -> List[Dict[str, Any]]:
     scene = _normalize_tts_audio_scene(rule.get("tts_audio_scene"))
     background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
     ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
     finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
     background_url = _text(background.get("url"))
@@ -3378,6 +3409,22 @@ def _announcement_audio_fields(rule: Dict[str, Any], show_tts: Dict[str, Any]) -
             "max": 100,
             "value": _int(background.get("volume_percent"), 60, maximum=100),
             "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_start_delay_seconds",
+            "label": "Music Lead-In Before Speech",
+            "type": "range",
+            "min": 0,
+            "max": 30,
+            "step": 0.25,
+            "suffix": " s",
+            "description": "How long the background music plays before Tater begins speaking.",
+            "value": round(
+                _int(foreground.get("start_delay_ms"), 0, maximum=30000) / 1000.0,
+                2,
+            ),
+            "show_when_all": show_for_audio,
+            "full_width": True,
         },
         {
             "key": "tts_ducking_target_percent",

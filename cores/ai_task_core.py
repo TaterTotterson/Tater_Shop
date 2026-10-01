@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -339,9 +339,18 @@ def _delivery_clamped_int(value: Any, default: int, minimum: int = 0, maximum: i
     return max(int(minimum), min(int(maximum), parsed))
 
 
+def _delivery_seconds_to_milliseconds(value: Any, default_ms: int = 0) -> int:
+    try:
+        parsed = int(round(float(value) * 1000.0))
+    except Exception:
+        parsed = int(default_ms)
+    return max(0, min(30000, parsed))
+
+
 def _normalize_audio_scene(raw: Any) -> Dict[str, Any]:
     scene = raw if isinstance(raw, dict) else {}
     background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
     ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
     finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
     background_url = str(
@@ -372,6 +381,14 @@ def _normalize_audio_scene(raw: Any) -> Dict[str, Any]:
             "volume_percent": _delivery_clamped_int(
                 background.get("volume_percent", scene.get("background_volume_percent")),
                 60,
+            ),
+        },
+        "foreground": {
+            "start_delay_ms": _delivery_clamped_int(
+                foreground.get("start_delay_ms", scene.get("tts_start_delay_ms")),
+                0,
+                0,
+                30000,
             ),
         },
         "ducking": {
@@ -2349,6 +2366,7 @@ def _ai_tasks_ui_broadcast_audio_fields(
     normalized = _normalize_delivery(delivery)
     scene = normalized.get("audio_scene") if isinstance(normalized.get("audio_scene"), dict) else {}
     background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
     ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
     finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
     background_url = _ai_tasks_ui_clean_text(background.get("url"))
@@ -2441,6 +2459,23 @@ def _ai_tasks_ui_broadcast_audio_fields(
             "max": 100,
             "value": _delivery_clamped_int(background.get("volume_percent"), 60),
             "show_when_all": show_for_audio,
+        },
+        {
+            "key": "tts_start_delay_seconds",
+            "label": "Music Lead-In Before Speech",
+            "type": "range",
+            "min": 0,
+            "max": 30,
+            "step": 0.25,
+            "suffix": " s",
+            "description": "How long the background music plays before Tater begins speaking.",
+            "value": round(
+                _delivery_clamped_int(foreground.get("start_delay_ms"), 0, 0, 30000)
+                / 1000.0,
+                2,
+            ),
+            "show_when_all": show_for_audio,
+            "full_width": True,
         },
         {
             "key": "ducking_target_percent",
@@ -3980,6 +4015,11 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             if isinstance(current_scene.get("background"), dict)
             else {}
         )
+        current_foreground = (
+            current_scene.get("foreground")
+            if isinstance(current_scene.get("foreground"), dict)
+            else {}
+        )
         current_ducking = (
             current_scene.get("ducking")
             if isinstance(current_scene.get("ducking"), dict)
@@ -4062,6 +4102,20 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
                     "volume_percent": _delivery_clamped_int(
                         _value("background_volume_percent", current_background.get("volume_percent")),
                         60,
+                    ),
+                },
+                "foreground": {
+                    "start_delay_ms": _delivery_seconds_to_milliseconds(
+                        _value(
+                            "tts_start_delay_seconds",
+                            _delivery_clamped_int(
+                                current_foreground.get("start_delay_ms"),
+                                0,
+                                0,
+                                30000,
+                            )
+                            / 1000.0,
+                        )
                     ),
                 },
                 "ducking": {

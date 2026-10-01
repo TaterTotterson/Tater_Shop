@@ -607,6 +607,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
                     "loop": True,
                     "volume_percent": 60,
                 },
+                "foreground": {"start_delay_ms": 2250},
                 "ducking": {"target_percent": 35, "attack_ms": 150, "release_ms": 350},
                 "finish": {"fade_ms": 500},
             }
@@ -627,6 +628,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
 
         scene = speak.await_args.kwargs["audio_scene"]
         self.assertEqual(scene["background"]["url"], "https://example.test/morning.wav")
+        self.assertEqual(scene["foreground"]["start_delay_ms"], 2250)
         self.assertEqual(scene["ducking"]["target_percent"], 35)
         self.assertEqual(result["audio_scene_sent_count"], 1)
 
@@ -662,6 +664,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
             "tts_audio_enabled": "enabled",
             "tts_background_audio_source": "preset:morning_glow",
             "tts_background_volume_percent": 55,
+            "tts_start_delay_seconds": 2.75,
             "tts_ducking_target_percent": 30,
             "tts_ducking_attack_ms": 125,
             "tts_ducking_release_ms": 325,
@@ -679,6 +682,7 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         scene = rule["tts_audio_scene"]
         self.assertTrue(scene["background"]["url"].endswith("/presets/morning_glow.wav"))
         self.assertEqual(scene["background"]["volume_percent"], 55)
+        self.assertEqual(scene["foreground"]["start_delay_ms"], 2750)
         self.assertEqual(scene["ducking"]["target_percent"], 30)
         self.assertEqual(len(generated), 4)
 
@@ -1387,6 +1391,9 @@ class AutomationCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_key["tts_mode"]["value"], "default")
         self.assertEqual(by_key["tts_audio_enabled"]["type"], "select")
         self.assertEqual(by_key["tts_audio_enabled"]["presentation"], "cards")
+        self.assertEqual(by_key["tts_start_delay_seconds"]["type"], "range")
+        self.assertEqual(by_key["tts_start_delay_seconds"]["max"], 30)
+        self.assertEqual(by_key["tts_start_delay_seconds"]["step"], 0.25)
         self.assertEqual(by_key["camera_face_id_enabled"]["type"], "checkbox")
         self.assertEqual(
             by_key["camera_face_id_enabled"]["show_when"],
