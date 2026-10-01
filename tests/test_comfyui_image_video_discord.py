@@ -92,7 +92,7 @@ class ComfyUIImageVideoDiscordTests(unittest.TestCase):
         }
 
     def test_metadata_enables_discord_and_bumps_version(self):
-        self.assertEqual(self.plugin.version, "1.0.7")
+        self.assertEqual(self.plugin.version, "1.0.8")
         self.assertIn("discord", self.plugin.platforms)
 
     def test_upload_limit_uses_guild_and_reserves_headroom(self):

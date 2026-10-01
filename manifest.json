@@ -103,12 +103,13 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.27",
+      "version": "1.0.28",
       "min_tater_version": "59",
       "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
       "portals": [
         "discord",
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos",
         "voice_core",
@@ -120,17 +121,18 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "81bb3478b4342e6c420698453702128673218ab89ad8df669c3781a686cb79e5"
+      "sha256": "24c521db2ea4c54f21cd873d42df878560cc0a5d65c3b059c0f58ba241b3af91"
     },
     {
       "id": "comfyui_image_edit",
       "name": "ComfyUI Image Edit",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Edit or transform the latest/referenced image in chat with ComfyUI image-to-image.",
       "portals": [
         "discord",
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos",
         "matrix",
@@ -140,17 +142,18 @@
       "settings_category": "ComfyUI Image Edit",
       "tags": [],
       "entry": "verba/comfyui_image_edit.py",
-      "sha256": "81e7b40a45ad02ab4e0873bb51b9aa06eaef4dccedba441113c4e7198876d890"
+      "sha256": "10d7301dc049f0b0d1f4507522742d397d5ca05d796cd4fffe8dd07d9dedd9be"
     },
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
       "portals": [
         "discord",
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos",
         "matrix",
@@ -160,17 +163,18 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "verba/comfyui_image_plugin.py",
-      "sha256": "c0ba675c8ba780b9add17b5ade82ed324fd815367c5cb20336a4caa75a86bb34"
+      "sha256": "0d31b4cc5b67cdaf33b01900b582f508cff5d7806519210391ac06fec261e834"
     },
     {
       "id": "comfyui_image_video",
       "name": "ComfyUI Animate Image",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Animate the most recent image in chat into a looping WebP or MP4 via ComfyUI.",
       "portals": [
         "discord",
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos"
       ],
@@ -178,16 +182,17 @@
       "settings_category": "ComfyUI Animate Image",
       "tags": [],
       "entry": "verba/comfyui_image_video.py",
-      "sha256": "ae494ef43f7891d813313a854570c3e4e08dc5ae4969e5dfbc499b8ca0794414"
+      "sha256": "38dfb61cf3e5b64415fc53148ddc8bf334c183fb79c49a88ce0728111536a811"
     },
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "portals": [
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos"
       ],
@@ -195,16 +200,17 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_music_video.py",
-      "sha256": "af2d595e063b653832899ceb72b482b95dd5e8fc1d3038f4f8fdd268b19e21fd"
+      "sha256": "7211ec695ede552c628b9fd05eca6c46f69098badd4c8ffe66e3624fdbf6cb05"
     },
     {
       "id": "comfyui_video_plugin",
       "name": "ComfyUI Video",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Create a short video from a text prompt by stitching ComfyUI-generated clips.",
       "portals": [
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos"
       ],
@@ -212,7 +218,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_video_plugin.py",
-      "sha256": "2319d089cedbe54bdfb23053a4968486d839fb8cdfe73367422a2cde293b08f7"
+      "sha256": "59e9cc169751fa5c893c61cb0915a1c1aef7bf203fe5720c308fc1274a74eaac"
     },
     {
       "id": "device_compare",
@@ -694,11 +700,12 @@
     {
       "id": "lowfi_video",
       "name": "ComfyUI Lofi Video",
-      "version": "1.1.7",
+      "version": "1.1.8",
       "min_tater_version": "59",
       "description": "Create a cozy ComfyUI lofi video by generating music and looping a matching animation.",
       "portals": [
         "webui",
+        "tater_open_webui",
         "little_spud",
         "macos"
       ],
@@ -706,7 +713,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/lowfi_video.py",
-      "sha256": "9acda1f1ec0211a6463ffa11637164c00eb92ec41a11688d93019a512687f245"
+      "sha256": "274017b470500a55e6a23b1c801baf883fef25fbe83a11d6ae6200ca59cdd31f"
     },
     {
       "id": "microwakeword",
