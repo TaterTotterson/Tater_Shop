@@ -3,43 +3,20 @@
   "kind": "core",
   "repositories": [
     {
-      "id": "heapsoftware-tater-jarvis-screen",
-      "name": "Jarvis Screen",
-      "repository": "Tater-Jarvis-Screen",
-      "description": "A Jarvis-style full-screen dashboard and visual interface for Tater.",
+      "id": "heapsoftware-tater-modules",
+      "name": "Tater Modules",
+      "repository": "Tater-Modules",
+      "description": "A collection of community Cores, Portals, and Verbas for Tater.",
       "author": {
         "name": "heapsoftware",
         "url": "https://github.com/heapsoftware"
       },
-      "manifest_url": "https://raw.githubusercontent.com/heapsoftware/Tater-Jarvis-Screen/main/core_manifest.json",
-      "homepage": "https://github.com/heapsoftware/Tater-Jarvis-Screen",
+      "manifest_url": "https://raw.githubusercontent.com/heapsoftware/Tater-Modules/main/manifest.json",
+      "homepage": "https://github.com/heapsoftware/Tater-Modules",
       "tags": [
-        "display",
-        "dashboard",
-        "voice",
-        "face id"
-      ]
-    },
-    {
-      "id": "heapsoftware-tater-personal-music-core",
-      "name": "Personal Music Core",
-      "repository": "Tater-Personal-Music-Core",
-      "description": "Per-person music libraries, playback, recommendations, smart shuffle, sleep timers, and Follow-Me audio for Tater.",
-      "author": {
-        "name": "heapsoftware",
-        "url": "https://github.com/heapsoftware"
-      },
-      "manifest_url": "https://raw.githubusercontent.com/heapsoftware/Tater-Personal-Music-Core/main/core_manifest.json",
-      "homepage": "https://github.com/heapsoftware/Tater-Personal-Music-Core",
-      "tags": [
-        "music",
-        "per-person",
-        "emby",
-        "jellyfin",
-        "subsonic",
-        "plex",
-        "multi-room",
-        "follow-me"
+        "cores",
+        "portals",
+        "verbas"
       ]
     }
   ]

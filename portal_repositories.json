@@ -1,5 +1,23 @@
 {
   "schema": 1,
   "kind": "portal",
-  "repositories": []
+  "repositories": [
+    {
+      "id": "heapsoftware-tater-modules",
+      "name": "Tater Modules",
+      "repository": "Tater-Modules",
+      "description": "A collection of community Cores, Portals, and Verbas for Tater.",
+      "author": {
+        "name": "heapsoftware",
+        "url": "https://github.com/heapsoftware"
+      },
+      "manifest_url": "https://raw.githubusercontent.com/heapsoftware/Tater-Modules/main/manifest.json",
+      "homepage": "https://github.com/heapsoftware/Tater-Modules",
+      "tags": [
+        "cores",
+        "portals",
+        "verbas"
+      ]
+    }
+  ]
 }
