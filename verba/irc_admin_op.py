@@ -45,7 +45,7 @@ class IrcAdminOpPlugin(ToolVerba):
     name = "irc_admin_op"
     verba_name = "IRC Admin OP"
     pretty_name = "IRC Admin OP"
-    version = "1.3.2"
+    version = "1.3.3"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc", "meshtastic"]
@@ -206,15 +206,15 @@ class IrcAdminOpPlugin(ToolVerba):
                 say_hint="Ask the user to clarify whether they want operator or voice.",
             )
 
-        service_cmd = "OP" if action == "op" else "VOICE"
+        mode = "+o" if action == "op" else "+v"
         try:
-            bot.privmsg("ChanServ", f"{service_cmd} {chan} {nick}")
+            bot.mode(chan, mode, nick)
         except Exception as exc:
-            logger.exception("[irc_admin] failed sending ChanServ command: %s", exc)
+            logger.exception("[irc_admin] failed sending MODE command: %s", exc)
             return action_failure(
                 code="irc_command_failed",
-                message=f"Failed to send ChanServ {service_cmd} request.",
-                say_hint="Explain the IRC service command could not be sent.",
+                message=f"Failed to send IRC MODE {mode} command.",
+                say_hint="Explain the direct IRC mode command could not be sent.",
             )
 
         return action_success(
@@ -222,10 +222,10 @@ class IrcAdminOpPlugin(ToolVerba):
                 "action": action,
                 "channel": chan,
                 "nick": nick,
-                "service": "ChanServ",
+                "mode": mode,
             },
-            summary_for_user=f"Requested ChanServ to {service_cmd} {nick} in {chan}.",
-            say_hint="Confirm the IRC admin command was sent.",
+            summary_for_user=f"Sent IRC MODE {chan} {mode} {nick}.",
+            say_hint="Confirm the direct IRC mode command was sent.",
         )
 
 
