@@ -582,6 +582,175 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(reconciled["status"], "playing")
         self.assertTrue(reconciled["warnings"])
 
+    def test_sendspin_transport_failure_stops_without_skipping_the_track(self):
+        player = {
+            "status": "playing",
+            "started_at": time.time(),
+            "queue": self.tracks,
+            "index": 0,
+            "current": self.tracks[0],
+            "targets": ["voice_core:native:kitchen"],
+            "playback_result": {
+                "sent_count": 1,
+                "voice_core_sessions": [
+                    {
+                        "target": "sendspin:music-stream-1",
+                        "session_id": "music-stream-1",
+                        "selectors": ["native:kitchen"],
+                        "transport": "sendspin",
+                        "start_unix_ms": 1000,
+                    }
+                ],
+            },
+        }
+        sendspin_playback = types.SimpleNamespace(stream_outcomes=lambda *_args, **_kwargs: object())
+        native_satellite = types.SimpleNamespace(
+            run_on_runtime_loop=lambda _query, timeout=0: {
+                "ok": True,
+                "outcomes": {
+                    "music-stream-1": {
+                        "status": "failed",
+                        "error_kind": "transport",
+                        "error": "satellite disconnected",
+                    }
+                },
+            }
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        tater_voice.sendspin_playback = sendspin_playback
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}), patch.object(
+            self.core, "_advance_player"
+        ) as advance:
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        self.assertEqual(reconciled["status"], "error")
+        self.assertIn("native:kitchen", reconciled["last_error"])
+        advance.assert_not_called()
+
+    def test_sendspin_source_failure_skips_and_counts_the_bad_track(self):
+        player = {
+            "status": "playing",
+            "started_at": time.time(),
+            "queue": self.tracks,
+            "queue_original": self.tracks,
+            "index": 0,
+            "current": self.tracks[0],
+            "targets": ["voice_core:native:kitchen"],
+            "playback_result": {
+                "sent_count": 1,
+                "voice_core_sessions": [
+                    {
+                        "target": "sendspin:music-stream-1",
+                        "session_id": "music-stream-1",
+                        "selectors": ["native:kitchen"],
+                        "transport": "sendspin",
+                    }
+                ],
+            },
+        }
+        self.redis.set(self.core.PLAYER_KEY, json.dumps(player))
+        sendspin_playback = types.SimpleNamespace(stream_outcomes=lambda *_args, **_kwargs: object())
+        native_satellite = types.SimpleNamespace(
+            run_on_runtime_loop=lambda _query, timeout=0: {
+                "ok": True,
+                "outcomes": {
+                    "music-stream-1": {
+                        "status": "failed",
+                        "error_kind": "source",
+                        "error": "ffmpeg rejected the file",
+                    }
+                },
+            }
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        tater_voice.sendspin_playback = sendspin_playback
+        advanced = {
+            **player,
+            "index": 1,
+            "current": self.tracks[1],
+            "warnings": [],
+            "playback_result": {},
+        }
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}), patch.object(
+            self.core, "_advance_player", return_value=advanced
+        ) as advance:
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        advance.assert_called_once_with(1, client=self.redis)
+        self.assertEqual(reconciled["status"], "playing")
+        self.assertEqual(reconciled["index"], 1)
+        self.assertEqual(reconciled["consecutive_source_failures"], 1)
+        self.assertTrue(any("Three Little Birds" in row for row in reconciled["warnings"]))
+
+    def test_sendspin_stops_after_three_consecutive_source_failures(self):
+        player = {
+            "status": "playing",
+            "started_at": time.time(),
+            "current": self.tracks[0],
+            "targets": ["voice_core:native:kitchen"],
+            "consecutive_source_failures": 2,
+            "playback_result": {
+                "sent_count": 1,
+                "voice_core_sessions": [
+                    {
+                        "target": "sendspin:music-stream-3",
+                        "session_id": "music-stream-3",
+                        "selectors": ["native:kitchen"],
+                        "transport": "sendspin",
+                    }
+                ],
+            },
+        }
+        sendspin_playback = types.SimpleNamespace(stream_outcomes=lambda *_args, **_kwargs: object())
+        native_satellite = types.SimpleNamespace(
+            run_on_runtime_loop=lambda _query, timeout=0: {
+                "ok": True,
+                "outcomes": {
+                    "music-stream-3": {
+                        "status": "failed",
+                        "error_kind": "source",
+                        "error": "damaged audio",
+                    }
+                },
+            }
+        )
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = native_satellite
+        tater_voice.sendspin_playback = sendspin_playback
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}), patch.object(
+            self.core, "_advance_player"
+        ) as advance:
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        self.assertEqual(reconciled["status"], "error")
+        self.assertEqual(reconciled["consecutive_source_failures"], 3)
+        self.assertIn("3 consecutive source failures", reconciled["last_error"])
+        advance.assert_not_called()
+
+    def test_sendspin_outcomes_are_optional_on_older_tater_versions(self):
+        player = {
+            "status": "playing",
+            "started_at": time.time(),
+            "playback_result": {
+                "voice_core_sessions": [
+                    {
+                        "session_id": "music-stream-old-host",
+                        "selectors": ["native:kitchen"],
+                        "transport": "sendspin",
+                    }
+                ]
+            },
+        }
+        tater_voice = types.ModuleType("tater_voice")
+        tater_voice.native_satellite = types.SimpleNamespace()
+        tater_voice.sendspin_playback = types.SimpleNamespace()
+        with patch.dict(sys.modules, {"tater_voice": tater_voice}):
+            reconciled = self.core._reconcile_native_playback(player, self.redis)
+
+        self.assertEqual(reconciled, player)
+
     def test_removed_provider_migrates_to_tater_tube_and_clears_stale_player(self):
         self.redis.hset(self.core.SETTINGS_KEY, mapping={"provider": "plex"})
         self.redis.set(
@@ -1716,7 +1885,11 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "integration:homeassistant:media_player.living_room",
         ]
-        with patch.dict(sys.modules, {"media_playback": playback}):
+        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
+            self.core,
+            "_fetch_track_artwork",
+            return_value={"body": b"jpeg-cover", "content_type": "image/jpeg"},
+        ):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1761,6 +1934,14 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["filename"],
             "09 Three Little Birds.flac",
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["artwork_bytes"],
+            b"jpeg-cover",
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["artwork_content_type"],
+            "image/jpeg",
         )
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["source_owner"],

@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.6.0"
+__version__ = "3.6.1"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -3190,6 +3190,12 @@ def _play_track(
         if audio_sync_transcode
         else source_path.name
     )
+    artwork: Dict[str, Any] = {}
+    if native_sendspin:
+        try:
+            artwork = _fetch_track_artwork(track, client)
+        except Exception:
+            artwork = {}
 
     from media_playback import play_media_url_targets
 
@@ -3203,6 +3209,12 @@ def _play_track(
         title=_text(track.get("title")) or Path(_text(track.get("path")) or "music-track").stem,
         artist=_text(track.get("artist") or track.get("album_artist")),
         album=_text(track.get("album")),
+        artwork_bytes=(
+            bytes(artwork.get("body") or b"")
+            if isinstance(artwork.get("body"), (bytes, bytearray))
+            else None
+        ),
+        artwork_content_type=_text(artwork.get("content_type")),
         duration_seconds=duration,
         volume_percent=volume_percent,
         start_position_seconds=start_position,
@@ -4036,26 +4048,29 @@ def _reconcile_native_playback(player: Dict[str, Any], client: Any = None) -> Di
     sessions = [
         row
         for row in list(playback_result.get("voice_core_sessions") or [])
-        if (
-            isinstance(row, dict)
-            and _text(row.get("session_id"))
-            and _text(row.get("transport")) != "sendspin"
-        )
+        if isinstance(row, dict) and _text(row.get("session_id"))
     ]
     if not sessions:
         return player
-    try:
-        from tater_voice import native_satellite
 
-        snapshot = native_satellite.status_snapshot_sync()
-    except Exception:
-        return player
-    clients = snapshot.get("clients") if isinstance(snapshot, dict) else {}
-    if not isinstance(clients, dict):
-        return player
+    legacy_sessions = [
+        row for row in sessions if _text(row.get("transport")).lower() != "sendspin"
+    ]
+    sendspin_sessions = [
+        row for row in sessions if _text(row.get("transport")).lower() == "sendspin"
+    ]
+    failures: List[Dict[str, Any]] = []
 
-    failed: List[str] = []
-    for session in sessions:
+    clients: Dict[str, Any] = {}
+    if legacy_sessions:
+        try:
+            from tater_voice import native_satellite
+
+            snapshot = native_satellite.status_snapshot_sync()
+            clients = snapshot.get("clients") if isinstance(snapshot, dict) else {}
+        except Exception:
+            clients = {}
+    for session in legacy_sessions:
         session_id = _text(session.get("session_id"))
         selectors = _list(session.get("selectors") or session.get("target"))
         states = []
@@ -4072,26 +4087,144 @@ def _reconcile_native_playback(player: Dict[str, Any], client: Any = None) -> Di
             continue
         finished_states = [state for state in states if _as_float(state.get("finished_ts")) > 0]
         if finished_states and any(state.get("ok") is False for state in finished_states):
-            failed.append(_text(session.get("target")) or ", ".join(selectors))
+            failures.append(
+                {
+                    "label": _text(session.get("target")) or ", ".join(selectors),
+                    "kind": "transport",
+                    "error": "The satellite reported a playback failure.",
+                }
+            )
 
-    if not failed:
+    sendspin_outcomes: Dict[str, Dict[str, Any]] = {}
+    if sendspin_sessions:
+        try:
+            from tater_voice import native_satellite, sendspin_playback
+
+            query = getattr(sendspin_playback, "stream_outcomes", None)
+            if callable(query):
+                stream_ids = [_text(row.get("session_id")) for row in sendspin_sessions]
+                starts = [
+                    _as_int(row.get("start_unix_ms"), 0, 0, 9_999_999_999_999)
+                    for row in sendspin_sessions
+                    if _as_int(row.get("start_unix_ms"), 0, 0, 9_999_999_999_999) > 0
+                ]
+                result = native_satellite.run_on_runtime_loop(
+                    query(stream_ids, since_unix_ms=min(starts, default=0)),
+                    timeout=5.0,
+                )
+                rows = result.get("outcomes") if isinstance(result, dict) else {}
+                if isinstance(rows, dict):
+                    sendspin_outcomes = {
+                        _text(stream_id): dict(row)
+                        for stream_id, row in rows.items()
+                        if _text(stream_id) and isinstance(row, dict)
+                    }
+        except Exception:
+            # Older Tater versions have no outcome registry. Retain the former
+            # behavior until the host is updated rather than guessing from the
+            # absence of audio.
+            sendspin_outcomes = {}
+
+    for session in sendspin_sessions:
+        stream_id = _text(session.get("session_id"))
+        outcome = sendspin_outcomes.get(stream_id) or {}
+        if _text(outcome.get("status")).lower() != "failed":
+            continue
+        selectors = _list(session.get("selectors") or session.get("target"))
+        failures.append(
+            {
+                "label": ", ".join(selectors) or _text(session.get("target")) or stream_id,
+                "kind": _text(outcome.get("error_kind")).lower() or "internal",
+                "error": _text(outcome.get("error")) or "The Sendspin stream failed.",
+                "stream_id": stream_id,
+            }
+        )
+
+    if not failures:
+        if (
+            sendspin_sessions
+            and _as_int(player.get("consecutive_source_failures"), 0, 0, 1000) > 0
+            and _player_position_seconds(player) >= 10.0
+        ):
+            player["consecutive_source_failures"] = 0
+            _save_player(player, client)
         return player
-    warning = "Playback failed on " + ", ".join(failed) + "."
+
+    warning = "Playback failed on " + ", ".join(
+        _text(row.get("label")) for row in failures if _text(row.get("label"))
+    ) + "."
     warnings = [_text(value) for value in list(player.get("warnings") or []) if _text(value)]
     if warning not in warnings:
         warnings.append(warning)
     player["warnings"] = warnings
-    sent_count = _as_int(playback_result.get("sent_count"), len(sessions), 0, 10000)
+
+    def member_count(session: Dict[str, Any]) -> int:
+        return max(1, len(_list(session.get("selectors") or session.get("target"))))
+
+    tracked_count = sum(member_count(session) for session in sessions)
+    sent_count = _as_int(playback_result.get("sent_count"), tracked_count, 0, 10000)
     voice_core_sent_count = _as_int(
         playback_result.get("voice_core_sent_count"),
-        len(sessions),
+        0,
         0,
         10000,
     )
-    all_dispatched_targets_are_tracked_native_sessions = (
-        len(sessions) >= voice_core_sent_count and sent_count <= voice_core_sent_count
+    airplay_bridge_sent_count = _as_int(
+        playback_result.get("airplay_bridge_sent_count"),
+        0,
+        0,
+        10000,
     )
-    if len(failed) == len(sessions) and all_dispatched_targets_are_tracked_native_sessions:
+    tracked_dispatch_count = voice_core_sent_count + airplay_bridge_sent_count
+    if tracked_dispatch_count <= 0:
+        tracked_dispatch_count = tracked_count
+    all_dispatched_targets_are_tracked_native_sessions = (
+        len(failures) >= len(sessions) and sent_count <= tracked_dispatch_count
+    )
+
+    source_only_failure = bool(failures) and all(
+        _text(row.get("kind")).lower() == "source" for row in failures
+    )
+    if source_only_failure and all_dispatched_targets_are_tracked_native_sessions:
+        consecutive = _as_int(player.get("consecutive_source_failures"), 0, 0, 1000) + 1
+        detail = next(
+            (_text(row.get("error")) for row in failures if _text(row.get("error"))),
+            "The media source could not be decoded.",
+        )
+        track_warning = f"Could not play {_track_label(player.get('current') or {})}: {detail}"
+        if track_warning not in warnings:
+            warnings.append(track_warning)
+        player["warnings"] = warnings
+        player["consecutive_source_failures"] = consecutive
+        if consecutive < 3:
+            _save_player(player, client)
+            try:
+                advanced = _advance_player(1, client=client)
+                advanced_warnings = [
+                    _text(value)
+                    for value in list(advanced.get("warnings") or [])
+                    if _text(value)
+                ]
+                if track_warning not in advanced_warnings:
+                    advanced_warnings.append(track_warning)
+                advanced["warnings"] = advanced_warnings
+                advanced["consecutive_source_failures"] = consecutive
+                _save_player(advanced, client)
+                return advanced
+            except Exception as exc:
+                player = _player(client)
+                player["status"] = "error"
+                player["last_error"] = _text(exc) or track_warning
+                player["started_at"] = 0.0
+                _save_player(player, client)
+                return player
+        player["status"] = "error"
+        player["last_error"] = (
+            f"Music stopped after {consecutive} consecutive source failures. "
+            f"Last failure: {detail}"
+        )
+        player["started_at"] = 0.0
+    elif all_dispatched_targets_are_tracked_native_sessions:
         player["status"] = "error"
         player["last_error"] = warning
         player["started_at"] = 0.0
