@@ -10,11 +10,8 @@ import io
 import json
 import logging
 import math
-import os
 import random
-import shutil
 import struct
-import subprocess
 import threading
 import time
 import uuid
@@ -34,7 +31,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.5.2"
+__version__ = "3.6.0"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -160,9 +157,6 @@ ARTWORK_READ_TIMEOUT_SECONDS = 5.0
 ARTWORK_INFLIGHT_WAIT_TIMEOUT_SECONDS = 6.0
 ARTWORK_FAILURE_CACHE_SECONDS = 15.0
 ARTWORK_MAX_CONCURRENT_FETCHES = 4
-NATIVE_MP3_BITRATE_KBPS = 192
-NATIVE_MP3_SAMPLE_RATE_HZ = 48000
-NATIVE_MP3_STREAM_TTL_SECONDS = 8 * 60 * 60
 DEFAULT_SYNC_INTERVAL_SECONDS = 900
 MAX_CATALOG_TRACKS = 20000
 MAX_SEARCH_RESULTS = 100
@@ -177,8 +171,6 @@ MAX_CONTINUATION_CANDIDATES = 200
 PROVIDER_LABELS = {"tater_tube": "Tater Tube Server"}
 CATALOG_PROVIDER_IDS = {"tater_tube"}
 
-_native_mp3_stream_lock = threading.RLock()
-_native_mp3_streams: Dict[str, Dict[str, Any]] = {}
 GENERIC_SEARCH_WORDS = {
     "a",
     "an",
@@ -628,175 +620,10 @@ def _is_native_target(value: Any) -> bool:
     return target.startswith(("voice_core:native:", "voice_core:stereo:", "native:", "stereo:"))
 
 
-def _is_airplay_target(value: Any) -> bool:
-    return _text(value).casefold().startswith("airplay:")
-
-
-def _is_sonos_target(value: Any) -> bool:
-    return _text(value).casefold().startswith("sonos:")
-
-
 def _uses_audio_sync_transcode(targets: Any) -> bool:
     """Keep legacy PCM normalization only for groups without native satellites."""
     target_ids = _list(targets)
     return bool(target_ids) and not any(_is_native_target(target) for target in target_ids)
-
-
-def _uses_native_mp3_stream(targets: Any) -> bool:
-    return any(_is_native_target(target) for target in _list(targets))
-
-
-def _native_mp3_ffmpeg_binary() -> str:
-    bundled = ""
-    with contextlib.suppress(Exception):
-        import imageio_ffmpeg
-
-        bundled = _text(imageio_ffmpeg.get_ffmpeg_exe())
-    candidates = (
-        _text(os.getenv("TATER_FFMPEG_PATH") or os.getenv("FFMPEG_PATH")),
-        bundled,
-        _text(shutil.which("ffmpeg")),
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
-    )
-    for candidate in candidates:
-        path = Path(candidate).expanduser() if candidate else None
-        if path and path.is_file() and os.access(path, os.X_OK):
-            return str(path.resolve())
-    return ""
-
-
-def _tater_service_base_url(peer_base: Any = "") -> str:
-    with contextlib.suppress(Exception):
-        from speech_tts import _service_base_url_for_peer
-
-        return _text(_service_base_url_for_peer(peer_base)).rstrip("/")
-    host = _text(os.getenv("VOICE_CORE_PUBLIC_HOST") or os.getenv("HTMLUI_HOST"))
-    if host and host not in {"0.0.0.0", "::"}:
-        if host.startswith(("http://", "https://")):
-            return host.rstrip("/")
-        port = _as_int(os.getenv("HTMLUI_PORT"), 8501, 1, 65535)
-        return f"http://{host}:{port}"
-    return f"http://127.0.0.1:{_as_int(os.getenv('HTMLUI_PORT'), 8501, 1, 65535)}"
-
-
-def _prune_native_mp3_streams_locked(*, now_ts: Optional[float] = None) -> None:
-    now = float(now_ts if now_ts is not None else time.time())
-    for stream_id, row in list(_native_mp3_streams.items()):
-        if not isinstance(row, dict) or _as_float(row.get("expires_ts")) <= now:
-            _native_mp3_streams.pop(stream_id, None)
-
-
-def _register_native_mp3_stream(
-    source_url: Any,
-    *,
-    filename: Any,
-    duration_seconds: Any = 0.0,
-    start_position_seconds: Any = 0.0,
-) -> str:
-    source = _text(source_url)
-    parsed = urlparse(source)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise RuntimeError("Music Core needs an HTTP source before it can make a native MP3 stream.")
-    if not _native_mp3_ffmpeg_binary():
-        raise RuntimeError("Music Core could not find FFmpeg for native satellite MP3 playback.")
-
-    duration = max(0.0, _as_float(duration_seconds))
-    start_position = max(0.0, _as_float(start_position_seconds))
-    ttl = max(30 * 60.0, min(float(NATIVE_MP3_STREAM_TTL_SECONDS), duration + 30 * 60.0))
-    stream_id = uuid.uuid4().hex
-    with _native_mp3_stream_lock:
-        _prune_native_mp3_streams_locked()
-        _native_mp3_streams[stream_id] = {
-            "source_url": source,
-            "filename": Path(_text(filename) or "music-track.mp3").stem + ".sync.mp3",
-            "start_position_seconds": start_position,
-            "expires_ts": time.time() + ttl,
-        }
-    base_url = _tater_service_base_url(source)
-    return f"{base_url}/api/cores/music_core/webhook/native-mp3?stream_id={quote(stream_id)}"
-
-
-def _native_mp3_stream_row(stream_id: Any) -> Dict[str, Any]:
-    token = _text(stream_id)
-    if not token:
-        return {}
-    with _native_mp3_stream_lock:
-        _prune_native_mp3_streams_locked()
-        row = _native_mp3_streams.get(token)
-        return dict(row) if isinstance(row, dict) else {}
-
-
-def _native_mp3_stream_command(row: Dict[str, Any]) -> List[str]:
-    binary = _native_mp3_ffmpeg_binary()
-    if not binary:
-        raise RuntimeError("Music Core could not find FFmpeg for native satellite MP3 playback.")
-    command = [binary, "-hide_banner", "-loglevel", "error", "-nostdin"]
-    start_position = max(0.0, _as_float(row.get("start_position_seconds")))
-    if start_position > 0:
-        command.extend(("-ss", f"{start_position:.3f}"))
-    command.extend(
-        (
-            "-i",
-            _text(row.get("source_url")),
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-map_metadata",
-            "-1",
-            "-ar",
-            str(NATIVE_MP3_SAMPLE_RATE_HZ),
-            "-ac",
-            "2",
-            "-c:a",
-            "libmp3lame",
-            "-b:a",
-            f"{NATIVE_MP3_BITRATE_KBPS}k",
-            "-write_xing",
-            "0",
-            "-f",
-            "mp3",
-            "pipe:1",
-        )
-    )
-    return command
-
-
-def _native_mp3_body(row: Dict[str, Any]) -> Iterable[bytes]:
-    process = subprocess.Popen(
-        _native_mp3_stream_command(row),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        if process.stdout is None:
-            raise RuntimeError("FFmpeg did not expose its MP3 output stream.")
-        while True:
-            chunk = process.stdout.read(128 * 1024)
-            if not chunk:
-                break
-            yield chunk
-        return_code = process.wait()
-        if return_code != 0:
-            logger.warning("[Music] native MP3 encoder exited with status %s", return_code)
-    finally:
-        if process.stdout is not None:
-            with contextlib.suppress(Exception):
-                process.stdout.close()
-        if process.poll() is None:
-            with contextlib.suppress(Exception):
-                process.terminate()
-            try:
-                process.wait(timeout=2.0)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    process.kill()
-                with contextlib.suppress(Exception):
-                    process.wait(timeout=1.0)
 
 
 def _mixed_sync_from_player_settings(
@@ -3348,34 +3175,21 @@ def _play_track(
     selected_player_settings = (
         player_settings if isinstance(player_settings, dict) else {}
     )
-    native_mp3_stream = _uses_native_mp3_stream(target_ids)
+    native_sendspin = any(_is_native_target(target) for target in target_ids)
     audio_sync_transcode = _uses_audio_sync_transcode(target_ids)
-    provider_source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
-    if not provider_source_url:
+    source_url = provider.stream_url(track, audio_sync=audio_sync_transcode)
+    if not source_url:
         raise RuntimeError(f"No stream is available for {_track_label(track)}.")
 
     duration = max(0.0, _as_float(track.get("duration_seconds")))
     source_path = Path(_text(track.get("path")) or "music-track")
     start_position = max(0.0, _as_float(start_position_seconds))
-    if native_mp3_stream:
-        source_url = _register_native_mp3_stream(
-            provider_source_url,
-            filename=source_path.name,
-            duration_seconds=duration,
-            start_position_seconds=start_position,
-        )
-        playback_media_type = "audio/mpeg"
-        playback_filename = f"{source_path.stem}.sync.mp3"
-        transport_start_position = 0.0
-    else:
-        source_url = provider_source_url
-        playback_media_type = "audio/wav" if audio_sync_transcode else _track_media_type(track)
-        playback_filename = (
-            f"{source_path.stem}.sync.wav"
-            if audio_sync_transcode
-            else source_path.name
-        )
-        transport_start_position = start_position
+    playback_media_type = "audio/wav" if audio_sync_transcode else _track_media_type(track)
+    playback_filename = (
+        f"{source_path.stem}.sync.wav"
+        if audio_sync_transcode
+        else source_path.name
+    )
 
     from media_playback import play_media_url_targets
 
@@ -3391,7 +3205,7 @@ def _play_track(
         album=_text(track.get("album")),
         duration_seconds=duration,
         volume_percent=volume_percent,
-        start_position_seconds=transport_start_position,
+        start_position_seconds=start_position,
         mixed_sync_adjustment_ms=_as_int(mixed_sync_adjustment_ms, 0, -750, 3000),
         target_volume_percent={
             target: _as_int(values.get("volume_percent"), volume_percent, 0, 100)
@@ -3413,17 +3227,14 @@ def _play_track(
         airplay_group_id=_text(airplay_group_id),
         timeout_s=max(180.0, duration + 120.0),
         respect_reply_playback=False,
+        source_owner="music_core",
     )
     if not isinstance(result, dict) or result.get("ok") is False:
         raise RuntimeError(_text((result or {}).get("error")) or "Music playback failed.")
     result["audio_sync_transcode_used"] = audio_sync_transcode
     if audio_sync_transcode:
         result["audio_sync_transcode_profile"] = "audio_sync"
-    result["native_mp3_stream_used"] = native_mp3_stream
-    if native_mp3_stream:
-        result["native_mp3_stream_profile"] = (
-            f"mp3_{NATIVE_MP3_SAMPLE_RATE_HZ // 1000}k_{NATIVE_MP3_BITRATE_KBPS}k"
-        )
+    result["native_sendspin_used"] = native_sendspin
     return result
 
 
@@ -3472,30 +3283,18 @@ def _stop_target(
                     )
                 )
             else:
-                from tater_voice import native_satellite, stereo_pairs
+                from tater_voice import native_satellite, sendspin_playback
 
-                for selector in selectors:
-                    members = [selector]
-                    pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
-                    if isinstance(pair, dict) and pair:
-                        members = [
-                            _text(pair.get("left_selector")),
-                            _text(pair.get("right_selector")),
-                        ]
-                    for member in members:
-                        if not member:
-                            continue
-                        try:
-                            native_satellite.run_on_runtime_loop(
-                                native_satellite.send_command(
-                                    member,
-                                    "media.session.stop",
-                                    {"reason": "music_core_stop"},
-                                ),
-                                timeout=8.0,
-                            )
-                        except Exception as exc:
-                            warnings.append(f"{member}: {exc}")
+                async def stop_sendspin_targets() -> None:
+                    targets = await native_satellite.sendspin_targets_for_selectors(selectors)
+                    await sendspin_playback.stop_live_streams_for_targets(
+                        _text(target.get("selector")) for target in targets
+                    )
+
+                native_satellite.run_on_runtime_loop(
+                    stop_sendspin_targets(),
+                    timeout=8.0,
+                )
         except Exception as exc:
             warnings.append(_text(exc))
 
@@ -3579,6 +3378,7 @@ def _native_session_members(player: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "selector": selector,
                         "session_id": _text(session.get("session_id")),
                         "target": _text(session.get("target")),
+                        "transport": _text(session.get("transport")),
                     }
                 )
     return members
@@ -3587,40 +3387,14 @@ def _native_session_members(player: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _require_native_seek_support(targets: Any) -> None:
     try:
         from announcement_targets import split_announcement_targets
-        from tater_voice import native_satellite, stereo_pairs
+        from tater_voice import native_satellite
 
         grouped = split_announcement_targets(_list(targets))
         selectors = list(grouped.get("voice_core_selectors") or [])
-        members: List[str] = []
-        for selector in selectors:
-            pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
-            if isinstance(pair, dict) and pair:
-                members.extend(
-                    member
-                    for member in (
-                        _text(pair.get("left_selector")),
-                        _text(pair.get("right_selector")),
-                    )
-                    if member
-                )
-            elif selector:
-                members.append(selector)
-        unsupported = []
-        for member in members:
-            supported = native_satellite.run_on_runtime_loop(
-                native_satellite.client_has_capability(
-                    member,
-                    "media_session_start_position",
-                ),
-                timeout=4.0,
-            )
-            if not supported:
-                unsupported.append(member)
-        if unsupported:
-            raise ValueError(
-                "Seeking needs the latest satellite firmware on "
-                + ", ".join(unsupported)
-                + "."
+        if selectors:
+            native_satellite.run_on_runtime_loop(
+                native_satellite.sendspin_targets_for_selectors(selectors),
+                timeout=6.0,
             )
     except ValueError:
         raise
@@ -3677,7 +3451,7 @@ def _set_target_volume(player: Dict[str, Any], volume_percent: int) -> Dict[str,
         warnings.append("The current satellite playback session is unavailable; start the track again.")
     if native_members:
         try:
-            from tater_voice import native_satellite, stereo_pairs
+            from tater_voice import native_satellite, sendspin_playback, stereo_pairs
 
             pair_scales: Dict[str, int] = {}
             for target in grouped.get("voice_core_selectors") or []:
@@ -3690,31 +3464,45 @@ def _set_target_volume(player: Dict[str, Any], volume_percent: int) -> Dict[str,
                 pair_scales[_text(pair.get("right_selector"))] = _as_int(
                     pair.get("right_volume_percent"), 100, 0, 100
                 )
+            sendspin_sessions: Dict[str, List[Dict[str, Any]]] = {}
+            stale_members: List[Dict[str, Any]] = []
             for member in native_members:
-                selector = _text(member.get("selector"))
-                try:
-                    supported = native_satellite.run_on_runtime_loop(
-                        native_satellite.client_has_capability(selector, "media_session_volume"),
-                        timeout=4.0,
-                    )
-                    if not supported:
-                        raise RuntimeError("update satellite firmware to enable live music volume")
-                    member_volume = round(volume_percent * pair_scales.get(selector, 100) / 100)
-                    native_satellite.run_on_runtime_loop(
-                        native_satellite.send_request(
-                            selector,
-                            "media.session.volume",
-                            {
-                                "session_id": _text(member.get("session_id")),
-                                "volume_percent": max(0, min(100, member_volume)),
-                            },
-                            timeout_s=4.0,
+                if _text(member.get("transport")) == "sendspin":
+                    sendspin_sessions.setdefault(_text(member.get("session_id")), []).append(member)
+                else:
+                    stale_members.append(member)
+            for session_id, members in sendspin_sessions.items():
+                volumes = {
+                    _text(member.get("selector")): max(
+                        0,
+                        min(
+                            100,
+                            round(
+                                volume_percent
+                                * pair_scales.get(_text(member.get("selector")), 100)
+                                / 100
+                            ),
                         ),
-                        timeout=6.0,
                     )
-                    sent_count += 1
-                except Exception as exc:
-                    warnings.append(f"{selector}: {exc}")
+                    for member in members
+                    if _text(member.get("selector"))
+                }
+                result = native_satellite.run_on_runtime_loop(
+                    sendspin_playback.set_live_stream_volumes(session_id, volumes),
+                    timeout=6.0,
+                )
+                if not isinstance(result, dict) or result.get("ok") is False:
+                    warnings.append(
+                        _text((result or {}).get("error"))
+                        if isinstance(result, dict)
+                        else f"{session_id}: Sendspin volume update failed"
+                    )
+                else:
+                    sent_count += len(volumes)
+            if stale_members:
+                warnings.append(
+                    "The active satellite session predates Sendspin; start the track again."
+                )
         except Exception as exc:
             warnings.append(_text(exc))
 
@@ -4248,7 +4036,11 @@ def _reconcile_native_playback(player: Dict[str, Any], client: Any = None) -> Di
     sessions = [
         row
         for row in list(playback_result.get("voice_core_sessions") or [])
-        if isinstance(row, dict) and _text(row.get("session_id"))
+        if (
+            isinstance(row, dict)
+            and _text(row.get("session_id"))
+            and _text(row.get("transport")) != "sendspin"
+        )
     ]
     if not sessions:
         return player
@@ -6705,6 +6497,7 @@ def handle_htmlui_tab_action(
             },
             timeout_s=30.0,
             respect_reply_playback=False,
+            source_owner="music_core",
         )
         if not isinstance(result, dict) or result.get("ok") is False:
             raise ValueError(_text((result or {}).get("error")) or "The sync test could not start.")
@@ -6926,31 +6719,6 @@ def _fallback_track_artwork(track: Dict[str, Any]) -> Dict[str, Any]:
     return {"body": svg.encode("utf-8"), "content_type": "image/svg+xml"}
 
 
-def _native_mp3_stream_response(query: Optional[Dict[str, Any]] = None) -> Any:
-    params = query if isinstance(query, dict) else {}
-    row = _native_mp3_stream_row(params.get("stream_id"))
-    if not row:
-        raise KeyError("Native MP3 stream was not found or has expired.")
-    filename = Path(_text(row.get("filename")) or "music-track.sync.mp3").name
-    header_filename = "".join(
-        character
-        if 32 <= ord(character) < 127 and character not in {'"', "\\"}
-        else "_"
-        for character in filename
-    ) or "music-track.sync.mp3"
-    from starlette.responses import StreamingResponse
-
-    return StreamingResponse(
-        _native_mp3_body(row),
-        media_type="audio/mpeg",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": f'inline; filename="{header_filename}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
 def handle_core_webhook(
     *,
     webhook: str,
@@ -6959,8 +6727,6 @@ def handle_core_webhook(
     **_kwargs,
 ) -> Any:
     hook = _text(webhook).lower()
-    if hook == "native-mp3":
-        return _native_mp3_stream_response(query)
     if hook != "artwork":
         raise KeyError(f"Unsupported Music Core webhook: {webhook}")
     params = query if isinstance(query, dict) else {}

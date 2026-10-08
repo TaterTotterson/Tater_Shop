@@ -70,8 +70,6 @@ class MusicCoreTests(unittest.TestCase):
             self.core._artwork_cache.clear()
             self.core._artwork_inflight.clear()
             self.core._artwork_failure_until.clear()
-        with self.core._native_mp3_stream_lock:
-            self.core._native_mp3_streams.clear()
         self.redis = FakeRedis()
         self.redis.hset(
             self.core.SETTINGS_KEY,
@@ -1709,7 +1707,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertTrue(queued["continuation_pending"])
         self.core._continuation_thread = None
 
-    def test_play_track_forwards_mixed_targets_with_native_mp3_stream(self):
+    def test_play_track_routes_native_destinations_through_sendspin(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1718,12 +1716,7 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "integration:homeassistant:media_player.living_room",
         ]
-        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
-        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
-            self.core,
-            "_register_native_mp3_stream",
-            return_value=native_mp3_url,
-        ) as register:
+        with patch.dict(sys.modules, {"media_playback": playback}):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1744,9 +1737,8 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["start_position_seconds"],
-            0,
+            37,
         )
-        self.assertEqual(register.call_args.kwargs["start_position_seconds"], 37)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["mixed_sync_adjustment_ms"],
             125,
@@ -1760,20 +1752,22 @@ class MusicCoreTests(unittest.TestCase):
             {targets[0]: -20, targets[1]: 80},
         )
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertEqual(source_url, native_mp3_url)
-        provider_url = register.call_args.args[0]
-        self.assertNotIn("transcode=1", provider_url)
-        self.assertNotIn("profile=audio_sync", provider_url)
+        self.assertNotIn("transcode=1", source_url)
+        self.assertNotIn("profile=audio_sync", source_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/mpeg",
+            "audio/flac",
         )
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["filename"],
-            "09 Three Little Birds.sync.mp3",
+            "09 Three Little Birds.flac",
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["source_owner"],
+            "music_core",
         )
         self.assertFalse(result["audio_sync_transcode_used"])
-        self.assertTrue(result["native_mp3_stream_used"])
+        self.assertTrue(result["native_sendspin_used"])
 
     def test_play_track_keeps_audio_sync_wav_for_non_native_target(self):
         playback = types.ModuleType("media_playback")
@@ -1796,47 +1790,14 @@ class MusicCoreTests(unittest.TestCase):
             playback.play_media_url_targets.call_args.kwargs["media_type"],
             "audio/wav",
         )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["source_owner"],
+            "music_core",
+        )
         self.assertTrue(result["audio_sync_transcode_used"])
-        self.assertFalse(result["native_mp3_stream_used"])
+        self.assertFalse(result["native_sendspin_used"])
 
-    def test_native_mp3_registration_is_opaque_and_builds_streaming_encoder(self):
-        provider_url = "http://tube.local/private/song.flac?player_token=secret"
-        with patch.object(
-            self.core,
-            "_native_mp3_ffmpeg_binary",
-            return_value="/usr/bin/ffmpeg",
-        ), patch.object(
-            self.core,
-            "_tater_service_base_url",
-            return_value="http://tater.local:8501",
-        ):
-            stream_url = self.core._register_native_mp3_stream(
-                provider_url,
-                filename="song.flac",
-                duration_seconds=180,
-                start_position_seconds=12.5,
-            )
-            stream_id = stream_url.rsplit("=", 1)[-1]
-            row = self.core._native_mp3_stream_row(stream_id)
-            command = self.core._native_mp3_stream_command(row)
-
-        self.assertTrue(
-            stream_url.startswith(
-                "http://tater.local:8501/api/cores/music_core/webhook/native-mp3?stream_id="
-            )
-        )
-        self.assertNotIn("secret", stream_url)
-        self.assertEqual(row["source_url"], provider_url)
-        self.assertEqual(row["filename"], "song.sync.mp3")
-        self.assertEqual(command[0], "/usr/bin/ffmpeg")
-        self.assertIn("-ss", command)
-        self.assertIn("12.500", command)
-        self.assertIn("libmp3lame", command)
-        self.assertIn("192k", command)
-        self.assertIn("48000", command)
-        self.assertEqual(command[-2:], ["mp3", "pipe:1"])
-
-    def test_play_track_uses_native_mp3_stream_for_native_and_airplay(self):
+    def test_play_track_keeps_sendspin_for_native_and_sonos(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 2}
@@ -1845,51 +1806,7 @@ class MusicCoreTests(unittest.TestCase):
             "voice_core:native:kitchen",
             "sonos:RINCON_LIVING",
         ]
-        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
-        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
-            self.core,
-            "_register_native_mp3_stream",
-            return_value=native_mp3_url,
-        ):
-            result = self.core._play_track(
-                self.tracks[0],
-                targets,
-                volume_percent=55,
-                player_settings={
-                    targets[0]: {"volume_percent": 55, "sync_offset_ms": 0},
-                    targets[1]: {
-                        "volume_percent": 55,
-                        "sync_offset_ms": 0,
-                        "transport_mode": "auto",
-                    },
-                },
-                client=self.redis,
-            )
-
-        kwargs = playback.play_media_url_targets.call_args.kwargs
-        source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertEqual(source_url, native_mp3_url)
-        self.assertEqual(kwargs["media_type"], "audio/mpeg")
-        self.assertEqual(kwargs["filename"], "09 Three Little Birds.sync.mp3")
-        self.assertFalse(result["audio_sync_transcode_used"])
-        self.assertTrue(result["native_mp3_stream_used"])
-        self.assertEqual(result["native_mp3_stream_profile"], "mp3_48k_192k")
-
-    def test_play_track_uses_native_mp3_for_native_sonos_transport(self):
-        playback = types.ModuleType("media_playback")
-        playback.play_media_url_targets = Mock(
-            return_value={"ok": True, "sent_count": 2}
-        )
-        targets = [
-            "voice_core:native:kitchen",
-            "sonos:RINCON_LIVING",
-        ]
-        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
-        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
-            self.core,
-            "_register_native_mp3_stream",
-            return_value=native_mp3_url,
-        ):
+        with patch.dict(sys.modules, {"media_playback": playback}):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1906,26 +1823,25 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertEqual(source_url, native_mp3_url)
+        self.assertNotIn("transcode=1", source_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/mpeg",
+            "audio/flac",
+        )
+        self.assertEqual(
+            playback.play_media_url_targets.call_args.kwargs["source_owner"],
+            "music_core",
         )
         self.assertFalse(result["audio_sync_transcode_used"])
-        self.assertTrue(result["native_mp3_stream_used"])
+        self.assertTrue(result["native_sendspin_used"])
 
-    def test_play_track_uses_native_mp3_for_native_stereo_pair(self):
+    def test_play_track_uses_sendspin_for_native_stereo_pair(self):
         playback = types.ModuleType("media_playback")
         playback.play_media_url_targets = Mock(
             return_value={"ok": True, "sent_count": 1}
         )
         targets = ["voice_core:stereo:office"]
-        native_mp3_url = "http://tater.local/api/cores/music_core/webhook/native-mp3?stream_id=opaque"
-        with patch.dict(sys.modules, {"media_playback": playback}), patch.object(
-            self.core,
-            "_register_native_mp3_stream",
-            return_value=native_mp3_url,
-        ):
+        with patch.dict(sys.modules, {"media_playback": playback}):
             result = self.core._play_track(
                 self.tracks[0],
                 targets,
@@ -1934,17 +1850,17 @@ class MusicCoreTests(unittest.TestCase):
             )
 
         source_url = playback.play_media_url_targets.call_args.args[1]
-        self.assertEqual(source_url, native_mp3_url)
+        self.assertNotIn("transcode=1", source_url)
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["media_type"],
-            "audio/mpeg",
+            "audio/flac",
         )
         self.assertEqual(
             playback.play_media_url_targets.call_args.kwargs["filename"],
-            "09 Three Little Birds.sync.mp3",
+            "09 Three Little Birds.flac",
         )
         self.assertFalse(result["audio_sync_transcode_used"])
-        self.assertTrue(result["native_mp3_stream_used"])
+        self.assertTrue(result["native_sendspin_used"])
 
     def test_hydra_exposes_play_search_control_status_and_browse(self):
         self.assertTrue(self.core.CORE_SETTINGS["hydra_tools_require_running"])
@@ -2348,6 +2264,7 @@ class MusicCoreTests(unittest.TestCase):
             {
                 "session_id": "music-session-1",
                 "selectors": ["native:kitchen"],
+                "transport": "sendspin",
             }
         ]
         announcement_targets = types.ModuleType("announcement_targets")
@@ -3069,9 +2986,10 @@ class MusicCoreTests(unittest.TestCase):
         self.assertGreater(len(kwargs["audio_bytes"]), 1000)
         self.assertEqual(kwargs["target_volume_percent"], {targets[0]: 44, targets[1]: 63})
         self.assertEqual(kwargs["target_sync_offset_ms"], {targets[0]: -80, targets[1]: 120})
+        self.assertEqual(kwargs["source_owner"], "music_core")
         self.assertEqual(self.core._player(self.redis)["status"], "stopped")
 
-    def test_live_volume_is_sent_to_the_active_native_media_session(self):
+    def test_live_volume_is_sent_to_the_active_sendspin_stream(self):
         calls = []
         announcement_targets = types.ModuleType("announcement_targets")
         announcement_targets.split_announcement_targets = lambda _targets: {
@@ -3082,22 +3000,19 @@ class MusicCoreTests(unittest.TestCase):
         }
         native_satellite = types.ModuleType("tater_voice.native_satellite")
 
-        async def has_capability(selector, capability):
-            calls.append(("capability", selector, capability))
-            return True
-
-        async def send_request(selector, command, payload, timeout_s=0):
-            calls.append(("request", selector, command, payload, timeout_s))
+        async def set_live_stream_volumes(stream_id, volumes):
+            calls.append((stream_id, volumes))
             return {"ok": True}
 
-        native_satellite.client_has_capability = has_capability
-        native_satellite.send_request = send_request
         native_satellite.run_on_runtime_loop = lambda awaitable, timeout=0: asyncio.run(awaitable)
+        sendspin_playback = types.ModuleType("tater_voice.sendspin_playback")
+        sendspin_playback.set_live_stream_volumes = set_live_stream_volumes
         stereo_pairs = types.ModuleType("tater_voice.stereo_pairs")
         stereo_pairs.is_stereo_selector = lambda _selector: False
         stereo_pairs.get_pair = lambda _selector: {}
         tater_voice = types.ModuleType("tater_voice")
         tater_voice.native_satellite = native_satellite
+        tater_voice.sendspin_playback = sendspin_playback
         tater_voice.stereo_pairs = stereo_pairs
         player = {
             "status": "playing",
@@ -3108,6 +3023,7 @@ class MusicCoreTests(unittest.TestCase):
                         "session_id": "session-1",
                         "target": "native:kitchen",
                         "selectors": ["native:kitchen"],
+                        "transport": "sendspin",
                     }
                 ]
             },
@@ -3119,22 +3035,14 @@ class MusicCoreTests(unittest.TestCase):
                 "announcement_targets": announcement_targets,
                 "tater_voice": tater_voice,
                 "tater_voice.native_satellite": native_satellite,
+                "tater_voice.sendspin_playback": sendspin_playback,
                 "tater_voice.stereo_pairs": stereo_pairs,
             },
         ):
             result = self.core._set_target_volume(player, 42)
 
         self.assertEqual(result, {"sent_count": 1, "warnings": []})
-        self.assertIn(
-            ("capability", "native:kitchen", "media_session_volume"),
-            calls,
-        )
-        request = next(row for row in calls if row[0] == "request")
-        self.assertEqual(request[2], "media.session.volume")
-        self.assertEqual(
-            request[3],
-            {"session_id": "session-1", "volume_percent": 42},
-        )
+        self.assertEqual(calls, [("session-1", {"native:kitchen": 42})])
 
     def test_player_search_keeps_destinations_selected_from_speaker_popup(self):
         self.redis.set(
