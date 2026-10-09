@@ -298,6 +298,48 @@ def test_echo_history_is_persisted_with_monotonic_event_ids() -> None:
     assert [row["text"] for row in restored.get_messages(since_id=1)["messages"]] == ["second"]
 
 
+def test_node_cards_use_human_readable_mesh_details() -> None:
+    now = 1_800_000_000.0
+    relative, freshness, exact = meshtastic_core._node_last_seen(now - 3700, now=now)
+
+    assert relative == "1 hr ago"
+    assert freshness == "recent"
+    assert exact.startswith("Last report ")
+
+    items = meshtastic_core._node_items(
+        [
+            {
+                "node_id": "!00000001",
+                "num": 1,
+                "long_name": "Tater",
+                "last_seen": now,
+                "snr": 0.0,
+                "hops_away": 0,
+            },
+            {
+                "node_id": "!00000002",
+                "num": 2,
+                "long_name": "Phooey",
+                "last_seen": now - 90,
+                "snr": 7.25,
+                "hops_away": 1,
+            },
+        ],
+        local_node={"node_id": "!00000001", "num": 1},
+    )
+
+    assert items[0]["card_variant"] == "mesh_node"
+    assert items[0]["hide_core_key"] is True
+    assert items[0]["hero_badges"][0] == {"label": "LOCAL", "tone": "accent"}
+    assert items[0]["summary_rows"] == [
+        {"label": "Last heard", "value": "Connected now"},
+        {"label": "Link quality", "value": "Local radio"},
+        {"label": "Route", "value": "This radio"},
+    ]
+    assert items[1]["hero_badges"][1]["label"] == "1 HOP"
+    assert items[1]["summary_rows"][1]["value"] == "Good · +7.2 dB"
+
+
 def test_echo_config_request_id_is_not_restarted(monkeypatch) -> None:
     transport = meshtastic_core.EchoGATTTransport(
         selector="native:config-test",

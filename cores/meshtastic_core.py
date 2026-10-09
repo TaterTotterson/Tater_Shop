@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -1578,8 +1578,74 @@ def _message_items(messages: List[Any]) -> List[Dict[str, Any]]:
     return items
 
 
-def _node_items(nodes: List[Any]) -> List[Dict[str, Any]]:
+def _node_last_seen(raw: Any, *, now: Optional[float] = None) -> tuple[str, str, str]:
+    value = _text(raw)
+    try:
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000.0
+    except (TypeError, ValueError):
+        timestamp = 0.0
+    if timestamp <= 0:
+        return "Not reported", "unknown", "No last-heard time reported."
+
+    current = float(time.time() if now is None else now)
+    age = max(0.0, current - timestamp)
+    if age < 10:
+        relative = "Just now"
+    elif age < 60:
+        relative = f"{int(age)} sec ago"
+    elif age < 3600:
+        minutes = max(1, int(age // 60))
+        relative = f"{minutes} min ago"
+    elif age < 86400:
+        hours = max(1, int(age // 3600))
+        relative = f"{hours} hr{'s' if hours != 1 else ''} ago"
+    elif age < 604800:
+        days = max(1, int(age // 86400))
+        relative = f"{days} day{'s' if days != 1 else ''} ago"
+    else:
+        weeks = max(1, int(age // 604800))
+        relative = f"{weeks} week{'s' if weeks != 1 else ''} ago"
+
+    if age <= 900:
+        freshness = "active"
+    elif age <= 86400:
+        freshness = "recent"
+    else:
+        freshness = "stale"
+    exact = time.strftime("Last report %b %d, %Y at %I:%M %p.", time.localtime(timestamp))
+    exact = exact.replace(" 0", " ").replace(" at 0", " at ")
+    return relative, freshness, exact
+
+
+def _node_signal(row: Dict[str, Any], *, is_local: bool) -> str:
+    if is_local:
+        return "Local radio"
+    for key in ("snr", "signal_to_noise"):
+        if row.get(key) not in (None, ""):
+            try:
+                value = float(row[key])
+            except (TypeError, ValueError):
+                break
+            quality = "Excellent" if value >= 10 else "Good" if value >= 5 else "Fair" if value >= 0 else "Weak"
+            return f"{quality} · {value:+.1f} dB"
+    if row.get("rssi") not in (None, ""):
+        try:
+            return f"{int(float(row['rssi']))} dBm"
+        except (TypeError, ValueError):
+            pass
+    return "Not reported"
+
+
+def _node_items(nodes: List[Any], *, local_node: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    local = _record(local_node)
+    local_id = _first_text(local, "node_id", "id")
+    try:
+        local_num = int(local.get("num") or 0)
+    except (TypeError, ValueError):
+        local_num = 0
     for position, raw in enumerate(nodes):
         row = _record(raw)
         user = _record(row.get("user"))
@@ -1589,19 +1655,49 @@ def _node_items(nodes: List[Any]) -> List[Dict[str, Any]]:
             or _first_text(user, "longName", "shortName", "long_name", "short_name")
             or node_id
         )
-        last_seen = _first_text(row, "last_seen", "last_heard", "lastHeard") or "Unknown"
-        signal = _first_text(row, "snr", "rssi") or "Unknown"
-        hops = _first_text(row, "hops_away", "hopsAway", "hops") or "Unknown"
+        try:
+            node_num = int(row.get("num") or 0)
+        except (TypeError, ValueError):
+            node_num = 0
+        is_local = bool((local_id and node_id.lower() == local_id.lower()) or (local_num and node_num == local_num))
+        last_seen_raw = row.get("last_seen") or row.get("last_heard") or row.get("lastHeard")
+        last_seen, freshness, exact_seen = _node_last_seen(last_seen_raw)
+        if is_local:
+            last_seen, freshness, exact_seen = "Connected now", "active", "This is the radio connected to Tater."
+        signal = _node_signal(row, is_local=is_local)
+        try:
+            hop_count = int(row.get("hops_away") if row.get("hops_away") is not None else row.get("hopsAway") or row.get("hops") or 0)
+        except (TypeError, ValueError):
+            hop_count = -1
+        if is_local:
+            route = "This radio"
+        elif hop_count == 0:
+            route = "Direct"
+        elif hop_count == 1:
+            route = "1 hop"
+        elif 1 < hop_count < 255:
+            route = f"{hop_count} hops"
+        else:
+            route = "Unknown"
+        state_label = "LOCAL" if is_local else "ACTIVE" if freshness == "active" else "RECENT" if freshness == "recent" else "STALE"
+        state_tone = "accent" if is_local else "success" if freshness == "active" else "accent" if freshness == "recent" else "muted"
         items.append(
             {
                 "id": f"node:{node_id}",
                 "group": "nodes",
+                "card_variant": "mesh_node",
+                "hide_core_key": True,
                 "title": title,
                 "subtitle": node_id,
+                "detail": exact_seen,
+                "hero_badges": [
+                    {"label": state_label, "tone": state_tone},
+                    {"label": route.upper(), "tone": "muted"},
+                ],
                 "summary_rows": [
-                    {"label": "Last seen", "value": last_seen},
-                    {"label": "Signal", "value": signal},
-                    {"label": "Hops", "value": hops},
+                    {"label": "Last heard", "value": last_seen},
+                    {"label": "Link quality", "value": signal},
+                    {"label": "Route", "value": route},
                 ],
             }
         )
@@ -1688,11 +1784,11 @@ def get_htmlui_tab_data(
     channels = list(snapshot.get("channels") or [])
     nodes = list(snapshot.get("nodes") or [])
     connected = bool(status.get("connected"))
+    local_node = _record(status.get("local_node"))
     item_forms = [
-        *_node_items(nodes),
+        *_node_items(nodes, local_node=local_node),
         *_pairing_items(snapshot),
     ]
-    local_node = _record(status.get("local_node"))
     radio_name = _first_text(local_node, "long_name", "short_name", "node_id")
 
     return {

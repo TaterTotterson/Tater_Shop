@@ -116,7 +116,7 @@
       "id": "meshtastic",
       "name": "Meshtastic Core",
       "module_key": "meshtastic_core",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "min_tater_version": "187",
       "description": "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing through a transport-neutral Tater core.",
       "settings_category": "Meshtastic Core Settings",
@@ -129,7 +129,7 @@
         "bluetooth"
       ],
       "entry": "cores/meshtastic_core.py",
-      "sha256": "41b78d91af64ccd2ac1207a864d300fc6e0a5c93ca250d51f75ad4fd526cd401"
+      "sha256": "f27238046510839be54b5f64e850a477fba3efa6077ec6770437d8ebc8e746f6"
     },
     {
       "id": "music",
