@@ -7,6 +7,7 @@ import re
 import struct
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 from urllib.parse import urljoin
@@ -14,7 +15,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -252,6 +253,42 @@ MESHTASTIC_FROMRADIO_UUID = "2c55e69e-4993-11ed-b878-0242ac120002"
 MESHTASTIC_TORADIO_UUID = "f75c76d2-129e-4dad-a1dd-7866124401e7"
 MESHTASTIC_FROMNUM_UUID = "ed9da18c-a800-4f66-a670-aa7547e34453"
 GATT_CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+
+
+def _advertisement_service_uuids(data_hex: Any) -> set[str]:
+    """Decode service UUID lists directly from one raw BLE advertisement.
+
+    Tater's presence inventory historically decoded 16-bit service UUIDs but
+    left 128-bit AD types in the raw payload. Meshtastic advertises its PhoneAPI
+    service as a 128-bit UUID, so discovery must not depend on the derived
+    presence metadata being complete.
+    """
+    try:
+        payload = bytes.fromhex(str(data_hex or "").strip())
+    except ValueError:
+        return set()
+    found: set[str] = set()
+    offset = 0
+    while offset < len(payload):
+        field_length = payload[offset]
+        field_end = offset + field_length + 1
+        if field_length < 1 or field_end > len(payload):
+            break
+        field_type = payload[offset + 1]
+        value = payload[offset + 2 : field_end]
+        if field_type in {0x02, 0x03}:
+            for index in range(0, len(value) - 1, 2):
+                found.add(f"{int.from_bytes(value[index:index + 2], 'little'):04x}")
+        elif field_type in {0x04, 0x05}:
+            for index in range(0, len(value) - 3, 4):
+                found.add(f"{int.from_bytes(value[index:index + 4], 'little'):08x}")
+        elif field_type in {0x06, 0x07}:
+            for index in range(0, len(value) - 15, 16):
+                # Multi-byte Bluetooth UUIDs are carried least-significant
+                # octet first in advertising data.
+                found.add(str(uuid.UUID(bytes=bytes(value[index:index + 16][::-1]))))
+        offset = field_end
+    return found
 
 _echo_request_lock = threading.Lock()
 _echo_request_id = random.randint(1, 0x7FFFFFFF)
@@ -801,27 +838,68 @@ class EchoGATTTransport:
 
         snapshot = native_ble.snapshot(max_age_s=30.0, include_observations=True, limit=500)
         observations = snapshot.get("observations") if isinstance(snapshot, dict) else []
+        satellites = _native_satellites()
+        active_selectors = {
+            str(selector)
+            for selector, row in satellites.items()
+            if isinstance(row, dict)
+            and bool(row.get("connected"))
+            and isinstance(row.get("capabilities"), dict)
+            and bool(row["capabilities"].get("ble_gatt"))
+        }
         address_types: Dict[str, int] = {}
+        raw_service_uuids: Dict[str, set[str]] = {}
+        active_observers: Dict[str, Dict[str, Any]] = {}
         for row in observations or []:
             if isinstance(row, dict):
-                address_types[str(row.get("address") or "").lower()] = int(row.get("address_type") or 0)
+                address = str(row.get("address") or "").lower()
+                if not address:
+                    continue
+                address_types[address] = int(row.get("address_type") or 0)
+                raw_service_uuids.setdefault(address, set()).update(
+                    _advertisement_service_uuids(row.get("data"))
+                )
+                selector = str(row.get("selector") or "")
+                if selector in active_selectors:
+                    rssi = int(row.get("rssi") or -127)
+                    previous = active_observers.get(address)
+                    if previous is None or rssi > int(previous.get("rssi") or -127):
+                        active_observers[address] = {
+                            "selector": selector,
+                            "rssi": rssi,
+                            "room": str(row.get("room") or ""),
+                        }
         devices: List[Dict[str, Any]] = []
         for row in snapshot.get("devices") or []:
             if not isinstance(row, dict):
                 continue
             name = str(row.get("advertised_name") or row.get("display_name") or "").strip()
+            address = str(row.get("address") or "").lower()
             uuids = {str(value).lower() for value in row.get("service_uuids") or []}
+            uuids.update(raw_service_uuids.get(address, set()))
             if MESHTASTIC_SERVICE_UUID not in uuids and "meshtastic" not in name.lower():
                 continue
-            address = str(row.get("address") or "").lower()
+            observer = active_observers.get(address) or {}
+            selector = str(observer.get("selector") or "")
+            if not selector:
+                strongest = str(row.get("strongest_selector") or "")
+                if strongest in active_selectors:
+                    selector = strongest
+                elif self.selector in active_selectors:
+                    selector = self.selector
+                else:
+                    selector = _available_echo_selector(self.selector)
             devices.append(
                 {
                     "name": name or "Meshtastic radio",
                     "address": address,
                     "address_type": address_types.get(address, 1),
-                    "selector": str(row.get("strongest_selector") or self.selector or ""),
-                    "rssi": int(row.get("strongest_rssi") or -127),
-                    "room": str(row.get("strongest_room") or ""),
+                    # Pairing must be routed through a satellite that actually
+                    # implements active GATT, even when a passive-only proxy
+                    # happened to report the strongest advertisement.
+                    "selector": selector,
+                    "rssi": int(observer.get("rssi", row.get("strongest_rssi") or -127)),
+                    "room": str(observer.get("room") or row.get("strongest_room") or ""),
                 }
             )
         return {"ok": True, "transport": self.name, "finished_at": _iso_now(), "devices": devices, "count": len(devices)}

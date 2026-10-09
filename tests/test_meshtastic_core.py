@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -229,6 +231,77 @@ def test_auto_transport_uses_echo_for_initial_scan(monkeypatch) -> None:
 
     assert client.transport_name == "echo_gatt"
     assert client.transport.selector == "native:scan-test"
+
+
+def test_echo_scan_decodes_meshtastic_128_bit_uuid_and_uses_gatt_capable_observer(monkeypatch) -> None:
+    address = "c6:26:49:99:cd:6a"
+    raw_advert = "0201061107fdea73e2ca5da89f1f46a81518b2a16b"
+    snapshot = {
+        "observations": [
+            {
+                "address": address,
+                "address_type": 1,
+                "selector": "native:passive-only",
+                "room": "Office",
+                "rssi": -50,
+                "data": raw_advert,
+            },
+            {
+                "address": address,
+                "address_type": 1,
+                "selector": "native:active-gatt",
+                "room": "Game Room",
+                "rssi": -76,
+                "data": raw_advert,
+            },
+        ],
+        "devices": [
+            {
+                "address": address,
+                "display_name": "BLE 99:CD:6A",
+                "service_uuids": [],
+                "strongest_selector": "native:passive-only",
+                "strongest_room": "Office",
+                "strongest_rssi": -50,
+            }
+        ],
+    }
+    native_ble = types.ModuleType("tater_voice.native_ble")
+    native_ble.snapshot = lambda **_kwargs: snapshot
+    tater_voice = types.ModuleType("tater_voice")
+    tater_voice.__path__ = []
+    tater_voice.native_ble = native_ble
+    monkeypatch.setitem(sys.modules, "tater_voice", tater_voice)
+    monkeypatch.setitem(sys.modules, "tater_voice.native_ble", native_ble)
+    monkeypatch.setattr(
+        meshtastic_core,
+        "_native_satellites",
+        lambda: {
+            "native:passive-only": {"connected": True, "capabilities": {"ble_gatt": False}},
+            "native:active-gatt": {"connected": True, "capabilities": {"ble_gatt": True}},
+        },
+    )
+
+    transport = meshtastic_core.EchoGATTTransport(
+        selector="native:active-gatt",
+        address="",
+        address_type=1,
+        timeout=5,
+    )
+    result = transport.scan_devices()
+
+    assert meshtastic_core.MESHTASTIC_SERVICE_UUID in meshtastic_core._advertisement_service_uuids(raw_advert)
+    assert result["count"] == 1
+    assert result["devices"] == [
+        {
+            "name": "BLE 99:CD:6A",
+            "address": address,
+            "address_type": 1,
+            "selector": "native:active-gatt",
+            "rssi": -76,
+            "room": "Game Room",
+        }
+    ]
 
 
 def test_tab_uses_shop_compatible_manager_contract(monkeypatch) -> None:
