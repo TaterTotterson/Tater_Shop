@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import types
@@ -619,3 +620,31 @@ def test_shop_portal_keeps_fallback_and_optionally_uses_core() -> None:
     assert "from cores.meshtastic_core import build_portal_client as _build_core_client" in source
     assert "class BridgeClient:" in source
     assert "self.bridge = _bridge_client_from_settings()" in source
+
+
+def test_shop_portal_hides_legacy_connection_settings() -> None:
+    source = (ROOT / "portals" / "meshtastic_portal.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    settings = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "PORTAL_SETTINGS" for target in node.targets)
+    )
+    assert isinstance(settings, ast.Dict)
+    top_level = {
+        key.value: value
+        for key, value in zip(settings.keys, settings.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert isinstance(top_level["category"], ast.Constant)
+    assert top_level["category"].value == "Meshtastic Portal"
+    required = top_level["required"]
+    assert isinstance(required, ast.Dict)
+    visible_keys = {
+        key.value
+        for key in required.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert visible_keys.isdisjoint({"bridge_url", "api_token", "poll_interval_sec", "request_timeout_sec"})
+    assert "never let legacy bridge fields override the core's radio" in source

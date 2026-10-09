@@ -31,8 +31,8 @@ try:
 except Exception:  # Core and portal may be installed independently.
     _build_core_client = None
 
-__version__ = "0.2.0"
-PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
+__version__ = "0.2.1"
+PORTAL_DESCRIPTION = "Meshtastic response and session controls for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
 
@@ -65,33 +65,9 @@ _MD_DECORATION_RE = re.compile(r"[*_~>#]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 PORTAL_SETTINGS = {
-    "category": "Meshtastic Settings",
+    "category": "Meshtastic Portal",
     "tags": TAGS,
     "required": {
-        "bridge_url": {
-            "label": "Bridge URL",
-            "type": "string",
-            "default": DEFAULT_BRIDGE_URL,
-            "description": "Base URL for the local Tater Meshtastic Bridge service.",
-        },
-        "api_token": {
-            "label": "API Token",
-            "type": "password",
-            "default": "",
-            "description": "Optional bearer token expected by the bridge.",
-        },
-        "poll_interval_sec": {
-            "label": "Poll Interval (sec)",
-            "type": "number",
-            "default": DEFAULT_POLL_INTERVAL_SECONDS,
-            "description": "How often to poll the bridge for new mesh messages.",
-        },
-        "request_timeout_sec": {
-            "label": "HTTP Timeout (sec)",
-            "type": "number",
-            "default": DEFAULT_REQUEST_TIMEOUT_SECONDS,
-            "description": "Timeout for bridge API requests.",
-        },
         "response_policy": {
             "label": "Response Policy",
             "type": "select",
@@ -162,7 +138,7 @@ PORTAL_SETTINGS = {
             "type": "select",
             "options": ["from_now", "from_last_seen"],
             "default": "from_now",
-            "description": "Choose whether the portal ignores existing bridge backlog on startup.",
+            "description": "Choose whether the portal ignores existing message history on startup.",
         },
         "max_message_age_sec": {
             "label": "Max Message Age (sec)",
@@ -251,7 +227,9 @@ def _coerce_allowed_channel_values(raw: Any) -> List[str]:
 
 
 def _bridge_client_from_settings(raw_settings: Optional[Dict[str, Any]] = None) -> Any:
-    if raw_settings is None and callable(_build_core_client):
+    # The installed core owns connection settings. Portal settings only govern
+    # reply behavior; never let legacy bridge fields override the core's radio.
+    if callable(_build_core_client):
         return _build_core_client(redis_client=redis_client)
 
     current = raw_settings if isinstance(raw_settings, dict) else {}
@@ -357,7 +335,7 @@ def webui_settings_fields(
             base_desc = str(updated.get("description") or "").strip()
             extra = "Pick one or more reply channels. If nothing is selected, Tater will not answer on mesh channels."
             if fetch_error:
-                extra = f"{extra} Bridge lookup failed: {fetch_error}"
+                extra = f"{extra} Radio lookup failed: {fetch_error}"
             updated["description"] = f"{base_desc} {extra}".strip()
         out.append(updated)
 
@@ -1180,7 +1158,7 @@ class MeshtasticPortalRuntime:
                     )
                     self._set_last_event_id(latest_id, force=True)
                     backoff = 1.0
-                    await asyncio.sleep(max(0.25, _get_float_setting("poll_interval_sec", DEFAULT_POLL_INTERVAL_SECONDS)))
+                    await asyncio.sleep(DEFAULT_POLL_INTERVAL_SECONDS)
                     continue
 
                 for message in messages:
@@ -1202,7 +1180,7 @@ class MeshtasticPortalRuntime:
                 backoff = min(30.0, backoff * 2.0)
                 continue
 
-            interval = max(0.25, _get_float_setting("poll_interval_sec", DEFAULT_POLL_INTERVAL_SECONDS))
+            interval = DEFAULT_POLL_INTERVAL_SECONDS
             await asyncio.sleep(interval)
 
     async def _notify_queue_worker(self, stop_event: Optional[threading.Event]) -> None:
