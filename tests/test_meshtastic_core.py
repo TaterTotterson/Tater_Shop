@@ -243,6 +243,61 @@ def test_echo_transports_share_phone_api_history() -> None:
     assert second.get_messages(since_id=0)["messages"][-1]["text"] == "shared"
 
 
+def test_echo_history_is_persisted_with_monotonic_event_ids() -> None:
+    selector = "native:persistent-test"
+    address = "c0:00:00:00:00:79"
+    redis = FakeRedis({})
+    session_key = f"{selector}|{address}"
+    with meshtastic_core._echo_sessions_lock:
+        meshtastic_core._echo_sessions.pop(session_key, None)
+
+    first = meshtastic_core.EchoGATTTransport(
+        selector=selector,
+        address=address,
+        address_type=1,
+        timeout=5,
+        redis_client=redis,
+    )
+    first._record_message(
+        {
+            "event_id": 900000,
+            "message_id": "900000",
+            "direction": "inbound",
+            "channel": 0,
+            "timestamp": "2026-10-09T12:00:00+00:00",
+            "from": {"node_id": "!00000001", "num": 1},
+            "text": "first",
+        }
+    )
+    first._record_message(
+        {
+            "event_id": 12,
+            "message_id": "12",
+            "direction": "inbound",
+            "channel": 0,
+            "timestamp": "2026-10-09T12:01:00+00:00",
+            "from": {"node_id": "!00000002", "num": 2},
+            "text": "second",
+        }
+    )
+
+    assert [row["event_id"] for row in first.messages] == [1, 2]
+    assert json.loads(redis.values[meshtastic_core.MESSAGE_HISTORY_KEY][f"messages:{address}"])[-1]["text"] == "second"
+
+    with meshtastic_core._echo_sessions_lock:
+        meshtastic_core._echo_sessions.pop(session_key, None)
+    restored = meshtastic_core.EchoGATTTransport(
+        selector=selector,
+        address=address,
+        address_type=1,
+        timeout=5,
+        redis_client=redis,
+    )
+
+    assert [row["text"] for row in restored.get_messages(since_id=0)["messages"]] == ["first", "second"]
+    assert [row["text"] for row in restored.get_messages(since_id=1)["messages"]] == ["second"]
+
+
 def test_echo_config_request_id_is_not_restarted(monkeypatch) -> None:
     transport = meshtastic_core.EchoGATTTransport(
         selector="native:config-test",
@@ -351,7 +406,7 @@ def test_echo_scan_decodes_meshtastic_128_bit_uuid_and_uses_gatt_capable_observe
     ]
 
 
-def test_tab_uses_shop_compatible_manager_contract(monkeypatch) -> None:
+def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
     snapshot = {
         "running": True,
         "transport": "bridge_http",
@@ -385,24 +440,32 @@ def test_tab_uses_shop_compatible_manager_contract(monkeypatch) -> None:
     result = meshtastic_core.get_htmlui_tab_data()
 
     ui = result["ui"]
-    assert ui["kind"] == "settings_manager"
-    assert ui["persistent_item_groups"] == ["status"]
-    assert [tab["key"] for tab in ui["manager_tabs"]] == ["chat", "nodes", "bluetooth"]
+    assert ui["kind"] == "channel_chat"
+    assert ui["status"]["connected"] is True
+    assert [channel["label"] for channel in ui["channels"]] == ["Primary", "Ops"]
+    assert ui["channels"][0]["message_count"] == 1
+    assert ui["messages"] == [
+        {
+            "id": "44",
+            "event_id": 44,
+            "message_id": "",
+            "channel": "0",
+            "direction": "inbound",
+            "sender_name": "Alice",
+            "sender_id": "!abcd",
+            "recipient_id": "",
+            "timestamp": "2026-10-09T11:59:00+00:00",
+            "text": "Hello from the mesh",
+        }
+    ]
+    assert ui["composer"]["action"] == "send_message"
+    assert [tab["key"] for tab in ui["manager_tabs"]] == ["nodes", "bluetooth"]
     forms = ui["item_forms"]
     assert {form["group"] for form in forms} >= {
-        "status",
-        "compose",
-        "messages",
         "nodes",
         "pairing_controls",
         "pairing_devices",
     }
-    composer = next(form for form in forms if form["group"] == "compose")
-    channel = next(field for field in composer["fields"] if field["key"] == "channel")
-    assert channel["options"] == [
-        {"value": "0", "label": "Primary (0)"},
-        {"value": "2", "label": "Ops (2)"},
-    ]
     pairing = next(form for form in forms if form["group"] == "pairing_devices")
     pin = next(field for field in pairing["fields"] if field["key"] == "pin")
     assert pin["type"] == "password"

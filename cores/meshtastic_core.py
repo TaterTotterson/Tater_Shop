@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import base64
+import json
 import random
 import re
 import struct
@@ -15,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -30,6 +31,8 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 ECHO_GATT_LONG_REQUEST_TIMEOUT_SECONDS = 40.0
 DEFAULT_REFRESH_INTERVAL_SECONDS = 3.0
 DEFAULT_HISTORY_LIMIT = 100
+MAX_PERSISTED_MESSAGES = 1000
+MESSAGE_HISTORY_KEY = "meshtastic_core_history"
 
 CORE_SETTINGS = {
     "category": "Meshtastic Core Settings",
@@ -307,6 +310,9 @@ class _EchoSessionState:
     local_node_num: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
     messages: List[Dict[str, Any]] = field(default_factory=list)
+    message_keys: set[str] = field(default_factory=set)
+    next_event_id: int = 1
+    history_loaded: bool = False
     nodes: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     channels: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
@@ -571,9 +577,104 @@ class EchoGATTTransport:
         self.timeout = max(3.0, float(timeout or DEFAULT_REQUEST_TIMEOUT_SECONDS))
         self.redis_client = redis_client
         self._state = _echo_session_state(self.selector, self.address)
+        self._load_history()
 
     def _bind_session(self) -> None:
         self._state = _echo_session_state(self.selector, self.address)
+        self._load_history()
+
+    def _history_field(self) -> str:
+        return f"messages:{self.address or 'unselected'}"
+
+    def _history_store(self) -> Any:
+        return self.redis_client if self.redis_client is not None else _default_redis_client()
+
+    @staticmethod
+    def _message_identity(message: Dict[str, Any]) -> str:
+        sender = message.get("from") if isinstance(message.get("from"), dict) else {}
+        message_id = str(message.get("message_id") or "").strip()
+        sender_id = str(sender.get("node_id") or sender.get("num") or "").strip()
+        channel = str(message.get("channel") or 0)
+        if message_id and message_id != "0":
+            return f"packet:{message_id}:{sender_id}:{channel}"
+        return "content:{direction}:{sender}:{channel}:{timestamp}:{text}".format(
+            direction=str(message.get("direction") or ""),
+            sender=sender_id,
+            channel=channel,
+            timestamp=str(message.get("timestamp") or ""),
+            text=str(message.get("text") or ""),
+        )
+
+    def _load_history(self) -> None:
+        with self._state.lock:
+            if self._state.history_loaded:
+                return
+            store = self._history_store()
+            if store is None:
+                return
+            self._state.history_loaded = True
+            try:
+                raw = _read_settings_hash(store, MESSAGE_HISTORY_KEY).get(self._history_field())
+                decoded = json.loads(str(raw or "[]"))
+            except Exception:
+                logger.warning("[Meshtastic Core] ignored unreadable persisted message history")
+                return
+            if not isinstance(decoded, list):
+                return
+            next_event_id = 1
+            for raw_message in decoded[-MAX_PERSISTED_MESSAGES:]:
+                if not isinstance(raw_message, dict):
+                    continue
+                message = dict(raw_message)
+                try:
+                    event_id = int(message.get("event_id") or 0)
+                except (TypeError, ValueError):
+                    event_id = 0
+                if event_id < next_event_id:
+                    event_id = next_event_id
+                message["event_id"] = event_id
+                identity = self._message_identity(message)
+                if identity in self._state.message_keys:
+                    continue
+                self._state.messages.append(message)
+                self._state.message_keys.add(identity)
+                next_event_id = event_id + 1
+            self._state.next_event_id = next_event_id
+
+    def _persist_history(self) -> None:
+        store = self._history_store()
+        if store is None:
+            return
+        value = json.dumps(self.messages[-MAX_PERSISTED_MESSAGES:], separators=(",", ":"), ensure_ascii=False)
+        try:
+            try:
+                store.hset(MESSAGE_HISTORY_KEY, mapping={self._history_field(): value})
+            except TypeError:
+                store.hset(MESSAGE_HISTORY_KEY, self._history_field(), value)
+        except Exception as exc:
+            logger.warning("[Meshtastic Core] could not persist message history: %s", exc)
+
+    def _record_message(self, raw_message: Dict[str, Any]) -> Dict[str, Any]:
+        message = dict(raw_message)
+        identity = self._message_identity(message)
+        if identity in self._state.message_keys:
+            for existing in reversed(self.messages):
+                if self._message_identity(existing) == identity:
+                    return existing
+            return message
+        message["event_id"] = self._state.next_event_id
+        self._state.next_event_id += 1
+        self.messages.append(message)
+        self._state.message_keys.add(identity)
+        if len(self.messages) > MAX_PERSISTED_MESSAGES:
+            removed = self.messages[:-MAX_PERSISTED_MESSAGES]
+            del self.messages[:-MAX_PERSISTED_MESSAGES]
+            for old in removed:
+                old_identity = self._message_identity(old)
+                if not any(self._message_identity(current) == old_identity for current in self.messages):
+                    self._state.message_keys.discard(old_identity)
+        self._persist_history()
+        return message
 
     @property
     def handles(self) -> Dict[str, int]:
@@ -769,8 +870,7 @@ class EchoGATTTransport:
                 sender_num = int((message.get("from") or {}).get("num") or 0)
                 node = self.nodes.get(sender_num) or {}
                 message["from"] = {**(message.get("from") or {}), **{k: v for k, v in node.items() if k in {"node_id", "long_name", "short_name"}}}
-                self.messages.append(message)
-                del self.messages[:-1000]
+                self._record_message(message)
         my_info = _pb_first(fields, 3, b"")
         if my_info:
             self.local_node_num = int(_pb_first(_pb_fields(bytes(my_info)), 1, 0) or 0)
@@ -839,8 +939,7 @@ class EchoGATTTransport:
                 "text": body,
                 "portnum": "TEXT_MESSAGE_APP",
             }
-            self.messages.append(outbound)
-            del self.messages[:-1000]
+            outbound = self._record_message(outbound)
             return {"ok": True, "connected": True, "message": outbound}
 
     def scan_devices(self) -> Dict[str, Any]:
@@ -1297,6 +1396,92 @@ def _channel_options(channels: List[Any]) -> List[Dict[str, str]]:
     return options
 
 
+def _chat_channels(channels: List[Any], messages: List[Any]) -> List[Dict[str, Any]]:
+    records: Dict[str, Dict[str, Any]] = {}
+    for position, raw in enumerate(channels):
+        row = _record(raw)
+        channel_id = _first_text(row, "index", "channel", "id") or str(position)
+        label = _first_text(row, "name", "long_name", "label")
+        records[channel_id] = {
+            "id": channel_id,
+            "label": label or ("Primary" if channel_id == "0" else f"Channel {channel_id}"),
+            "subtitle": f"Channel {channel_id}",
+            "message_count": 0,
+        }
+    records.setdefault(
+        "0",
+        {"id": "0", "label": "Primary", "subtitle": "Channel 0", "message_count": 0},
+    )
+    for raw in messages:
+        row = _record(raw)
+        channel_id = _first_text(row, "channel") or "0"
+        records.setdefault(
+            channel_id,
+            {
+                "id": channel_id,
+                "label": "Primary" if channel_id == "0" else f"Channel {channel_id}",
+                "subtitle": f"Channel {channel_id}",
+                "message_count": 0,
+            },
+        )
+        records[channel_id]["message_count"] += 1
+
+    def sort_key(item: Dict[str, Any]) -> tuple[int, str]:
+        value = str(item.get("id") or "")
+        return (int(value) if value.isdigit() else 9999, value.lower())
+
+    return sorted(records.values(), key=sort_key)
+
+
+def _chat_messages(messages: List[Any], nodes: List[Any]) -> List[Dict[str, Any]]:
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+    nodes_by_num: Dict[int, Dict[str, Any]] = {}
+    for raw in nodes:
+        row = _record(raw)
+        node_id = _first_text(row, "node_id", "id")
+        if node_id:
+            nodes_by_id[node_id.lower()] = row
+        try:
+            number = int(row.get("num") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if number:
+            nodes_by_num[number] = row
+
+    result: List[Dict[str, Any]] = []
+    for position, raw in enumerate(messages):
+        row = _record(raw)
+        sender = _record(row.get("from"))
+        sender_id = _first_text(sender, "node_id", "id")
+        try:
+            sender_num = int(sender.get("num") or 0)
+        except (TypeError, ValueError):
+            sender_num = 0
+        node = nodes_by_num.get(sender_num) or nodes_by_id.get(sender_id.lower()) or {}
+        direction = (_first_text(row, "direction") or "inbound").lower()
+        sender_name = (
+            _first_text(sender, "long_name", "short_name")
+            or _first_text(node, "long_name", "short_name", "name")
+            or ("You" if direction == "outbound" else sender_id)
+            or "Mesh"
+        )
+        result.append(
+            {
+                "id": _first_text(row, "event_id", "message_id", "id") or str(position),
+                "event_id": row.get("event_id") or 0,
+                "message_id": _first_text(row, "message_id", "id"),
+                "channel": _first_text(row, "channel") or "0",
+                "direction": direction,
+                "sender_name": "You" if direction == "outbound" else sender_name,
+                "sender_id": sender_id,
+                "recipient_id": _first_text(_record(row.get("to")), "node_id", "id"),
+                "timestamp": _first_text(row, "timestamp", "received_at", "created_at"),
+                "text": _first_text(row, "text"),
+            }
+        )
+    return result
+
+
 def _status_item(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     status = _record(snapshot.get("status"))
     local_node = _record(status.get("local_node"))
@@ -1500,14 +1685,15 @@ def get_htmlui_tab_data(
     snapshot = _state_snapshot()
     status = snapshot.get("status") or {}
     messages = snapshot.get("messages") or []
+    channels = list(snapshot.get("channels") or [])
+    nodes = list(snapshot.get("nodes") or [])
     connected = bool(status.get("connected"))
     item_forms = [
-        _status_item(snapshot),
-        _compose_item(list(snapshot.get("channels") or [])),
-        *_message_items(list(messages)),
-        *_node_items(list(snapshot.get("nodes") or [])),
+        *_node_items(nodes),
         *_pairing_items(snapshot),
     ]
+    local_node = _record(status.get("local_node"))
+    radio_name = _first_text(local_node, "long_name", "short_name", "node_id")
 
     return {
         "summary": "Meshtastic chat and radio management powered by the Tater core.",
@@ -1520,28 +1706,31 @@ def get_htmlui_tab_data(
         "items": [],
         "empty_message": "No Meshtastic messages have been received.",
         "ui": {
-            "kind": "settings_manager",
+            "kind": "channel_chat",
             "title": "Meshtastic",
             "live_updates": True,
             "poll_interval_ms": 2000,
-            "persistent_item_groups": ["status"],
             "default_tab": "chat",
+            "default_channel": "0",
+            "status": {
+                "connected": connected,
+                "label": "Connected" if connected else "Disconnected",
+                "transport": snapshot.get("transport") or "unknown",
+                "radio_name": radio_name,
+                "last_refresh": snapshot.get("last_refresh") or "",
+                "error": snapshot.get("last_error") or "",
+                "refresh_action": "refresh",
+            },
+            "channels": _chat_channels(channels, list(messages)),
+            "messages": _chat_messages(list(messages), nodes),
+            "composer": {
+                "action": "send_message",
+                "destination": "broadcast",
+                "placeholder": "Message the mesh…",
+                "send_label": "Send",
+                "max_length": 200,
+            },
             "manager_tabs": [
-                {
-                    "key": "chat",
-                    "label": "Chat",
-                    "source": "grouped_items",
-                    "groups": [
-                        {"key": "compose", "label": "Compose", "item_group": "compose"},
-                        {
-                            "key": "history",
-                            "label": "History",
-                            "item_group": "messages",
-                            "page_size": 50,
-                            "empty_message": "No Meshtastic messages have been received.",
-                        },
-                    ],
-                },
                 {
                     "key": "nodes",
                     "label": "Nodes",
