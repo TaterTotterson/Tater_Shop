@@ -35,6 +35,7 @@ class FakeCoreClient:
         self.closed = False
         self.sent = []
         self.paired = []
+        self.unpaired = 0
         self.pairing_result = pairing_result or {"ok": True}
 
     def close(self):
@@ -54,6 +55,10 @@ class FakeCoreClient:
         del selector, address_type
         self.paired.append((device_name, device_address, pin))
         return self.pairing_result
+
+    def unpair_device(self):
+        self.unpaired += 1
+        return {"ok": True, "forgotten": True}
 
 
 def test_connection_settings_preserve_portal_values_until_core_values_exist() -> None:
@@ -222,6 +227,42 @@ def test_echo_pairing_forgets_only_after_stale_bond_restore_failure(monkeypatch)
         ("connect", {"addr": "aa:bb:cc:dd:ee:ff", "addr_type": 1}),
         ("pair", {"addr": "aa:bb:cc:dd:ee:ff", "pin": "123456"}),
     ]
+
+
+def test_echo_unpair_forgets_bond_and_clears_saved_radio(monkeypatch) -> None:
+    redis = FakeRedis(
+        {
+            "meshtastic_core_settings": {
+                "transport": "echo",
+                "echo_selector": "native:rook",
+                "device_address": "aa:bb:cc:dd:ee:55",
+                "device_address_type": "1",
+            }
+        }
+    )
+    transport = meshtastic_core.EchoGATTTransport(
+        selector="native:rook",
+        address="aa:bb:cc:dd:ee:55",
+        address_type=1,
+        timeout=5,
+        redis_client=redis,
+    )
+    calls = []
+    transport.connected = True
+    transport.handles["fromradio"] = 10
+    monkeypatch.setattr(transport, "_request", lambda kind, **payload: calls.append((kind, payload)) or {"ok": True})
+
+    result = transport.unpair_device()
+
+    assert result == {
+        "ok": True,
+        "device_address": "aa:bb:cc:dd:ee:55",
+        "forgotten": True,
+    }
+    assert calls == [("forget", {"addr": "aa:bb:cc:dd:ee:55"})]
+    assert transport.address == ""
+    assert transport.connected is False
+    assert redis.values["meshtastic_core_settings"]["device_address"] == ""
 
 
 def test_echo_transports_share_phone_api_history() -> None:
@@ -451,11 +492,13 @@ def test_echo_scan_decodes_meshtastic_128_bit_uuid_and_uses_gatt_capable_observe
 def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
     snapshot = {
         "running": True,
-        "transport": "bridge_http",
+        "transport": "echo_gatt",
         "last_refresh": "2026-10-09T12:00:00+00:00",
         "last_error": "",
         "status": {
             "connected": True,
+            "selector": "native:rook",
+            "device_address": "AA:BB",
             "local_node": {"node_id": "!1234", "long_name": "Kitchen Mesh"},
         },
         "messages": [
@@ -471,7 +514,10 @@ def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
         "channels": [{"index": 0, "name": "Primary"}, {"index": 2, "name": "Ops"}],
         "nodes": [{"node_id": "!abcd", "long_name": "Alice", "snr": 8.5, "hops_away": 1}],
         "scan": {
-            "devices": [{"name": "Mesh Radio", "address": "AA:BB", "rssi": -54}],
+            "devices": [
+                {"name": "Mesh Radio", "address": "AA:BB", "rssi": -54, "room": "Game Room"},
+                {"name": "Spare Radio", "address": "CC:DD", "rssi": -72, "room": "Office"},
+            ],
             "finished_at": "2026-10-09T11:58:00+00:00",
             "error": "",
         },
@@ -502,13 +548,21 @@ def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
     ]
     assert ui["composer"]["action"] == "send_message"
     assert [tab["key"] for tab in ui["manager_tabs"]] == ["nodes", "bluetooth"]
+    assert ui["manager_tabs"][1]["featured_item_group"] == "pairing_current"
     forms = ui["item_forms"]
     assert {form["group"] for form in forms} >= {
         "nodes",
+        "pairing_current",
         "pairing_controls",
         "pairing_devices",
     }
-    pairing = next(form for form in forms if form["group"] == "pairing_devices")
+    current = next(form for form in forms if form["group"] == "pairing_current")
+    assert current["title"] == "Kitchen Mesh"
+    assert current["hero_badges"][0]["label"] == "CONNECTED"
+    assert current["actions"][0]["action"] == "unpair_device"
+    connected_device = next(form for form in forms if form["group"] == "pairing_devices" and form["title"] == "Mesh Radio")
+    assert connected_device["hero_badges"][0]["label"] == "CONNECTED"
+    pairing = next(form for form in forms if form["group"] == "pairing_devices" and form["title"] == "Spare Radio")
     pin = next(field for field in pairing["fields"] if field["key"] == "pin")
     assert pin["type"] == "password"
     assert pin["value"] == ""
@@ -517,6 +571,7 @@ def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
 def test_manager_actions_read_nested_values_and_never_return_pin(monkeypatch) -> None:
     client = FakeCoreClient(pairing_result={"ok": True, "ble_pin": "123456", "restart_required": True})
     monkeypatch.setattr(meshtastic_core, "_fresh_client", lambda _redis=None: client)
+    monkeypatch.setattr(meshtastic_core, "_get_active_client", lambda: None)
 
     sent = meshtastic_core.handle_htmlui_tab_action(
         action="send_message",
@@ -529,6 +584,7 @@ def test_manager_actions_read_nested_values_and_never_return_pin(monkeypatch) ->
             "values": {"device_name": "Mesh Radio", "device_address": "AA:BB", "pin": "123456"},
         },
     )
+    unpaired = meshtastic_core.handle_htmlui_tab_action(action="unpair_device", payload={"id": "pairing:current:AA:BB"})
 
     assert sent["ok"] is True
     assert client.sent == [("Hi", 2, "broadcast")]
@@ -536,6 +592,8 @@ def test_manager_actions_read_nested_values_and_never_return_pin(monkeypatch) ->
     assert "123456" not in json.dumps(paired)
     assert "ble_pin" not in paired
     assert paired["restart_required"] is True
+    assert unpaired["forgotten"] is True
+    assert client.unpaired == 1
     assert client.closed is True
 
 

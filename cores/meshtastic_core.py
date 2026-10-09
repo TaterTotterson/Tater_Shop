@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -134,6 +134,8 @@ class MeshtasticTransport(Protocol):
         address_type: int = 1,
     ) -> Dict[str, Any]: ...
 
+    def unpair_device(self) -> Dict[str, Any]: ...
+
 
 class BridgeHTTPTransport:
     """Compatibility transport for the existing standalone bridge.
@@ -250,6 +252,9 @@ class BridgeHTTPTransport:
             "ble_pin": str(pin or "").strip(),
         }
         return self._post("/settings", payload)
+
+    def unpair_device(self) -> Dict[str, Any]:
+        raise RuntimeError("Unpairing is available for radios connected through an Echo satellite.")
 
 
 MESHTASTIC_SERVICE_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
@@ -1029,6 +1034,22 @@ class EchoGATTTransport:
             for key, value in values.items():
                 store.hset("meshtastic_core_settings", key, value)
 
+    def _clear_selection(self) -> None:
+        store = self.redis_client if self.redis_client is not None else _default_redis_client()
+        if store is None:
+            return
+        values = {
+            "transport": "echo",
+            "echo_selector": self.selector,
+            "device_address": "",
+            "device_address_type": "1",
+        }
+        try:
+            store.hset("meshtastic_core_settings", mapping=values)
+        except TypeError:
+            for key, value in values.items():
+                store.hset("meshtastic_core_settings", key, value)
+
     def configure_pairing(
         self,
         *,
@@ -1064,6 +1085,18 @@ class EchoGATTTransport:
                 raise RuntimeError("Echo satellite did not confirm an authenticated encrypted bond.")
             self._save_selection()
             return {"ok": True, "bonded": True, "encrypted": True, "authenticated": True, "restart_required": False}
+
+    def unpair_device(self) -> Dict[str, Any]:
+        self._ensure_selected()
+        address = self.address
+        with self._state.lock:
+            self._request("forget", addr=address)
+            self._reset_link_state()
+        self._clear_selection()
+        self.address = ""
+        self.address_type = 1
+        self._bind_session()
+        return {"ok": True, "device_address": address, "forgotten": True}
 
 
 class MeshtasticCoreClient:
@@ -1118,6 +1151,9 @@ class MeshtasticCoreClient:
             selector=selector,
             address_type=address_type,
         )
+
+    def unpair_device(self) -> Dict[str, Any]:
+        return self.transport.unpair_device()
 
 
 @dataclass(frozen=True)
@@ -1276,6 +1312,20 @@ _state: Dict[str, Any] = {
     "scan": {"devices": [], "finished_at": "", "error": ""},
     "pairing": {"device_name": "", "device_address": "", "configured_at": ""},
 }
+_active_client_lock = threading.RLock()
+_active_client_operation_lock = threading.RLock()
+_active_client: Optional[MeshtasticCoreClient] = None
+
+
+def _set_active_client(client: Optional[MeshtasticCoreClient]) -> None:
+    global _active_client
+    with _active_client_lock:
+        _active_client = client
+
+
+def _get_active_client() -> Optional[MeshtasticCoreClient]:
+    with _active_client_lock:
+        return _active_client
 
 
 def _iso_now() -> str:
@@ -1303,21 +1353,22 @@ def _state_snapshot() -> Dict[str, Any]:
 
 
 def _refresh(client: MeshtasticCoreClient, *, history_limit: int) -> None:
-    status = client.get_status()
-    messages_payload = client.get_messages(since_id=0, limit=history_limit)
-    channels_payload = client.get_channels()
-    nodes_payload = client.get_nodes()
-    _state_update(
-        {
-            "transport": client.transport_name,
-            "last_refresh": _iso_now(),
-            "last_error": "",
-            "status": status,
-            "messages": list(messages_payload.get("messages") or []),
-            "channels": list(channels_payload.get("channels") or []),
-            "nodes": list(nodes_payload.get("nodes") or []),
-        }
-    )
+    with _active_client_operation_lock:
+        status = client.get_status()
+        messages_payload = client.get_messages(since_id=0, limit=history_limit)
+        channels_payload = client.get_channels()
+        nodes_payload = client.get_nodes()
+        _state_update(
+            {
+                "transport": client.transport_name,
+                "last_refresh": _iso_now(),
+                "last_error": "",
+                "status": status,
+                "messages": list(messages_payload.get("messages") or []),
+                "channels": list(channels_payload.get("channels") or []),
+                "nodes": list(nodes_payload.get("nodes") or []),
+            }
+        )
 
 
 def run(stop_event: Optional[threading.Event] = None) -> None:
@@ -1326,6 +1377,7 @@ def run(stop_event: Optional[threading.Event] = None) -> None:
     last_logged_error = ""
     last_error_log_at = 0.0
     _state_update({"running": True, "transport": client.transport_name, "last_error": ""})
+    _set_active_client(client)
     logger.info("[Meshtastic Core] started with %s transport", client.transport_name)
     try:
         while not (stop_event and stop_event.is_set()):
@@ -1348,6 +1400,8 @@ def run(stop_event: Optional[threading.Event] = None) -> None:
             else:
                 time.sleep(settings.refresh_interval_sec)
     finally:
+        if _get_active_client() is client:
+            _set_active_client(None)
         client.close()
         _state_update({"running": False})
         logger.info("[Meshtastic Core] stopped")
@@ -1704,37 +1758,129 @@ def _node_items(nodes: List[Any], *, local_node: Optional[Dict[str, Any]] = None
     return items
 
 
+def _friendly_scan_time(raw: Any) -> str:
+    value = _text(raw)
+    if not value:
+        return "Not scanned yet"
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        relative, _, _ = _node_last_seen(parsed.timestamp())
+        return relative
+    except (TypeError, ValueError):
+        return value
+
+
+def _ble_signal(raw: Any) -> str:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return "Not reported"
+    quality = "Strong" if value >= -60 else "Good" if value >= -75 else "Fair" if value >= -90 else "Weak"
+    return f"{quality} · {value} dBm"
+
+
+def _pairing_satellite_label(snapshot: Dict[str, Any], *, selector: str, address: str) -> str:
+    scan = _record(snapshot.get("scan"))
+    for raw in scan.get("devices") or []:
+        row = _record(raw)
+        row_address = _first_text(row, "address", "device_address", "mac").lower()
+        if address and row_address == address.lower():
+            room = _first_text(row, "room", "satellite_name")
+            if room:
+                return room
+    satellite = _record(_native_satellites().get(selector)) if selector else {}
+    return _first_text(satellite, "room", "name", "display_name") or selector or "Automatic"
+
+
 def _pairing_items(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
     scan = _record(snapshot.get("scan"))
     pairing = _record(snapshot.get("pairing"))
+    status = _record(snapshot.get("status"))
     devices = list(scan.get("devices") or [])
     error = _text(scan.get("error"))
     finished_at = _text(scan.get("finished_at"))
-    detail = error or (
-        f"Last scan finished {finished_at}." if finished_at else "Scan for nearby Meshtastic Bluetooth radios."
+    current_address = _first_text(status, "device_address") or _first_text(pairing, "device_address")
+    selector = _first_text(status, "selector")
+    connected = bool(status.get("connected") and current_address)
+    local_node = _record(status.get("local_node"))
+    radio_name = _first_text(local_node, "long_name", "short_name", "node_id") or _first_text(pairing, "device_name")
+    satellite_label = _pairing_satellite_label(snapshot, selector=selector, address=current_address)
+    transport = _text(snapshot.get("transport") or status.get("transport") or "unknown")
+    transport_label = "Echo GATT" if transport == "echo_gatt" else "Compatibility bridge" if transport == "bridge_http" else transport
+
+    if current_address:
+        current_item: Dict[str, Any] = {
+            "id": f"pairing:current:{current_address}",
+            "group": "pairing_current",
+            "card_variant": "pairing_current",
+            "hide_core_key": True,
+            "title": radio_name or "Meshtastic radio",
+            "subtitle": current_address,
+            "detail": (
+                f"Secure Bluetooth link through {satellite_label}."
+                if connected
+                else "This radio is saved, but it is not currently connected."
+            ),
+            "hero_badges": [
+                {"label": "CONNECTED" if connected else "OFFLINE", "tone": "success" if connected else "muted"},
+                {"label": "PAIRED", "tone": "accent"},
+            ],
+            "summary_rows": [
+                {"label": "Mesh ID", "value": _first_text(local_node, "node_id") or "Not reported"},
+                {"label": "Satellite", "value": satellite_label},
+                {"label": "Transport", "value": transport_label or "Unknown"},
+            ],
+        }
+        if transport == "echo_gatt":
+            current_item["actions"] = [
+                {
+                    "action": "unpair_device",
+                    "label": "Unpair radio",
+                    "tone": "danger",
+                    "confirm": (
+                        f"Unpair {radio_name or current_address}? This disconnects it and removes its saved "
+                        "Bluetooth bond. You will need the six-digit PIN to pair it again."
+                    ),
+                    "success_text": "Meshtastic radio unpaired.",
+                }
+            ]
+    else:
+        current_item = {
+            "id": "pairing:current:none",
+            "group": "pairing_current",
+            "card_variant": "pairing_current_empty",
+            "hide_core_key": True,
+            "title": "No radio paired",
+            "subtitle": "Bluetooth is ready",
+            "detail": "Scan for a nearby Meshtastic radio, then enter its six-digit PIN to connect securely.",
+            "hero_badges": [{"label": "READY TO PAIR", "tone": "muted"}],
+        }
+
+    scan_detail = error or (
+        f"Last scan completed {_friendly_scan_time(finished_at)}."
+        if finished_at
+        else "Search through Bluetooth-capable Echo satellites for nearby Meshtastic radios."
     )
     items: List[Dict[str, Any]] = [
+        current_item,
         {
             "id": "pairing:scan",
             "group": "pairing_controls",
-            "title": "Discover Bluetooth radios",
-            "subtitle": f"{len(devices)} device{'s' if len(devices) != 1 else ''} found",
-            "detail": detail,
+            "card_variant": "pairing_scan",
+            "hide_core_key": True,
+            "title": "Find a Meshtastic radio",
+            "subtitle": f"{len(devices)} radio{'s' if len(devices) != 1 else ''} found",
+            "detail": scan_detail,
+            "hero_badges": [
+                {"label": "BLUETOOTH", "tone": "accent"},
+                {"label": "SECURE PAIRING", "tone": "muted"},
+            ],
             "run_action": "scan_devices",
-            "run_label": "Scan for devices",
+            "run_label": "Scan for radios",
         }
     ]
-    configured_name = _first_text(pairing, "device_name", "device_address")
-    if configured_name:
-        items.append(
-            {
-                "id": "pairing:last",
-                "group": "pairing_controls",
-                "title": "Last configured radio",
-                "subtitle": configured_name,
-                "detail": _text(pairing.get("configured_at")),
-            }
-        )
     for position, raw in enumerate(devices):
         row = _record(raw)
         name = _first_text(row, "name", "device_name", "local_name") or "Meshtastic radio"
@@ -1742,32 +1888,47 @@ def _pairing_items(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         selector = _first_text(row, "selector", "echo_selector")
         address_type = int(row.get("address_type") or 0)
         identity = address or f"scan-{position}"
-        rssi = _first_text(row, "rssi", "signal")
-        items.append(
-            {
-                "id": f"pairing:device:{identity}",
-                "group": "pairing_devices",
-                "title": name,
-                "subtitle": address or "Address unavailable",
-                "detail": f"Signal: {rssi}" if rssi else "Enter the radio's six-digit PIN to pair securely.",
-                "fields": [
-                    {"key": "device_name", "label": "Device name", "type": "hidden", "value": name},
-                    {"key": "device_address", "label": "Device address", "type": "hidden", "value": address},
-                    {"key": "selector", "label": "Echo satellite", "type": "hidden", "value": selector},
-                    {"key": "address_type", "label": "Address type", "type": "hidden", "value": str(address_type)},
-                    {
-                        "key": "pin",
-                        "label": "Six-digit Bluetooth PIN",
-                        "type": "password",
-                        "value": "",
-                        "placeholder": "000000",
-                        "description": "The PIN is submitted only for pairing and is never returned to the browser.",
-                    },
-                ],
-                "save_action": "pair_device",
-                "save_label": "Pair securely",
-            }
-        )
+        room = _first_text(row, "room") or selector or "Automatic"
+        is_current = bool(address and current_address and address.lower() == current_address.lower())
+        item: Dict[str, Any] = {
+            "id": f"pairing:device:{identity}",
+            "group": "pairing_devices",
+            "card_variant": "pairing_device",
+            "hide_core_key": True,
+            "title": name,
+            "subtitle": address or "Address unavailable",
+            "detail": "This is your current radio." if is_current else "Enter the radio's six-digit PIN to pair securely.",
+            "hero_badges": [
+                {"label": "CONNECTED" if is_current and connected else "NEARBY", "tone": "success" if is_current and connected else "accent"},
+                {"label": room.upper(), "tone": "muted"},
+            ],
+            "summary_rows": [
+                {"label": "Signal", "value": _ble_signal(row.get("rssi", row.get("signal")))},
+                {"label": "Via", "value": room},
+            ],
+        }
+        if not is_current:
+            item.update(
+                {
+                    "fields": [
+                        {"key": "device_name", "label": "Device name", "type": "hidden", "value": name},
+                        {"key": "device_address", "label": "Device address", "type": "hidden", "value": address},
+                        {"key": "selector", "label": "Echo satellite", "type": "hidden", "value": selector},
+                        {"key": "address_type", "label": "Address type", "type": "hidden", "value": str(address_type)},
+                        {
+                            "key": "pin",
+                            "label": "Six-digit Bluetooth PIN",
+                            "type": "password",
+                            "value": "",
+                            "placeholder": "000000",
+                            "description": "The PIN is used only during pairing and is never returned to the browser.",
+                        },
+                    ],
+                    "save_action": "pair_device",
+                    "save_label": "Pair securely",
+                }
+            )
+        items.append(item)
     return items
 
 
@@ -1838,6 +1999,8 @@ def get_htmlui_tab_data(
                     "key": "bluetooth",
                     "label": "Bluetooth pairing",
                     "source": "grouped_items",
+                    "featured_item_group": "pairing_current",
+                    "featured_label": "Current connection",
                     "groups": [
                         {"key": "scan", "label": "Scan", "item_group": "pairing_controls"},
                         {
@@ -1876,7 +2039,10 @@ def handle_htmlui_tab_action(
     name = str(action or "").strip().lower()
     body = payload if isinstance(payload, dict) else {}
     values = body.get("values") if isinstance(body.get("values"), dict) else body
-    client = _fresh_client(redis_client)
+    client = _get_active_client() if name in {"pair_device", "unpair_device"} else None
+    close_client = client is None
+    if client is None:
+        client = _fresh_client(redis_client)
     try:
         if name == "refresh":
             settings = resolve_connection_settings(redis_client=redis_client)
@@ -1918,13 +2084,14 @@ def handle_htmlui_tab_action(
             device_address = str(values.get("device_address") or "").strip()
             if not device_name and not device_address:
                 raise ValueError("Select a Meshtastic Bluetooth device before pairing.")
-            result = client.configure_pairing(
-                device_name=device_name,
-                device_address=device_address,
-                pin=pin,
-                selector=str(values.get("selector") or "").strip(),
-                address_type=int(values.get("address_type") or 0),
-            )
+            with _active_client_operation_lock:
+                result = client.configure_pairing(
+                    device_name=device_name,
+                    device_address=device_address,
+                    pin=pin,
+                    selector=str(values.get("selector") or "").strip(),
+                    address_type=int(values.get("address_type") or 0),
+                )
             _state_update(
                 {
                     "pairing": {
@@ -1944,6 +2111,27 @@ def handle_htmlui_tab_action(
                 "restart_required": restart_required,
             }
 
+        if name == "unpair_device":
+            status = _record(_state_snapshot().get("status"))
+            radio_name = _first_text(_record(status.get("local_node")), "long_name", "short_name", "node_id")
+            with _active_client_operation_lock:
+                result = client.unpair_device()
+                next_status = dict(status)
+                next_status.update({"connected": False, "device_address": "", "local_node": {}})
+                _state_update(
+                    {
+                        "last_error": "",
+                        "last_refresh": _iso_now(),
+                        "status": next_status,
+                        "pairing": {"device_name": "", "device_address": "", "configured_at": ""},
+                    }
+                )
+            return {
+                "ok": True,
+                "message": f"{radio_name or 'Meshtastic radio'} was disconnected and unpaired.",
+                "forgotten": bool(result.get("forgotten")),
+            }
+
         raise ValueError(f"Unsupported Meshtastic core action: {name or '(empty)'}")
     except Exception as exc:
         if name == "scan_devices":
@@ -1959,4 +2147,5 @@ def handle_htmlui_tab_action(
             )
         raise
     finally:
-        client.close()
+        if close_client:
+            client.close()
