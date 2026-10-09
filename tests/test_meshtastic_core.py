@@ -622,6 +622,35 @@ def test_shop_portal_keeps_fallback_and_optionally_uses_core() -> None:
     assert "self.bridge = _bridge_client_from_settings()" in source
 
 
+def test_shop_portal_passes_meshtastic_context_to_hydra() -> None:
+    source = (ROOT / "portals" / "meshtastic_portal.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    handler = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_handle_inbound_message"
+    )
+    hydra_call = next(
+        node
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_hydra_turn"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in hydra_call.keywords if keyword.arg}
+    context = keywords["context"]
+    assert isinstance(context, ast.Dict)
+    context_values = {
+        key.value: value
+        for key, value in zip(context.keys, context.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert isinstance(context_values["packet"], ast.Name)
+    assert context_values["packet"].id == "message"
+    assert isinstance(context_values["raw_message"], ast.Name)
+    assert context_values["raw_message"].id == "effective_request"
+
+
 def test_shop_portal_hides_legacy_connection_settings() -> None:
     source = (ROOT / "portals" / "meshtastic_portal.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

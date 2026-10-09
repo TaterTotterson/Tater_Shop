@@ -31,7 +31,7 @@ try:
 except Exception:  # Core and portal may be installed independently.
     _build_core_client = None
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 PORTAL_DESCRIPTION = "Meshtastic response and session controls for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -1090,7 +1090,10 @@ class MeshtasticPortalRuntime:
                 history_messages=history,
                 registry=registry,
                 enabled_predicate=_get_plugin_enabled,
-                context={},
+                context={
+                    "packet": message,
+                    "raw_message": effective_request,
+                },
                 user_text=effective_request,
                 scope=scope_value,
                 origin=origin,

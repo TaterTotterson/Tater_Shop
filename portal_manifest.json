@@ -61,7 +61,7 @@
       "id": "meshtastic",
       "name": "Meshtastic Portal",
       "module_key": "meshtastic_portal",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "min_tater_version": "59",
       "description": "Meshtastic response and session controls for Tater.",
       "settings_category": "Meshtastic Portal",
@@ -73,7 +73,7 @@
         "offgrid"
       ],
       "entry": "portals/meshtastic_portal.py",
-      "sha256": "2d9909d5b0da01bec5c50994a32df297abee27e01327eccfd27bb14ae1c86d50"
+      "sha256": "1f2426e925ec3d0784dfcbc604f02daa9a24700861edebe26dbb3b07e65282f5"
     },
     {
       "id": "moltbook",
