@@ -138,6 +138,53 @@ def test_echo_pairing_requires_confirmed_encrypted_bond_and_saves_no_pin(monkeyp
     assert "123456" not in json.dumps(saved)
 
 
+@pytest.mark.parametrize("kind", ["connect", "pair"])
+def test_echo_long_operations_outwait_rook_bluez_without_exceeding_satellite_correlation(
+    monkeypatch,
+    kind,
+) -> None:
+    observed = {}
+    request_token = object()
+    native_satellite = types.ModuleType("tater_voice.native_satellite")
+
+    def send_request(selector, message_type, payload, *, timeout_s):
+        observed.update(
+            selector=selector,
+            message_type=message_type,
+            payload=payload,
+            request_timeout=timeout_s,
+        )
+        return request_token
+
+    def run_on_runtime_loop(awaitable, *, timeout):
+        assert awaitable is request_token
+        observed["loop_timeout"] = timeout
+        return {"ok": True}
+
+    native_satellite.send_request = send_request
+    native_satellite.run_on_runtime_loop = run_on_runtime_loop
+    tater_voice = types.ModuleType("tater_voice")
+    tater_voice.__path__ = []
+    tater_voice.native_satellite = native_satellite
+    monkeypatch.setitem(sys.modules, "tater_voice", tater_voice)
+    monkeypatch.setitem(sys.modules, "tater_voice.native_satellite", native_satellite)
+
+    transport = meshtastic_core.EchoGATTTransport(
+        selector="native:rook",
+        address="aa:bb:cc:dd:ee:ff",
+        address_type=1,
+        timeout=5,
+    )
+    transport._request(kind, addr=transport.address)
+
+    assert observed["selector"] == "native:rook"
+    assert observed["message_type"] == "ble.gatt"
+    assert observed["payload"]["t"] == kind
+    assert observed["request_timeout"] == 40.0
+    assert observed["loop_timeout"] == 42.0
+    assert observed["request_timeout"] < 45.0
+
+
 def test_echo_pairing_forgets_only_after_stale_bond_restore_failure(monkeypatch) -> None:
     transport = meshtastic_core.EchoGATTTransport(
         selector="native:kitchen",

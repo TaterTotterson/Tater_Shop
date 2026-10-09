@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -27,6 +27,7 @@ logger = logging.getLogger("meshtastic.core")
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8433"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
+ECHO_GATT_LONG_REQUEST_TIMEOUT_SECONDS = 40.0
 DEFAULT_REFRESH_INTERVAL_SECONDS = 3.0
 DEFAULT_HISTORY_LIMIT = 100
 
@@ -649,14 +650,23 @@ class EchoGATTTransport:
         from tater_voice import native_satellite
 
         body = {"t": kind, "req": _next_echo_request_id(), **payload}
+        # Rook's BlueZ backend permits up to 25 seconds for connection and
+        # 30 seconds for authenticated pairing. Keep the controller wait below
+        # the satellite's 45-second correlation lifetime while leaving enough
+        # margin for the backend to return its real result.
+        request_timeout = (
+            ECHO_GATT_LONG_REQUEST_TIMEOUT_SECONDS
+            if kind in {"connect", "pair"}
+            else self.timeout
+        )
         result = native_satellite.run_on_runtime_loop(
             native_satellite.send_request(
                 self.selector,
                 "ble.gatt",
                 body,
-                timeout_s=max(self.timeout, 25.0 if kind in {"connect", "pair"} else self.timeout),
+                timeout_s=request_timeout,
             ),
-            timeout=max(self.timeout + 1.0, 27.0 if kind in {"connect", "pair"} else self.timeout + 1.0),
+            timeout=request_timeout + 2.0,
         )
         if not isinstance(result, dict):
             raise RuntimeError("Echo GATT returned an invalid response.")
