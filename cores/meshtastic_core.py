@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -1814,7 +1814,6 @@ def _pairing_items(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         current_item: Dict[str, Any] = {
             "id": f"pairing:current:{current_address}",
             "group": "pairing_current",
-            "card_variant": "pairing_current",
             "hide_core_key": True,
             "title": radio_name or "Meshtastic radio",
             "subtitle": current_address,
@@ -1850,7 +1849,6 @@ def _pairing_items(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         current_item = {
             "id": "pairing:current:none",
             "group": "pairing_current",
-            "card_variant": "pairing_current_empty",
             "hide_core_key": True,
             "title": "No radio paired",
             "subtitle": "Bluetooth is ready",

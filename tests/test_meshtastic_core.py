@@ -558,6 +558,7 @@ def test_tab_uses_live_channel_chat_contract(monkeypatch) -> None:
     }
     current = next(form for form in forms if form["group"] == "pairing_current")
     assert current["title"] == "Kitchen Mesh"
+    assert "card_variant" not in current
     assert current["hero_badges"][0]["label"] == "CONNECTED"
     assert current["actions"][0]["action"] == "unpair_device"
     connected_device = next(form for form in forms if form["group"] == "pairing_devices" and form["title"] == "Mesh Radio")
