@@ -113,6 +113,25 @@
       "sha256": "c06a7ea1f9abcefb67ef4818230756a5a5c1cd6de63f3fc1badd841cc9428f75"
     },
     {
+      "id": "meshtastic",
+      "name": "Meshtastic Core",
+      "module_key": "meshtastic_core",
+      "version": "0.2.0",
+      "min_tater_version": "187",
+      "description": "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing through a transport-neutral Tater core.",
+      "settings_category": "Meshtastic Core Settings",
+      "required_settings_count": 9,
+      "autostart_key": "meshtastic_core_running",
+      "tags": [
+        "radio",
+        "mesh",
+        "offgrid",
+        "bluetooth"
+      ],
+      "entry": "cores/meshtastic_core.py",
+      "sha256": "ca6a6f714079e692884179edcda9e49f38dc18d1b911b4e6921a89da4f860bb6"
+    },
+    {
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",

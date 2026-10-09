@@ -26,7 +26,12 @@ from hydra import resolve_agent_limits, run_hydra_turn
 from notify.queue import is_expired
 from verba_result import action_failure
 
-__version__ = "0.1.8"
+try:
+    from cores.meshtastic_core import build_portal_client as _build_core_client
+except Exception:  # Core and portal may be installed independently.
+    _build_core_client = None
+
+__version__ = "0.2.0"
 PORTAL_DESCRIPTION = "Meshtastic integration portal for Tater."
 MIN_TATER_VERSION = "59"
 TAGS = ["radio", "mesh", "offgrid"]
@@ -245,7 +250,10 @@ def _coerce_allowed_channel_values(raw: Any) -> List[str]:
     return out
 
 
-def _bridge_client_from_settings(raw_settings: Optional[Dict[str, Any]] = None) -> "BridgeClient":
+def _bridge_client_from_settings(raw_settings: Optional[Dict[str, Any]] = None) -> Any:
+    if raw_settings is None and callable(_build_core_client):
+        return _build_core_client(redis_client=redis_client)
+
     current = raw_settings if isinstance(raw_settings, dict) else {}
     bridge_url = str(current.get("bridge_url") or _get_str_setting("bridge_url", DEFAULT_BRIDGE_URL)).strip() or DEFAULT_BRIDGE_URL
     api_token = str(current.get("api_token") or _get_str_setting("api_token", "")).strip()
@@ -255,11 +263,16 @@ def _bridge_client_from_settings(raw_settings: Optional[Dict[str, Any]] = None) 
             timeout = float(str(current.get("request_timeout_sec")).strip())
         except Exception:
             timeout = _get_float_setting("request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SECONDS)
-    return BridgeClient(
-        base_url=bridge_url,
-        api_token=api_token,
-        timeout=max(2.0, float(timeout)),
-    )
+    if callable(_build_core_client):
+        return _build_core_client(
+            redis_client=redis_client,
+            overrides={
+                "bridge_url": bridge_url,
+                "api_token": api_token,
+                "request_timeout_sec": max(2.0, float(timeout)),
+            },
+        )
+    return BridgeClient(base_url=bridge_url, api_token=api_token, timeout=max(2.0, float(timeout)))
 
 
 def _channel_option_rows(*, channels_payload: Any, selected_values: Optional[List[str]] = None) -> List[Dict[str, str]]:
@@ -314,6 +327,7 @@ def webui_settings_fields(
 
     fetch_error = ""
     channel_options: List[Dict[str, str]] = []
+    bridge_client = None
     try:
         bridge_client = _bridge_client_from_settings(current)
         channel_options = _channel_option_rows(
@@ -323,6 +337,9 @@ def webui_settings_fields(
     except Exception as exc:
         fetch_error = str(exc).strip()
         channel_options = _channel_option_rows(channels_payload=[], selected_values=selected_allowed)
+    finally:
+        if bridge_client is not None:
+            bridge_client.close()
 
     out: List[Dict[str, Any]] = []
     for item in base_fields:
@@ -839,6 +856,9 @@ class BridgeClient:
         self.timeout = float(timeout)
         self.session = requests.Session()
 
+    def close(self) -> None:
+        self.session.close()
+
     def _headers(self) -> Dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.api_token:
@@ -889,11 +909,7 @@ class BridgeClient:
 
 class MeshtasticPortalRuntime:
     def __init__(self) -> None:
-        self.bridge = BridgeClient(
-            base_url=_get_str_setting("bridge_url", DEFAULT_BRIDGE_URL),
-            api_token=_get_str_setting("api_token", ""),
-            timeout=max(2.0, _get_float_setting("request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SECONDS)),
-        )
+        self.bridge = _bridge_client_from_settings()
         self.llm_client = _get_primary_llm_client_from_env()
         self.last_event_id = _load_saved_cursor()
         self.local_node_ids = {"^local", "local", "^me"}
@@ -1260,6 +1276,7 @@ class MeshtasticPortalRuntime:
                     task.cancel()
             await asyncio.gather(notify_task, poll_task, return_exceptions=True)
             await self._close_llm_client()
+            self.bridge.close()
             logger.info("[Meshtastic] Portal stopped")
 
 
