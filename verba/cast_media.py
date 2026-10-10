@@ -21,8 +21,8 @@ class CastMediaPlugin(ToolVerba):
     name = "cast_media"
     verba_name = "Cast Media"
     pretty_name = "Playing on TV"
-    version = "1.0.0"
-    min_tater_version = "196"
+    version = "1.0.1"
+    min_tater_version = "197"
     settings_category = None
     platforms = [
         "voice_core",
