@@ -21,7 +21,7 @@ class CastMediaPlugin(ToolVerba):
     name = "cast_media"
     verba_name = "Cast Media"
     pretty_name = "Playing on TV"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "197"
     settings_category = None
     platforms = [
@@ -40,9 +40,12 @@ class CastMediaPlugin(ToolVerba):
         "meshtastic",
     ]
 
-    description = "Play media files on a TV."
+    description = "Play audio and video media files on a named TV or Google Cast device."
     verba_dec = description
-    when_to_use = ""
+    when_to_use = (
+        "Play media on a TV or cast audio/video to a named Google Cast device. "
+        "Use after a media-creation Verba returns a song, recording, or video and the user asks to play or cast it."
+    )
     how_to_use = (
         "Pass the user's complete natural-language playback request unchanged in query. "
         "When an available artifact is the requested media, pass its exact artifact_id. "

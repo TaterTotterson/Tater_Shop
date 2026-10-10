@@ -76,12 +76,15 @@ class CastMediaTests(unittest.TestCase):
         }
 
     def test_metadata_routes_tv_playback_and_media_chaining(self):
-        self.assertEqual(self.plugin.description, "Play media files on a TV.")
-        self.assertEqual(self.plugin.when_to_use, "")
+        self.assertEqual(
+            self.plugin.description,
+            "Play audio and video media files on a named TV or Google Cast device.",
+        )
+        self.assertTrue(self.plugin.when_to_use.startswith("Play media on a TV or cast"))
         self.assertIn('"query":"Play the generated song on the office TV"', self.plugin.usage)
         self.assertIn('"artifact_id"', self.plugin.usage)
         self.assertEqual(self.plugin.argument_schema["required"], ["query"])
-        self.assertEqual(self.plugin.version, "1.0.2")
+        self.assertEqual(self.plugin.version, "1.0.3")
         self.assertEqual(self.plugin.min_tater_version, "197")
 
     def test_generated_audio_artifact_is_played_on_named_tv(self):

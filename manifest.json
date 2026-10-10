@@ -103,9 +103,9 @@
     {
       "id": "cast_media",
       "name": "Cast Media",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "197",
-      "description": "Play media files on a TV.",
+      "description": "Play audio and video media files on a named TV or Google Cast device.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -130,7 +130,7 @@
         "playback"
       ],
       "entry": "verba/cast_media.py",
-      "sha256": "78008f7c5670ae5e049e35b17b4e9727988316652b368153ad3f1e7d18d7ddcc"
+      "sha256": "4e6436a668758b53cb9f7d9dcb2adbee26d28e8a07bd722b82a23e9263d37642"
     },
     {
       "id": "comfyui_audio_ace",
