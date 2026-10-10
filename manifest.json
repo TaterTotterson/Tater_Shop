@@ -101,6 +101,38 @@
       "sha256": "868e83240567ab1858c51657873b3169cf9a2f1ef27f9c1b61e59e35c22e2ddd"
     },
     {
+      "id": "cast_media",
+      "name": "Cast Media",
+      "version": "1.0.0",
+      "min_tater_version": "196",
+      "description": "Play media on a TV or cast audio/video to a named Google Cast device. Use this after another Verba creates or returns media when the user also asks to play it on a TV. This tool plays existing media; it does not create songs, audio, or video.",
+      "portals": [
+        "voice_core",
+        "homeassistant",
+        "webui",
+        "tater_open_webui",
+        "little_spud",
+        "macos",
+        "xbmc",
+        "homekit",
+        "discord",
+        "telegram",
+        "matrix",
+        "irc",
+        "meshtastic"
+      ],
+      "notifier": false,
+      "settings_category": null,
+      "tags": [
+        "media",
+        "google-cast",
+        "tv",
+        "playback"
+      ],
+      "entry": "verba/cast_media.py",
+      "sha256": "5e774c347463d20c0055802de050fb19d2fa1296abba6d70cf3c545d8a294f4a"
+    },
+    {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
       "version": "1.0.28",
