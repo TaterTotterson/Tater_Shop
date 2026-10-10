@@ -84,8 +84,8 @@ class CastMediaTests(unittest.TestCase):
         self.assertIn('"query":"Play the generated song on the office TV"', self.plugin.usage)
         self.assertIn('"artifact_id"', self.plugin.usage)
         self.assertEqual(self.plugin.argument_schema["required"], ["query"])
-        self.assertEqual(self.plugin.version, "1.0.4")
-        self.assertEqual(self.plugin.min_tater_version, "199")
+        self.assertEqual(self.plugin.version, "1.0.5")
+        self.assertEqual(self.plugin.min_tater_version, "198")
 
     def test_generated_audio_artifact_is_played_on_named_tv(self):
         playback = Mock(return_value={"ok": True, "sent_count": 1})
