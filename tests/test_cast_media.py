@@ -84,7 +84,7 @@ class CastMediaTests(unittest.TestCase):
         self.assertIn('"query":"Play the generated song on the office TV"', self.plugin.usage)
         self.assertIn('"artifact_id"', self.plugin.usage)
         self.assertEqual(self.plugin.argument_schema["required"], ["query"])
-        self.assertEqual(self.plugin.version, "1.0.6")
+        self.assertEqual(self.plugin.version, "1.0.7")
         self.assertEqual(self.plugin.min_tater_version, "198")
 
     def test_generated_audio_artifact_is_played_on_named_tv(self):
@@ -300,6 +300,70 @@ class CastMediaTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["facts"]["resolved_from"], "previous_tool_result_link")
         self.assertEqual(playback.call_args.args[1], "https://cdn.example/movie")
+
+    def test_direct_url_misplaced_in_artifact_id_is_played(self):
+        playback = Mock(return_value={"ok": True, "sent_count": 1})
+        media_playback = types.ModuleType("media_playback")
+        media_playback.play_media_url_targets = playback
+        media_url = "https://cdn.example/Movie.1080p.mp4?auth=signed"
+        args = {
+            "query": "Play the retrieved media link on the office TV",
+            "artifact_id": media_url,
+        }
+
+        with patch.object(
+            self.module,
+            "get_integration_devices_by_capability",
+            return_value=[self.office_tv],
+        ), patch.dict(sys.modules, {"media_playback": media_playback}):
+            result = asyncio.run(self.plugin.handle_webui(args, None))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["facts"]["resolved_from"], "artifact_url")
+        self.assertEqual(playback.call_args.args[1], media_url)
+        self.assertEqual(playback.call_args.kwargs["media_type"], "video/mp4")
+
+    def test_premiumize_path_misplaced_in_artifact_id_matches_its_link(self):
+        playback = Mock(return_value={"ok": True, "sent_count": 1})
+        media_playback = types.ModuleType("media_playback")
+        media_playback.play_media_url_targets = playback
+        movie_path = "Movie Folder/Movie.1080p.mp4"
+        args = {
+            "query": "Play the movie on the office TV",
+            "artifact_id": movie_path,
+            "origin": {
+                "tool_results_full": [
+                    {
+                        "ok": True,
+                        "data": {
+                            "direct_links": [
+                                {
+                                    "path": movie_path,
+                                    "stream_link": "https://cdn.example/movie-1080p",
+                                    "size": 2_000_000_000,
+                                },
+                                {
+                                    "path": "Movie Folder/Movie.2160p.mp4",
+                                    "stream_link": "https://cdn.example/movie-2160p",
+                                    "size": 8_000_000_000,
+                                },
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+
+        with patch.object(
+            self.module,
+            "get_integration_devices_by_capability",
+            return_value=[self.office_tv],
+        ), patch.dict(sys.modules, {"media_playback": media_playback}):
+            result = asyncio.run(self.plugin.handle_webui(args, None))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["facts"]["resolved_from"], "previous_tool_result_link")
+        self.assertEqual(playback.call_args.args[1], "https://cdn.example/movie-1080p")
 
     def test_unknown_artifact_id_still_fails_instead_of_using_unrelated_media(self):
         result = asyncio.run(

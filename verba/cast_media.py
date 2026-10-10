@@ -21,7 +21,7 @@ class CastMediaPlugin(ToolVerba):
     name = "cast_media"
     verba_name = "Cast Media"
     pretty_name = "Playing on TV"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "198"
     settings_category = None
     platforms = [
@@ -422,7 +422,38 @@ class CastMediaPlugin(ToolVerba):
         return media, (kind_match, int(is_primary), default_kind, size, url_preference)
 
     @classmethod
-    def _best_link_list_media(cls, containers: List[Dict[str, Any]], *, query: str) -> Dict[str, Any]:
+    def _reference_matches_link(cls, reference: str, entry: Dict[str, Any], media: Dict[str, Any]) -> bool:
+        wanted = unquote(cls._text(reference)).casefold()
+        if not wanted:
+            return False
+        wanted_basename = Path(urlparse(wanted).path).name
+        values = [
+            entry.get("path"),
+            entry.get("name"),
+            entry.get("filename"),
+            entry.get("title"),
+            media.get("source_url"),
+            media.get("filename"),
+        ]
+        for value in values:
+            candidate = unquote(cls._text(value)).casefold()
+            if not candidate:
+                continue
+            if candidate == wanted:
+                return True
+            candidate_basename = Path(urlparse(candidate).path).name
+            if wanted_basename and candidate_basename == wanted_basename:
+                return True
+        return False
+
+    @classmethod
+    def _best_link_list_media(
+        cls,
+        containers: List[Dict[str, Any]],
+        *,
+        query: str,
+        preferred_reference: str = "",
+    ) -> Dict[str, Any]:
         ranked: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
         for container in containers:
             for key in ("direct_links", "links", "files", "items"):
@@ -433,12 +464,39 @@ class CastMediaPlugin(ToolVerba):
                     if not isinstance(entry, dict):
                         continue
                     media, rank = cls._link_entry_media(entry, query=query)
-                    if media:
-                        ranked.append((rank, media))
+                    if not media:
+                        continue
+                    if preferred_reference:
+                        if not cls._reference_matches_link(preferred_reference, entry, media):
+                            continue
+                        rank = (1,) + rank
+                    ranked.append((rank, media))
         if not ranked:
             return {}
         ranked.sort(key=lambda item: item[0], reverse=True)
         return ranked[0][1]
+
+    @classmethod
+    def _prior_link_media(cls, origin: Dict[str, Any], *, query: str, reference: str) -> Dict[str, Any]:
+        history = origin.get("tool_results_full") if isinstance(origin, dict) else None
+        if not isinstance(history, list):
+            return {}
+        for raw_payload in reversed(history):
+            if not isinstance(raw_payload, dict) or raw_payload.get("ok") is False:
+                continue
+            containers = [raw_payload]
+            for key in ("facts", "data"):
+                value = raw_payload.get(key)
+                if isinstance(value, dict):
+                    containers.append(value)
+            media = cls._best_link_list_media(
+                containers,
+                query=query,
+                preferred_reference=reference,
+            )
+            if media:
+                return media
+        return {}
 
     @classmethod
     def _prior_media_url(cls, origin: Dict[str, Any], *, query: str = "") -> Dict[str, Any]:
@@ -508,6 +566,9 @@ class CastMediaPlugin(ToolVerba):
         artifact_id = cls._text((args or {}).get("artifact_id"))
         result_set_reference = False
         if artifact_id:
+            artifact_url = cls._http_url(artifact_id)
+            if artifact_url:
+                return cls._url_media(artifact_url, resolved_from="artifact_url"), ""
             artifact = next(
                 (
                     item
@@ -517,9 +578,17 @@ class CastMediaPlugin(ToolVerba):
                 None,
             )
             if artifact is None:
-                if not cls._is_result_set_reference(artifact_id):
+                if cls._is_result_set_reference(artifact_id):
+                    result_set_reference = True
+                else:
+                    linked_media = cls._prior_link_media(
+                        cls._context_origin(args, context),
+                        query=query,
+                        reference=artifact_id,
+                    )
+                    if linked_media:
+                        return linked_media, ""
                     return {}, f"Artifact `{artifact_id}` is not available in this conversation."
-                result_set_reference = True
             else:
                 media = cls._materialize_artifact(artifact)
                 if not media:
