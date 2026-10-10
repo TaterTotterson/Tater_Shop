@@ -84,8 +84,8 @@ class CastMediaTests(unittest.TestCase):
         self.assertIn('"query":"Play the generated song on the office TV"', self.plugin.usage)
         self.assertIn('"artifact_id"', self.plugin.usage)
         self.assertEqual(self.plugin.argument_schema["required"], ["query"])
-        self.assertEqual(self.plugin.version, "1.0.3")
-        self.assertEqual(self.plugin.min_tater_version, "197")
+        self.assertEqual(self.plugin.version, "1.0.4")
+        self.assertEqual(self.plugin.min_tater_version, "199")
 
     def test_generated_audio_artifact_is_played_on_named_tv(self):
         playback = Mock(return_value={"ok": True, "sent_count": 1})
@@ -160,6 +160,7 @@ class CastMediaTests(unittest.TestCase):
             playback.call_args.args[1],
             "http://192.168.1.50:8188/view?filename=ace_song.mp3",
         )
+        self.assertIsNone(playback.call_args.kwargs["volume_percent"])
 
     def test_latest_playable_artifact_is_used_without_explicit_artifact_id(self):
         playback = Mock(return_value={"ok": True, "sent_count": 1})

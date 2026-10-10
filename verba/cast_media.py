@@ -21,8 +21,8 @@ class CastMediaPlugin(ToolVerba):
     name = "cast_media"
     verba_name = "Cast Media"
     pretty_name = "Playing on TV"
-    version = "1.0.3"
-    min_tater_version = "197"
+    version = "1.0.4"
+    min_tater_version = "199"
     settings_category = None
     platforms = [
         "voice_core",
@@ -611,7 +611,7 @@ class CastMediaPlugin(ToolVerba):
         return None, "The request did not identify which Google Cast TV or device to use."
 
     @classmethod
-    def _volume_percent(cls, args: Dict[str, Any], query: str) -> int:
+    def _volume_percent(cls, args: Dict[str, Any], query: str) -> Optional[int]:
         raw = (args or {}).get("volume_percent")
         if raw in (None, ""):
             match = re.search(
@@ -619,11 +619,13 @@ class CastMediaPlugin(ToolVerba):
                 query or "",
                 flags=re.IGNORECASE,
             )
-            raw = match.group(1) if match else 100
+            if match is None:
+                return None
+            raw = match.group(1)
         try:
             parsed = int(float(raw))
         except Exception:
-            parsed = 100
+            return None
         return max(0, min(100, parsed))
 
     @classmethod

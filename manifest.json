@@ -103,8 +103,8 @@
     {
       "id": "cast_media",
       "name": "Cast Media",
-      "version": "1.0.3",
-      "min_tater_version": "197",
+      "version": "1.0.4",
+      "min_tater_version": "199",
       "description": "Play audio and video media files on a named TV or Google Cast device.",
       "portals": [
         "voice_core",
@@ -130,7 +130,7 @@
         "playback"
       ],
       "entry": "verba/cast_media.py",
-      "sha256": "4e6436a668758b53cb9f7d9dcb2adbee26d28e8a07bd722b82a23e9263d37642"
+      "sha256": "78262f6027ff5489e814b7d60a1e86a870fe3454ecabe231d6d270aa15abfb8a"
     },
     {
       "id": "comfyui_audio_ace",
