@@ -103,9 +103,9 @@
     {
       "id": "cast_media",
       "name": "Cast Media",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "197",
-      "description": "Play media on a TV or cast audio/video to a named Google Cast device. Use this after another Verba creates or returns media when the user also asks to play it on a TV. This tool plays existing media; it does not create songs, audio, or video.",
+      "description": "Play media files on a TV.",
       "portals": [
         "voice_core",
         "homeassistant",
@@ -130,7 +130,7 @@
         "playback"
       ],
       "entry": "verba/cast_media.py",
-      "sha256": "58b611a5447a51974b1c7a3c5d308b9999bdcf0af67932d4e71efc4129a5abf5"
+      "sha256": "78008f7c5670ae5e049e35b17b4e9727988316652b368153ad3f1e7d18d7ddcc"
     },
     {
       "id": "comfyui_audio_ace",
