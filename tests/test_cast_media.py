@@ -84,7 +84,7 @@ class CastMediaTests(unittest.TestCase):
         self.assertIn('"query":"Play the generated song on the office TV"', self.plugin.usage)
         self.assertIn('"artifact_id"', self.plugin.usage)
         self.assertEqual(self.plugin.argument_schema["required"], ["query"])
-        self.assertEqual(self.plugin.version, "1.0.5")
+        self.assertEqual(self.plugin.version, "1.0.6")
         self.assertEqual(self.plugin.min_tater_version, "198")
 
     def test_generated_audio_artifact_is_played_on_named_tv(self):
@@ -205,6 +205,132 @@ class CastMediaTests(unittest.TestCase):
         self.assertEqual(result["facts"]["resolved_from"], "artifact")
         self.assertEqual(playback.call_args.args[1], "")
         self.assertEqual(playback.call_args.kwargs["audio_bytes"], b"latest-generated-song")
+
+    def test_premiumize_direct_links_choose_largest_primary_video(self):
+        playback = Mock(return_value={"ok": True, "sent_count": 1})
+        media_playback = types.ModuleType("media_playback")
+        media_playback.play_media_url_targets = playback
+        args = {
+            "query": "Play the movie on the office TV",
+            "origin": {
+                "tool_results_full": [
+                    {
+                        "ok": True,
+                        "data": {
+                            "direct_links": [
+                                {
+                                    "name": "Featurette.mp4",
+                                    "stream_link": "https://cdn.example/featurette",
+                                    "size": 50_000_000,
+                                },
+                                {
+                                    "path": "Movie.Sample.mp4",
+                                    "stream_link": "https://cdn.example/sample",
+                                    "size": 9_000_000_000,
+                                },
+                                {
+                                    "path": "Movie.720p.mp4",
+                                    "stream_link": "https://cdn.example/movie-720p",
+                                    "size": 1_500_000_000,
+                                },
+                                {
+                                    "path": "Movie.1080p.mp4",
+                                    "download_link": "https://cdn.example/movie-download",
+                                    "stream_link": "https://cdn.example/movie-stream",
+                                    "size": 2_500_000_000,
+                                },
+                                {
+                                    "path": "Movie.en.srt",
+                                    "download_link": "https://cdn.example/subtitle",
+                                    "size": 50_000,
+                                },
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+
+        with patch.object(
+            self.module,
+            "get_integration_devices_by_capability",
+            return_value=[self.office_tv],
+        ), patch.dict(sys.modules, {"media_playback": media_playback}):
+            result = asyncio.run(self.plugin.handle_webui(args, None))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["facts"]["resolved_from"], "previous_tool_result_link")
+        self.assertEqual(result["facts"]["filename"], "Movie.1080p.mp4")
+        self.assertEqual(playback.call_args.args[1], "https://cdn.example/movie-stream")
+        self.assertEqual(playback.call_args.kwargs["media_type"], "video/mp4")
+
+    def test_result_set_reference_falls_back_to_premiumize_links(self):
+        playback = Mock(return_value={"ok": True, "sent_count": 1})
+        media_playback = types.ModuleType("media_playback")
+        media_playback.play_media_url_targets = playback
+        args = {
+            "query": "Play the resulting movie on the office TV",
+            "artifact_id": "rs2",
+            "origin": {
+                "available_artifacts": [],
+                "tool_results_full": [
+                    {
+                        "ok": True,
+                        "data": {
+                            "links": [
+                                {
+                                    "name": "Movie.mkv",
+                                    "stream_link": "https://cdn.example/movie",
+                                    "size": 4_000_000_000,
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+        }
+
+        with patch.object(
+            self.module,
+            "get_integration_devices_by_capability",
+            return_value=[self.office_tv],
+        ), patch.dict(sys.modules, {"media_playback": media_playback}):
+            result = asyncio.run(self.plugin.handle_webui(args, None))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["facts"]["resolved_from"], "previous_tool_result_link")
+        self.assertEqual(playback.call_args.args[1], "https://cdn.example/movie")
+
+    def test_unknown_artifact_id_still_fails_instead_of_using_unrelated_media(self):
+        result = asyncio.run(
+            self.plugin.handle_webui(
+                {
+                    "query": "Play it on the office TV",
+                    "artifact_id": "att-does-not-exist",
+                    "origin": {
+                        "tool_results_full": [
+                            {
+                                "ok": True,
+                                "data": {
+                                    "links": [
+                                        {
+                                            "name": "Unrelated.mp4",
+                                            "stream_link": "https://cdn.example/unrelated",
+                                            "size": 10,
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                },
+                None,
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_media")
+        self.assertIn("att-does-not-exist", result["error"]["message"])
 
     def test_room_preferred_cast_target_wins_when_room_has_multiple_devices(self):
         preferred = {

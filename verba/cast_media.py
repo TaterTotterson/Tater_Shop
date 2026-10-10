@@ -21,7 +21,7 @@ class CastMediaPlugin(ToolVerba):
     name = "cast_media"
     verba_name = "Cast Media"
     pretty_name = "Playing on TV"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "198"
     settings_category = None
     platforms = [
@@ -113,21 +113,33 @@ class CastMediaPlugin(ToolVerba):
         "required": ["query"],
     }
 
-    _PLAYABLE_SUFFIXES = {
+    _AUDIO_SUFFIXES = {
         ".aac",
         ".flac",
         ".m4a",
         ".mka",
-        ".mkv",
         ".mp3",
-        ".mp4",
-        ".mpeg",
-        ".mpg",
         ".oga",
         ".ogg",
         ".opus",
         ".wav",
+    }
+    _VIDEO_SUFFIXES = {
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
         ".webm",
+    }
+    _PLAYABLE_SUFFIXES = _AUDIO_SUFFIXES | _VIDEO_SUFFIXES
+    _SECONDARY_VIDEO_MARKERS = {
+        "behind the scenes",
+        "deleted scene",
+        "featurette",
+        "sample",
+        "trailer",
     }
     _GENERIC_TARGET_ALIASES = {
         "cast",
@@ -332,7 +344,104 @@ class CastMediaPlugin(ToolVerba):
         }
 
     @classmethod
-    def _prior_media_url(cls, origin: Dict[str, Any]) -> Dict[str, Any]:
+    def _requested_media_kind(cls, query: str) -> str:
+        normalized = cls._norm(query)
+        if re.search(r"\b(?:audio|music|podcast|recording|song|sound|track)\b", normalized):
+            return "audio"
+        if re.search(r"\b(?:episode|film|movie|show|video)\b", normalized):
+            return "video"
+        return ""
+
+    @classmethod
+    def _link_entry_media(cls, entry: Dict[str, Any], *, query: str) -> Tuple[Dict[str, Any], Tuple[Any, ...]]:
+        source_url = ""
+        url_preference = 0
+        for preference, key in enumerate(
+            (
+                "stream_link",
+                "stream",
+                "media_url",
+                "video_url",
+                "audio_url",
+                "source_url",
+                "download_link",
+                "link",
+                "url",
+            ),
+            start=1,
+        ):
+            candidate = cls._http_url(entry.get(key))
+            if candidate:
+                source_url = candidate
+                url_preference = 10 - preference
+                break
+        if not source_url:
+            return {}, ()
+
+        raw_name = cls._text(
+            entry.get("path")
+            or entry.get("name")
+            or entry.get("filename")
+            or entry.get("title")
+        )
+        filename = Path(urlparse(raw_name).path).name if raw_name else ""
+        if not filename:
+            filename = Path(urlparse(source_url).path).name
+        filename = unquote(filename) or "media.bin"
+
+        supplied_type = cls._text(entry.get("mimetype") or entry.get("mime_type")).lower()
+        suffix = Path(filename).suffix.lower()
+        if supplied_type.startswith("video/") or suffix in cls._VIDEO_SUFFIXES:
+            media_kind = "video"
+        elif supplied_type.startswith("audio/") or suffix in cls._AUDIO_SUFFIXES:
+            media_kind = "audio"
+        else:
+            return {}, ()
+
+        try:
+            size = int(float(entry.get("size") or 0))
+        except (TypeError, ValueError):
+            size = 0
+        normalized_name = cls._norm(raw_name or filename)
+        is_primary = not any(marker in normalized_name for marker in cls._SECONDARY_VIDEO_MARKERS)
+        requested_kind = cls._requested_media_kind(query)
+        kind_match = 1 if not requested_kind or requested_kind == media_kind else 0
+        default_kind = 1 if media_kind == "video" else 0
+
+        media_type = cls._media_type(entry, source_url, filename)
+        media = {
+            "artifact_id": "",
+            "source_url": source_url,
+            "media_bytes": b"",
+            "media_type": media_type,
+            "media_content_type": "video" if media_kind == "video" else "music",
+            "filename": filename,
+            "title": Path(filename).stem.replace("_", " ").strip() or "Media",
+            "resolved_from": "previous_tool_result_link",
+        }
+        return media, (kind_match, int(is_primary), default_kind, size, url_preference)
+
+    @classmethod
+    def _best_link_list_media(cls, containers: List[Dict[str, Any]], *, query: str) -> Dict[str, Any]:
+        ranked: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+        for container in containers:
+            for key in ("direct_links", "links", "files", "items"):
+                rows = container.get(key)
+                if not isinstance(rows, list):
+                    continue
+                for entry in rows:
+                    if not isinstance(entry, dict):
+                        continue
+                    media, rank = cls._link_entry_media(entry, query=query)
+                    if media:
+                        ranked.append((rank, media))
+        if not ranked:
+            return {}
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
+
+    @classmethod
+    def _prior_media_url(cls, origin: Dict[str, Any], *, query: str = "") -> Dict[str, Any]:
         history = origin.get("tool_results_full") if isinstance(origin, dict) else None
         if not isinstance(history, list):
             return {}
@@ -361,7 +470,14 @@ class CastMediaPlugin(ToolVerba):
                         "title": Path(filename).stem.replace("_", " ").strip() or "Media",
                         "resolved_from": "previous_tool_result",
                     }
+            linked_media = cls._best_link_list_media(containers, query=query)
+            if linked_media:
+                return linked_media
         return {}
+
+    @classmethod
+    def _is_result_set_reference(cls, value: str) -> bool:
+        return bool(re.fullmatch(r"rs\d+(?:[#:_-]\d+)?", cls._text(value), flags=re.IGNORECASE))
 
     @classmethod
     def _url_media(cls, source_url: str, *, resolved_from: str) -> Dict[str, Any]:
@@ -390,6 +506,7 @@ class CastMediaPlugin(ToolVerba):
     ) -> Tuple[Dict[str, Any], str]:
         artifacts = cls._artifact_rows(args, context)
         artifact_id = cls._text((args or {}).get("artifact_id"))
+        result_set_reference = False
         if artifact_id:
             artifact = next(
                 (
@@ -400,11 +517,14 @@ class CastMediaPlugin(ToolVerba):
                 None,
             )
             if artifact is None:
-                return {}, f"Artifact `{artifact_id}` is not available in this conversation."
-            media = cls._materialize_artifact(artifact)
-            if not media:
-                return {}, f"Artifact `{artifact_id}` is not playable audio or video."
-            return media, ""
+                if not cls._is_result_set_reference(artifact_id):
+                    return {}, f"Artifact `{artifact_id}` is not available in this conversation."
+                result_set_reference = True
+            else:
+                media = cls._materialize_artifact(artifact)
+                if not media:
+                    return {}, f"Artifact `{artifact_id}` is not playable audio or video."
+                return media, ""
 
         explicit_url = cls._http_url(
             (args or {}).get("source_url")
@@ -414,11 +534,16 @@ class CastMediaPlugin(ToolVerba):
         if explicit_url:
             return cls._url_media(explicit_url, resolved_from="source_url"), ""
 
+        if result_set_reference:
+            prior_media = cls._prior_media_url(cls._context_origin(args, context), query=query)
+            if prior_media:
+                return prior_media, ""
+
         for artifact in artifacts:
             media = cls._materialize_artifact(artifact)
             if media:
                 return media, ""
-        prior_media = cls._prior_media_url(cls._context_origin(args, context))
+        prior_media = cls._prior_media_url(cls._context_origin(args, context), query=query)
         if prior_media:
             return prior_media, ""
 
