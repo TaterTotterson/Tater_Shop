@@ -224,8 +224,8 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "example_status",
-            "description": "Read Example Core runtime status and item count.",
-            "usage": '{"function":"example_status","arguments":{}}',
+            "description": "Answer natural-language questions about Example Core status and items.",
+            "usage": '{"function":"example_status","arguments":{"request":"Is Example Core ready and how many items does it have?"}}',
         }
     ]
 
@@ -243,6 +243,17 @@ async def run_hydra_kernel_tool(
 ) -> Optional[Dict[str, Any]]:
     if tool_id != "example_status":
         return None
+    request = _text((args or {}).get("request") or (args or {}).get("query"))
+    if not request:
+        return {
+            "tool": "example_status",
+            "ok": False,
+            "error": {
+                "code": "missing_request",
+                "message": "A natural-language request is required.",
+            },
+            "summary_for_user": "Ask what the user wants to know about Example Core.",
+        }
     client = redis_client or globals().get("redis_client")
     status = dict(client.hgetall(STATUS_KEY) or {})
     items = _load_items(client)

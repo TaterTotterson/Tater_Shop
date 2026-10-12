@@ -47,7 +47,19 @@ Choose a distinctive lowercase `snake_case` ID and do not rename it after releas
 | `required_settings` | Settings field definitions. |
 | `tags` | Search and catalog labels. |
 
-Keep the tool payload small. For flexible requests, prefer a single natural-language field such as `query` or `request`, then interpret it inside the Verba:
+## Natural language is the Verba contract
+
+Every Verba must accept the user's complete natural-language request in one primary field, normally `query` or `request`. This is the standard contract, not an optional pattern.
+
+Hydra should decide **which Verba to call**, then pass through what the user asked. Hydra should not be required to translate the request into provider-specific action names, IDs, booleans, enums, or settings before the Verba can work. The Verba owns:
+
+1. Interpreting the request.
+2. Resolving people, rooms, devices, files, and provider entities.
+3. Choosing from its supported actions.
+4. Validating settings and permissions.
+5. Performing the operation and returning structured facts.
+
+Keep the tool payload small and put the complete request in one natural-language field:
 
 ```python
 argument_schema = {
@@ -62,7 +74,15 @@ argument_schema = {
 }
 ```
 
-Use deterministic parsing first. If the request remains ambiguous, an internal `llm_client` call may select from a small, validated set of actions. Never execute an unvalidated action name returned by a model.
+Structured fields may supplement the natural-language request when Tater or the active surface already has authoritative context, such as an uploaded `artifact_id` or the message `origin`. They must not replace the complete request or force Hydra to become the domain parser.
+
+Even a simple status Verba should receive the original request:
+
+```json
+{"function":"example_status","arguments":{"request":"Is the example service working right now?"}}
+```
+
+Inside the Verba, use deterministic parsing first. If the request remains ambiguous, an internal `llm_client` call may select from a small, validated set of actions. Never execute an unvalidated action name returned by a model.
 
 ## Handlers
 

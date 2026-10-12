@@ -167,6 +167,12 @@ The installer downloads exactly the `entry` file. It does not install:
 
 Embed small defaults in the extension file and use stable Tater APIs for shared services. If an optional library may not exist, guard its import and report a clear unavailable state. Do not download and execute Python dependencies at runtime.
 
+## Natural-language tool contract
+
+Every Hydra-facing Verba and Core kernel tool accepts the user's complete natural-language request, normally in `query` or `request`. Hydra selects the tool; the extension interprets the request, resolves domain entities, validates the action, and executes it.
+
+Authoritative structured context such as an uploaded artifact ID or message origin may accompany the request. Do not design a tool that requires Hydra to replace the user's words with provider-specific IDs, action enums, flags, and settings before it can run.
+
 ## Versions and compatibility
 
 Use semantic versions such as `1.2.0`. Tater offers an update only when the catalog version compares higher than the installed extension version. Changing code or a checksum without increasing the version will not produce the expected update prompt.

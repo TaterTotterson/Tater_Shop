@@ -28,6 +28,21 @@ class ExtensionAuthoringToolsTests(unittest.TestCase):
                 result = self._run(VALIDATOR, "--root", ROOT / "templates" / kind)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_authoring_contract_requires_natural_language_tools(self) -> None:
+        verba_guide = (ROOT / "docs" / "verba-authoring.md").read_text(encoding="utf-8")
+        core_guide = (ROOT / "docs" / "core-authoring.md").read_text(encoding="utf-8")
+        verba_template = (ROOT / "templates" / "verba" / "verba" / "example_lookup.py").read_text(
+            encoding="utf-8"
+        )
+        core_template = (ROOT / "templates" / "core" / "cores" / "example_core.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Every Verba must accept the user's complete natural-language request", verba_guide)
+        self.assertIn("Core-owned tools follow the same natural-language contract", core_guide)
+        self.assertIn('"query": {', verba_template)
+        self.assertIn('"arguments":{\"request\":', core_template)
+
     def test_checksum_mismatch_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "verba-template"

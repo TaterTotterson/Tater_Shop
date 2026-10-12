@@ -2,6 +2,8 @@
 
 Copy this folder's `verba/` directory into a new repository, then rename `example_lookup.py` and change the class metadata and behavior.
 
+Keep the template's natural-language contract: Hydra passes the user's complete request in `query` or `request`, and the Verba interprets and validates it internally.
+
 From this template directory, generate and validate its manifest with the Tater Shop tools:
 
 ```bash

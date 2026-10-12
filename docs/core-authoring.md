@@ -95,15 +95,17 @@ Never scan or delete broad shared prefixes. Shared data should be accessed throu
 
 ## Hydra kernel tools
 
-A Core may add tools directly to Hydra:
+A Core may add tools directly to Hydra. Core-owned tools follow the same natural-language contract as Verbas: every tool accepts the user's complete request, normally in `request` or `query`, and the Core performs domain interpretation internally.
+
+Hydra chooses the appropriate Core tool; it should not have to pre-parse the request into provider-specific action names, IDs, enums, or settings. Structured context may accompany the natural-language request when Tater already knows it, but it must not replace the request.
 
 ```python
 def get_hydra_kernel_tools(*, platform: str = "", **_kwargs):
     return [
         {
             "id": "example_status",
-            "description": "Read the current Example Core status.",
-            "usage": '{"function":"example_status","arguments":{}}',
+            "description": "Answer natural-language questions about Example Core status.",
+            "usage": '{"function":"example_status","arguments":{"request":"Is Example Core ready?"}}',
         }
     ]
 
@@ -121,6 +123,14 @@ async def run_hydra_kernel_tool(
 ):
     if tool_id != "example_status":
         return None
+    request = str((args or {}).get("request") or "").strip()
+    if not request:
+        return {
+            "tool": tool_id,
+            "ok": False,
+            "error": {"code": "missing_request", "message": "A natural-language request is required."},
+        }
+    # Interpret request deterministically first, then use llm_client only if needed.
     return {
         "tool": tool_id,
         "ok": True,
@@ -129,7 +139,7 @@ async def run_hydra_kernel_tool(
     }
 ```
 
-Use Core kernel tools for Core-owned data and workflows. Keep them narrow, safe to retry, and independent of a specific Portal transport. Set `hydra_tools_require_running` to `False` only when those tools are genuinely useful while the background loop is stopped.
+Use Core kernel tools for Core-owned data and workflows. Keep them narrow, safe to retry, and independent of a specific Portal transport. After interpretation, validate the selected action and resolved entities before doing work. Set `hydra_tools_require_running` to `False` only when those tools are genuinely useful while the background loop is stopped.
 
 Optional Core context hooks include `get_hydra_system_prompt_fragments(...)` and Core-specific compact context providers. Keep injected context small, current, and directly useful to the model.
 

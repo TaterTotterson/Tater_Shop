@@ -11,6 +11,8 @@ The starter includes:
 - Popup item settings.
 - A small Hydra kernel tool.
 
+Keep the kernel tool's natural-language contract: Hydra passes the user's complete request in `request` or `query`, and the Core interprets and validates it internally.
+
 From this template directory:
 
 ```bash

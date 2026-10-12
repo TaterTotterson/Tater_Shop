@@ -87,6 +87,7 @@ A third-party repository needs only its extension file or files and the matching
 
 ## Design principles
 
+- Every Hydra-facing Verba and Core tool accepts the user's complete natural-language request. The extension—not Hydra—interprets actions, entities, options, and provider-specific details. Structured context may supplement the request but must not replace it.
 - Keep tools and actions narrow, predictable, and safe to retry.
 - Do not perform network calls or long discovery during module import.
 - Keep Core and Portal loops cooperative and quick to stop.
