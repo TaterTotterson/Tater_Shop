@@ -32,6 +32,8 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from hydra import run_hydra_turn, resolve_agent_limits
 from notify import dispatch_notification, notifier_destination_catalog
+from speech_settings import get_speech_settings
+from speech_tts import speak_announcement_targets
 try:
     from announcement_targets import (
         get_voice_core_satellite_target_options,
@@ -58,7 +60,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -1247,22 +1249,54 @@ async def _deliver_scheduled_broadcast(
     if not normalized:
         raise RuntimeError("Scheduled broadcast delivery is invalid.")
 
-    registry = dict(pr.get_verba_registry_snapshot() or {})
-    plugin = registry.get("broadcast")
-    if plugin is None:
-        raise RuntimeError("Broadcast Verba is not installed.")
-    if not get_plugin_enabled("broadcast"):
-        raise RuntimeError("Broadcast Verba is disabled.")
+    if normalized.get("scope") == "selected":
+        targets = normalize_announcement_targets(normalized.get("targets"))
+    else:
+        try:
+            target_options = (
+                get_voice_core_satellite_target_options(current_values=[])
+                if callable(get_voice_core_satellite_target_options)
+                else []
+            )
+        except Exception as exc:
+            logger.warning("[AI Tasks] Failed to load Tater satellite targets: %s", exc)
+            target_options = []
+        targets = normalize_announcement_targets(
+            [
+                row.get("value")
+                for row in list(target_options or [])
+                if isinstance(row, dict)
+                and str(row.get("value") or "").strip().startswith("voice_core:")
+            ]
+        )
+    if not targets:
+        raise RuntimeError("No Tater satellite broadcast targets are available.")
 
-    deliver = getattr(plugin, "deliver_prepared_announcement", None)
-    if not callable(deliver):
-        raise RuntimeError("Broadcast Verba must be updated before AI Task broadcast delivery can run.")
-
-    selected_targets = normalized.get("targets") if normalized.get("scope") == "selected" else None
-    result = await deliver(
-        str(announcement or "").strip(),
+    speech = get_speech_settings() or {}
+    announcement_backend = str(
+        speech.get("announcement_tts_backend")
+        or speech.get("tts_backend")
+        or "wyoming"
+    )
+    result = await speak_announcement_targets(
+        text=str(announcement or "").strip(),
+        backend=announcement_backend,
+        ha_base="",
+        token="",
+        targets=targets,
+        model=str(speech.get("announcement_tts_model") or ""),
+        voice=str(speech.get("announcement_tts_voice") or ""),
+        wyoming_host=str(speech.get("wyoming_tts_host") or ""),
+        wyoming_port=speech.get("wyoming_tts_port"),
+        wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
+        voice_core_backend=str(speech.get("tts_backend") or ""),
+        voice_core_model=str(speech.get("tts_model") or ""),
+        voice_core_voice=str(speech.get("tts_voice") or ""),
+        voice_core_wyoming_host=str(speech.get("wyoming_tts_host") or ""),
+        voice_core_wyoming_port=speech.get("wyoming_tts_port"),
+        voice_core_wyoming_voice=str(speech.get("wyoming_tts_voice") or ""),
+        default_backend=announcement_backend,
         audio_scene=normalized.get("audio_scene"),
-        targets=selected_targets,
     )
     if not isinstance(result, dict) or result.get("ok") is False:
         detail = ""
@@ -2296,7 +2330,7 @@ def _ai_tasks_ui_broadcast_destination_options() -> List[Dict[str, str]]:
                 BROADCAST_DELIVERY_TYPE,
                 {"scope": "everywhere"},
             ),
-            "label": "Broadcast: Everywhere",
+            "label": "Announcement: Everywhere",
         }
     ]
     if not callable(get_voice_core_satellite_target_options):
@@ -2319,7 +2353,7 @@ def _ai_tasks_ui_broadcast_destination_options() -> List[Dict[str, str]]:
         if not value or value in seen:
             continue
         label = _ai_tasks_ui_clean_text(row.get("label")) or target
-        out.append({"value": value, "label": f"Broadcast: {label}"})
+        out.append({"value": value, "label": f"Announcement: {label}"})
         seen.add(value)
     return out
 
@@ -3607,7 +3641,7 @@ async def _ai_tasks_kernel_schedule(
             return {
                 "tool": "ai_tasks",
                 "ok": False,
-                "error": "Cannot schedule: selected broadcast delivery requires a satellite target.",
+                "error": "Cannot schedule: selected announcement delivery requires a satellite target.",
             }
     else:
         delivery = {}
@@ -3812,7 +3846,7 @@ def _ai_tasks_ui_manager_payload(schedules: List[Dict[str, Any]], *, redis_obj: 
                 destination_options.append(
                     {
                         "value": destination_value,
-                        "label": f"Broadcast: {target_label} (current)",
+                        "label": f"Announcement: {target_label} (current)",
                     }
                 )
         elif targets_payload:
@@ -4036,7 +4070,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         if scope not in {"everywhere", "selected"}:
             scope = "selected" if target else "everywhere"
         if scope == "selected" and not target:
-            raise ValueError("Choose a satellite for selected broadcast delivery.")
+            raise ValueError("Choose a satellite for selected announcement delivery.")
 
         delivery_payload: Dict[str, Any] = {
             "type": BROADCAST_DELIVERY_TYPE,

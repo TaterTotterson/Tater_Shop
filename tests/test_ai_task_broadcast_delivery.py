@@ -12,6 +12,7 @@ import unittest
 import wave
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest import mock
 
 
 def _normalize_targets(value: Any) -> List[str]:
@@ -68,8 +69,18 @@ def _load_helpers():
                     "label": "Tater Satellite: Kitchen",
                 }
             ],
-            "pr": types.SimpleNamespace(get_verba_registry_snapshot=lambda: {}),
-            "get_plugin_enabled": lambda _name: True,
+            "logger": mock.Mock(),
+            "get_speech_settings": lambda: {
+                "announcement_tts_backend": "qwen3_tts",
+                "announcement_tts_model": "announcement-model",
+                "announcement_tts_voice": "announcement-voice",
+                "tts_backend": "kokoro",
+                "tts_model": "reply-model",
+                "tts_voice": "reply-voice",
+            },
+            "speak_announcement_targets": mock.AsyncMock(
+                return_value={"ok": True, "sent_count": 1}
+            ),
         }
     )
     compiled = ast.Module(body=selected, type_ignores=[])
@@ -121,8 +132,8 @@ class AiTaskBroadcastDeliveryTests(unittest.TestCase):
     def test_destination_options_include_everywhere_and_satellite(self) -> None:
         options = self.core._ai_tasks_ui_broadcast_destination_options()
         labels = [row["label"] for row in options]
-        self.assertIn("Broadcast: Everywhere", labels)
-        self.assertIn("Broadcast: Tater Satellite: Kitchen", labels)
+        self.assertIn("Announcement: Everywhere", labels)
+        self.assertIn("Announcement: Tater Satellite: Kitchen", labels)
 
         selected_platform, selected_targets = self._decode(options[1]["value"])
         self.assertEqual(selected_platform, "broadcast")
@@ -133,18 +144,8 @@ class AiTaskBroadcastDeliveryTests(unittest.TestCase):
         parsed = json.loads(value)
         return parsed["platform"], parsed["targets"]
 
-    def test_delivery_uses_prepared_text_without_a_second_rewrite(self) -> None:
-        calls: List[Dict[str, Any]] = []
-
-        class FakeBroadcast:
-            async def deliver_prepared_announcement(self, announcement: str, **kwargs):
-                calls.append({"announcement": announcement, **kwargs})
-                return {"ok": True}
-
-        self.core.pr = types.SimpleNamespace(
-            get_verba_registry_snapshot=lambda: {"broadcast": FakeBroadcast()}
-        )
-        self.core.get_plugin_enabled = lambda _name: True
+    def test_delivery_calls_shared_announcement_service_directly(self) -> None:
+        self.core.speak_announcement_targets.reset_mock()
 
         result = asyncio.run(
             self.core._deliver_scheduled_broadcast(
@@ -153,13 +154,57 @@ class AiTaskBroadcastDeliveryTests(unittest.TestCase):
                     "type": "broadcast",
                     "scope": "selected",
                     "targets": ["voice_core:native:kitchen"],
+                    "audio_scene": {
+                        "background": {
+                            "url": "https://example.test/morning.mp3",
+                            "volume_percent": 60,
+                            "loop": True,
+                        },
+                        "foreground": {"start_delay_ms": 2500},
+                    },
                 },
             )
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(calls[0]["announcement"], "Good morning. Today will be sunny.")
-        self.assertEqual(calls[0]["targets"], ["voice_core:native:kitchen"])
+        call = self.core.speak_announcement_targets.await_args.kwargs
+        self.assertEqual(call["text"], "Good morning. Today will be sunny.")
+        self.assertEqual(call["targets"], ["voice_core:native:kitchen"])
+        self.assertEqual(call["backend"], "qwen3_tts")
+        self.assertEqual(call["model"], "announcement-model")
+        self.assertEqual(call["voice_core_backend"], "kokoro")
+        self.assertEqual(call["audio_scene"]["foreground"]["start_delay_ms"], 2500)
+
+    def test_everywhere_delivery_resolves_tater_satellites_without_broadcast_verba(self) -> None:
+        self.core.speak_announcement_targets.reset_mock()
+
+        result = asyncio.run(
+            self.core._deliver_scheduled_broadcast(
+                announcement="Good morning.",
+                delivery={"type": "broadcast", "scope": "everywhere"},
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        call = self.core.speak_announcement_targets.await_args.kwargs
+        self.assertEqual(call["targets"], ["voice_core:native:kitchen"])
+
+    def test_everywhere_delivery_fails_clearly_when_no_satellites_exist(self) -> None:
+        original = self.core.get_voice_core_satellite_target_options
+        self.core.get_voice_core_satellite_target_options = lambda **_kwargs: []
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "No Tater satellite broadcast targets are available",
+            ):
+                asyncio.run(
+                    self.core._deliver_scheduled_broadcast(
+                        announcement="Good morning.",
+                        delivery={"type": "broadcast", "scope": "everywhere"},
+                    )
+                )
+        finally:
+            self.core.get_voice_core_satellite_target_options = original
 
 
 class FakeRedis:
@@ -200,6 +245,8 @@ def _load_full_core(fake_redis: FakeRedis):
         "notify.queue",
         "dotenv",
         "announcement_targets",
+        "speech_settings",
+        "speech_tts",
     }
     previous = {name: sys.modules.get(name) for name in injected}
 
@@ -270,6 +317,16 @@ def _load_full_core(fake_redis: FakeRedis):
         }
     ]
     sys.modules["announcement_targets"] = announcement_targets
+
+    speech_settings = types.ModuleType("speech_settings")
+    speech_settings.get_speech_settings = lambda: {}
+    sys.modules["speech_settings"] = speech_settings
+
+    speech_tts = types.ModuleType("speech_tts")
+    speech_tts.speak_announcement_targets = mock.AsyncMock(
+        return_value={"ok": True, "sent_count": 1}
+    )
+    sys.modules["speech_tts"] = speech_tts
 
     path = Path(__file__).resolve().parents[1] / "cores" / "ai_task_core.py"
     try:
