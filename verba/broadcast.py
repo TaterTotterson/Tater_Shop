@@ -38,7 +38,7 @@ class BroadcastPlugin(ToolVerba):
 
     name = "broadcast"
     verba_name = "Broadcast"
-    version = "1.3.0"
+    version = "1.3.1"
     min_tater_version = "98"
     usage = '{"function":"broadcast","arguments":{"text":"<what to announce>","room":"<optional room or satellite>"}}'
     description = (
@@ -90,6 +90,17 @@ class BroadcastPlugin(ToolVerba):
                             "url": {"type": "string", "description": "Stable HTTP(S) URL for WAV, MP3, or FLAC background audio."},
                             "loop": {"type": "boolean", "description": "Loop the background until the announcement finishes."},
                             "volume_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+                        },
+                    },
+                    "foreground": {
+                        "type": "object",
+                        "properties": {
+                            "start_delay_ms": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 30000,
+                                "description": "How long the background plays before speech begins.",
+                            },
                         },
                     },
                     "ducking": {
@@ -384,6 +395,7 @@ class BroadcastPlugin(ToolVerba):
     def _normalize_audio_scene(cls, raw: Any) -> Dict[str, Any]:
         scene = raw if isinstance(raw, dict) else {}
         background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+        foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
         ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
         finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
 
@@ -409,6 +421,14 @@ class BroadcastPlugin(ToolVerba):
                 "volume_percent": cls._clamped_int(
                     background.get("volume_percent", scene.get("background_volume_percent")),
                     60,
+                ),
+            },
+            "foreground": {
+                "start_delay_ms": cls._clamped_int(
+                    foreground.get("start_delay_ms", scene.get("tts_start_delay_ms")),
+                    0,
+                    0,
+                    30000,
                 ),
             },
             "ducking": {
