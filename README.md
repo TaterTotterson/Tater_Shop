@@ -9,9 +9,6 @@
   <a href="https://taterassistant.com">
     <img alt="Visit Tater Assistant" src="https://img.shields.io/badge/Tater%20Assistant-Visit%20Website-F28C28?style=for-the-badge&logo=googlechrome&logoColor=white" />
   </a>
-  <a href="https://discord.gg/w52namKyXT">
-    <img alt="Join the Tater Assistant Discord" src="https://img.shields.io/badge/Discord-Join%20the%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" />
-  </a>
 </p>
 
 Tater Shop is the modular source repository for Tater Verbas, Portals, and Cores. Tater reads its generated manifests and installs each selected extension as a single Python module.
@@ -96,5 +93,3 @@ A third-party repository needs only its extension file or files and the matching
 - Return structured results and concise user-facing messages.
 - Keep UI payloads bounded; paginate or summarize long histories.
 - Keep IDs stable after release. Renaming an ID creates a different package.
-
-For questions or extension reviews, join the [Tater Assistant Discord](https://discord.gg/w52namKyXT).
