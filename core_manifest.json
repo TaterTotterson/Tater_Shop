@@ -84,7 +84,7 @@
       "module_key": "fitness_core",
       "version": "1.0.0",
       "min_tater_version": "200",
-      "description": "Store private daily health totals from Little Spud, show fitness trends, and run opt-in step challenges.",
+      "description": "Store health aggregates sent by Little Spud, show private fitness trends, and run opt-in step challenges.",
       "settings_category": "Fitness Core Settings",
       "required_settings_count": 3,
       "autostart_key": "fitness_core_running",
