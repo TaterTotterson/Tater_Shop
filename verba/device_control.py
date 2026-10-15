@@ -1428,7 +1428,7 @@ class DeviceControlPlugin(_DeviceVerbaRuntime):
     name = "device_control"
     verba_name = "Device Control"
     pretty_name = "Device Control"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [
@@ -1579,6 +1579,64 @@ class DeviceControlPlugin(_DeviceVerbaRuntime):
         "my",
         "all",
     }
+
+    def _origin_area_name(self, payload: dict) -> str:
+        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        return self._text(
+            origin.get("area_name")
+            or origin.get("room_name")
+        )
+
+    def _has_specific_target(self, intent: dict) -> bool:
+        target = self._text(intent.get("target"))
+        if not target:
+            return False
+        if self._text(intent.get("action")) == "set_color":
+            for color in sorted(_COLOR_NAMES, key=len, reverse=True):
+                target = re.sub(rf"\b{re.escape(color)}\b", " ", target, flags=re.I)
+        return bool(self._clean_target(target))
+
+    async def _interpret_query(self, payload: dict, query: str, llm_client) -> dict:
+        intent = await super()._interpret_query(payload, query, llm_client)
+        if not self._has_specific_target(intent):
+            default_area = self._origin_area_name(payload)
+            if default_area:
+                intent["target"] = default_area
+                intent["target_source"] = "origin_area"
+        return intent
+
+    async def _select_devices(
+        self,
+        *,
+        devices: List[dict],
+        payload: dict,
+        query: str,
+        intent: dict,
+        llm_client,
+    ) -> Tuple[List[dict], List[str]]:
+        explicit_id = self._text(payload.get("device_id") or payload.get("id") or payload.get("ref"))
+        if intent.get("target_source") == "origin_area" and not explicit_id:
+            action = self._text(intent.get("action"))
+            candidates = [device for device in devices if self._action_supported(device, action)]
+            requested_categories = [
+                self._text(item).lower()
+                for item in (intent.get("requested_categories") or [])
+                if self._text(item)
+            ]
+            room_matches = self._room_matches(
+                self._text(intent.get("target")),
+                candidates,
+                requested_categories,
+            )
+            if room_matches:
+                return room_matches, []
+        return await super()._select_devices(
+            devices=devices,
+            payload=payload,
+            query=query,
+            intent=intent,
+            llm_client=llm_client,
+        )
 
 
 verba = DeviceControlPlugin()

@@ -275,7 +275,7 @@
     {
       "id": "device_control",
       "name": "Device Control",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "98.4",
       "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, media players, remotes, scenes, and scripts. Use Tater Vision for visual camera questions.",
       "portals": [
@@ -303,7 +303,7 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "5a24ec0258dea24944e7e277bf1bd949606389a3f795176e4c4fa6e601d27e3e"
+      "sha256": "913d607d1d7d8514417d14d31a9fda49e76cd63c84d636a19a5102a2d302effb"
     },
     {
       "id": "discord_admin_response_mode",

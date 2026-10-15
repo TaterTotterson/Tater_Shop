@@ -126,7 +126,7 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
                 self.assertEqual(
                     row["version"],
                     {
-                        "device_control": "1.0.5",
+                        "device_control": "1.0.6",
                         "temperature_status": "1.0.3",
                     }.get(verba_id, "1.0.1"),
                 )
@@ -156,7 +156,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.5")
+        self.assertEqual(plugin.version, "1.0.6")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)
@@ -247,6 +247,96 @@ class UnifiedDeviceSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent["action"], "set_brightness")
         self.assertEqual(intent["brightness_pct"], 20)
         self.assertEqual([row["id"] for row in selected], ["light.floor"])
+        self.assertEqual(needs, [])
+
+    async def test_generic_lights_use_voice_origin_area_as_room_group(self) -> None:
+        class GenericTargetLlm:
+            async def chat(self, **_kwargs):
+                return {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "action": "set_color",
+                                "target": "light",
+                                "color_name": "white",
+                            }
+                        ),
+                    }
+                }
+
+        devices = [
+            {
+                "integration_id": "hue",
+                "id": "light.game_room_left",
+                "name": "Game Room Left",
+                "room": "Game Room",
+                "category_ids": ["light"],
+                "actions": ["set_color"],
+            },
+            {
+                "integration_id": "hue",
+                "id": "light.game_room_right",
+                "name": "Game Room Right",
+                "room": "Game Room",
+                "category_ids": ["light"],
+                "actions": ["set_color"],
+            },
+            {
+                "integration_id": "hue",
+                "id": "light.office",
+                "name": "Office Light",
+                "room": "Office",
+                "category_ids": ["light"],
+                "actions": ["set_color"],
+            },
+        ]
+        payload = {
+            "origin": {
+                "platform": "voice_core",
+                "area_name": "Game Room",
+            }
+        }
+        query = "Turn the light to a bright white color"
+
+        intent = await self.plugin._interpret_query(payload, query, GenericTargetLlm())
+        selected, needs = await self.plugin._select_devices(
+            devices=devices,
+            payload=payload,
+            query=query,
+            intent=intent,
+            llm_client=None,
+        )
+
+        self.assertEqual(intent["action"], "set_color")
+        self.assertEqual(intent["color_name"], "white")
+        self.assertEqual(intent["target"], "Game Room")
+        self.assertEqual(
+            {row["id"] for row in selected},
+            {"light.game_room_left", "light.game_room_right"},
+        )
+        self.assertEqual(needs, [])
+
+    async def test_specific_device_name_wins_over_voice_origin_area(self) -> None:
+        payload = {
+            "origin": {
+                "platform": "voice_core",
+                "area_name": "Game Room",
+            }
+        }
+        query = "Turn on the Christmas tree lights"
+
+        intent = await self.plugin._interpret_query(payload, query, None)
+        selected, needs = await self.plugin._select_devices(
+            devices=[self.tree_plug, self.floor_light, self.ceiling_fan],
+            payload=payload,
+            query=query,
+            intent=intent,
+            llm_client=None,
+        )
+
+        self.assertEqual(intent["target"], "christmas tree")
+        self.assertNotIn("target_source", intent)
+        self.assertEqual([row["id"] for row in selected], ["relay.tree"])
         self.assertEqual(needs, [])
 
     async def test_fuzzy_score_cannot_select_without_ai(self) -> None:
