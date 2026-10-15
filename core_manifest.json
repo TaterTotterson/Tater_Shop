@@ -79,6 +79,26 @@
       "sha256": "2ab6224e6a089660b2f494300dd2260f276d987029b89e590a0c428d5ea2dcd8"
     },
     {
+      "id": "fitness",
+      "name": "Fitness Core",
+      "module_key": "fitness_core",
+      "version": "1.0.0",
+      "min_tater_version": "200",
+      "description": "Store private daily health totals from Little Spud, show fitness trends, and run opt-in step challenges.",
+      "settings_category": "Fitness Core Settings",
+      "required_settings_count": 3,
+      "autostart_key": "fitness_core_running",
+      "tags": [
+        "fitness",
+        "health",
+        "steps",
+        "challenges",
+        "little-spud"
+      ],
+      "entry": "cores/fitness_core.py",
+      "sha256": "12079e7b6c100a6f6a1e19ef999effb00e8fcab1086c645c2f32a2a3f1570bd6"
+    },
+    {
       "id": "guardian",
       "name": "Guardian Core",
       "module_key": "guardian_core",
