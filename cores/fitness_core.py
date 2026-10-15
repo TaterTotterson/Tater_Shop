@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover - older compatible Tater builds.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 MIN_TATER_VERSION = "200"
 CORE_DESCRIPTION = (
     "Store health aggregates sent by Little Spud, show private fitness trends, and run opt-in step challenges."
@@ -42,15 +42,6 @@ CORE_SETTINGS = {
             "type": "number",
             "default": 30,
             "description": "How often active challenge standings refresh.",
-        },
-        "ai_summaries_enabled": {
-            "label": "AI wellness summaries",
-            "type": "checkbox",
-            "default": False,
-            "description": (
-                "Opt in to sending recent daily totals to Tater's configured primary model for a short, "
-                "descriptive wellness recap. Summaries never diagnose or provide medical advice."
-            ),
         },
     },
     "tags": TAGS,
@@ -259,7 +250,7 @@ def _summary(days: List[Dict[str, Any]], ai_summary: Optional[Dict[str, Any]] = 
 
 
 def _ai_summary(client: Any, node_id: str, days: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not _boolean(_settings(client).get("ai_summaries_enabled"), False) or not days:
+    if not days:
         return None
     cached = _json_load(client.get(AI_SUMMARY_PREFIX + node_id), {})
     if isinstance(cached, dict) and time.time() - _number(cached.get("generated_at")) < 12 * 3600:
@@ -314,7 +305,6 @@ def get_client_fitness_state(
     person = _load_person(store, person_id, person_name)
     days = _load_days(store, person_id)
     cached_ai = _json_load(store.get(AI_SUMMARY_PREFIX + person_id), {})
-    use_ai = _boolean(_settings(store).get("ai_summaries_enabled"), False)
     challenge_people = [
         {"id": _text(row.get("id"), 160), "name": _text(row.get("name"), 80)}
         for row in (people or [])
@@ -327,7 +317,7 @@ def get_client_fitness_state(
         "challenge_people": challenge_people,
         "today": days[0] if days else {},
         "recent_days": days[:30],
-        "summary": _summary(days, cached_ai if use_ai else None),
+        "summary": _summary(days, cached_ai),
         "challenges": _challenge_snapshot(store, person_id),
         "last_sync_at": _number(person.get("last_sync_at")),
         "platform": person.get("platform", ""),
@@ -518,7 +508,7 @@ def run(stop_event=None) -> None:
     try:
         while not (stop_event and stop_event.is_set()):
             redis_client.hset(STATUS_KEY, mapping={"state": "ready", "last_seen": str(time.time())})
-            if _boolean(_settings().get("ai_summaries_enabled"), False) and time.time() - last_ai_sweep >= 600:
+            if time.time() - last_ai_sweep >= 600:
                 last_ai_sweep = time.time()
                 for raw_key in list(redis_client.scan_iter(f"{PERSON_PREFIX}*"))[:20]:
                     key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)

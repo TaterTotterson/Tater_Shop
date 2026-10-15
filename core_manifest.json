@@ -82,11 +82,11 @@
       "id": "fitness",
       "name": "Fitness Core",
       "module_key": "fitness_core",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "min_tater_version": "200",
       "description": "Store health aggregates sent by Little Spud, show private fitness trends, and run opt-in step challenges.",
       "settings_category": "Fitness Core Settings",
-      "required_settings_count": 2,
+      "required_settings_count": 1,
       "autostart_key": "fitness_core_running",
       "tags": [
         "fitness",
@@ -96,7 +96,7 @@
         "little-spud"
       ],
       "entry": "cores/fitness_core.py",
-      "sha256": "16ef8170d055e58941fd40e4f3638d80ec4ddf36e1b8ce9c61f8d41ea21d110c"
+      "sha256": "5524b5def08d7cde3d32d748d50c430313ce0bb3e04d5f7708407b2ae8075396"
     },
     {
       "id": "guardian",

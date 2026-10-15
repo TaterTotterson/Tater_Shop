@@ -54,6 +54,35 @@ def people():
     ]
 
 
+def test_ai_wellness_summary_is_automatic_and_not_a_setting():
+    core = load_core()
+    store = FakeRedis()
+
+    class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, **_kwargs):
+            self.calls += 1
+            return {
+                "message": {
+                    "content": json.dumps(
+                        {"headline": "A steady week", "detail": "Your recent activity has been consistent."}
+                    )
+                }
+            }
+
+    model = FakeModel()
+    core._get_primary_llm_client_from_env = lambda: model
+    assert "ai_summaries_enabled" not in core.CORE_SETTINGS["required"]
+    days = [{"date": "2026-10-14", "steps": 7000}]
+    first = core._ai_summary(store, "person_alex", days)
+    second = core._ai_summary(store, "person_alex", days)
+    assert first == second
+    assert first["headline"] == "A steady week"
+    assert model.calls == 1
+
+
 def test_daily_aggregates_are_stored_under_the_linked_person():
     core = load_core()
     store = FakeRedis()
