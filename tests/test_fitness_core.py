@@ -67,7 +67,17 @@ def test_ai_wellness_summary_is_automatic_and_not_a_setting():
             return {
                 "message": {
                     "content": json.dumps(
-                        {"headline": "A steady week", "detail": "Your recent activity has been consistent."}
+                        {
+                            "headline": "A steady week",
+                            "detail": "Your recent activity has been consistent.",
+                            "insights": [
+                                {
+                                    "id": "steps",
+                                    "headline": "Consistent steps",
+                                    "detail": "Your recent step totals have been steady.",
+                                }
+                            ],
+                        }
                     )
                 }
             }
@@ -80,7 +90,11 @@ def test_ai_wellness_summary_is_automatic_and_not_a_setting():
     second = core._ai_summary(store, "person_alex", days)
     assert first == second
     assert first["headline"] == "A steady week"
+    assert first["insights"][0]["id"] == "steps"
     assert model.calls == 1
+    changed = core._ai_summary(store, "person_alex", [{"date": "2026-10-14", "steps": 7100}])
+    assert changed["headline"] == "A steady week"
+    assert model.calls == 2
 
 
 def test_daily_aggregates_are_stored_under_the_linked_person():
@@ -102,7 +116,8 @@ def test_daily_aggregates_are_stored_under_the_linked_person():
     )
     assert state["person"] == {"id": "person_alex", "name": "Alex"}
     assert state["today"]["steps"] == 12345
-    assert state["summary"]["headline"] == "Step goal reached"
+    assert state["summary"]["headline"] == "Your health overview"
+    assert state["summary"]["insights"][0]["id"] == "steps"
     assert state["challenge_people"] == [{"id": "person_sam", "name": "Sam"}]
     stored = json.loads(store.hashes[core.DAILY_PREFIX + "person_alex"]["2026-10-14"])
     assert "date" not in stored
@@ -130,11 +145,12 @@ def test_same_tater_step_challenge_uses_people_ids():
         people=people(),
         node_id="phone-one",
         action="create",
-        payload={"person_id": "person_sam", "duration": "3_hours", "steps": 1000},
+        payload={"person_id": "person_sam", "duration": "3_hours", "metric": "steps", "value": 1000},
         client=store,
     )
     challenge = created["challenges"][0]
     assert challenge["opponent_id"] == "person_sam"
+    assert challenge["metric"] == "steps"
     incoming = core.get_client_fitness_state(
         person_id="person_sam", person_name="Sam", people=people(), client=store
     )["challenges"][0]
@@ -146,7 +162,7 @@ def test_same_tater_step_challenge_uses_people_ids():
         people=people(),
         node_id="phone-two",
         action="accept",
-        payload={"challenge_id": challenge["id"], "steps": 2000},
+        payload={"challenge_id": challenge["id"], "metric": "steps", "value": 2000},
         client=store,
     )
     core.sync_client_fitness(
@@ -155,12 +171,68 @@ def test_same_tater_step_challenge_uses_people_ids():
         people=people(),
         node_id="phone-one",
         client=store,
-        payload={"days": [{"date": "2026-10-14", "steps": 1250}], "challenge_steps": 1250},
+        payload={"days": [{"date": "2026-10-14", "steps": 1250}]},
     )
     state = core.get_client_fitness_state(
         person_id="person_alex", person_name="Alex", people=people(), client=store
     )
-    assert state["challenges"][0]["my_steps"] == 250
+    assert state["challenges"][0]["my_score"] == 250
+
+
+def test_missing_health_values_stay_missing_and_vitals_get_insights():
+    core = load_core()
+    row = core._normalized_day(
+        {
+            "date": "2026-10-14",
+            "steps": None,
+            "heart_rate_avg_bpm": 74.2,
+            "heart_rate_min_bpm": 58,
+            "heart_rate_max_bpm": 121,
+            "blood_pressure_systolic_mmhg": 118,
+            "blood_pressure_diastolic_mmhg": 76,
+        }
+    )
+    assert "steps" not in row
+    assert row["heart_rate_avg_bpm"] == 74
+    summary = core._summary([row])
+    ids = {item["id"] for item in summary["insights"]}
+    assert {"heart_rate", "blood_pressure"}.issubset(ids)
+
+
+def test_weight_challenge_compares_checkins_not_weight_values():
+    core = load_core()
+    store = FakeRedis()
+    for person_id, name, weight in (("person_alex", "Alex", 82.0), ("person_sam", "Sam", 64.0)):
+        core.sync_client_fitness(
+            person_id=person_id,
+            person_name=name,
+            people=people(),
+            client=store,
+            payload={"days": [{"date": "2026-10-14", "weight_kg": weight}]},
+        )
+    created = core.run_client_fitness_challenge_action(
+        person_id="person_alex",
+        person_name="Alex",
+        people=people(),
+        action="create",
+        payload={"person_id": "person_sam", "metric": "weight_checkins", "duration": "week"},
+        client=store,
+    )
+    challenge = created["challenges"][0]
+    accepted = core.run_client_fitness_challenge_action(
+        person_id="person_sam",
+        person_name="Sam",
+        people=people(),
+        action="accept",
+        payload={"challenge_id": challenge["id"]},
+        client=store,
+    )["challenges"][0]
+    assert accepted["metric"] == "weight_checkins"
+    assert accepted["my_score"] == 1
+    assert accepted["their_score"] == 1
+    stored = json.loads(store.hashes[core.CHALLENGE_RECORDS_KEY][challenge["id"]])
+    assert stored["challenger_last_value"] == 1
+    assert stored["opponent_last_value"] == 1
 
 
 def test_challenge_rejects_unknown_or_self_person():
