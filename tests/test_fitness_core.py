@@ -3,7 +3,6 @@ import json
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
 
 
 class FakeRedis:
@@ -48,106 +47,117 @@ def load_core():
     return module
 
 
-def test_daily_aggregates_are_normalized_and_summarized():
+def people():
+    return [
+        {"id": "person_alex", "name": "Alex"},
+        {"id": "person_sam", "name": "Sam"},
+    ]
+
+
+def test_daily_aggregates_are_stored_under_the_linked_person():
     core = load_core()
     store = FakeRedis()
     state = core.sync_client_fitness(
         node_id="phone-one",
         node_name="Alex on iPhone",
+        person_id="person_alex",
+        person_name="Alex",
+        people=people(),
         client=store,
         payload={
             "platform": "ios-healthkit",
             "time_zone": "America/Chicago",
             "permissions": ["steps", "distance"],
-            "days": [
-                {
-                    "date": "2026-10-14",
-                    "steps": 12345,
-                    "distance_m": 8123.45,
-                    "active_energy_kcal": 511,
-                    "exercise_minutes": 42,
-                    "workouts": 1,
-                }
-            ],
+            "days": [{"date": "2026-10-14", "steps": 12345, "distance_m": 8123.45}],
         },
     )
+    assert state["person"] == {"id": "person_alex", "name": "Alex"}
     assert state["today"]["steps"] == 12345
-    assert state["today"]["distance_m"] == 8123.45
     assert state["summary"]["headline"] == "Step goal reached"
-    assert state["profile"]["display_name"] == "Alex on iPhone"
-    stored = json.loads(store.hashes[core.DAILY_PREFIX + "phone-one"]["2026-10-14"])
+    assert state["challenge_people"] == [{"id": "person_sam", "name": "Sam"}]
+    stored = json.loads(store.hashes[core.DAILY_PREFIX + "person_alex"]["2026-10-14"])
     assert "date" not in stored
 
 
-def test_profile_credentials_stay_private_and_challenge_profile_is_public():
+def test_same_tater_step_challenge_uses_people_ids():
     core = load_core()
     store = FakeRedis()
-    store.hset(core.SETTINGS_KEY, mapping={"challenge_relay_url": "https://relay.example"})
-    with patch.object(
-        core,
-        "_relay",
-        return_value={"profile_id": "fit_123", "profile_secret": "secret-value"},
+    for person_id, name, node_id, steps in (
+        ("person_alex", "Alex", "phone-one", 1000),
+        ("person_sam", "Sam", "phone-two", 2000),
     ):
-        state = core.run_client_fitness_profile_action(
-            node_id="phone-one",
-            node_name="Alex on iPhone",
-            client=store,
-            payload={"handle": "alex.walks", "display_name": "Alex", "discoverable": True},
-        )
-    assert state["profile"] == {"handle": "alex.walks", "display_name": "Alex", "discoverable": True}
-    assert "relay_secret" not in state["profile"]
-    private = json.loads(store.values[core.PROFILE_PREFIX + "phone-one"])
-    assert private["relay_secret"] == "secret-value"
-
-
-def test_same_tater_step_challenge_works_without_cloud_relay():
-    core = load_core()
-    store = FakeRedis()
-    for node_id, handle, name, steps in (
-        ("phone-one", "alex.walks", "Alex", 1000),
-        ("phone-two", "sam.moves", "Sam", 2000),
-    ):
-        core.run_client_fitness_profile_action(
-            node_id=node_id,
-            node_name=name,
-            client=store,
-            payload={"handle": handle, "display_name": name, "discoverable": True},
-        )
         core.sync_client_fitness(
+            person_id=person_id,
+            person_name=name,
+            people=people(),
             node_id=node_id,
-            node_name=name,
+            node_name=f"{name}'s phone",
             client=store,
             payload={"days": [{"date": "2026-10-14", "steps": steps}]},
         )
     created = core.run_client_fitness_challenge_action(
+        person_id="person_alex",
+        person_name="Alex",
+        people=people(),
         node_id="phone-one",
         action="create",
-        payload={"handle": "sam.moves", "duration": "3_hours", "steps": 1000},
+        payload={"person_id": "person_sam", "duration": "3_hours", "steps": 1000},
         client=store,
     )
     challenge = created["challenges"][0]
-    incoming = core.get_client_fitness_state(node_id="phone-two", client=store)["challenges"][0]
+    assert challenge["opponent_id"] == "person_sam"
+    incoming = core.get_client_fitness_state(
+        person_id="person_sam", person_name="Sam", people=people(), client=store
+    )["challenges"][0]
     assert incoming["incoming"] is True
+    assert incoming["opponent_name"] == "Alex"
     core.run_client_fitness_challenge_action(
+        person_id="person_sam",
+        person_name="Sam",
+        people=people(),
         node_id="phone-two",
         action="accept",
         payload={"challenge_id": challenge["id"], "steps": 2000},
         client=store,
     )
     core.sync_client_fitness(
+        person_id="person_alex",
+        person_name="Alex",
+        people=people(),
         node_id="phone-one",
         client=store,
         payload={"days": [{"date": "2026-10-14", "steps": 1250}], "challenge_steps": 1250},
     )
-    state = core.get_client_fitness_state(node_id="phone-one", client=store)
+    state = core.get_client_fitness_state(
+        person_id="person_alex", person_name="Alex", people=people(), client=store
+    )
     assert state["challenges"][0]["my_steps"] == 250
+
+
+def test_challenge_rejects_unknown_or_self_person():
+    core = load_core()
+    for target in ("person_alex", "person_missing"):
+        try:
+            core.run_client_fitness_challenge_action(
+                person_id="person_alex",
+                person_name="Alex",
+                people=people(),
+                action="create",
+                payload={"person_id": target},
+                client=FakeRedis(),
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid challenge target was accepted")
 
 
 def test_invalid_daily_date_is_rejected():
     core = load_core()
     try:
         core.sync_client_fitness(
-            node_id="phone-one",
+            person_id="person_alex",
+            person_name="Alex",
             client=FakeRedis(),
             payload={"days": [{"date": "not-a-date", "steps": 10}]},
         )
