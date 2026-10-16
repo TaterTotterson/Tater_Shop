@@ -9,9 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = {
-    "comfyui_audio_ace": "1.0.28",
+    "comfyui_audio_ace": "1.0.29",
     "comfyui_image_edit": "1.0.3",
-    "comfyui_image_plugin": "1.0.8",
+    "comfyui_image_plugin": "1.1.0",
     "comfyui_image_video": "1.0.8",
     "comfyui_music_video": "1.0.8",
     "comfyui_video_plugin": "1.0.7",

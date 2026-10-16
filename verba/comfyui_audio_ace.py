@@ -46,14 +46,18 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.28"
+    version = "1.0.29"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = (
         "Creates original songs and music tracks using ComfyUI Audio Ace. "
-        "On voice satellites, playback automatically uses the current room's preferred media player when configured; otherwise it falls back to the speaking satellite."
+        "On native voice satellites, playback uses SendSpin with song metadata, automatic presentation colors, and optional generated album art for screen-equipped devices. "
+        "The current room's preferred media player is still honored when configured."
     )
-    verba_dec = "Compose a music track from a prompt with ComfyUI Audio Ace."
+    verba_dec = (
+        "Compose a music track with ComfyUI Audio Ace and play it through SendSpin "
+        "with automatic presentation colors and optional generated album art."
+    )
     pretty_name = "Your Song"
     settings_category = "ComfyUI Audio Ace"
     platforms = ['discord', 'webui', 'tater_open_webui', 'little_spud', 'macos', 'voice_core', 'homeassistant', 'matrix', 'telegram']
@@ -247,6 +251,71 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         lyrics = re.sub(r"\\+", "\n", lyrics)
         lyrics = re.sub(r"\n{3,}", "\n\n", lyrics)
         return lyrics.strip()
+
+    @staticmethod
+    def _fallback_song_presentation(user_prompt: str, tags: str) -> dict:
+        theme = " ".join(str(user_prompt or "Original Song").split())
+        title_words = re.findall(r"[A-Za-z0-9']+", theme)[:6]
+        title = " ".join(title_words).title() or "Your Song"
+        return {
+            "title": title[:80],
+            "album": "Audio ACE Originals",
+            "artist": "Tater AI",
+            "album_art_prompt": (
+                f"Square album cover artwork for an original song about {theme}. "
+                f"Musical mood and style: {tags or 'cinematic and expressive'}. "
+                "Bold focal subject, cohesive lighting, polished record-cover composition, no text, no letters, no logos."
+            ),
+        }
+
+    @classmethod
+    async def generate_song_presentation(
+        cls,
+        user_prompt: str,
+        tags: str,
+        lyrics: str,
+        llm_client,
+    ) -> dict:
+        fallback = cls._fallback_song_presentation(user_prompt, tags)
+        if llm_client is None:
+            return fallback
+        try:
+            response = await llm_client.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Design the title and cover concept for one original song. Return only a JSON object with: "
+                            "title (2-6 words) and "
+                            "album_art_prompt (one detailed sentence for square cover art with no text, letters, logos, or watermark). "
+                            "Make the cover concept emotionally match the song's subject and musical mood."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Song request: {user_prompt}\n"
+                            f"Music tags: {tags}\n"
+                            f"Lyrics excerpt: {str(lyrics or '')[:1200]}"
+                        ),
+                    },
+                ]
+            )
+            content = str((response.get("message") or {}).get("content") or "").strip()
+            cleaned = re.sub(r"^```(?:json)?\s*|```$", "", content, flags=re.MULTILINE).strip()
+            parsed = json.loads(cleaned)
+            if not isinstance(parsed, dict):
+                return fallback
+            title = " ".join(str(parsed.get("title") or "").split())[:80]
+            art_prompt = " ".join(str(parsed.get("album_art_prompt") or "").split())[:1200]
+            return {
+                **fallback,
+                "title": title or fallback["title"],
+                "album_art_prompt": art_prompt or fallback["album_art_prompt"],
+            }
+        except Exception as exc:
+            logger.warning("Audio ACE song presentation generation fell back to defaults: %s", exc)
+            return fallback
 
     @staticmethod
     async def generate_tags_and_lyrics(user_prompt, llm_client):
@@ -627,6 +696,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                         prompt,
                         llm_client,
                         preferred_target,
+                        requesting_selector=self._voice_core_selector(context),
                         respect_reply_playback=False,
                     )
                 )
@@ -682,6 +752,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                     prompt,
                     llm_client,
                     f"ha:{target_player}",
+                    requesting_selector=self._voice_core_selector(context),
                     respect_reply_playback=False,
                 )
             )
@@ -734,6 +805,7 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                     prompt,
                     llm_client,
                     playback_target,
+                    requesting_selector=selector,
                     respect_reply_playback=False,
                 )
             )
@@ -772,12 +844,33 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         llm_client,
         target: str,
         *,
+        requesting_selector: str = "",
         respect_reply_playback: bool = False,
     ):
         try:
             async with self._background_llm_client(llm_client) as bg_llm_client:
                 tags, lyrics = await self.generate_tags_and_lyrics(prompt, bg_llm_client)
-            media_url, audio_bytes = await asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+                presentation = await self.generate_song_presentation(
+                    prompt,
+                    tags,
+                    lyrics,
+                    bg_llm_client,
+                )
+            audio_task = asyncio.create_task(
+                asyncio.to_thread(self.process_prompt_sync, tags, lyrics)
+            )
+            artwork_task = asyncio.create_task(
+                self._maybe_generate_album_cover(
+                    presentation.get("album_art_prompt") or prompt,
+                    requesting_selector=(
+                        requesting_selector
+                        if "voice_core:" in str(target or "").casefold()
+                        else ""
+                    ),
+                )
+            )
+            media_url, audio_bytes = await audio_task
+            artwork_bytes, artwork_content_type = await artwork_task
         except Exception as e:
             logger.exception("ComfyUI target playback generation failed: %s", e)
             return
@@ -789,23 +882,113 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         try:
             from media_playback import play_media_url_targets
 
+            playback_kwargs = {
+                "audio_bytes": audio_bytes,
+                "media_type": "audio/mpeg",
+                "media_content_type": "music",
+                "filename": "ace_song.mp3",
+                "text": "Playing your new song.",
+                "title": str(presentation.get("title") or "Your Song"),
+                "artist": str(presentation.get("artist") or "Tater AI"),
+                "album": str(presentation.get("album") or "Audio ACE Originals"),
+                "artwork_bytes": artwork_bytes,
+                "artwork_content_type": artwork_content_type,
+                "duration_seconds": float(self._estimate_duration_seconds(lyrics)),
+                "timeout_s": 360.0,
+                "respect_reply_playback": respect_reply_playback,
+                # Use Tater's existing generic music route so SendSpin owns the
+                # shared playback timeline and derives its normal presentation
+                # colors from the cover art or track metadata.
+                "source_owner": "music_core",
+            }
             result = await asyncio.to_thread(
                 play_media_url_targets,
                 target,
                 media_url,
-                audio_bytes=audio_bytes,
-                media_type="audio/mpeg",
-                media_content_type="music",
-                filename="ace_song.mp3",
-                text="Playing your new song.",
-                timeout_s=360.0,
-                respect_reply_playback=respect_reply_playback,
+                **playback_kwargs,
             )
             if isinstance(result, dict) and result.get("ok") is False:
                 logger.warning("Media playback failed for %s: %s", target, result.get("error"))
         except Exception as e:
             logger.exception("Failed to play generated media on %s: %s", target, e)
             return
+
+    @staticmethod
+    def _installed_image_verba():
+        try:
+            from verba_registry import get_verba_registry_snapshot
+
+            image_verba = (get_verba_registry_snapshot() or {}).get("comfyui_image_plugin")
+        except Exception as exc:
+            logger.debug("Audio ACE could not inspect installed image verbas: %s", exc)
+            return None
+        if image_verba is None or not callable(getattr(image_verba, "process_prompt", None)):
+            return None
+        try:
+            hget = getattr(redis_client, "hget", None)
+            raw_enabled = hget("verba_enabled", "comfyui_image_plugin") if callable(hget) else None
+            enabled_token = ComfyUIAudioAcePlugin._as_text(raw_enabled, "").strip().lower()
+            if enabled_token in {"0", "false", "no", "off", "disabled"}:
+                return None
+        except Exception:
+            pass
+        return image_verba
+
+    @staticmethod
+    def _generate_album_cover_sync(image_verba, album_art_prompt: str) -> tuple[bytes | None, str]:
+        negative_prompt = "text, letters, words, typography, logo, watermark, signature"
+        try:
+            image_bytes = image_verba.process_prompt(
+                album_art_prompt,
+                negative_prompt,
+                args={"width": 1024, "height": 1024},
+            )
+        except TypeError as exc:
+            if "args" not in str(exc):
+                raise
+            image_bytes = image_verba.process_prompt(album_art_prompt, negative_prompt)
+        if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+            return None, ""
+        infer = getattr(image_verba, "_infer_mime_and_ext", None)
+        content_type = "image/png"
+        if callable(infer):
+            inferred, _extension = infer(bytes(image_bytes))
+            if str(inferred or "").startswith("image/"):
+                content_type = str(inferred)
+        return bytes(image_bytes), content_type
+
+    async def _maybe_generate_album_cover(
+        self,
+        album_art_prompt: str,
+        *,
+        requesting_selector: str,
+    ) -> tuple[bytes | None, str]:
+        if not requesting_selector:
+            return None, ""
+        try:
+            from tater_voice import native_satellite
+
+            has_screen = await native_satellite.client_has_capability(
+                requesting_selector,
+                "screen_notifications",
+            )
+        except Exception as exc:
+            logger.debug("Audio ACE could not inspect satellite screen capability: %s", exc)
+            return None, ""
+        if not has_screen:
+            return None, ""
+        image_verba = self._installed_image_verba()
+        if image_verba is None:
+            return None, ""
+        try:
+            return await asyncio.to_thread(
+                self._generate_album_cover_sync,
+                image_verba,
+                album_art_prompt,
+            )
+        except Exception as exc:
+            logger.warning("Audio ACE album-cover generation was skipped after an error: %s", exc)
+            return None, ""
 
     def _voice_core_selector(self, context: dict | None) -> str:
         ctx = context if isinstance(context, dict) else {}

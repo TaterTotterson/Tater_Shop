@@ -1,9 +1,12 @@
 # verba/comfyui_image_plugin.py
+import base64
+import io
 import json
 import time
 import asyncio
 import secrets
 import copy
+import logging
 import requests
 import imghdr
 from typing import Optional
@@ -11,6 +14,10 @@ from typing import Optional
 from verba_base import ToolVerba
 from helpers import redis_client, run_comfy_prompt
 from verba_result import action_failure, action_success
+
+
+logger = logging.getLogger("comfyui_image_plugin")
+_SATELLITE_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -28,11 +35,13 @@ def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype
 class ComfyUIImagePlugin(ToolVerba):
     name = "comfyui_image_plugin"
     verba_name = "ComfyUI Image"
-    version = "1.0.8"
+    version = "1.1.0"
     min_tater_version = "59"
     usage = '{"function":"comfyui_image_plugin","arguments":{"prompt":"<Text prompt for the image. If omitted, generate a creative prompt based on the user request>","negative_prompt":"<Optional negative prompt>"}}'
     description = "Draws a picture from a text prompt using your ComfyUI workflow."
-    verba_dec = "Generate a still image from a text prompt using your ComfyUI workflow."
+    verba_dec = (
+        "Generate a still image from a text prompt and show it on supported screen satellites."
+    )
     pretty_name = "Your Image"
     settings_category = "ComfyUI Image"
     required_settings = {
@@ -60,7 +69,7 @@ class ComfyUIImagePlugin(ToolVerba):
     waiting_prompt_template = (
         "Write a fun, casual message saying you’re creating their masterpiece now! Only output that message."
     )
-    platforms = ["discord", "webui", "tater_open_webui", "little_spud", "macos", "matrix", "telegram"]
+    platforms = ["discord", "webui", "tater_open_webui", "little_spud", "macos", "voice_core", "matrix", "telegram"]
     when_to_use = ""
     common_needs = []
     missing_info_prompts = []
@@ -380,6 +389,80 @@ class ComfyUIImagePlugin(ToolVerba):
         return mime, ext
 
     @staticmethod
+    def _voice_core_selector(context: Optional[dict]) -> str:
+        ctx = context if isinstance(context, dict) else {}
+        origin = ctx.get("origin") if isinstance(ctx.get("origin"), dict) else {}
+        for key in ("satellite_selector", "device_id"):
+            value = str(ctx.get(key) or origin.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _prepare_satellite_image(image_bytes: bytes) -> tuple[bytes, str]:
+        """Return a renderer-supported image small enough for one JSON command."""
+        mime, _ = ComfyUIImagePlugin._infer_mime_and_ext(image_bytes)
+        if mime in {"image/jpeg", "image/png"} and len(image_bytes) <= _SATELLITE_IMAGE_MAX_BYTES:
+            return bytes(image_bytes), mime
+
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                prepared = ImageOps.exif_transpose(source).convert("RGB")
+                resampling = getattr(Image, "Resampling", Image)
+                prepared.thumbnail((1600, 1200), resampling.LANCZOS)
+                for quality in (90, 82, 74, 66, 58):
+                    output = io.BytesIO()
+                    prepared.save(output, format="JPEG", quality=quality, optimize=True)
+                    payload = output.getvalue()
+                    if len(payload) <= _SATELLITE_IMAGE_MAX_BYTES:
+                        return payload, "image/jpeg"
+        except Exception as exc:
+            raise ValueError(f"Could not prepare the generated image for the satellite display: {exc}") from exc
+
+        raise ValueError("The generated image is too large for the satellite display.")
+
+    @staticmethod
+    async def _screen_notifications_supported(selector: str) -> bool:
+        if not selector:
+            return False
+        from tater_voice import native_satellite
+
+        return await native_satellite.client_has_capability(selector, "screen_notifications")
+
+    @staticmethod
+    async def _send_to_satellite_screen(
+        selector: str,
+        image_bytes: bytes,
+        content_type: str,
+        user_prompt: str,
+    ) -> None:
+        from tater_voice import native_satellite
+
+        ttl_seconds = 120
+        now = time.time()
+        await native_satellite.send_command(
+            selector,
+            "display.notification",
+            {
+                "id": f"comfyui-{secrets.token_hex(12)}",
+                "kind": "image",
+                "display_label": "Generated Image",
+                "priority": "normal",
+                "title": "Your image",
+                "description": str(user_prompt or "")[:480],
+                "source": "ComfyUI",
+                "image_fit": "contain",
+                "created_at": now,
+                "expires_at": now + ttl_seconds,
+                "ttl_seconds": ttl_seconds,
+                "image_data_b64": base64.b64encode(image_bytes).decode("ascii"),
+                "image_content_type": content_type,
+            },
+        )
+
+    @staticmethod
     def _fetch_first_image(base_http: str, prompt_id: str, tries: int = 10, delay: float = 0.5) -> bytes:
         for _ in range(max(1, tries)):
             hist_all = ComfyUIImagePlugin.get_history(base_http, prompt_id)
@@ -551,6 +634,67 @@ class ComfyUIImagePlugin(ToolVerba):
 
     async def handle_little_spud(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
         return await self.handle_webui(args or {}, llm_client)
+
+
+    async def handle_voice_core(self, args=None, llm_client=None, context=None, *unused_args, **unused_kwargs):
+        selector = self._voice_core_selector(context)
+        if not selector:
+            return action_failure(
+                code="missing_voice_core_satellite",
+                message="I couldn't determine which satellite requested the image.",
+                say_hint="Explain that image display requires a request from a connected screen satellite.",
+            )
+        try:
+            screen_supported = await self._screen_notifications_supported(selector)
+        except Exception as exc:
+            logger.warning("Could not inspect satellite display capability for %s: %s", selector, exc)
+            screen_supported = False
+        if not screen_supported:
+            return action_failure(
+                code="satellite_screen_required",
+                message="This satellite does not have a supported screen for generated images.",
+                say_hint="Explain briefly that generated images can be shown from a Tater satellite with a screen.",
+            )
+
+        user_prompt = self._resolve_prompt(args)
+        try:
+            negative_prompt = (args or {}).get("negative_prompt", "") or ""
+            image_bytes = await asyncio.to_thread(
+                self.process_prompt,
+                user_prompt,
+                negative_prompt,
+                args=args,
+            )
+            display_bytes, content_type = await asyncio.to_thread(
+                self._prepare_satellite_image,
+                image_bytes,
+            )
+            await self._send_to_satellite_screen(
+                selector,
+                display_bytes,
+                content_type,
+                user_prompt,
+            )
+            message_text = await self._celebrate(llm_client, user_prompt)
+            return action_success(
+                facts={
+                    "prompt": user_prompt,
+                    "artifact_type": "image",
+                    "artifact_count": 1,
+                    "displayed_on_satellite": True,
+                    "satellite_selector": selector,
+                },
+                summary_for_user="Generated one image and displayed it on the satellite.",
+                flair=message_text,
+                say_hint="Confirm that the generated image is now on the satellite screen.",
+            )
+        except Exception as exc:
+            logger.exception("ComfyUI image generation or satellite display failed for %s", selector)
+            return action_failure(
+                code="image_generation_failed",
+                message=f"Failed to generate or display the image: {type(exc).__name__}: {exc}",
+                say_hint="Explain that the image could not be generated or shown and suggest retrying.",
+            )
 
 
     async def handle_macos(self, args, llm_client, context=None):

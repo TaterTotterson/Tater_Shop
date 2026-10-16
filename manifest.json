@@ -135,9 +135,9 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.28",
+      "version": "1.0.29",
       "min_tater_version": "59",
-      "description": "Compose a music track from a prompt with ComfyUI Audio Ace.",
+      "description": "Compose a music track with ComfyUI Audio Ace and play it through SendSpin with automatic presentation colors and optional generated album art.",
       "portals": [
         "discord",
         "webui",
@@ -153,7 +153,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "24c521db2ea4c54f21cd873d42df878560cc0a5d65c3b059c0f58ba241b3af91"
+      "sha256": "77433f4af006d9829458989cc37ad1b388d3eb85bf7b2b67ed55ea8312384b80"
     },
     {
       "id": "comfyui_image_edit",
@@ -179,15 +179,16 @@
     {
       "id": "comfyui_image_plugin",
       "name": "ComfyUI Image",
-      "version": "1.0.8",
+      "version": "1.1.0",
       "min_tater_version": "59",
-      "description": "Generate a still image from a text prompt using your ComfyUI workflow.",
+      "description": "Generate a still image from a text prompt and show it on supported screen satellites.",
       "portals": [
         "discord",
         "webui",
         "tater_open_webui",
         "little_spud",
         "macos",
+        "voice_core",
         "matrix",
         "telegram"
       ],
@@ -195,7 +196,7 @@
       "settings_category": "ComfyUI Image",
       "tags": [],
       "entry": "verba/comfyui_image_plugin.py",
-      "sha256": "0d31b4cc5b67cdaf33b01900b582f508cff5d7806519210391ac06fec261e834"
+      "sha256": "9249bfd039b46c9e22c21d2d029c9f19d6e4b91fb5dc6cb357f4e6ae0d1e6ca2"
     },
     {
       "id": "comfyui_image_video",
