@@ -23,7 +23,7 @@
     {
       "id": "battery_status",
       "name": "Battery Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read battery status from Hue, Ecobee/HomeKit, Aladdin, UniFi Protect, Home Assistant, and other integrations.",
       "portals": [
@@ -48,7 +48,7 @@
         "integration"
       ],
       "entry": "verba/battery_status.py",
-      "sha256": "f65b7a42bbaea9a2baa09315e42e3379ed55eeeecc8b67b3e57607b6da3d54cc"
+      "sha256": "f77c5cc46cb4ba7859f0a0535a627d6a6858dff6eb4e0c69c88c41edd841901e"
     },
     {
       "id": "ble_device_enrollment",
@@ -135,7 +135,7 @@
     {
       "id": "comfyui_audio_ace",
       "name": "ComfyUI Audio Ace",
-      "version": "1.0.29",
+      "version": "1.0.30",
       "min_tater_version": "59",
       "description": "Compose a music track with ComfyUI Audio Ace and play it through SendSpin with automatic presentation colors and optional generated album art.",
       "portals": [
@@ -153,7 +153,7 @@
       "settings_category": "ComfyUI Audio Ace",
       "tags": [],
       "entry": "verba/comfyui_audio_ace.py",
-      "sha256": "77433f4af006d9829458989cc37ad1b388d3eb85bf7b2b67ed55ea8312384b80"
+      "sha256": "3bf5290b8dedd0f0210266b1eb7bd07dacde222d888762a8d7a57bf85a630133"
     },
     {
       "id": "comfyui_image_edit",
@@ -220,7 +220,7 @@
     {
       "id": "comfyui_music_video",
       "name": "ComfyUI Music Video",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Build a full AI music video—lyrics, music, and animated visuals—using ComfyUI.",
       "portals": [
@@ -233,7 +233,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/comfyui_music_video.py",
-      "sha256": "7211ec695ede552c628b9fd05eca6c46f69098badd4c8ffe66e3624fdbf6cb05"
+      "sha256": "32db3c753cc3eb6fe9eedebd6c270b187c93c206720fe65f5f53c543c7256ef3"
     },
     {
       "id": "comfyui_video_plugin",
@@ -256,7 +256,7 @@
     {
       "id": "device_compare",
       "name": "Device Compare",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Natural-language device comparison with spec tables and optional per-game FPS benchmarks.",
       "portals": [
@@ -271,12 +271,12 @@
       "settings_category": "Device Compare",
       "tags": [],
       "entry": "verba/device_compare.py",
-      "sha256": "186dbc2c185f9a5d90f324d9e9d901ac8e02568b62c6b97caae7460262cc9f2e"
+      "sha256": "7ee95a04df9edee4e12b4c20c9f8b65c9b42e0e64f2d80da2f12f7519be2a2eb"
     },
     {
       "id": "device_control",
       "name": "Device Control",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "98.4",
       "description": "Use for any request to control or check smart-home devices across integrations, including lights, switches, plugs, fans, covers, garage doors, locks, thermostats, media players, remotes, scenes, and scripts. Use Tater Vision for visual camera questions.",
       "portals": [
@@ -304,12 +304,12 @@
         "plug"
       ],
       "entry": "verba/device_control.py",
-      "sha256": "913d607d1d7d8514417d14d31a9fda49e76cd63c84d636a19a5102a2d302effb"
+      "sha256": "d3ad6fb79b45e43368b15e280719703ece79f22a81e95cbc78638737d33bcccb"
     },
     {
       "id": "discord_admin_response_mode",
       "name": "Discord Admin Response Mode",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "min_tater_version": "59",
       "description": "Toggle always-respond mode for the current Discord channel only.",
       "portals": [
@@ -322,12 +322,12 @@
         "response_mode"
       ],
       "entry": "verba/discord_admin_response_mode.py",
-      "sha256": "110db3bba4ec21fb157386417d18806bcc7126e47447dbdc9516e5d30b320bb4"
+      "sha256": "f2bf4441f002473b0a529f0f7221130cb1faaae8d9272e3d184020d322775a26"
     },
     {
       "id": "discord_admin_roles",
       "name": "Discord Admin Roles",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Discord role listing and role assignment commands.",
       "portals": [
@@ -340,12 +340,12 @@
         "roles"
       ],
       "entry": "verba/discord_admin_roles.py",
-      "sha256": "58e49b6e6a541d9be34bf0415a91aec50ec97d75b827407723640d4ca266e96e"
+      "sha256": "afbe61f6b134e36ed5313e0bff071358d55a756bf2183e1a3d86891338be4dca"
     },
     {
       "id": "discord_admin_setup",
       "name": "Discord Admin Setup",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Discord server setup and structural admin changes.",
       "portals": [
@@ -358,12 +358,12 @@
         "setup"
       ],
       "entry": "verba/discord_admin_setup.py",
-      "sha256": "e69b4e0f296dfc719b45f0ce63a2f9672e3735ae5e6298d2c6019be1d0cd38d1"
+      "sha256": "7b6add6edc98128335f793dc17263b989645f612de3a98d10a4120e0d825b915"
     },
     {
       "id": "energy_status",
       "name": "Energy Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read energy and power data from Shelly, Home Assistant, and other integrations.",
       "portals": [
@@ -390,12 +390,12 @@
         "integration"
       ],
       "entry": "verba/energy_status.py",
-      "sha256": "9911644ccdc6892dc8984685c99bf9c13eefaf928a2ab1bd8b0263c7ead95a7b"
+      "sha256": "caf2e544bab75acbb4a8b1b9a6e0210f9a3245831bcd2f8bcabfb08d0e4ce0de"
     },
     {
       "id": "entry_sensor_status",
       "name": "Door & Window Sensor Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read entry sensor status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
       "portals": [
@@ -422,7 +422,7 @@
         "integration"
       ],
       "entry": "verba/entry_sensor_status.py",
-      "sha256": "6a4c540b6514a327941320f0099fd4db228b2c4f2a9d03e8e928c62f914fa017"
+      "sha256": "f282e853adb6f95f2f45e7b7445e99e0608c9ce548dc2ccf505a0bd633b1459b"
     },
     {
       "id": "find_my_phone",
@@ -468,7 +468,7 @@
     {
       "id": "ha_camera_area",
       "name": "Home Assistant Camera Area",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "min_tater_version": "59",
       "description": "Find cameras in a Home Assistant area and describe what they see.",
       "portals": [
@@ -493,12 +493,12 @@
         "area"
       ],
       "entry": "verba/ha_camera_area.py",
-      "sha256": "e694c863619b9f5c28249229cd31a476f40ce9d70d255edc7561bf2a85a75530"
+      "sha256": "c0b5f0798131f35be55ef5a8862fa7a02bee86c2eb3cd515a1424ec10866cc82"
     },
     {
       "id": "humidity_status",
       "name": "Humidity Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read humidity from Ecobee/HomeKit, Home Assistant, Hue, Shelly, UniFi Protect, and other integrations.",
       "portals": [
@@ -523,12 +523,12 @@
         "integration"
       ],
       "entry": "verba/humidity_status.py",
-      "sha256": "58459e7913e7d352087b6accbc4f50a39fee4e136f1ee8e7fce0228d713b1e2f"
+      "sha256": "5fc1417fd2575c7340dbf104b9b77e1723e4fea7bc70e72088192f82dcc84581"
     },
     {
       "id": "illuminance_status",
       "name": "Light Sensor Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read lux and light-level sensors from Hue, Shelly, Home Assistant, UniFi Protect, and other integrations.",
       "portals": [
@@ -555,12 +555,12 @@
         "integration"
       ],
       "entry": "verba/illuminance_status.py",
-      "sha256": "8aa1dda2f760d418d3be322d4dce3e6025290d95bd3a0af4b1159f9c5c724edf"
+      "sha256": "80fe837ac7bb6478b9ef4a070401b8f2fdff9fff8dc79a0780a34aba7b9cc5d9"
     },
     {
       "id": "irc_admin_op",
       "name": "IRC Admin OP",
-      "version": "1.3.3",
+      "version": "1.3.4",
       "min_tater_version": "59",
       "description": "Gives the user op or voice in the current IRC channel.",
       "portals": [
@@ -574,7 +574,7 @@
         "admin"
       ],
       "entry": "verba/irc_admin_op.py",
-      "sha256": "5366bfa10ab865f9ac1dab189d184203c648f5ce97f9d9d2344e72f581833f68"
+      "sha256": "0c5e775f99ffe2bc31c0102922633ec1c129f44f1dcb4cb94cefd7b70814188f"
     },
     {
       "id": "irc_admin_slap",
@@ -598,7 +598,7 @@
     {
       "id": "irc_admin_topic",
       "name": "IRC Admin Topic",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "min_tater_version": "59",
       "description": "Sets the current IRC channel topic to the requested text.",
       "portals": [
@@ -612,12 +612,12 @@
         "admin"
       ],
       "entry": "verba/irc_admin_topic.py",
-      "sha256": "1348b713893eabd94460330aeb6610c1847f230f6f69f5784ea95b330bc931e1"
+      "sha256": "d5fba24924f3d0224ec76bb3f24876fd3a6da504076e08991de4031582527e39"
     },
     {
       "id": "jackett_recent_uploads",
       "name": "Jackett Recent Uploads",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "List and rank recent Jackett uploads across selected indexers.",
       "portals": [
@@ -641,12 +641,12 @@
         "recent"
       ],
       "entry": "verba/jackett_recent_uploads.py",
-      "sha256": "670dc26e7f4f459f8207ab7a18f28d54b4fc22e6118b765aaf3ba771a63dfb42"
+      "sha256": "0678e12399ed98ad5776eabbf72b08d8d84d4f92fd631504dd700066c289faef"
     },
     {
       "id": "jackett_search_torrents",
       "name": "Jackett Search Torrents",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Run Jackett torrent searches with filters and ranked results.",
       "portals": [
@@ -670,7 +670,7 @@
         "search"
       ],
       "entry": "verba/jackett_search_torrents.py",
-      "sha256": "5139f445337780d0a126d3143699294d96fd9403c86d031a73a14e7a42e1ceaa"
+      "sha256": "aae17ebd563974e8a0073872a11939b7391ae16e0f7cd356c88bdb02c467d6f5"
     },
     {
       "id": "joke_api",
@@ -701,7 +701,7 @@
     {
       "id": "leak_status",
       "name": "Leak Sensor Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read leak sensor status from UniFi Protect, Home Assistant, and other integrations.",
       "portals": [
@@ -728,7 +728,7 @@
         "integration"
       ],
       "entry": "verba/leak_status.py",
-      "sha256": "4346eec6ee6ebd42b617ec403d2e83a3cdfdd2697585b764efa4c7866b2a2a37"
+      "sha256": "07f0349e1ae9ee2046f63efb505547a9d327f65b65840bb5c1e84de6e57e60d6"
     },
     {
       "id": "lowfi_video",
@@ -751,7 +751,7 @@
     {
       "id": "microwakeword",
       "name": "microWakeWord",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Change or suggest the local microWakeWord wake word on a Tater Voice Core satellite.",
       "portals": [
@@ -775,12 +775,12 @@
         "wake-word"
       ],
       "entry": "verba/microwakeword.py",
-      "sha256": "59b2c4f92dfd41787dfdf7163af67339375329c1eb150aca11832f6939687092"
+      "sha256": "f459ff10053495262e913c7b5e3c9e8627051328ff4f0a6c7a97f55c7db55322"
     },
     {
       "id": "mister_remote",
       "name": "MiSTer Remote",
-      "version": "1.1.10",
+      "version": "1.1.11",
       "min_tater_version": "59",
       "description": "Control your MiSTer FPGA setup—launch games, check status, or take screenshots.",
       "portals": [
@@ -800,12 +800,12 @@
       "settings_category": "MiSTer Remote",
       "tags": [],
       "entry": "verba/mister_remote.py",
-      "sha256": "21232048a069caf1ebede6583a7c871b53f83155ade24b5f9d972720a801acbb"
+      "sha256": "b758e0b99c2d26a68dfdfdbd1ff774f8f33451f5e6a18cc127f13de7a5accea7"
     },
     {
       "id": "moltbook_account_summary",
       "name": "Moltbook Account Summary",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Moltbook account/profile summary, profile URL, following/fellow agents, and target agent profiles.",
       "portals": [
@@ -833,12 +833,12 @@
         "fellow_taters"
       ],
       "entry": "verba/moltbook_account_summary.py",
-      "sha256": "a647b7dfd11878ce7a5cd222bd304ded015cd1e7d7489e20ba02cb9952799ccf"
+      "sha256": "e0da57ba7a0364b2fb66b813db474b245f97cf457808a4db2e16c459c8f2ece6"
     },
     {
       "id": "moltbook_home_overview",
       "name": "Moltbook Home Overview",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "min_tater_version": "59",
       "description": "Moltbook dashboard overview plus latest posts, announcements, post activity, subscriptions, and monitored submolts.",
       "portals": [
@@ -867,12 +867,12 @@
         "monitoring_submolts"
       ],
       "entry": "verba/moltbook_home_overview.py",
-      "sha256": "016b8adc370aa835ce1bdd4b1c3457b51412139f27716b5bd82a37963c9524ed"
+      "sha256": "93dc1d7e666efc7af6c6cc3d6df3f82fa9bf4e2943812d5e35cdebd8494cd89d"
     },
     {
       "id": "motion_status",
       "name": "Motion Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read motion status from Home Assistant, Hue, UniFi Protect, Ecobee/HomeKit, and other integrations.",
       "portals": [
@@ -898,12 +898,12 @@
         "integration"
       ],
       "entry": "verba/motion_status.py",
-      "sha256": "279d8b0e335167facc36962d886fec732a6a59336a32ba0549cbccfa8921925f"
+      "sha256": "6f88ac02d7d27ff3ed351a190e4c22db6b3740c6bc9546b96e0dfb669512c971"
     },
     {
       "id": "music_assistant",
       "name": "Music Assistant",
-      "version": "1.0.32",
+      "version": "1.0.33",
       "min_tater_version": "59",
       "description": "Play music and control playback via Music Assistant in Home Assistant.",
       "portals": [
@@ -924,12 +924,12 @@
       "settings_category": "Music Assistant",
       "tags": [],
       "entry": "verba/music_assistant.py",
-      "sha256": "1ff57bc43a04d92af32e299682804e02da41c9d4cb0b80e8cbdaff6d6e06ea94"
+      "sha256": "d11e8375ec1764dfe089169e0dcf31fbe49d7c7cb138080987a3b3bab6e41809"
     },
     {
       "id": "network_device_status",
       "name": "Network Device Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read network device status from UniFi Network and any integration that exposes network devices.",
       "portals": [
@@ -955,7 +955,7 @@
         "integration"
       ],
       "entry": "verba/network_device_status.py",
-      "sha256": "6627a6f1fa30796f3a18ec8ded624d18e0416e1630cb20ca140435b7f0b5479d"
+      "sha256": "ced63b1051e429391fa8a5023cfe0a9ce075977b0f9019fc647ade3065bcb0a0"
     },
     {
       "id": "obsidian_note",
@@ -994,7 +994,7 @@
     {
       "id": "overseerr_details",
       "name": "Overseerr Details",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "min_tater_version": "59",
       "description": "Fetch details for a specific movie or TV show from Overseerr.",
       "portals": [
@@ -1014,12 +1014,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_details.py",
-      "sha256": "d04f4f424dd2105db992e3b2b1aef57720755dbd8f0c2744e0013c67cfaea7aa"
+      "sha256": "3132d773a9267221cd1592b278aa9a861e75a17f0c9716a19ce66dc18891d8d8"
     },
     {
       "id": "overseerr_request",
       "name": "Overseerr Request",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Request a movie or TV show in Overseerr by title.",
       "portals": [
@@ -1039,12 +1039,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_request.py",
-      "sha256": "048037dad7d59dd989b611dc38f485808771f2b5d54531c2f28fe165e9d06b0e"
+      "sha256": "fdfe7f2799d62092e3e9b68cb2a9f770b461ecdb3ff47925fb37a97dd185b24e"
     },
     {
       "id": "overseerr_trending",
       "name": "Overseerr Trending",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "min_tater_version": "59",
       "description": "List trending or upcoming movies/TV from Overseerr.",
       "portals": [
@@ -1064,12 +1064,12 @@
       "settings_category": "Overseerr",
       "tags": [],
       "entry": "verba/overseerr_trending.py",
-      "sha256": "13a970625cd616924e4c718f3eeb583cd3580f4a5c9179f6541ff4ed525f0a6f"
+      "sha256": "71e212f9e33537cd36bbdc1c20354a245a7f7ddae981e8b5551ac82297a71761"
     },
     {
       "id": "premiumize_add_transfer",
       "name": "Premiumize Add Transfer",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Create Premiumize transfers from explicit magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1089,12 +1089,12 @@
         "add_transfer"
       ],
       "entry": "verba/premiumize_add_transfer.py",
-      "sha256": "d255898f131b02ea0adba3145a964acc1d901b801c411dea35fca82819e6e205"
+      "sha256": "f5c46f6a10ae5706e5262e052866648c49f55261bdf88f05fbd441d66e307c19"
     },
     {
       "id": "premiumize_check_transfer",
       "name": "Premiumize Check Transfer",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "min_tater_version": "59",
       "description": "Inspect a Premiumize transfer and report status, progress, and related files.",
       "portals": [
@@ -1114,12 +1114,12 @@
         "check_transfer"
       ],
       "entry": "verba/premiumize_check_transfer.py",
-      "sha256": "c98403da029d1927bdaf40f2479f3356e8bfd178c3b4a6b0cf415cbe5d6be880"
+      "sha256": "a223b1ee041db3264c7292cad5a10cc40d1e75a06dda6044a13ecd6edcf07801"
     },
     {
       "id": "premiumize_get_links",
       "name": "Premiumize Get Links",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "min_tater_version": "59",
       "description": "Get Premiumize stream/download links by magnet links, remote HTTP(S) .torrent URLs, attached .torrent files, or local/downloaded .torrent files.",
       "portals": [
@@ -1139,12 +1139,12 @@
         "get_links"
       ],
       "entry": "verba/premiumize_get_links.py",
-      "sha256": "bc54c9086cb6e122925cf90bb4c93eb9e4e4cefa6145c70db3a8fe6848f72ac8"
+      "sha256": "5b0fa09df4a79a137b83056d5f5b750049d8389fdc25be80cec14d1153e98332"
     },
     {
       "id": "premiumize_list_files",
       "name": "Premiumize List Files",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "min_tater_version": "59",
       "description": "List Premiumize cloud folder contents with file/folder counts.",
       "portals": [
@@ -1164,12 +1164,12 @@
         "list_files"
       ],
       "entry": "verba/premiumize_list_files.py",
-      "sha256": "77a6020b4e57c17658364eb76841fdf126dbece8aaa075c7144e66e9be060285"
+      "sha256": "b6cb5a649ce6e5aa3ed70ea458e4c8230d0e9f6ab9a3c34c41039e8e8ae08481"
     },
     {
       "id": "premiumize_list_transfers",
       "name": "Premiumize List Transfers",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "min_tater_version": "59",
       "description": "Show Premiumize transfer queue/status with active, finished, and failed counts.",
       "portals": [
@@ -1189,12 +1189,12 @@
         "list_transfers"
       ],
       "entry": "verba/premiumize_list_transfers.py",
-      "sha256": "ccd34d37b8ccdc532a361cea2622f1e1f310fcf0eef5e7abcb0c8b53e1798625"
+      "sha256": "d3290c4bc2ee7d7e3e784c70d9b03a19ee150d9d8a1a7d9f1a4fe105f521dd57"
     },
     {
       "id": "presence_status",
       "name": "Presence Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read presence from UniFi Network clients, Ecobee/HomeKit occupancy sensors, and other integrations.",
       "portals": [
@@ -1221,7 +1221,7 @@
         "integration"
       ],
       "entry": "verba/presence_status.py",
-      "sha256": "ca53940aa0367078ca03d76c0ec8095fc7845e653f61f1811ad3965adb4b758e"
+      "sha256": "f568a6c072efa8c05429a415e64e92097f1f80ef8d47b87fdf266637f4c99947"
     },
     {
       "id": "reachy_sleep",
@@ -1269,7 +1269,7 @@
     {
       "id": "roon_music",
       "name": "Roon Music",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "59",
       "description": "Play existing music through Roon in a room or zone: songs, artists, albums, genres, playlists, radio, shuffle/random playback, and playback controls. Do not use for generating new songs or audio.",
       "portals": [
@@ -1296,12 +1296,12 @@
         "roon"
       ],
       "entry": "verba/roon_music.py",
-      "sha256": "c051fa1da2127fa9401ff01d8ab08a690e1b553503d1081110c187ac12dd1a3a"
+      "sha256": "2c95d1399b21126242becc93c14ebfb2089bcd1deb62efd8c412f7d5a7311427"
     },
     {
       "id": "sensor_status",
       "name": "Sensor Status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "min_tater_version": "98.4",
       "description": "Read other sensor status from all enabled integrations through the shared device registry.",
       "portals": [
@@ -1326,7 +1326,7 @@
         "integration"
       ],
       "entry": "verba/sensor_status.py",
-      "sha256": "6f87a467f0cd798cf1547161e6a253dc38f5bf62fc49a1da7781ea3015369aa4"
+      "sha256": "ada1e97fca3cc73719117e7ec0952f62d93e8d7c636f788dfe5ab3b21480d645"
     },
     {
       "id": "sftpgo_account",
@@ -1375,7 +1375,7 @@
     {
       "id": "tater_assistant_support",
       "name": "Tater Assistant Support",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Use when a Discord user asks how to install, configure, troubleshoot, use, or develop Tater Assistant, Tater Shop packages, or Tater Integrations, including questions that require checking their README files or source code.",
       "portals": [
@@ -1391,12 +1391,12 @@
         "tater-assistant"
       ],
       "entry": "verba/tater_assistant_support.py",
-      "sha256": "e09cda7e756126f38db15744acabeb7febd2fd98b74b30d6253ce03a5a7be1a4"
+      "sha256": "800109a94e4c171699520c74aace84a3cfa504053d1b70d79edf0a1606fba681"
     },
     {
       "id": "tater_gits_add_feed",
       "name": "Tater Gits Add Feed",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Add a GitHub releases feed to the tater-gits watcher with smart naming.",
       "portals": [
@@ -1413,12 +1413,12 @@
       "settings_category": "Tater Gits",
       "tags": [],
       "entry": "verba/tater_gits_add_feed.py",
-      "sha256": "de8722439862f92b10d47bc098dfdcc1367beadc8439812b29d312ec9da33f04"
+      "sha256": "7d6f85ab66441b2d96776e944460207799fe297cf664be6f31a113f16ad1d3cd"
     },
     {
       "id": "tater_tube_support",
       "name": "Tater Tube Support",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Use when a Discord user asks how to install, configure, pair, troubleshoot, use, or develop Tater Tube for Raspberry Pi, Tater Tube for Steam or Steam Deck, or Tater Tube Server, including questions that require checking their README files or source code.",
       "portals": [
@@ -1435,7 +1435,7 @@
         "steam-deck"
       ],
       "entry": "verba/tater_tube_support.py",
-      "sha256": "ec0dee27ce17a707b4685cdd323431263c2831d8141a25e5ad20e2e0e18b9fcf"
+      "sha256": "75354e93f2149ee7962292fb82918b23947e47d3f65b093a6570f951287591f7"
     },
     {
       "id": "tater_vision",
@@ -1476,7 +1476,7 @@
     {
       "id": "temperature_status",
       "name": "Temperature Status",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "98.4",
       "description": "Read a specifically named local room, thermostat, device, or temperature sensor; never handle general weather or geographic locations.",
       "portals": [
@@ -1501,12 +1501,12 @@
         "integration"
       ],
       "entry": "verba/temperature_status.py",
-      "sha256": "15e2df25d58ea342d5d14e8ca00d29a95c646770eb7fe9fa58e6fb003461536a"
+      "sha256": "9dc400429e3c4d55fe0a26ca0285439ac47c5940f1a584dd9e7f56f7cc01b14c"
     },
     {
       "id": "unifi_network_health",
       "name": "UniFi Network Health",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Get UniFi network health summary including client/device totals and offline device signals.",
       "portals": [
@@ -1530,12 +1530,12 @@
         "health"
       ],
       "entry": "verba/unifi_network_health.py",
-      "sha256": "91d203c0de2f47dc6081c326685d8ba6eed7ddc1fb3993bfbc9da3eb6c661fee"
+      "sha256": "d24d749f9455da2bd11245ebdbc535bead9cdeb551fa43492b50e36ce933c716"
     },
     {
       "id": "unifi_network_lookup",
       "name": "UniFi Network Lookup",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "min_tater_version": "59",
       "description": "Look up a UniFi client/device and return matching identity and network details.",
       "portals": [
@@ -1559,12 +1559,12 @@
         "lookup"
       ],
       "entry": "verba/unifi_network_lookup.py",
-      "sha256": "6605bd04d2dd6b19574ebb7daa683d07f7870199ff8bff1c7738de37e0a2bf3d"
+      "sha256": "ce5789a2754f03b7994350816b5b653edabc92fa353d1ee57a53d4b39a15a940"
     },
     {
       "id": "unifi_protect_area",
       "name": "UniFi Protect Area",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "min_tater_version": "59",
       "description": "Describe activity across multiple cameras in a named area.",
       "portals": [
@@ -1588,12 +1588,12 @@
         "area_snapshot"
       ],
       "entry": "verba/unifi_protect_area.py",
-      "sha256": "0c7a2cd8dc3967a413e97fe876246dad91acb94443a1dfd62b60f1ef23fdeee8"
+      "sha256": "9759869437801091dead798a61d527a95aa5025fd37121e234be5a025a569831"
     },
     {
       "id": "voicepe_remote_timer",
       "name": "Timer",
-      "version": "1.4.0",
+      "version": "1.4.1",
       "min_tater_version": "97.7",
       "description": "Set, cancel, snooze, silence, or check a timer.",
       "portals": [
@@ -1614,12 +1614,12 @@
       "settings_category": "Timer",
       "tags": [],
       "entry": "verba/voicepe_remote_timer.py",
-      "sha256": "6ce49b85c08108ba6537ee30bdcf8b9392558dfe0dd26210bcfb9951a51cf24d"
+      "sha256": "42d5e00972fc6600c953b267324fdbd75cd26919f889c6660437ab73a8f70fae"
     },
     {
       "id": "wake_word_trainer_support",
       "name": "Wake Word Trainer Support",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "59",
       "description": "Use when a Discord user asks how to choose, install, configure, train with, troubleshoot, or understand code in the Apple Silicon or NVIDIA microWakeWord trainers. Do not use for openWakeWord or NanoWakeWord.",
       "portals": [
@@ -1636,12 +1636,12 @@
         "training"
       ],
       "entry": "verba/wake_word_trainer_support.py",
-      "sha256": "fb489692c0e95a7406e3953c2bf4f8f220cdcab2fa9e9478107100925796c12f"
+      "sha256": "3313b038e9fb8947e108d0f22b4b27a15954fe14bafe52a655b014b564f0ce52"
     },
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "min_tater_version": "59",
       "description": "Get WeatherAPI.com conditions and forecasts for the configured home location or any named geographic place.",
       "portals": [
@@ -1662,7 +1662,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "ef71b53fa58d6a872845f65bbd73245bc8fd2a62cfd51fc2829c793dce1c5a21"
+      "sha256": "c17c531f0f65adf9380ff8e1a5d3a6c0ddd0945a2f295b60e3a12064fa382d21"
     },
     {
       "id": "webdav_browser",

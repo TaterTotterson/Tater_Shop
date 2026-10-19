@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from voice_core_entities import VoiceCoreEntityClient
@@ -26,7 +26,7 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
@@ -529,7 +529,31 @@ class MicroWakeWordPlugin(ToolVerba):
             f'User request: "{text}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the microWakeWord action: set when a specific new wake word is supplied, suggest for "
+                            "ideas or options, reset for the default or compiled wake word, or status for the current wake "
+                            "word. Extract the wake word only for a clear set request."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["set", "suggest", "reset", "status", ""]},
+                        "wake_word": {"type": "string"},
+                    },
+                    "required": ["action", "wake_word"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_wake_word_intent",
+            )
             raw = ((resp or {}).get("message") or {}).get("content", "")
             data = self._json_object_from_text(raw)
             return {

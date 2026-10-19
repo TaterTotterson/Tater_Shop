@@ -47,7 +47,11 @@ def load_weather_forecast():
     verba_base.ToolVerba = object
 
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.get_tater_name = lambda: ("Tater", "")
+    helpers.llm_structured_chat = llm_structured_chat
 
     diagnostics = types.ModuleType("verba_diagnostics")
     diagnostics.needs_from_diagnosis = lambda *_args, **_kwargs: []
@@ -72,7 +76,11 @@ def load_weather_forecast():
 
 def load_environment_core():
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.extract_json = lambda value: str(value or "")
+    helpers.llm_structured_chat = llm_structured_chat
     helpers.redis_client = None
     return _load_module(
         SHOP_ROOT / "cores" / "environment_core.py",

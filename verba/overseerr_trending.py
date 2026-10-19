@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 from dotenv import load_dotenv
 
-from helpers import redis_client, extract_json
+from helpers import extract_json, llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -18,7 +18,7 @@ logger.setLevel(logging.INFO)
 class OverseerrTrendingPlugin(ToolVerba):
     name = "overseerr_trending"
     verba_name = "Overseerr Trending"
-    version = "1.2.4"
+    version = "1.2.5"
     min_tater_version = "59"
     pretty_name = "Overseerr: Trending & Upcoming"
     settings_category = "Overseerr"
@@ -120,8 +120,29 @@ class OverseerrTrendingPlugin(ToolVerba):
             f'User request: "{text}"\n'
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Interpret whether the user wants movies or TV and whether they want trending or upcoming "
+                            "titles. Choose the most likely media kind when omitted and default to trending when timing is omitted."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["movie", "tv"]},
+                        "when": {"type": "string", "enum": ["trending", "upcoming"]},
+                    },
+                    "required": ["kind", "when"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_overseerr_trending_intent",
                 max_tokens=80,
                 temperature=0,
             )

@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from tateros import integration_store as integration_store_module
+from helpers import llm_structured_chat
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -75,7 +76,7 @@ class RoonMusicPlugin(ToolVerba):
     name = "roon_music"
     verba_name = "Roon Music"
     pretty_name = "Roon Music"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     settings_category = "Roon Control"
     platforms = [
@@ -321,7 +322,33 @@ class RoonMusicPlugin(ToolVerba):
             f"User request: {query}"
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract a voice music-playback intent. Use track for a specific song and retain its artist, "
+                            "artist with random enabled for artist-only requests, and genre with random enabled for genres. "
+                            "Do not choose a room, speaker, or device because voice context supplies it."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["play_media", "queue_media", "pause", "play", "stop", "next", "previous"]},
+                        "query": {"type": "string"},
+                        "media_kind": {"type": "string", "enum": ["track", "artist", "album", "genre", "playlist", "radio", "any"]},
+                        "random": {"type": "boolean"},
+                    },
+                    "required": ["action", "query", "media_kind", "random"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_roon_music_plan",
+            )
             raw = ((resp or {}).get("message") or {}).get("content", "")
             data = _json_object_from_text(raw)
             if not isinstance(data, dict):

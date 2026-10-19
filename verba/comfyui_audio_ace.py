@@ -11,7 +11,7 @@ import requests
 from typing import Any
 from urllib.parse import quote, unquote
 from verba_base import ToolVerba
-from helpers import get_llm_client_from_env, redis_client, run_comfy_prompt
+from helpers import get_llm_client_from_env, llm_structured_chat, redis_client, run_comfy_prompt
 try:
     from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
@@ -46,7 +46,7 @@ def load_homeassistant_config(*, required: bool = False, client: Any = None) -> 
 class ComfyUIAudioAcePlugin(ToolVerba):
     name = "comfyui_audio_ace"
     verba_name = "ComfyUI Audio Ace"
-    version = "1.0.29"
+    version = "1.0.30"
     min_tater_version = "59"
     usage = '{"function":"comfyui_audio_ace","arguments":{"prompt":"<Concept for the song, e.g. happy summer song>"}}'
     description = (
@@ -280,7 +280,8 @@ class ComfyUIAudioAcePlugin(ToolVerba):
         if llm_client is None:
             return fallback
         try:
-            response = await llm_client.chat(
+            response = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {
                         "role": "system",
@@ -299,7 +300,22 @@ class ComfyUIAudioAcePlugin(ToolVerba):
                             f"Lyrics excerpt: {str(lyrics or '')[:1200]}"
                         ),
                     },
-                ]
+                ],
+                native_system_prompt=(
+                    "Design the title and cover concept for the supplied original song. Use a two-to-six-word title and "
+                    "one detailed sentence describing square cover art that emotionally matches the subject and musical "
+                    "mood. The artwork must contain no text, letters, logos, or watermark."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "album_art_prompt": {"type": "string"},
+                    },
+                    "required": ["title", "album_art_prompt"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_song_presentation",
             )
             content = str((response.get("message") or {}).get("content") or "").strip()
             cleaned = re.sub(r"^```(?:json)?\s*|```$", "", content, flags=re.MULTILINE).strip()
@@ -334,11 +350,24 @@ class ComfyUIAudioAcePlugin(ToolVerba):
             "- Do NOT use [verse 1], [chorus 2], or any custom tag variants.\n"
             "- Output ONLY valid JSON, no explanation."
         )
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Write tags and lyrics for the song."}
-            ]
+            ],
+            native_system_prompt=(
+                f"Write music-style tags and English lyrics for this song request: {user_prompt!r}. Tags must be a "
+                "comma-separated list. Structure lyrics with [inst] and at least one of [verse], [chorus], [bridge], "
+                "or [outro]; do not number or invent section headers."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"tags": {"type": "string"}, "lyrics": {"type": "string"}},
+                "required": ["tags", "lyrics"],
+                "additionalProperties": False,
+            },
+            function_name="submit_song_lyrics",
         )
         content = response.get("message", {}).get("content", "").strip()
         try:

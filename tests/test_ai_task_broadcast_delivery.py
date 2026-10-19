@@ -263,9 +263,13 @@ def _load_full_core(fake_redis: FakeRedis):
     sys.modules["verba_kernel"] = verba_kernel
 
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.redis_client = fake_redis
     helpers.get_llm_client_from_env = lambda: None
     helpers.get_primary_llm_client_from_env = lambda: None
+    helpers.llm_structured_chat = llm_structured_chat
     sys.modules["helpers"] = helpers
 
     hydra = types.ModuleType("hydra")

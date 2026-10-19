@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import requests
 
 from verba_base import ToolVerba
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 from voice_core_entities import VoiceCoreEntityClient
 
@@ -44,7 +44,7 @@ class VoicePERemoteTimerPlugin(ToolVerba):
 
     name = "voicepe_remote_timer"
     verba_name = "Timer"
-    version = "1.4.0"
+    version = "1.4.1"
     min_tater_version = "97.7"
     pretty_name = "Timer"
     settings_category = "Timer"
@@ -1034,11 +1034,23 @@ class VoicePERemoteTimerPlugin(ToolVerba):
         user_prompt = f"Request: {text}"
 
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
-                ]
+                ],
+                native_system_prompt=(
+                    "Extract the timer duration from the supplied request. Parse natural-language durations, treat a bare "
+                    "number in a timer request as minutes, and use null when no duration is present."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {"seconds": {"type": ["integer", "null"]}},
+                    "required": ["seconds"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_timer_duration",
             )
             content = (resp.get("message") or {}).get("content", "").strip()
             try:

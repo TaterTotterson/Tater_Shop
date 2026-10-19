@@ -25,7 +25,7 @@ import requests
 from dotenv import load_dotenv
 
 import face_identity as _shared_face_identity
-from helpers import extract_json, get_llm_client_from_env, redis_client
+from helpers import extract_json, get_llm_client_from_env, llm_structured_chat, redis_client
 try:
     from helpers import redis_blob_client as _shared_redis_blob_client
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes and test harnesses.
@@ -70,7 +70,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.5"
+__version__ = "4.12.6"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -4257,6 +4257,8 @@ async def _events_query_llm_json_object(
     *,
     llm_client: Any,
     system_prompt: str,
+    native_system_prompt: str,
+    schema: Dict[str, Any],
     user_payload: Dict[str, Any],
     max_tokens: Optional[int] = None,
     temperature: float = 0.0,
@@ -4264,11 +4266,15 @@ async def _events_query_llm_json_object(
     if llm_client is None:
         return None, "LLM client is unavailable."
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
+            native_system_prompt=native_system_prompt,
+            schema=schema,
+            function_name="submit_event_query_plan",
             temperature=temperature,
             max_tokens=None if max_tokens is None else max(80, int(max_tokens)),
             timeout_ms=45_000,
@@ -4322,6 +4328,24 @@ async def _events_query_interpret_query(
     return await _events_query_llm_json_object(
         llm_client=llm_client,
         system_prompt=system_prompt,
+        native_system_prompt=(
+            "Interpret the natural-language event-history request. Preserve its area, timeframe, semantic details, "
+            "and desired response mode. Use only supplied sources, use all sources for broad requests, and always "
+            "resolve a bounded local time window. Do not answer the request."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "query_type": {"type": "string", "enum": ["summary", "presence", "count", "semantic_search", "timeline"]},
+                "search_scope": {"type": "string", "enum": ["selected_sources", "all_sources"]},
+                "source_ids": {"type": "array", "items": {"type": "string"}},
+                "time_window": {"type": "object", "properties": {"start_local": {"type": "string"}, "end_local": {"type": "string"}, "label": {"type": "string"}}, "required": ["start_local", "end_local", "label"]},
+                "semantic_focus": {"type": "array", "items": {"type": "string"}},
+                "response_mode": {"type": "string", "enum": ["summary", "presence", "count", "matches"]},
+            },
+            "required": ["query_type", "search_scope", "source_ids", "time_window", "semantic_focus", "response_mode"],
+            "additionalProperties": False,
+        },
         user_payload=payload,
         max_tokens=None,
         temperature=0.0,
@@ -4431,6 +4455,19 @@ async def _events_query_select_relevant_event_ids(
     obj, err = await _events_query_llm_json_object(
         llm_client=llm_client,
         system_prompt=system_prompt,
+        native_system_prompt=(
+            "Select only supplied event IDs that directly answer the user's request. Prefer the most relevant and "
+            "recent events, respect the result limit, and select none when nothing is relevant."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "relevant_event_ids": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+            "required": ["relevant_event_ids", "confidence"],
+            "additionalProperties": False,
+        },
         user_payload=payload,
         max_tokens=None,
         temperature=0.0,

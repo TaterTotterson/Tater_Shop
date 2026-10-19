@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import urllib3
 
-from helpers import extract_json, redis_client
+from helpers import extract_json, llm_structured_chat, redis_client
 try:
     from helpers import (
         _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
@@ -221,7 +221,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
@@ -390,11 +390,26 @@ class HACameraAreaPlugin(ToolVerba):
         payload = {"requested_area": hint, "candidates": candidates}
 
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
+                native_system_prompt=(
+                    "Select the supplied Home Assistant camera entity IDs that best match the requested area. Match camera "
+                    "names to the phrase, allow reasonable nearby synonyms such as driveway, garage, or porch for front, "
+                    "prefer precision over recall, and never invent an entity ID."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "camera_entity_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["camera_entity_ids"],
+                    "additionalProperties": False,
+                },
+                function_name="select_area_cameras",
                 max_tokens=220,
                 temperature=0.0,
             )
@@ -452,11 +467,23 @@ class HACameraAreaPlugin(ToolVerba):
             "- No prose."
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": text},
                 ],
+                native_system_prompt=(
+                    "Extract a short Home Assistant area name from the supplied request, such as front yard, driveway, "
+                    "or living room. Use an empty area when no clear area is present."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {"area": {"type": "string"}},
+                    "required": ["area"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_camera_area",
                 max_tokens=80,
                 temperature=0.0,
             )

@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -24,7 +24,7 @@ logger.setLevel(logging.INFO)
 class JackettRecentUploadsPlugin(ToolVerba):
     name = "jackett_recent_uploads"
     verba_name = "Jackett Recent Uploads"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = "Jackett Recent Uploads"
     settings_category = "Jackett"
@@ -309,7 +309,53 @@ Known indexers: {json.dumps(indexer_context, ensure_ascii=False)}
 Request: {query_text}
 """.strip()
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Interpret one natural-language Jackett request. Choose the appropriate allowed action and "
+                            "extract only filters or references explicitly present. Never invent result IDs, indexers, or titles."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"request": query_text, "known_indexers": indexer_context},
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["search", "recent", "list_indexers", "inspect_indexer", "which_indexer", "handoff"],
+                        },
+                        "search_query": {"type": "string"},
+                        "scope": {"type": "string"},
+                        "sort_by": {"type": "string"},
+                        "sort_direction": {"type": "string"},
+                        "categories": {"type": "array", "items": {"type": ["string", "integer"]}},
+                        "limit": {"type": ["integer", "null"]},
+                        "min_seeders": {"type": ["integer", "null"]},
+                        "max_age_days": {"type": ["integer", "null"]},
+                        "min_size": {"type": ["string", "number", "null"]},
+                        "max_size": {"type": ["string", "number", "null"]},
+                        "indexers": {"type": "array", "items": {"type": "string"}},
+                        "result_id": {"type": "string"},
+                        "result_title": {"type": "string"},
+                        "index": {"type": ["integer", "null"]},
+                        "target_downloader": {"type": "string"},
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_jackett_plan",
+            )
             raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
             data = self._json_object_from_text(str(raw or ""))
             if not isinstance(data, dict):

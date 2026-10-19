@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from verba_base import ToolVerba
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("moltbook_home_overview")
@@ -157,7 +157,7 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookHomeOverviewPlugin(ToolVerba):
     name = "moltbook_home_overview"
     verba_name = "Moltbook Home Overview"
-    version = "1.0.5"
+    version = "1.0.6"
     min_tater_version = "59"
     pretty_name = "Moltbook Home Overview"
     settings_category = "Moltbook Info"
@@ -477,7 +477,38 @@ Use an empty string for unknown text fields. Do not invent agent names.
 Request: {query}
 """.strip()
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Interpret one natural-language Moltbook request. Choose the matching supported route, extract "
+                            "only a concrete target name and limit when supplied, and never invent agent names."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "route": {
+                            "type": "string",
+                            "enum": [
+                                "latest_posts", "following", "profile_link", "account_summary", "home_overview",
+                                "latest_announcement", "activity_on_my_posts", "subscriptions", "monitoring_submolts",
+                                "fellow_taters", "agent_profile", "help",
+                            ],
+                        },
+                        "target_name": {"type": "string"},
+                        "limit": {"type": ["integer", "null"]},
+                    },
+                    "required": ["route", "target_name", "limit"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_moltbook_route",
+            )
             raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
             data = self._json_object_from_text(raw)
             if not isinstance(data, dict):

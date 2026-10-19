@@ -81,7 +81,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
         )
 
         memory = _parse("cores/memory_core.py")
-        _assert_context_bounded_call(self, memory, "_llm_extract_observations", "chat")
+        _assert_context_bounded_call(self, memory, "_llm_extract_observations", "llm_structured_chat")
         memory_settings = next(
             node.value
             for node in memory.body
@@ -114,11 +114,11 @@ class CoreTokenPolicyTests(unittest.TestCase):
             self,
             _parse("cores/tater_tube_core.py"),
             "_llm_json",
-            "chat",
+            "llm_structured_chat",
         )
 
         personal = _parse("cores/personal_core.py")
-        _assert_context_bounded_call(self, personal, "_llm_extract_updates", "chat")
+        _assert_context_bounded_call(self, personal, "_llm_extract_updates", "llm_structured_chat")
         _assert_context_bounded_call(
             self,
             personal,
@@ -135,15 +135,15 @@ class CoreTokenPolicyTests(unittest.TestCase):
 
     def test_edited_core_versions_and_manifest_match(self):
         expected_versions = {
-            "ai_task": "1.2.2",
+            "ai_task": "1.2.3",
             "automation": "1.6.4",
-            "awareness": "4.12.5",
-            "guardian": "1.3.12",
-            "memory": "1.0.30",
-            "music": "3.6.1",
-            "personal": "1.0.56",
+            "awareness": "4.12.6",
+            "guardian": "1.3.13",
+            "memory": "1.0.31",
+            "music": "3.6.2",
+            "personal": "1.0.57",
             "rss": "1.0.12",
-            "tater_tube": "1.4.3",
+            "tater_tube": "1.4.4",
         }
         manifest = json.loads((ROOT / "core_manifest.json").read_text(encoding="utf-8"))
         entries = {entry["id"]: entry for entry in manifest["cores"]}

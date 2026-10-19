@@ -28,6 +28,9 @@ def _load_module():
     verba_result.action_success = _action_success
     verba_result.action_failure = _action_failure
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.redis_client = SimpleNamespace(
         hgetall=lambda _key: {},
         hget=lambda _key, _field: None,
@@ -35,6 +38,7 @@ def _load_module():
     helpers.run_comfy_prompt = lambda *_args, **_kwargs: None
     helpers.get_llm_client_from_env = lambda **_kwargs: None
     helpers.get_primary_llm_client_from_env = lambda **_kwargs: None
+    helpers.llm_structured_chat = llm_structured_chat
     tateros = types.ModuleType("tateros")
     tateros.integration_store = SimpleNamespace(
         integration_module=lambda _integration_id: None,

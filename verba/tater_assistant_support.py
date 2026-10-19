@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, research_success
 
@@ -24,7 +24,7 @@ class ProductSupportPlugin(ToolVerba):
     name = "tater_assistant_support"
     verba_name = "Tater Assistant Support"
     pretty_name = "Tater Assistant Support"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "59"
 
     usage = '{"function":"tater_assistant_support","arguments":{"query":"How do I install Tater on macOS?"}}'
@@ -309,8 +309,39 @@ class ProductSupportPlugin(ToolVerba):
             f"QUESTION:\n{query}\n\nAVAILABLE FILES:{catalog}"
         )
         try:
-            response = await llm_client.chat(
+            response = await llm_structured_chat(
+                llm_client,
                 messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Choose at most {cls._MAX_SELECTED_FILES} files needed to answer the supplied "
+                            f"{cls.product_label} support question. Prefer README and installation docs for setup questions "
+                            "and the most relevant implementation or test files for code questions. Select only exact "
+                            "repository and path pairs from the catalog."
+                        ),
+                    },
+                    {"role": "user", "content": f"Question:\n{query}\n\nAvailable files:\n{catalog}"},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "maxItems": cls._MAX_SELECTED_FILES,
+                            "items": {
+                                "type": "object",
+                                "properties": {"repo": {"type": "string"}, "path": {"type": "string"}},
+                                "required": ["repo", "path"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["files"],
+                    "additionalProperties": False,
+                },
+                function_name="select_support_files",
                 max_tokens=500,
                 temperature=0,
             )

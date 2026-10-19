@@ -6,7 +6,7 @@ import logging
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from verba_base import ToolVerba
-from helpers import extract_json
+from helpers import extract_json, llm_structured_chat
 from verba_result import action_failure, action_success
 
 load_dotenv()
@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 class TaterGitsAddFeedPlugin(ToolVerba):
     name = "tater_gits_add_feed"
     verba_name = "Tater Gits Add Feed"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"tater_gits_add_feed","arguments":{"url":"https://github.com/OWNER/REPO/releases.atom"}}'
     description = "Adds a GitHub releases feed to the tater-gits watcher. Infers title prefix and category via LLM."
@@ -119,7 +119,28 @@ class TaterGitsAddFeedPlugin(ToolVerba):
         if llm_client is None or not hasattr(llm_client, "chat"):
             return None
 
-        resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": prompt}],
+            native_messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify the supplied GitHub project as ai when it is primarily about AI, machine learning, LLMs, "
+                        "agents, models, or tools centered on them; otherwise classify it as homebrew. Default ambiguous "
+                        "projects to homebrew."
+                    ),
+                },
+                {"role": "user", "content": f"Title: {app_title}\n\nREADME excerpt:\n{(readme_text or '')[:6000]}"},
+            ],
+            schema={
+                "type": "object",
+                "properties": {"category": {"type": "string", "enum": ["ai", "homebrew"]}},
+                "required": ["category"],
+                "additionalProperties": False,
+            },
+            function_name="classify_github_project",
+        )
         content = (resp.get("message") or {}).get("content", "")
         content = content.strip() if isinstance(content, str) else ""
         if not content:

@@ -52,6 +52,13 @@ def _extract_json(text: object) -> str:
 helpers_stub = types.ModuleType("helpers")
 helpers_stub.extract_json = _extract_json
 helpers_stub.redis_client = None
+
+
+async def _llm_structured_chat(client, *, messages, **kwargs):
+    return await client.chat(messages=messages, **kwargs)
+
+
+helpers_stub.llm_structured_chat = _llm_structured_chat
 sys.modules["helpers"] = helpers_stub
 
 registry_stub = types.ModuleType("integration_registry")
@@ -126,9 +133,9 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
                 self.assertEqual(
                     row["version"],
                     {
-                        "device_control": "1.0.6",
-                        "temperature_status": "1.0.3",
-                    }.get(verba_id, "1.0.1"),
+                        "device_control": "1.0.7",
+                        "temperature_status": "1.0.4",
+                    }.get(verba_id, "1.0.2"),
                 )
                 self.assertEqual(row["min_tater_version"], "98.4")
                 self.assertEqual(len(row["sha256"]), 64)
@@ -156,7 +163,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.6")
+        self.assertEqual(plugin.version, "1.0.7")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)

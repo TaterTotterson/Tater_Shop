@@ -9,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 
 from verba_base import ToolVerba
-from helpers import redis_client, extract_json
+from helpers import extract_json, llm_structured_chat, redis_client
 
 load_dotenv()
 logger = logging.getLogger("overseerr_request")
@@ -26,7 +26,7 @@ class OverseerrRequestPlugin(ToolVerba):
     """
     name = "overseerr_request"
     verba_name = "Overseerr Request"
-    version = "1.1.4"
+    version = "1.1.5"
     min_tater_version = "59"
     usage = (
         '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
@@ -211,8 +211,29 @@ class OverseerrRequestPlugin(ToolVerba):
             f'User request: "{text}"\n'
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract the one movie or TV title the user wants requested in Overseerr. Remove filler words, "
+                            "identify movie or tv only when explicitly clear, and leave fields empty when no title or type is clear."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["movie", "tv", ""]},
+                    },
+                    "required": ["title", "kind"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_overseerr_request",
                 max_tokens=120,
                 temperature=0,
             )

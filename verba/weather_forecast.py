@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
+from helpers import llm_structured_chat
 from verba_base import ToolVerba
 from tateros import integration_store as integration_store_module
 from verba_diagnostics import needs_from_diagnosis
@@ -116,7 +117,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.2.1"
+    version = "1.2.2"
     min_tater_version = "59"
     routing_keywords = [
         "weatherapi",
@@ -401,11 +402,41 @@ class WeatherForecastPlugin(ToolVerba):
             "Output JSON only."
         )
         try:
-            response = await llm_client.chat(
+            response = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
                 ],
+                native_system_prompt=(
+                    "Interpret the supplied weather request without answering it. Ignore mentions, names, and punctuation "
+                    "when identifying location. Never invent a named place: use named_place only for an explicitly supplied "
+                    "city, region, country, postal code, airport, landmark, or coordinates; home, here, outside, local, near "
+                    "me, and my location mean local_outdoor with no named location; and rooms, named local areas, or sensors "
+                    "mean local_area. Preserve explicit arguments unless they conflict with these rules. Resolve relative "
+                    "dates from supplied today, and use forecast for future times, highs, lows, tonight, tomorrow, or later."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "request_type": {"type": "string", "enum": ["current", "forecast"]},
+                        "measurement": {"type": "string", "enum": ["general", "condition", "temperature", "humidity", "wind", "rain", "snow", "air_quality", "pollen", "alerts"]},
+                        "location_scope": {"type": "string", "enum": ["local_outdoor", "local_area", "named_place"]},
+                        "location": {"type": ["string", "null"]},
+                        "area": {"type": ["string", "null"]},
+                        "sensor": {"type": ["string", "null"]},
+                        "provider": {"type": ["string", "null"]},
+                        "date": {"type": ["string", "null"]},
+                        "day": {"type": ["string", "null"], "enum": ["current", "today", "tonight", "tomorrow", "weekend", None]},
+                        "days": {"type": "integer", "minimum": 1, "maximum": 14},
+                        "hours": {"type": "integer", "minimum": 0, "maximum": 48},
+                        "units": {"type": ["string", "null"], "enum": ["us", "metric", None]},
+                        "temperature_focus": {"type": ["string", "null"], "enum": ["current", "high", "low", "both", None]},
+                    },
+                    "required": ["request_type", "measurement", "location_scope", "location", "area", "sensor", "provider", "date", "day", "days", "hours", "units", "temperature_focus"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_weather_intent",
                 temperature=0.0,
                 max_tokens=360,
                 timeout_ms=25_000,

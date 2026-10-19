@@ -19,7 +19,7 @@ from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from verba_base import ToolVerba
 from verba_settings import get_verba_settings
-from helpers import redis_client, run_comfy_prompt
+from helpers import llm_structured_chat, redis_client, run_comfy_prompt
 try:
     from helpers import (
         _is_local_hydra_llm_provider as _shared_is_local_hydra_llm_provider,
@@ -742,11 +742,24 @@ class _ComfyUIAudioAceHelper:
             "- Do NOT use [verse 1], [chorus 2], or any custom tag variants.\n"
             "- Output ONLY valid JSON, no explanation."
         )
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Write tags and lyrics for the song."}
-            ]
+            ],
+            native_system_prompt=(
+                f"Write music-style tags and English lyrics for this song request: {user_prompt!r}. Tags must be a "
+                "comma-separated list. Structure lyrics with [inst] and at least one of [verse], [chorus], [bridge], "
+                "or [outro]; do not number or invent section headers."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"tags": {"type": "string"}, "lyrics": {"type": "string"}},
+                "required": ["tags", "lyrics"],
+                "additionalProperties": False,
+            },
+            function_name="submit_song_lyrics",
         )
         content = response.get("message", {}).get("content", "").strip()
         try:
@@ -1001,7 +1014,7 @@ class _VisionHelper:
 class ComfyUIMusicVideoPlugin(ToolVerba):
     name = "comfyui_music_video"
     verba_name = "ComfyUI Music Video"
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     usage = '{"function":"comfyui_music_video","arguments":{"prompt":"<Concept for the song>"}}'
     description = "Generates a complete AI music video including lyrics, music, and animated visuals by orchestrating ComfyUI verba."

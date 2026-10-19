@@ -15,7 +15,7 @@ from urllib.parse import quote, urlencode, urlparse
 
 import requests
 
-from helpers import extract_json, get_llm_client_from_env, redis_client
+from helpers import extract_json, get_llm_client_from_env, llm_structured_chat, redis_client
 
 try:
     from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
@@ -606,15 +606,28 @@ def _sync_context(client: Any = None) -> Dict[str, Any]:
         _TATER_TUBE_SYNC_LOCK.release()
 
 
-def _llm_json(loop: asyncio.AbstractEventLoop, llm_client: Any, system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _llm_json(
+    loop: asyncio.AbstractEventLoop,
+    llm_client: Any,
+    system_prompt: str,
+    payload: Dict[str, Any],
+    *,
+    native_system_prompt: str,
+    schema: Dict[str, Any],
+    function_name: str,
+) -> Dict[str, Any]:
     if llm_client is None:
         raise RuntimeError("No primary LLM is configured for Tater.")
     response = loop.run_until_complete(
-        llm_client.chat(
+        llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
+            native_system_prompt=native_system_prompt,
+            schema=schema,
+            function_name=function_name,
             max_tokens=None,
             temperature=0.35,
         )
@@ -857,6 +870,32 @@ def _generate_main_menu_message(
                 ],
                 "music_mixes": music_mixes,
             },
+            native_system_prompt=(
+                f"Act as {_assistant_first_name(redis_obj)}, the warm personal guide on Tater Tube's main menu. "
+                "Using only the supplied privacy-safe activity, briefly mention one meaningful recent action and recommend "
+                "exactly one useful next activity from a current Tater Pick, recently used game, Music Core mix, PC app, or "
+                "configured module. Never invent a title, module, or preference; never mention tracking, internals, paths, "
+                "URLs, or credentials. Keep the message under 65 words with no time-of-day greeting."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "suggestion": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "kind": {"type": "string", "enum": ["watch", "play", "listen", "resume", "open"]},
+                            "source": {"type": "string"},
+                        },
+                        "required": ["title", "kind", "source"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["message", "suggestion"],
+                "additionalProperties": False,
+            },
+            function_name="submit_main_menu_message",
         )
     except Exception as exc:
         logger.warning("[Tater Tube] Main Menu Message generation failed: %s", exc)
@@ -995,6 +1034,38 @@ def _generate_recommendations_impl(
             "recent_server_viewing": compact_server_events,
             "server_catalog_candidates": compact_candidates,
         },
+        native_system_prompt=(
+            f"Act as {assistant_name}, a warm curator for Tater's Picks using only the supplied Tater Tube Server context "
+            f"and exact launchable catalog candidate IDs. Choose up to {count} unique items, avoid recently completed titles "
+            "and repeated prior picks when alternatives exist, and balance movies and series plus weekend-morning family "
+            "content when the supplied candidates support it. Treat watched_ms as actual playback and progress only as timeline "
+            "position. Write a timeless home-screen summary under 38 words, a distinct collection briefing under 75 words, and "
+            "one friendly reason per item. Never invent titles or preferences, mention other modules or tracking, or use relative "
+            "time words that could become stale while cached."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "picks_briefing": {"type": "string"},
+                "items": {
+                    "type": "array",
+                    "maxItems": count,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "candidate_id": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["candidate_id", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["summary", "picks_briefing", "items"],
+            "additionalProperties": False,
+        },
+        function_name="submit_tater_picks",
     )
     candidate_by_id = {_text(candidate.get("id")): candidate for candidate in candidates}
     allowed = set(candidate_by_id)

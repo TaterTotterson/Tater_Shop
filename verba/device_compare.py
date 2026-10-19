@@ -11,6 +11,7 @@ from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 from helpers import (
     extract_json,
+    llm_structured_chat,
     redis_client,
     get_tater_name,
 )
@@ -32,7 +33,7 @@ logger.setLevel(logging.INFO)
 class DeviceComparePlugin(ToolVerba):
     name = "device_compare"
     verba_name = "Device Compare"
-    version = "1.1.4"
+    version = "1.1.5"
     min_tater_version = "59"
     usage = (
         '{"function":"device_compare","arguments":{"query":"Natural-language request naming two devices to compare '
@@ -177,14 +178,35 @@ class DeviceComparePlugin(ToolVerba):
                 '  "arguments": {"indexes": [1, 2, 3]}\n'
                 "}"
             )
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are {first} {last}. Choose three high-quality, spec-focused sources for {device}. "
+                            "Prefer official specification pages, reputable reviews with specification tables, or "
+                            "datasheets. Select only 1-based indexes from the supplied results and never invent links."
+                        ),
+                    },
+                    {"role": "user", "content": self._format_results_for_llm(candidates)},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {"indexes": {"type": "array", "maxItems": 3, "items": {"type": "integer"}}},
+                    "required": ["indexes"],
+                    "additionalProperties": False,
+                },
+                function_name="pick_spec_sources",
+            )
             content = resp["message"].get("content", "").strip()
             try:
                 js = json.loads(content)
             except Exception:
                 js = json.loads(extract_json(content) or "{}")
 
-            raw_idxs = (js.get("arguments", {}) or {}).get("indexes", [])
+            raw_idxs = js.get("indexes") or (js.get("arguments", {}) or {}).get("indexes", [])
             if not isinstance(raw_idxs, list) or not raw_idxs:
                 urls = [r["href"] for r in candidates[:3] if r.get("href")]
             else:
@@ -251,14 +273,36 @@ class DeviceComparePlugin(ToolVerba):
                     '  "arguments": {"indexes": [1, 2, 3]}\n'
                     "}"
                 )
-                resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+                resp = await llm_structured_chat(
+                    llm_client,
+                    messages=[{"role": "system", "content": prompt}],
+                    native_messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                f"You are {first} {last}. Choose up to three supplied links that contain per-game FPS "
+                                f"or benchmark tables for the exact device name {device!r}. The exact name must appear in "
+                                "the result title, snippet, or URL. Select only 1-based indexes and return none when no "
+                                "result qualifies; never invent links."
+                            ),
+                        },
+                        {"role": "user", "content": self._format_results_for_llm(candidates)},
+                    ],
+                    schema={
+                        "type": "object",
+                        "properties": {"indexes": {"type": "array", "maxItems": 3, "items": {"type": "integer"}}},
+                        "required": ["indexes"],
+                        "additionalProperties": False,
+                    },
+                    function_name="pick_fps_sources",
+                )
                 content = resp["message"].get("content", "").strip()
                 try:
                     js = json.loads(content)
                 except Exception:
                     js = json.loads(extract_json(content) or "{}")
 
-                raw_idxs = (js.get("arguments", {}) or {}).get("indexes", [])
+                raw_idxs = js.get("indexes") or (js.get("arguments", {}) or {}).get("indexes", [])
                 if not isinstance(raw_idxs, list) or not raw_idxs:
                     urls = [r["href"] for r in candidates[:3] if r.get("href")]
                 else:
@@ -334,7 +378,31 @@ class DeviceComparePlugin(ToolVerba):
             "ONLY return JSON."
         )
 
-        resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+        spec_properties = {
+            key: ({"type": "array", "items": {"type": "string"}} if key == "_sources" else {"type": "string"})
+            for key in schema_hint
+        }
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": prompt}],
+            native_messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract and normalize device specifications from the supplied documents without inventing values. "
+                        "Use an empty string for an unknown specification and report only supplied source URLs."
+                    ),
+                },
+                {"role": "user", "content": f"Device: {device_name}\n\nDocuments:\n{big_blob}"},
+            ],
+            schema={
+                "type": "object",
+                "properties": spec_properties,
+                "required": list(spec_properties),
+                "additionalProperties": False,
+            },
+            function_name="submit_device_specs",
+        )
         content = resp["message"].get("content", "").strip()
         try:
             data = json.loads(content)
@@ -371,7 +439,32 @@ class DeviceComparePlugin(ToolVerba):
             "ONLY return JSON."
         )
 
-        resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": prompt}],
+            native_messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract per-game FPS benchmark rows for the specified device from only the supplied documents. "
+                        "Include only real video-game titles, not generic categories or averages. Each value must contain "
+                        "a numeric FPS and may include resolution or settings. Leave fps_by_game empty when no qualifying "
+                        "benchmarks exist and report only supplied source URLs."
+                    ),
+                },
+                {"role": "user", "content": f"Device: {device}\n\nDocuments:\n{blob}"},
+            ],
+            schema={
+                "type": "object",
+                "properties": {
+                    "fps_by_game": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "_sources": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["fps_by_game", "_sources"],
+                "additionalProperties": False,
+            },
+            function_name="submit_fps_benchmarks",
+        )
         content = resp["message"].get("content", "").strip()
         try:
             data = json.loads(content)
@@ -663,13 +756,37 @@ class DeviceComparePlugin(ToolVerba):
         )
 
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Decide whether per-game FPS benchmark research is appropriate for the supplied device. "
+                            "Allow it for a likely gaming-capable PC, laptop, mini PC, handheld, game console, or device "
+                            "with a discrete or console-class GPU. Reject phones, tablets, TVs, NAS devices, routers, "
+                            "office-only mini PCs, and devices without game-capable graphics."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(summary, ensure_ascii=False)},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {"allow_fps": {"type": "boolean"}, "reason": {"type": "string"}},
+                    "required": ["allow_fps", "reason"],
+                    "additionalProperties": False,
+                },
+                function_name="decide_fps_research",
+            )
             content = resp["message"].get("content", "").strip()
             try:
                 js = json.loads(content)
             except Exception:
                 js = json.loads(extract_json(content) or "{}")
-            allow = (js.get("arguments", {}) or {}).get("allow_fps")
+            allow = js.get("allow_fps")
+            if not isinstance(allow, bool):
+                allow = (js.get("arguments", {}) or {}).get("allow_fps")
             return bool(allow) if isinstance(allow, bool) else False
         except Exception:
             return False

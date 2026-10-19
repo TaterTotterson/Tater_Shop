@@ -2,7 +2,7 @@ import asyncio, json, logging, re, time, difflib, requests, mimetypes
 from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from verba_base import ToolVerba
-from helpers import redis_client, extract_json  # <-- we use your extractor
+from helpers import extract_json, llm_structured_chat, redis_client
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
 
@@ -67,7 +67,7 @@ COMMAND_ALIASES = {
 class MisterRemotePlugin(ToolVerba):
     name = "mister_remote"
     verba_name = "MiSTer Remote"
-    version = "1.1.10"
+    version = "1.1.11"
     min_tater_version = "59"
     pretty_name = "MiSTer Remote"
     routing_keywords = [
@@ -219,7 +219,29 @@ class MisterRemotePlugin(ToolVerba):
             f'User request: "{text}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the MiSTer command: play for launch or game-title requests, now_playing for status, "
+                            "go_to_menu for menu or home, screenshot_take for captures, or an empty command when unclear."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "enum": ["play", "now_playing", "go_to_menu", "screenshot_take", ""]},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                function_name="select_mister_command",
+            )
             raw = (resp["message"].get("content") or "").strip()
             jtxt = extract_json(raw) or raw
             data = json.loads(jtxt)
@@ -376,7 +398,27 @@ class MisterRemotePlugin(ToolVerba):
             f'User said: "{utterance}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract the clean game title from the supplied MiSTer request. Ignore the word MiSTer, drop "
+                            "an 'on <system>' suffix, and remove helper words such as play or please."
+                        ),
+                    },
+                    {"role": "user", "content": utterance},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_mister_game_title",
+            )
             raw = (resp["message"].get("content") or "").strip()
             jtxt = extract_json(raw) or raw
             data = json.loads(jtxt)
@@ -401,7 +443,27 @@ class MisterRemotePlugin(ToolVerba):
             f'User said: "{utterance}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the most likely MiSTer system for the supplied game request using exactly one supplied "
+                            "system ID. Ignore the word MiSTer and prefer the most likely classic platform when uncertain."
+                        ),
+                    },
+                    {"role": "user", "content": f"Request: {utterance}\n\nSystems:\n{sys_lines}"},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {"systemId": {"type": "string", "enum": [s["id"] for s in systems]}},
+                    "required": ["systemId"],
+                    "additionalProperties": False,
+                },
+                function_name="select_mister_system",
+            )
             raw = (resp["message"].get("content") or "").strip()
             jtxt = extract_json(raw) or raw
             data = json.loads(jtxt)
@@ -435,7 +497,28 @@ class MisterRemotePlugin(ToolVerba):
             f"Choices:\n{choices}\n"
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose exactly one supplied game that best matches the user's title query. Prefer an exact or "
+                            "near-exact title match, otherwise the closest canonical entry, and copy its path exactly without "
+                            "inventing or modifying it."
+                        ),
+                    },
+                    {"role": "user", "content": f"System: {system_id}\nQuery: {title_query}\nChoices:\n{choices}"},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "enum": [str(r.get("path") or "") for r in short]}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                function_name="select_mister_game",
+            )
             raw = (resp["message"].get("content") or "").strip()
             jtxt = extract_json(raw) or raw
             data = json.loads(jtxt)

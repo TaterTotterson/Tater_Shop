@@ -11,7 +11,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from helpers import extract_json
+from helpers import extract_json, llm_structured_chat
 from integration_registry import (
     get_integration_device_registry,
     get_integration_devices_by_capability,
@@ -67,7 +67,7 @@ class _DeviceVerbaRuntime(ToolVerba):
     name = "_device_verba_runtime"
     verba_name = "Device Verba Runtime"
     pretty_name = "Device Verba Runtime"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [
@@ -211,15 +211,29 @@ class _DeviceVerbaRuntime(ToolVerba):
         except Exception:
             return {}
 
-    async def _llm_json(self, *, llm_client, system: str, user_payload: dict, max_tokens: int = 260) -> dict:
+    async def _llm_json(
+        self,
+        *,
+        llm_client,
+        system: str,
+        native_system_prompt: str,
+        schema: dict,
+        function_name: str,
+        user_payload: dict,
+        max_tokens: int = 260,
+    ) -> dict:
         if llm_client is None:
             return {}
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
+                native_system_prompt=native_system_prompt,
+                schema=schema,
+                function_name=function_name,
                 max_tokens=max_tokens,
                 temperature=0.0,
             )
@@ -547,7 +561,44 @@ class _DeviceVerbaRuntime(ToolVerba):
                 "- source_url is a URL or empty string.\n"
                 "- command is a remote/button command such as mute, volume_up, home, back, select, play, or pause.\n"
             )
-            ai = await self._llm_json(llm_client=llm_client, system=system, user_payload={"query": query}, max_tokens=220)
+            ai = await self._llm_json(
+                llm_client=llm_client,
+                system=system,
+                native_system_prompt=(
+                    f"Interpret the supplied {self.category_label} request across home integrations. Select an allowed action; "
+                    "extract the named room or device without action words; and extract only values explicitly requested. "
+                    "List or status requests may omit a target. Percent-like values must be from 0 to 100, rgb_color must "
+                    "contain three color channels, source_url must be a supplied URL, and command should be the requested "
+                    "remote or button action."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": [*sorted(self.allowed_actions), ""]},
+                        "target": {"type": "string"},
+                        "position": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                        "volume": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                        "percentage": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                        "brightness_pct": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                        "color_name": {"type": "string"},
+                        "rgb_color": {
+                            "anyOf": [
+                                {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+                                {"type": "null"},
+                            ]
+                        },
+                        "temperature": {"type": ["number", "null"]},
+                        "hvac_mode": {"type": "string"},
+                        "source_url": {"type": "string"},
+                        "command": {"type": "string"},
+                    },
+                    "required": ["action", "target", "position", "volume", "percentage", "brightness_pct", "color_name", "rgb_color", "temperature", "hvac_mode", "source_url", "command"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_device_intent",
+                user_payload={"query": query},
+                max_tokens=220,
+            )
             if ai:
                 action = action or self._normalize_action(ai.get("action"), query)
                 target = target or self._text(ai.get("target"))
@@ -866,6 +917,18 @@ class _DeviceVerbaRuntime(ToolVerba):
         payload = await self._llm_json(
             llm_client=llm_client,
             system=system,
+            native_system_prompt=(
+                f"Choose the single best supplied {self.singular_label} candidate for the request, using names, aliases, "
+                "rooms, and the requested action. Candidates already support the action. Do not infer technical type from "
+                "words such as light, switch, or plug. Return an empty device_id when the choice is unclear and never invent IDs."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"device_id": {"type": "string"}},
+                "required": ["device_id"],
+                "additionalProperties": False,
+            },
+            function_name="select_device",
             user_payload={"query": query, "intent": intent, "candidates": compact},
             max_tokens=220,
         )

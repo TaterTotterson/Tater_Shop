@@ -42,10 +42,14 @@ class FakeRedis:
 
 def load_music_core():
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.redis_client = FakeRedis()
     helpers.extract_json = lambda value: value
     helpers.get_llm_client_from_env = lambda: None
     helpers.get_primary_llm_client_from_env = lambda: None
+    helpers.llm_structured_chat = llm_structured_chat
     sys.modules["helpers"] = helpers
 
     path = Path(__file__).resolve().parents[1] / "cores" / "music_core.py"

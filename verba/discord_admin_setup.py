@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 import discord
 
 from verba_base import ToolVerba
-from helpers import extract_json, redis_blob_client, redis_client
+from helpers import extract_json, llm_structured_chat, redis_blob_client, redis_client
 from verba_result import action_failure, action_success
 
 logger = logging.getLogger("discord_admin_setup")
@@ -27,6 +27,147 @@ DELETION_DISABLED_TEXT = (
     "Channel/category deletion is disabled in this plugin for safety. "
     "Please delete channels or categories manually in Discord."
 )
+
+
+def _discord_role_detail_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "apply_mode": {"type": "string", "enum": ["create_only", "create_or_update"]},
+            "color": {"type": "string"},
+            "mentionable": {"type": "boolean"},
+            "hoist": {"type": "boolean"},
+            "permissions": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+
+
+def _discord_rename_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "from": {"type": "string"},
+            "to": {"type": "string"},
+            "kind": {"type": "string", "enum": ["text", "voice", "any"]},
+        },
+        "required": ["from", "to", "kind"],
+        "additionalProperties": False,
+    }
+
+
+def _discord_plan_schema() -> Dict[str, Any]:
+    permission = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "allow": {"type": "array", "items": {"type": "string"}},
+            "deny": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["role", "allow", "deny"],
+        "additionalProperties": False,
+    }
+    channel = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "kind": {"type": "string", "enum": ["text", "voice"]},
+            "topic": {"type": "string"},
+            "slowmode_seconds": {"type": "integer"},
+            "nsfw": {"type": "boolean"},
+            "apply_mode": {"type": "string", "enum": ["create_only", "create_or_update"]},
+            "permissions": {"type": "array", "items": permission},
+        },
+        "required": ["name", "kind"],
+        "additionalProperties": False,
+    }
+    category = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "apply_mode": {"type": "string", "enum": ["create_only", "create_or_update"]},
+            "channels": {"type": "array", "maxItems": MAX_CHANNELS_PER_CATEGORY, "items": channel},
+        },
+        "required": ["name", "channels"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "response_channel_action": {
+                "type": "string",
+                "enum": ["none", "add_current", "remove_current", "set_only_current", "clear_all"],
+            },
+            "server_name": {"type": "string"},
+            "set_guild_icon_from_attachment": {"type": "boolean"},
+            "roles": {"type": "array", "maxItems": MAX_ROLES, "items": _discord_role_detail_schema()},
+            "categories": {"type": "array", "maxItems": MAX_CATEGORIES, "items": category},
+            "rename_channels": {"type": "array", "items": _discord_rename_schema()},
+            "notes": {"type": "string"},
+        },
+        "required": [
+            "response_channel_action",
+            "server_name",
+            "set_guild_icon_from_attachment",
+            "roles",
+            "categories",
+            "rename_channels",
+            "notes",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _discord_outline_schema() -> Dict[str, Any]:
+    channel = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "kind": {"type": "string", "enum": ["text", "voice"]},
+        },
+        "required": ["name", "kind"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "response_channel_action": {
+                "type": "string",
+                "enum": ["none", "add_current", "remove_current", "set_only_current", "clear_all"],
+            },
+            "server_name": {"type": "string"},
+            "set_guild_icon_from_attachment": {"type": "boolean"},
+            "roles": {"type": "array", "maxItems": MAX_ROLES, "items": {"type": "string"}},
+            "categories": {
+                "type": "array",
+                "maxItems": MAX_CATEGORIES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "channels": {"type": "array", "maxItems": MAX_CHANNELS_PER_CATEGORY, "items": channel},
+                    },
+                    "required": ["name", "channels"],
+                    "additionalProperties": False,
+                },
+            },
+            "rename_channels": {"type": "array", "items": _discord_rename_schema()},
+            "notes": {"type": "string"},
+        },
+        "required": [
+            "response_channel_action",
+            "server_name",
+            "set_guild_icon_from_attachment",
+            "roles",
+            "categories",
+            "rename_channels",
+            "notes",
+        ],
+        "additionalProperties": False,
+    }
+
 def _decode_map(raw: Dict[Any, Any] | None) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for key, value in (raw or {}).items():
@@ -148,7 +289,7 @@ class DiscordAdminSetupPlugin(ToolVerba):
     name = "discord_admin_setup"
     verba_name = "Discord Admin Setup"
     pretty_name = "Discord Admin Setup"
-    version = "1.0.1"
+    version = "1.0.2"
     min_tater_version = "59"
     tags = ["discord", "setup"]
     platforms = ["discord"]
@@ -804,11 +945,32 @@ class DiscordAdminSetupPlugin(ToolVerba):
             f"Request: {text}"
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": "You output only strict JSON."},
                     {"role": "user", "content": prompt},
                 ],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the top-level route for the supplied Discord admin request: role for listing or "
+                            "assigning roles, response_mode for this channel's always-respond behavior, setup for server "
+                            "structure changes, or none when it is not a Discord admin action."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "route": {"type": "string", "enum": ["role", "response_mode", "setup", "none"]},
+                    },
+                    "required": ["route"],
+                    "additionalProperties": False,
+                },
+                function_name="select_discord_admin_route",
                 max_tokens=80,
             )
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
@@ -1405,11 +1567,34 @@ class DiscordAdminSetupPlugin(ToolVerba):
             f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}"
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": "You output only strict JSON."},
                     {"role": "user", "content": prompt},
-                ]
+                ],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Build a safe Discord admin execution plan that follows the user's explicit setup request "
+                            "literally. Create or change only clearly requested server structure, default to create_only, "
+                            "and use create_or_update only for explicit modifications. Never delete structure or invent "
+                            "filler. Represent renames directly, use only text or voice channel kinds and valid Discord "
+                            f"permissions, with at most {MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels "
+                            f"per category. Allowed permissions: {allowed_perms}"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"request": request_text, "guild_snapshot": guild_snapshot},
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                schema=_discord_plan_schema(),
+                function_name="submit_discord_admin_plan",
             )
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
             blob = extract_json(raw) if raw else None
@@ -1718,11 +1903,37 @@ class DiscordAdminSetupPlugin(ToolVerba):
             f"Guild snapshot JSON: {json.dumps(guild_snapshot, ensure_ascii=False)}"
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": "You output only strict JSON."},
                     {"role": "user", "content": prompt},
                 ],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Design a non-empty, practical Discord server layout for the user's broad or creative request. "
+                            "Choose purposeful category, channel, and short role names without asking follow-up questions. "
+                            "Honor excluded themes, reuse obvious default rooms through renames when useful, never include "
+                            "@everyone as a role, and change response behavior or server name only when requested. Stay within "
+                            f"{MAX_CATEGORIES} categories and {MAX_CHANNELS_PER_CATEGORY} channels per category."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "request": request_text,
+                                "excluded_terms": excluded_terms,
+                                "guild_snapshot": guild_snapshot,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                schema=_discord_outline_schema(),
+                function_name="submit_discord_layout",
                 max_tokens=900,
             )
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()
@@ -1758,11 +1969,38 @@ class DiscordAdminSetupPlugin(ToolVerba):
             f"Role names: {json.dumps(role_names, ensure_ascii=False)}"
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": "You output only strict JSON."},
                     {"role": "user", "content": prompt},
                 ],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Add optional Discord role details for only the supplied role names. Keep permissions minimal "
+                            "and purposeful, never include @everyone, and omit powerful or administrative permissions unless "
+                            "the user's request clearly justifies them."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"request": request_text, "role_names": role_names},
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "roles": {"type": "array", "maxItems": MAX_ROLES, "items": _discord_role_detail_schema()},
+                    },
+                    "required": ["roles"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_discord_role_details",
                 max_tokens=500,
             )
             raw = str((resp.get("message", {}) or {}).get("content", "") or "").strip()

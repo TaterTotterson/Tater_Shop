@@ -10,7 +10,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 from verba_base import ToolVerba
-from helpers import redis_client, get_tater_name
+from helpers import get_tater_name, llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -55,7 +55,7 @@ class RoomPlayerNotFound(RuntimeError):
 class MusicAssistantPlugin(ToolVerba):
     name = "music_assistant"
     verba_name = "Music Assistant"
-    version = "1.0.32"
+    version = "1.0.33"
     min_tater_version = "59"
 
     usage = '{"function":"music_assistant","arguments":{"query":"What the user wants to play (artist, album, track, playlist)."}}'
@@ -705,6 +705,7 @@ class MusicAssistantPlugin(ToolVerba):
         content: str,
         schema_hint: str,
         llm_client,
+        schema: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         LLM-only repair pass when the first model output is not strict JSON.
@@ -721,8 +722,15 @@ class MusicAssistantPlugin(ToolVerba):
             },
             ensure_ascii=False,
         )
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            native_system_prompt=(
+                f"You are {first} {last}. Repair the supplied malformed model output into the requested structured "
+                "object without adding information or explanatory prose."
+            ),
+            schema=schema,
+            function_name="repair_music_assistant_result",
             temperature=0.0,
         )
         repaired = (resp.get("message") or {}).get("content", "").strip()
@@ -765,7 +773,31 @@ class MusicAssistantPlugin(ToolVerba):
             },
             ensure_ascii=False,
         )
-        resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        schema = {
+            "type": "object",
+            "properties": {
+                "queries": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string"}},
+                "prefer": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["artist", "album", "track", "playlist", "radio"]},
+                        {"type": "null"},
+                    ]
+                },
+            },
+            "required": ["queries", "prefer"],
+            "additionalProperties": False,
+        }
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            native_system_prompt=(
+                f"You are {first} {last}. Rewrite the supplied music request into one to four ordered Music Assistant "
+                "search queries. Remove command, filler, and room phrases while preserving artist, song, and album names. "
+                "Put an artist-only name first when appropriate and identify the requested media preference when clear."
+            ),
+            schema=schema,
+            function_name="submit_music_search_queries",
+        )
         content = (resp.get("message") or {}).get("content", "").strip()
 
         schema_hint = '{"queries":[string], "prefer": null|"artist"|"album"|"track"|"playlist"|"radio"}'
@@ -773,7 +805,7 @@ class MusicAssistantPlugin(ToolVerba):
             data = self._json_loads_loose(content)
         except Exception as e:
             try:
-                data = await self._llm_repair_json(content, schema_hint, llm_client)
+                data = await self._llm_repair_json(content, schema_hint, llm_client, schema)
             except Exception as repair_err:
                 logger.warning(
                     "[music_assistant] query rewrite JSON parse failed. raw=%r repair_err=%s",
@@ -839,7 +871,29 @@ class MusicAssistantPlugin(ToolVerba):
             '"random":null|bool,"room":null|string}\n'
         )
         user = f"User request: {request_text}\nRoom hint: {room or ''}".strip()
-        resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            native_system_prompt=(
+                f"You are {first} {last}. Convert the supplied music request into an executable Music Assistant plan. "
+                "Use play or queue for media, identify random or shuffle intent, infer artist versus track versus album, "
+                "and use playlist or radio for genre or vibe requests. Preserve the supplied room hint when relevant."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["play", "queue", "pause", "resume", "stop", "next", "previous", "volume"]},
+                    "query": {"type": ["string", "null"]},
+                    "prefer": {"type": ["string", "null"]},
+                    "volume": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+                    "random": {"type": ["boolean", "null"]},
+                    "room": {"type": ["string", "null"]},
+                },
+                "required": ["action", "query", "prefer", "volume", "random", "room"],
+                "additionalProperties": False,
+            },
+            function_name="submit_music_action_plan",
+        )
         content = (resp.get("message") or {}).get("content", "").strip()
 
         try:
@@ -938,7 +992,27 @@ class MusicAssistantPlugin(ToolVerba):
             "Search results (condensed):\n"
             f"{json.dumps(condensed, ensure_ascii=False)}"
         )
-        resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        schema = {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "media_type": {"type": "string", "enum": ["track", "album", "artist", "playlist", "radio"]},
+                "name": {"type": "string"},
+            },
+            "required": ["uri", "media_type", "name"],
+            "additionalProperties": False,
+        }
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            native_system_prompt=(
+                f"You are {first} {last}. Choose the best playable item from only the supplied Music Assistant search "
+                "results. Prefer exact artist-and-song track matches, artist-and-album matches, artist entries for "
+                "artist-only requests, and playlists or radio for genres and vibes."
+            ),
+            schema=schema,
+            function_name="select_music_item",
+        )
         content = (resp.get("message") or {}).get("content", "").strip()
 
         schema_hint = '{"uri":string,"media_type":"track|album|artist|playlist|radio","name":string}'
@@ -946,7 +1020,7 @@ class MusicAssistantPlugin(ToolVerba):
             j = self._json_loads_loose(content)
         except Exception:
             try:
-                j = await self._llm_repair_json(content, schema_hint, llm_client)
+                j = await self._llm_repair_json(content, schema_hint, llm_client, schema)
             except Exception:
                 return None
 
@@ -1322,7 +1396,23 @@ class MusicAssistantPlugin(ToolVerba):
         )
         listing = "\n".join([f'- {p["entity_id"]} ({p["friendly_name"]})' for p in players])
         user = f"Room: {room}\nAvailable players:\n{listing}"
-        resp = await llm_client.chat(messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}])
+        resp = await llm_structured_chat(
+            llm_client,
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            native_system_prompt=(
+                f"You are {first} {last}. Choose the single supplied Home Assistant media_player entity that best "
+                "matches the requested room. Never invent an entity ID."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "enum": [p["entity_id"] for p in players]},
+                },
+                "required": ["entity_id"],
+                "additionalProperties": False,
+            },
+            function_name="select_room_media_player",
+        )
         content = (resp.get("message") or {}).get("content", "").strip()
 
         try:

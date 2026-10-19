@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Tuple
 
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
-from helpers import redis_client
+from helpers import llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 
 def _build_media_metadata(binary: bytes, *, media_type: str, name: str, mimetype: str) -> dict:
@@ -186,7 +186,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     name = 'unifi_protect_area'
     verba_name = 'UniFi Protect Area'
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Area'
     settings_category = "UniFi Protect"
@@ -303,7 +303,34 @@ class UniFiProtectAreaPlugin(ToolVerba):
             f'Existing target hint: "{target_text}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the best UniFi Protect action. Distinguish camera listing, one named camera or doorbell, "
+                            "a named outdoor area, overall sensor status, and one named sensor. Extract a target only for a "
+                            "specific camera, area, or sensor."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({"request": text, "target_hint": target_text}, ensure_ascii=False),
+                    },
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": [*sorted(self._ALLOWED_ACTIONS), ""]},
+                        "target": {"type": "string"},
+                    },
+                    "required": ["action", "target"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_unifi_protect_action",
+            )
             raw = ((resp or {}).get("message") or {}).get("content", "")
             data = self._json_object_from_text(raw)
             return {

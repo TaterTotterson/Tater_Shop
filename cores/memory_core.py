@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from dotenv import load_dotenv
 
-from helpers import extract_json, get_llm_client_from_env, redis_client
+from helpers import extract_json, get_llm_client_from_env, llm_structured_chat, redis_client
 try:
     from helpers import get_primary_llm_client_from_env as _get_primary_llm_client_from_env
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
@@ -751,7 +751,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.0.30"
+__version__ = "1.0.31"
 
 
 load_dotenv()
@@ -2416,13 +2416,80 @@ def _llm_extract_observations(
         "- Do not include ttl/expiry fields.\n"
         "- If no valid observations exist, return empty arrays.\n"
     )
+    native_system_prompt = (
+        "Extract durable memory observations from the supplied normalized chat messages as incremental profile updates. "
+        "Use only explicit message evidence. Prefer the supplied allowed user and room keys, creating a concise snake_case "
+        "key only for a durable, explicit, useful fact that does not fit. Never store one-off requests, current tasks, "
+        "credentials, secrets, tokens, passwords, API keys, or guessed sensitive attributes. Compare against the current "
+        "profiles and emit only meaningful additions, refinements, or explicit corrections. Use removals only when a message "
+        "explicitly revokes or resolves an existing fact, and copy the exact existing key. Evidence entries must be supplied "
+        "message IDs; user observations must target a supplied known user ID."
+    )
+    observation_properties = {
+        "candidate_key": {"type": "string"},
+        "value": {},
+        "confidence": {"type": "number"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    }
+    removal_properties = {
+        "candidate_key": {"type": "string"},
+        "confidence": {"type": "number"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "user_observations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"user_id": {"type": "string"}, **observation_properties},
+                    "required": ["user_id", "candidate_key", "value", "confidence", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "room_observations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": observation_properties,
+                    "required": ["candidate_key", "value", "confidence", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "user_removals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"user_id": {"type": "string"}, **removal_properties},
+                    "required": ["user_id", "candidate_key", "confidence", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "room_removals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": removal_properties,
+                    "required": ["candidate_key", "confidence", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["user_observations", "room_observations", "user_removals", "room_removals"],
+        "additionalProperties": False,
+    }
 
     async def _call() -> Dict[str, Any]:
-        return await llm_client.chat(
+        return await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
+            native_system_prompt=native_system_prompt,
+            schema=schema,
+            function_name="submit_memory_observations",
             max_tokens=None,
             temperature=0.1,
         )
@@ -6438,6 +6505,8 @@ def _hydra_llm_json(
     *,
     llm_client: Any,
     system_prompt: str,
+    native_system_prompt: Optional[str] = None,
+    schema: Optional[Dict[str, Any]] = None,
     payload: Dict[str, Any],
     max_tokens: int = 900,
     temperature: float = 0.1,
@@ -6446,11 +6515,15 @@ def _hydra_llm_json(
         return None
     try:
         response = asyncio.run(
-            llm_client.chat(
+            llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
+                native_system_prompt=native_system_prompt,
+                schema=schema,
+                function_name="submit_memory_operation",
                 max_tokens=max(200, int(max_tokens)),
                 temperature=float(temperature),
             )
@@ -6477,6 +6550,8 @@ async def _hydra_llm_json_async(
     *,
     llm_client: Any,
     system_prompt: str,
+    native_system_prompt: Optional[str] = None,
+    schema: Optional[Dict[str, Any]] = None,
     payload: Dict[str, Any],
     max_tokens: int = 900,
     temperature: float = 0.1,
@@ -6484,11 +6559,15 @@ async def _hydra_llm_json_async(
     if llm_client is None:
         return None
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
+            native_system_prompt=native_system_prompt,
+            schema=schema,
+            function_name="submit_memory_operation",
             max_tokens=max(200, int(max_tokens)),
             temperature=float(temperature),
         )
@@ -6956,6 +7035,21 @@ async def _hydra_memory_remove(
             "- Do not invent values; copy exact text from known_facts.\n"
             "- Return empty arrays when unsure.\n"
         ),
+        native_system_prompt=(
+            "Plan exact durable-memory removals for the supplied forget request. Select remove_keys only from known_keys, "
+            "and copy remove_values exactly from known_facts. Prefer removing a matching value or list item over deleting "
+            "an entire fact unless the request clearly targets the whole key. Do not invent matches; leave both lists empty "
+            "when uncertain."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "remove_keys": {"type": "array", "items": {"type": "string"}},
+                "remove_values": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["remove_keys", "remove_values"],
+            "additionalProperties": False,
+        },
         payload={
             "request": request_text,
             "known_keys": sorted(str(k) for k in facts.keys()),

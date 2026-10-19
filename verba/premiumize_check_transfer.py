@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlsplit
 
-from helpers import redis_blob_client, redis_client
+from helpers import llm_structured_chat, redis_blob_client, redis_client
 from verba_base import ToolVerba
 from verba_diagnostics import combine_diagnosis, diagnose_hash_fields, diagnose_redis_keys, needs_from_diagnosis
 from verba_result import action_failure, action_success
@@ -238,7 +238,40 @@ Use an empty string for unknown fields. Do not invent IDs, URLs, paths, or names
 Request: {query}
 """.strip()
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Interpret one natural-language Premiumize request. Choose the supported action and extract "
+                            "only concrete values present in the request. Never invent IDs, URLs, paths, or names."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add_transfer", "list_transfers", "check_transfer", "list_files", "get_links"],
+                        },
+                        "status_filter": {"type": "string"},
+                        "source": {"type": "string"},
+                        "name_query": {"type": "string"},
+                        "transfer_id": {"type": "string"},
+                        "folder_id": {"type": "string"},
+                        "item_id": {"type": "string"},
+                        "index": {"type": ["integer", "null"]},
+                        "local_torrent_path": {"type": "string"},
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_premiumize_intent",
+            )
             raw = resp.get("message", {}).get("content") if isinstance(resp, dict) else getattr(resp, "content", resp)
             data = self._json_object_from_text(str(raw or ""))
             if not isinstance(data, dict):
@@ -2041,7 +2074,7 @@ Request: {query}
 class PremiumizeCheckTransferPlugin(PremiumizeBasePlugin):
     name = "premiumize_check_transfer"
     verba_name = "Premiumize Check Transfer"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
     pretty_name = "Premiumize Check Transfer"
     settings_category = "Premiumize"

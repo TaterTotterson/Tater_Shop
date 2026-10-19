@@ -24,6 +24,7 @@ from verba_base import ToolVerba
 from verba_kernel import verba_supports_platform
 from helpers import (
     get_llm_client_from_env,
+    llm_structured_chat,
     redis_client,
 )
 try:
@@ -60,7 +61,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -1101,11 +1102,23 @@ async def _ai_tasks_llm_clean_output_text(text: str, llm_client: Any) -> str:
         "Return strict JSON only: {\"clean_text\":\"...\"}\n"
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": base},
             ],
+            native_system_prompt=(
+                "Clean a scheduled-task response by removing process commentary and meta-prefaces. "
+                "Keep only the final user-facing deliverable."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"clean_text": {"type": "string"}},
+                "required": ["clean_text"],
+                "additionalProperties": False,
+            },
+            function_name="submit_clean_scheduled_output",
             temperature=0.0,
             max_tokens=220,
             timeout_ms=15_000,
@@ -2034,11 +2047,23 @@ async def _ai_tasks_llm_auto_title(
         "Return only JSON."
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            native_system_prompt=(
+                "Generate a short, neutral scheduled-task title. Keep it concise and descriptive, "
+                "focus on the action, omit schedule wording, and obey the supplied word and character limits."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+            function_name="submit_scheduled_task_title",
             temperature=0.0,
             max_tokens=80,
             timeout_ms=15_000,
@@ -3056,11 +3081,31 @@ async def _ai_tasks_kernel_parse_schedule_with_llm(
         "Return only the JSON object."
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            native_system_prompt=(
+                "Parse the current-turn request into one local-time scheduler definition. Treat the supplied "
+                "request text and current timestamp as authoritative, resolve relative times from that timestamp, "
+                "and use Python weekday indexes. Report an error when the schedule is ambiguous or impossible."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["one_time_local_datetime", "daily_local_time", "weekly_local_time", "monthly_local_time", "cron_simple"]},
+                    "one_time": {"type": "object", "properties": {"run_at_ts": {"type": "number"}}, "required": ["run_at_ts"]},
+                    "daily": {"type": "object", "properties": {"hour": {"type": "integer"}, "minute": {"type": "integer"}, "second": {"type": "integer"}}},
+                    "weekly": {"type": "object", "properties": {"hour": {"type": "integer"}, "minute": {"type": "integer"}, "second": {"type": "integer"}, "weekdays": {"type": "array", "items": {"type": "integer"}}}},
+                    "monthly": {"type": "object", "properties": {"hour": {"type": "integer"}, "minute": {"type": "integer"}, "second": {"type": "integer"}, "monthdays": {"type": "array", "items": {"type": "integer"}}}},
+                    "cron": {"type": "object", "properties": {"hours": {"type": "array", "items": {"type": "integer"}}, "minutes": {"type": "array", "items": {"type": "integer"}}, "seconds": {"type": "array", "items": {"type": "integer"}}, "weekdays": {"type": "array", "items": {"type": "integer"}}, "cron": {"type": "string"}}},
+                    "error": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            function_name="submit_schedule_definition",
             temperature=0.0,
             max_tokens=320,
             timeout_ms=20_000,
@@ -3101,11 +3146,27 @@ async def _ai_tasks_kernel_refine_task_prompt(task_prompt: str, request_text: st
         "Return execution-only task text."
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            native_system_prompt=(
+                "Rewrite scheduled task content into execution-only text. Remove scheduling and assistant-addressing "
+                "phrases. Detect reminder intent and isolate the reminder text without schedule wording."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "task_prompt": {"type": "string"},
+                    "reminder_intent": {"type": "boolean"},
+                    "reminder_text": {"type": "string"},
+                },
+                "required": ["task_prompt", "reminder_intent", "reminder_text"],
+                "additionalProperties": False,
+            },
+            function_name="submit_execution_task_prompt",
             temperature=0.0,
             max_tokens=180,
             timeout_ms=20_000,
@@ -3141,11 +3202,23 @@ async def _ai_tasks_kernel_extract_target_hint(raw_text: Any, llm_client: Any) -
         "Preserve the exact token if present (examples: #general, !room:id, @bot, device_service name).\n"
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
             ],
+            native_system_prompt=(
+                "Extract the single explicit destination, channel, room, chat, or service hint. Preserve the exact "
+                "token and use an empty value when no explicit destination exists."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"target_hint": {"type": "string"}},
+                "required": ["target_hint"],
+                "additionalProperties": False,
+            },
+            function_name="submit_destination_hint",
             temperature=0.0,
             max_tokens=100,
             timeout_ms=15_000,

@@ -14,10 +14,10 @@ from html import escape as html_escape
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote
 
-from helpers import extract_json, redis_client
+from helpers import extract_json, llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "AI-interpreted weather orchestration across local sensors, configured providers, forecasts, and named-place lookups."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -5392,11 +5392,38 @@ async def _hydra_ai_normalize_environment_args(
         "tomorrow, or later. Output JSON only."
     )
     try:
-        response = await llm_client.chat(
+        response = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
+            native_system_prompt=(
+                "Interpret the environment or weather request without answering it. Preserve explicit arguments, "
+                "match real context names, never invent a named place, and resolve relative dates using today. "
+                "Treat home/here/local as local outdoor context and rooms, areas, or sensors as local areas."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "request_type": {"type": "string", "enum": ["current", "forecast"]},
+                    "measurement": {"type": "string", "enum": ["general", "condition", "temperature", "humidity", "wind", "rain", "snow", "pressure", "solar", "air_quality", "lightning", "pollen", "alerts", "battery", "system", "other"]},
+                    "location_scope": {"type": "string", "enum": ["local_outdoor", "local_area", "named_place"]},
+                    "location": {"type": ["string", "null"]},
+                    "area": {"type": ["string", "null"]},
+                    "sensor": {"type": ["string", "null"]},
+                    "provider": {"type": ["string", "null"]},
+                    "date": {"type": ["string", "null"]},
+                    "day": {"type": ["string", "null"]},
+                    "days": {"type": "integer"},
+                    "hours": {"type": "integer"},
+                    "units": {"type": ["string", "null"]},
+                    "temperature_focus": {"type": ["string", "null"]},
+                },
+                "required": ["request_type", "measurement", "location_scope", "location", "area", "sensor", "provider", "date", "day", "days", "hours", "units", "temperature_focus"],
+                "additionalProperties": False,
+            },
+            function_name="submit_environment_request",
             temperature=0.0,
             max_tokens=280,
             timeout_ms=25_000,

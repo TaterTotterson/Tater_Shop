@@ -41,7 +41,11 @@ def _load_module(module_name: str):
     verba_result.action_failure = _action_failure
     verba_result.research_success = _research_success
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.redis_client = types.SimpleNamespace(hgetall=lambda _key: {})
+    helpers.llm_structured_chat = llm_structured_chat
 
     path = VERBA_DIR / f"{module_name}.py"
     spec = importlib.util.spec_from_file_location(f"{module_name}_test_module", path)

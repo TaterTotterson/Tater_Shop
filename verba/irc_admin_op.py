@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Any, Dict, Set
 
-from helpers import extract_json, redis_client
+from helpers import extract_json, llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -45,7 +45,7 @@ class IrcAdminOpPlugin(ToolVerba):
     name = "irc_admin_op"
     verba_name = "IRC Admin OP"
     pretty_name = "IRC Admin OP"
-    version = "1.3.3"
+    version = "1.3.4"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc", "meshtastic"]
@@ -89,11 +89,23 @@ class IrcAdminOpPlugin(ToolVerba):
             "- No prose. JSON only."
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": str(text)},
                 ],
+                native_system_prompt=(
+                    "Classify the supplied IRC admin request as op for operator or +o privileges, voice for voice or +v "
+                    "privileges, or unknown when it is ambiguous, mixed, or unrelated."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {"action": {"type": "string", "enum": ["op", "voice", "unknown"]}},
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+                function_name="classify_irc_admin_action",
                 max_tokens=60,
                 temperature=0.0,
             )

@@ -30,7 +30,11 @@ def _load_module():
     verba_result.action_success = _action_success
     verba_result.action_failure = _action_failure
     helpers = types.ModuleType("helpers")
+    async def llm_structured_chat(client, *, messages, **kwargs):
+        return await client.chat(messages=messages, **kwargs)
+
     helpers.extract_json = lambda value: value
+    helpers.llm_structured_chat = llm_structured_chat
     helpers.redis_client = SimpleNamespace(hgetall=lambda _key: {})
 
     spec = importlib.util.spec_from_file_location("irc_admin_op_test_module", MODULE_PATH)

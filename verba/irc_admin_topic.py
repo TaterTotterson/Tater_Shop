@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Any, Dict, Set
 
-from helpers import extract_json, redis_client
+from helpers import extract_json, llm_structured_chat, redis_client
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -45,7 +45,7 @@ class IrcAdminTopicPlugin(ToolVerba):
     name = "irc_admin_topic"
     verba_name = "IRC Admin Topic"
     pretty_name = "IRC Admin Topic"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     tags = ["irc", "admin"]
     platforms = ["irc", "meshtastic"]
@@ -90,11 +90,24 @@ class IrcAdminTopicPlugin(ToolVerba):
             "- No prose. JSON only.\n"
         )
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
+                native_system_prompt=(
+                    "Extract only the desired final IRC channel topic from the supplied request. Remove command wrappers "
+                    "such as 'set topic to', preserve the topic's wording and casing, and use an empty string when no clear "
+                    "topic is present."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {"topic": {"type": "string"}},
+                    "required": ["topic"],
+                    "additionalProperties": False,
+                },
+                function_name="extract_irc_topic",
                 max_tokens=120,
                 temperature=0.0,
             )

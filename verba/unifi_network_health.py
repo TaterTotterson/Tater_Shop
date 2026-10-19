@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 from verba_base import ToolVerba
-from helpers import redis_client, get_tater_name, get_tater_personality
+from helpers import get_tater_name, get_tater_personality, llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 from verba_result import action_failure, action_success
 
@@ -84,7 +84,7 @@ class UnifiNetworkHealthPlugin(ToolVerba):
 
     name = "unifi_network_health"
     verba_name = "UniFi Network Health"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     pretty_name = "UniFi Network Health"
     tags = ["unifi", "health"]
@@ -421,7 +421,32 @@ class UnifiNetworkHealthPlugin(ToolVerba):
             f'User request: "{text}"\n'
         )
         try:
-            resp = await llm_client.chat(messages=[{"role": "system", "content": prompt}])
+            resp = await llm_structured_chat(
+                llm_client,
+                messages=[{"role": "system", "content": prompt}],
+                native_messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose the best UniFi Network intent. Distinguish client lists and counts, UniFi device lists "
+                            "and counts, overall network or WAN health, and lookup of one named client or device. Include a "
+                            "target only for a lookup and identify whether it is a client, device, or unknown kind."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "intent": {"type": "string", "enum": [*sorted(self._INTENT_VALUES), ""]},
+                        "target": {"type": "string"},
+                        "target_kind": {"type": "string", "enum": ["any", "client", "device"]},
+                    },
+                    "required": ["intent", "target", "target_kind"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_unifi_network_intent",
+            )
             raw = ((resp or {}).get("message") or {}).get("content", "")
             data = self._json_object_from_text(str(raw or ""))
             intent_name = self._normalize_intent(data.get("intent"))
