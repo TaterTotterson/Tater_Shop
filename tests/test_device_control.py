@@ -5,6 +5,7 @@ import json
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,9 +134,9 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
                 self.assertEqual(
                     row["version"],
                     {
-                        "device_control": "1.0.7",
-                        "temperature_status": "1.0.4",
-                    }.get(verba_id, "1.0.2"),
+                        "device_control": "1.0.8",
+                        "temperature_status": "1.0.5",
+                    }.get(verba_id, "1.0.3"),
                 )
                 self.assertEqual(row["min_tater_version"], "98.4")
                 self.assertEqual(len(row["sha256"]), 64)
@@ -163,7 +164,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.7")
+        self.assertEqual(plugin.version, "1.0.8")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)
@@ -352,6 +353,77 @@ class UnifiedDeviceSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent["action"], "turn_on")
         self.assertEqual(selected, [])
         self.assertTrue(any("could not confidently match" in item.lower() for item in needs))
+
+    async def test_washer_remaining_time_selects_linked_property_and_formats_countdown(self) -> None:
+        finish_at = datetime.now(timezone.utc) + timedelta(minutes=90)
+        washer_status = {
+            "integration_id": "homeassistant",
+            "id": "sensor.washer_current_status",
+            "name": "Washer Current status",
+            "aliases": ["Laundry Washer"],
+            "room": "Laundry Room",
+            "state": "Rinsing",
+            "capabilities": ["sensor", "appliance", "washer", "current_status"],
+            "details": {
+                "parent_device_name": "Laundry Washer",
+                "homeassistant_device_id": "washer-device-1",
+                "entity_property": "current_status",
+            },
+        }
+        washer_remaining = {
+            "integration_id": "homeassistant",
+            "id": "sensor.washer_remaining_time",
+            "name": "Washer Remaining time",
+            "aliases": ["Laundry Washer"],
+            "room": "Laundry Room",
+            "state": finish_at.isoformat(),
+            "capabilities": ["sensor", "appliance", "washer", "remaining_time"],
+            "details": {
+                "parent_device_name": "Laundry Washer",
+                "homeassistant_device_id": "washer-device-1",
+                "entity_property": "remaining_time",
+                "device_class": "timestamp",
+            },
+        }
+        query = "How much time is left on the washer?"
+
+        intent = await self.plugin._interpret_query({}, query, None)
+        selected, needs = await self.plugin._select_devices(
+            devices=[washer_status, washer_remaining],
+            payload={},
+            query=query,
+            intent=intent,
+            llm_client=None,
+        )
+
+        self.assertEqual(intent["action"], "status")
+        self.assertEqual(intent["target"], "washer")
+        self.assertEqual(intent["requested_property"], "remaining_time")
+        self.assertEqual([row["id"] for row in selected], ["sensor.washer_remaining_time"])
+        self.assertEqual(needs, [])
+        self.assertEqual(
+            self.plugin._status_summary(selected, intent),
+            "Laundry Washer has about 1 hour and 30 minutes remaining.",
+        )
+
+    def test_duration_sensor_units_are_converted_without_provider_specific_logic(self) -> None:
+        dryer = {
+            "id": "sensor.dryer_remaining_duration",
+            "name": "Dryer Remaining duration",
+            "state": "1200",
+            "capabilities": ["appliance", "dryer", "remaining_time"],
+            "details": {
+                "parent_device_name": "Dryer",
+                "entity_property": "remaining_time",
+                "device_class": "duration",
+                "unit_of_measurement": "s",
+            },
+        }
+
+        self.assertEqual(
+            self.plugin._status_summary([dryer], {"requested_property": "remaining_time"}),
+            "Dryer has about 20 minutes remaining.",
+        )
 
     async def test_ai_selects_every_non_exact_device_match(self) -> None:
         class PickingLlm:

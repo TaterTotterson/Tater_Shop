@@ -3,6 +3,7 @@
 """Build-time source for the runtime embedded in standalone device Verbas."""
 
 import base64
+from datetime import datetime, timezone
 import json
 import logging
 import mimetypes
@@ -40,6 +41,10 @@ _DEVICE_CATEGORY_QUERY_TERMS: Dict[str, Tuple[str, ...]] = {
     "remote": ("remote", "remotes"),
     "scene": ("scene", "scenes"),
     "script": ("script", "scripts"),
+    "appliance": ("appliance", "appliances"),
+    "washer": ("washer", "washers", "washing machine", "washing machines"),
+    "dryer": ("dryer", "dryers", "tumble dryer", "tumble dryers"),
+    "dishwasher": ("dishwasher", "dishwashers", "dish washer", "dish washers"),
 }
 _COLOR_NAMES = {
     "red",
@@ -314,6 +319,57 @@ class _DeviceVerbaRuntime(ToolVerba):
                 out.append(category_id)
         return out
 
+    def _normalize_requested_property(self, value: Any) -> str:
+        token = re.sub(r"[^a-z0-9]+", "_", self._text(value).lower()).strip("_")
+        aliases = {
+            "remaining": "remaining_time",
+            "time_left": "remaining_time",
+            "time_remaining": "remaining_time",
+            "completion_time": "remaining_time",
+            "finish_time": "remaining_time",
+            "status": "current_status",
+            "state": "current_status",
+            "cycle_state": "current_status",
+            "cycle_status": "current_status",
+            "percent_complete": "progress",
+            "percentage_complete": "progress",
+        }
+        token = aliases.get(token, token)
+        return token if token in {"remaining_time", "current_status", "progress", "cycle"} else ""
+
+    def _requested_property_from_query(self, query: Any) -> str:
+        text = re.sub(r"[^a-z0-9]+", " ", self._text(query).lower()).strip()
+        if (
+            re.search(r"\b(time|minutes?|hours?)\b.*\b(left|remaining)\b", text)
+            or re.search(r"\b(left|remaining)\b.*\b(time|minutes?|hours?)\b", text)
+            or re.search(r"\bhow long\b.*\b(until|before|left|remain|done|finish(?:ed)?)\b", text)
+            or re.search(r"\b(completion|finish|end) time\b", text)
+        ):
+            return "remaining_time"
+        if re.search(r"\b(current|cycle|machine|operation) (status|state)\b", text):
+            return "current_status"
+        if re.search(r"\b(progress|percent complete|percentage complete)\b", text):
+            return "progress"
+        if re.search(r"\bwhich cycle\b|\bcycle name\b", text):
+            return "cycle"
+        return ""
+
+    def _strip_requested_property(self, query: Any, requested_property: str) -> str:
+        text = self._text(query)
+        if requested_property == "remaining_time":
+            text = re.sub(r"\bhow (?:much|long)\b", " ", text, flags=re.I)
+            text = re.sub(r"\b(?:time|minutes?|hours?)\s+(?:is\s+)?(?:left|remaining)\b", " ", text, flags=re.I)
+            text = re.sub(r"\b(?:left|remaining)\s+(?:time|minutes?|hours?)\b", " ", text, flags=re.I)
+            text = re.sub(r"\b(?:completion|finish|end) time\b", " ", text, flags=re.I)
+            text = re.sub(r"\b(?:until|before)\s+(?:it\s+is\s+)?(?:done|finished|complete)\b", " ", text, flags=re.I)
+        elif requested_property == "current_status":
+            text = re.sub(r"\b(?:current|cycle|machine|operation) (?:status|state)\b", " ", text, flags=re.I)
+        elif requested_property == "progress":
+            text = re.sub(r"\b(?:progress|percent complete|percentage complete)\b", " ", text, flags=re.I)
+        elif requested_property == "cycle":
+            text = re.sub(r"\b(?:which cycle|cycle name)\b", " ", text, flags=re.I)
+        return text
+
     def _temperature_from_text(self, text: Any) -> Optional[float]:
         raw = self._text(text).lower()
         match = re.search(r"\b(\d{2,3}(?:\.\d+)?)\s*(?:degrees?|deg|f|c)?\b", raw)
@@ -528,6 +584,9 @@ class _DeviceVerbaRuntime(ToolVerba):
         source_url = self._text(payload.get("source_url") or payload.get("url") or payload.get("media_url")) or self._url_from_text(query)
         command = self._text(payload.get("command") or payload.get("button"))
         requested_categories = self._requested_categories(query)
+        requested_property = self._normalize_requested_property(
+            payload.get("property") or payload.get("requested_property") or payload.get("attribute")
+        ) or self._requested_property_from_query(query)
 
         if position is None and action == "set_position":
             position = self._percent_from_text(query)
@@ -550,7 +609,7 @@ class _DeviceVerbaRuntime(ToolVerba):
             system = (
                 f"Interpret one {self.category_label} request across multiple home integrations.\n"
                 "Return STRICT JSON only with keys: action, target, position, volume, percentage, brightness_pct, "
-                "color_name, rgb_color, temperature, hvac_mode, source_url, command.\n"
+                "color_name, rgb_color, temperature, hvac_mode, source_url, command, requested_property.\n"
                 f"Allowed action values: {', '.join(sorted(self.allowed_actions))}, or empty string.\n"
                 "Rules:\n"
                 "- target is the named room or specific device, without action words.\n"
@@ -560,6 +619,8 @@ class _DeviceVerbaRuntime(ToolVerba):
                 "- temperature is a number or null.\n"
                 "- source_url is a URL or empty string.\n"
                 "- command is a remote/button command such as mute, volume_up, home, back, select, play, or pause.\n"
+                "- requested_property is remaining_time, current_status, progress, cycle, or empty string. Use it only "
+                "when the user asks for that specific reading rather than a general device status.\n"
             )
             ai = await self._llm_json(
                 llm_client=llm_client,
@@ -569,7 +630,8 @@ class _DeviceVerbaRuntime(ToolVerba):
                     "extract the named room or device without action words; and extract only values explicitly requested. "
                     "List or status requests may omit a target. Percent-like values must be from 0 to 100, rgb_color must "
                     "contain three color channels, source_url must be a supplied URL, and command should be the requested "
-                    "remote or button action."
+                    "remote or button action. Set requested_property only for a specific remaining-time, current-status, "
+                    "progress, or cycle reading."
                 ),
                 schema={
                     "type": "object",
@@ -591,8 +653,12 @@ class _DeviceVerbaRuntime(ToolVerba):
                         "hvac_mode": {"type": "string"},
                         "source_url": {"type": "string"},
                         "command": {"type": "string"},
+                        "requested_property": {
+                            "type": "string",
+                            "enum": ["remaining_time", "current_status", "progress", "cycle", ""],
+                        },
                     },
-                    "required": ["action", "target", "position", "volume", "percentage", "brightness_pct", "color_name", "rgb_color", "temperature", "hvac_mode", "source_url", "command"],
+                    "required": ["action", "target", "position", "volume", "percentage", "brightness_pct", "color_name", "rgb_color", "temperature", "hvac_mode", "source_url", "command", "requested_property"],
                     "additionalProperties": False,
                 },
                 function_name="submit_device_intent",
@@ -622,6 +688,8 @@ class _DeviceVerbaRuntime(ToolVerba):
                     source_url = self._text(ai.get("source_url"))
                 if not command:
                     command = self._text(ai.get("command"))
+                if not requested_property:
+                    requested_property = self._normalize_requested_property(ai.get("requested_property"))
 
         # Preserve explicit dimming requests even when the wording also says
         # "turn on". Some integrations intentionally ignore brightness on a
@@ -630,7 +698,7 @@ class _DeviceVerbaRuntime(ToolVerba):
             action = "set_brightness"
 
         if not target:
-            target_query = query
+            target_query = self._strip_requested_property(query, requested_property)
             if action == "set_color":
                 for color in sorted(_COLOR_NAMES, key=len, reverse=True):
                     target_query = re.sub(rf"\b{re.escape(color)}\b", " ", target_query, flags=re.I)
@@ -649,6 +717,7 @@ class _DeviceVerbaRuntime(ToolVerba):
             "source_url": source_url,
             "command": command,
             "requested_categories": requested_categories,
+            "requested_property": requested_property,
         }
 
     def _remote_command_from_text(self, text: Any) -> str:
@@ -700,6 +769,34 @@ class _DeviceVerbaRuntime(ToolVerba):
                 if token:
                     out.add(token)
         return out
+
+    def _device_property(self, device: dict) -> str:
+        details = device.get("details") if isinstance(device.get("details"), dict) else {}
+        for value in (
+            device.get("property"),
+            device.get("attribute"),
+            details.get("entity_property"),
+            details.get("property"),
+            details.get("attribute"),
+        ):
+            normalized = self._normalize_requested_property(value)
+            if normalized:
+                return normalized
+        caps = self._device_caps(device)
+        for candidate in ("remaining_time", "current_status", "progress", "cycle"):
+            if candidate in caps:
+                return candidate
+        return self._requested_property_from_query(
+            " ".join(
+                self._text(value)
+                for value in (device.get("id"), device.get("name"), details.get("entity_original_name"))
+                if self._text(value)
+            )
+        )
+
+    def _device_matches_requested_property(self, device: dict, requested_property: str) -> bool:
+        wanted = self._normalize_requested_property(requested_property)
+        return not wanted or self._device_property(device) == wanted
 
     def _action_supported(self, device: dict, action: str) -> bool:
         if action in {"list", "status"}:
@@ -778,6 +875,8 @@ class _DeviceVerbaRuntime(ToolVerba):
             details.get("friendly_name"),
             details.get("alias"),
             details.get("alternate_names"),
+            details.get("parent_device_name"),
+            details.get("appliance_name"),
         ):
             add(value)
         return values
@@ -796,6 +895,11 @@ class _DeviceVerbaRuntime(ToolVerba):
             details.get("friendly_name"),
             details.get("alias"),
             details.get("device_id"),
+            details.get("homeassistant_device_id"),
+            details.get("parent_device_name"),
+            details.get("appliance_name"),
+            details.get("entity_property"),
+            details.get("appliance_type"),
             details.get("model"),
             details.get("host"),
             details.get("ip"),
@@ -900,7 +1004,8 @@ class _DeviceVerbaRuntime(ToolVerba):
                 "integration": row.get("integration_name") or row.get("integration_id"),
                 "state": row.get("state") or row.get("status"),
                 "actions": row.get("actions") or [],
-                "capabilities": row.get("category_ids") or row.get("capabilities") or [],
+                "capabilities": sorted(self._device_caps(row)),
+                "property": self._device_property(row),
                 "aliases": self._device_alias_values(row),
             }
             for row in shortlist
@@ -948,6 +1053,20 @@ class _DeviceVerbaRuntime(ToolVerba):
                     return [device], []
             return [], [f"No {self.singular_label} matched id {explicit_id}."]
 
+        requested_property = self._normalize_requested_property(intent.get("requested_property"))
+        if requested_property:
+            property_candidates = [
+                device
+                for device in candidates
+                if self._device_matches_requested_property(device, requested_property)
+            ]
+            if not property_candidates:
+                readable_property = requested_property.replace("_", " ")
+                return [], [
+                    f"No matching {self.singular_label} exposes {readable_property}."
+                ]
+            candidates = property_candidates
+
         target = self._text(intent.get("target")) or self._clean_target(query)
         if not target:
             if action == "status":
@@ -972,6 +1091,14 @@ class _DeviceVerbaRuntime(ToolVerba):
         ]
         if len(exact_matches) == 1:
             return exact_matches, []
+
+        if (
+            requested_property
+            and len(candidates) == 1
+            and self._score_device(target, candidates[0], requested_categories) > 0
+            and self._device_matches_requested_categories(candidates[0], requested_categories)
+        ):
+            return candidates, []
 
         room_matches = self._room_matches(target, candidates, requested_categories)
         if room_matches:
@@ -1027,9 +1154,96 @@ class _DeviceVerbaRuntime(ToolVerba):
         suffix = f", and {len(by_room) - 8} more rooms" if len(by_room) > 8 else ""
         return f"Found {len(devices)} {self.category_label}: {rooms}{suffix}."
 
-    def _status_summary(self, devices: List[dict]) -> str:
+    def _device_reading_label(self, device: dict) -> str:
+        details = device.get("details") if isinstance(device.get("details"), dict) else {}
+        label = self._text(details.get("parent_device_name") or details.get("appliance_name"))
+        if label:
+            return label
+        appliance_type = self._text(details.get("appliance_type"))
+        if appliance_type:
+            return appliance_type.replace("_", " ").title()
+        label = self._text(device.get("name")) or self.singular_label.title()
+        label = re.sub(
+            r"\s+(?:remaining time|time remaining|time left|completion time|finish time|current status|current state|cycle status|cycle state|progress)$",
+            "",
+            label,
+            flags=re.I,
+        ).strip()
+        return label or self.singular_label.title()
+
+    def _duration_seconds_from_state(self, state: Any, details: dict) -> Optional[float]:
+        raw = self._text(state)
+        if not raw or raw.lower() in {"unknown", "unavailable", "none", "null"}:
+            return None
+
+        timestamp = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            target = datetime.fromisoformat(timestamp)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            return (target.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            pass
+
+        clock_match = re.fullmatch(r"(\d+):(\d{1,2})(?::(\d{1,2}))?", raw)
+        if clock_match:
+            first = int(clock_match.group(1))
+            second = int(clock_match.group(2))
+            third = int(clock_match.group(3) or 0)
+            if clock_match.group(3) is None:
+                return float(first * 60 + second)
+            return float(first * 3600 + second * 60 + third)
+
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        unit = self._text(details.get("unit_of_measurement")).lower()
+        if unit in {"s", "sec", "secs", "second", "seconds"}:
+            return value
+        if unit in {"h", "hr", "hrs", "hour", "hours"}:
+            return value * 3600
+        return value * 60
+
+    def _format_duration(self, seconds: float) -> str:
+        if seconds <= 0:
+            return "no time"
+        total_minutes = max(1, int(round(seconds / 60.0)))
+        hours, minutes = divmod(total_minutes, 60)
+        if hours and minutes:
+            return f"{hours} hour{'s' if hours != 1 else ''} and {minutes} minute{'s' if minutes != 1 else ''}"
+        if hours:
+            return f"{hours} hour{'s' if hours != 1 else ''}"
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+    def _remaining_time_summary(self, device: dict) -> str:
+        details = device.get("details") if isinstance(device.get("details"), dict) else {}
+        label = self._device_reading_label(device)
+        state = self._text(device.get("state") or device.get("status"))
+        seconds = self._duration_seconds_from_state(state, details)
+        if seconds is None:
+            if not state or state.lower() in {"unknown", "unavailable", "none", "null"}:
+                return f"{label}'s remaining time is unavailable."
+            return f"{label} reports {state} remaining."
+        if seconds <= 0:
+            return f"{label} shows no time remaining."
+        return f"{label} has about {self._format_duration(seconds)} remaining."
+
+    def _status_summary(self, devices: List[dict], intent: Optional[dict] = None) -> str:
         if len(devices) == 1:
             device = devices[0]
+            requested_property = self._normalize_requested_property((intent or {}).get("requested_property"))
+            device_property = self._device_property(device)
+            if requested_property == "remaining_time" or device_property == "remaining_time":
+                return self._remaining_time_summary(device)
+            if requested_property in {"current_status", "progress", "cycle"} or device_property in {
+                "current_status",
+                "progress",
+                "cycle",
+            }:
+                label = self._device_reading_label(device)
+                state = self._text(device.get("state") or device.get("status")) or "unknown"
+                return f"{label} is {state}."
             name = self._text(device.get("name")) or self.singular_label.title()
             state = self._text(device.get("state") or device.get("status")) or "unknown"
             room = self._text(device.get("room") or device.get("area"))
@@ -1356,8 +1570,13 @@ class _DeviceVerbaRuntime(ToolVerba):
             return action_success(
                 facts={"action": "status", "category": self.category_id, "device_count": len(selected)},
                 data={"devices": selected, "intent": intent},
-                summary_for_user=self._status_summary(selected),
-                say_hint=f"Report the {self.category_label} status briefly.",
+                summary_for_user=self._status_summary(selected, intent),
+                say_hint=(
+                    "Report the requested device reading briefly. Preserve the supplied relative duration instead of "
+                    "reading an ISO timestamp aloud."
+                    if self._text(intent.get("requested_property"))
+                    else f"Report the {self.category_label} status briefly."
+                ),
             )
 
         action_payload = self._action_payload(intent, payload)
@@ -1491,6 +1710,7 @@ class NetworkDeviceStatusPlugin(_DeviceVerbaRuntime):
     name = "network_device_status"
     verba_name = "Network Device Status"
     pretty_name = "Network Device Status"
+    version = "1.0.3"
     description = "Check network devices, clients, access points, and hosts across integrations."
     verba_dec = "Read network device status from UniFi Network and any integration that exposes network devices."
     tags = ["network", "client", "device", "integration"]
