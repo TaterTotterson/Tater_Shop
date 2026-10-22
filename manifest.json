@@ -381,6 +381,26 @@
       "sha256": "0b16a28a491662a819f29ecd6e62aedf77ab61a4983310a0a934992d58d8d8ae"
     },
     {
+      "id": "discord_user_profile",
+      "name": "Discord User Profile",
+      "version": "1.0.0",
+      "min_tater_version": "198",
+      "description": "Use when a Discord user asks for a brief, evidence-based behavioral profile of one member from that member's messages in the current channel.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": "Discord User Profile",
+      "tags": [
+        "discord",
+        "profile",
+        "history",
+        "behavioral-brief"
+      ],
+      "entry": "verba/discord_user_profile.py",
+      "sha256": "0d845f79daec303eb8f90607a79806f730dd4bf6b319f2bfd5f2c8622f514349"
+    },
+    {
       "id": "energy_status",
       "name": "Energy Status",
       "version": "1.0.3",
