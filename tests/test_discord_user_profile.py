@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -323,6 +324,53 @@ class DiscordUserProfileTests(unittest.TestCase):
         self.assertIn("fictional case-brief language is presentation", system_prompts)
         self.assertNotIn("Do not diagnose", system_prompts)
         self.assertNotIn("criminality", system_prompts)
+
+    def test_json_result_wrapper_is_rendered_as_discord_markdown(self):
+        model_payload = json.dumps(
+            {
+                "result": json.dumps(
+                    {
+                        "case_brief": {
+                            "analyst_snapshot": {
+                                "subject": "heapmaster",
+                                "status": "Active / High Engagement",
+                                "summary": "A highly technical participant focused on local automation.",
+                            },
+                            "known_from_messages": {
+                                "recurring_topics": [
+                                    "LLM deployment and optimization",
+                                    "Wake-word testing",
+                                ]
+                            },
+                        }
+                    }
+                )
+            }
+        )
+
+        rendered = self.plugin._normalize_model_text(model_payload)
+
+        self.assertIn("## Case Brief", rendered)
+        self.assertIn("### Analyst Snapshot", rendered)
+        self.assertIn("- **Subject:** heapmaster", rendered)
+        self.assertIn("- LLM deployment and optimization", rendered)
+        self.assertNotIn('{"result"', rendered)
+        self.assertNotIn("\\n", rendered)
+
+    def test_prose_chat_does_not_request_structured_tool_output(self):
+        llm = _CaptureLLM([json.dumps({"case_brief": {"summary": "Readable brief"}})])
+
+        rendered = asyncio.run(
+            self.plugin._chat(
+                llm,
+                [{"role": "user", "content": "Write the brief."}],
+                500,
+            )
+        )
+
+        self.assertIn("## Case Brief", rendered)
+        self.assertIn("Readable brief", rendered)
+        self.assertNotIn("tools", llm.calls[0])
 
 
 if __name__ == "__main__":

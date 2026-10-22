@@ -383,7 +383,7 @@
     {
       "id": "discord_user_profile",
       "name": "Discord User Profile",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "min_tater_version": "198",
       "description": "Use when a Discord user asks for a brief, evidence-based behavioral profile of one member from that member's messages in the current channel.",
       "portals": [
@@ -398,7 +398,7 @@
         "behavioral-brief"
       ],
       "entry": "verba/discord_user_profile.py",
-      "sha256": "0d845f79daec303eb8f90607a79806f730dd4bf6b319f2bfd5f2c8622f514349"
+      "sha256": "4c7a8b3b3f1ed8c56ae9cd4921052cd7dbcd4444aff23d0b7e4b0b355dc3a042"
     },
     {
       "id": "energy_status",

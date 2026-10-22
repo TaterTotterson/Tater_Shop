@@ -20,7 +20,7 @@ class DiscordUserProfileVerba(ToolVerba):
     name = "discord_user_profile"
     verba_name = "Discord User Profile"
     pretty_name = "Building a Discord User Brief"
-    version = "1.0.0"
+    version = "1.0.1"
     min_tater_version = "198"
     platforms = ["discord"]
     tags = ["discord", "profile", "history", "behavioral-brief"]
@@ -620,17 +620,84 @@ class DiscordUserProfileVerba(ToolVerba):
         return chunks
 
     @staticmethod
-    async def _chat(llm_client: Any, messages: List[Dict[str, str]], max_tokens: int) -> str:
+    def _humanize_key(value: Any) -> str:
+        text = re.sub(r"[_-]+", " ", str(value or "")).strip()
+        return " ".join(word.capitalize() for word in text.split())
+
+    @classmethod
+    def _markdown_from_value(cls, value: Any, depth: int = 0) -> str:
+        if isinstance(value, dict):
+            lines: List[str] = []
+            for key, item in value.items():
+                label = cls._humanize_key(key)
+                if isinstance(item, dict):
+                    heading = "#" * min(4, 2 + depth)
+                    lines.append(f"{heading} {label}")
+                    nested = cls._markdown_from_value(item, depth + 1)
+                    if nested:
+                        lines.append(nested)
+                elif isinstance(item, list):
+                    heading = "#" * min(4, 2 + depth)
+                    lines.append(f"{heading} {label}")
+                    for entry in item:
+                        if isinstance(entry, (dict, list)):
+                            nested = cls._markdown_from_value(entry, depth + 1)
+                            if nested:
+                                lines.append(nested)
+                        elif str(entry or "").strip():
+                            lines.append(f"- {str(entry).strip()}")
+                elif item not in (None, ""):
+                    lines.append(f"- **{label}:** {str(item).strip()}")
+            return "\n".join(lines).strip()
+        if isinstance(value, list):
+            return "\n".join(f"- {str(item).strip()}" for item in value if str(item or "").strip())
+        return str(value or "").strip()
+
+    @classmethod
+    def _normalize_model_text(cls, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("```") and text.endswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        parsed: Any = None
         try:
-            response = await llm_structured_chat(
-                llm_client,
+            parsed = json.loads(text)
+        except Exception:
+            return text
+
+        # Some local models wrap their real response as {"result": "<json>"}.
+        # Peel presentation wrappers and parse nested JSON strings before rendering.
+        for _ in range(4):
+            if isinstance(parsed, dict) and len(parsed) == 1:
+                key, inner = next(iter(parsed.items()))
+                if str(key).strip().lower() in {"result", "answer", "content", "text", "message"}:
+                    parsed = inner
+                    continue
+            if isinstance(parsed, str):
+                nested = parsed.strip()
+                try:
+                    parsed = json.loads(nested)
+                    continue
+                except Exception:
+                    return nested
+            break
+        return cls._markdown_from_value(parsed).strip() or text
+
+    @classmethod
+    async def _chat(cls, llm_client: Any, messages: List[Dict[str, str]], max_tokens: int) -> str:
+        try:
+            response = await llm_client.chat(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=0.1,
             )
         except TypeError:
-            response = await llm_structured_chat(llm_client, messages=messages)
-        return str(((response or {}).get("message") or {}).get("content", "") or "").strip()
+            response = await llm_client.chat(messages=messages)
+        content = str(((response or {}).get("message") or {}).get("content", "") or "").strip()
+        return cls._normalize_model_text(content)
 
     async def _profile_records(
         self,
