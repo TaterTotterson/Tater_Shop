@@ -361,6 +361,26 @@
       "sha256": "7b6add6edc98128335f793dc17263b989645f612de3a98d10a4120e0d825b915"
     },
     {
+      "id": "discord_chat_summary",
+      "name": "Discord Chat Summary",
+      "version": "1.0.0",
+      "min_tater_version": "198",
+      "description": "Use when a Discord user asks for a detailed summary of the current channel over a time frame, optionally limited to one or more mentioned or replied-to people.",
+      "portals": [
+        "discord"
+      ],
+      "notifier": false,
+      "settings_category": "Discord Chat Summary",
+      "tags": [
+        "discord",
+        "chat",
+        "history",
+        "summary"
+      ],
+      "entry": "verba/discord_chat_summary.py",
+      "sha256": "0b16a28a491662a819f29ecd6e62aedf77ab61a4983310a0a934992d58d8d8ae"
+    },
+    {
       "id": "energy_status",
       "name": "Energy Status",
       "version": "1.0.3",
