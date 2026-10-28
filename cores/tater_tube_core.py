@@ -23,12 +23,13 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.4.4"
-MIN_TATER_VERSION = "59"
+__version__ = "1.5.0"
+MIN_TATER_VERSION = "98.4"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
     "catalog, explain each pick and the group as a whole, create a separate global "
-    "Main Menu Message from cross-module activity, and voice both with the user's TTS settings."
+    "Main Menu Message from cross-module activity, voice both with the user's TTS settings, "
+    "and play the server's video library on compatible Tater screen satellites."
 )
 TAGS = ["tater-tube", "media", "games", "music", "recommendations", "context", "tts"]
 
@@ -1228,6 +1229,170 @@ def run_core_system_task(*, task_id: str, redis_client=None, **_kwargs) -> Dict[
             loop.close()
         return {"ok": True, "recommendation_count": len(recommendations.get("items") or [])}
     raise KeyError(f"Unknown Tater Tube Core task: {task_id}")
+
+
+def _video_context_selector(origin: Any) -> str:
+    values = origin if isinstance(origin, dict) else {}
+    nested = values.get("origin") if isinstance(values.get("origin"), dict) else {}
+    for key in ("satellite_selector", "selector", "device_id"):
+        value = _text(values.get(key) or nested.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _video_target(args: Dict[str, Any], origin: Any) -> str:
+    for key in ("target", "room", "satellite", "device", "location"):
+        value = _text(args.get(key))
+        if value:
+            return value
+    return _video_context_selector(origin)
+
+
+async def _tater_tube_video_event(selector: str, event: str, session: Dict[str, Any]) -> None:
+    provider_data = session.get("provider_data") if isinstance(session.get("provider_data"), dict) else {}
+    playback_id = _text(provider_data.get("playback_id"))
+    if not playback_id:
+        return
+    await asyncio.to_thread(
+        _api_request,
+        "POST",
+        "tater/core/playback/state",
+        settings=_settings(),
+        payload={
+            "playback_id": playback_id,
+            "state": _text(event) or _text(session.get("state")) or "progress",
+            "position_ms": _as_int(session.get("position_ms"), 0, 0, 2_147_483_647),
+            "duration_ms": _as_int(session.get("duration_ms"), 0, 0, 2_147_483_647),
+        },
+        timeout=15,
+    )
+
+
+def _register_video_provider() -> Any:
+    from tater_voice import display_video
+
+    display_video.register_provider_handler("tater_tube", _tater_tube_video_event)
+    return display_video
+
+
+def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": "tater_tube_play",
+            "description": (
+                "Search the paired Tater Tube Server and play a movie or series on a connected "
+                "screen-equipped Tater satellite. Use the speaking satellite when target is empty."
+            ),
+            "usage": (
+                '{"function":"tater_tube_play","arguments":{"query":"movie or series title",'
+                '"target":"optional room or satellite"}}'
+            ),
+        },
+        {
+            "id": "tater_tube_video_control",
+            "description": "Pause, resume, or stop Tater Tube video on a Tater screen satellite.",
+            "usage": (
+                '{"function":"tater_tube_video_control","arguments":'
+                '{"action":"pause|resume|stop","target":"optional room or satellite"}}'
+            ),
+        },
+    ]
+
+
+async def run_hydra_kernel_tool(
+    *,
+    tool_id: str,
+    args: Optional[Dict[str, Any]] = None,
+    origin: Optional[Dict[str, Any]] = None,
+    redis_client: Any = None,
+    **_kwargs,
+) -> Optional[Dict[str, Any]]:
+    if tool_id not in {"tater_tube_play", "tater_tube_video_control"}:
+        return None
+    values = args if isinstance(args, dict) else {}
+    store = redis_client or globals().get("redis_client")
+    cfg = _settings(store)
+    if not _paired(cfg):
+        return {
+            "ok": False,
+            "error": {"code": "tater_tube_not_paired", "message": "Pair Tater Tube Core with a server first."},
+            "say_hint": "Explain that Tater Tube Core must be paired before playing video.",
+        }
+    try:
+        display_video = _register_video_provider()
+        requested_target = _video_target(values, origin)
+        selector = display_video.resolve_target(
+            requested_target,
+            current_selector=_video_context_selector(origin),
+        )
+        if tool_id == "tater_tube_video_control":
+            action = _text(values.get("action")).lower()
+            if action not in {"pause", "resume", "stop"}:
+                raise ValueError("Video control action must be pause, resume, or stop.")
+            result = await display_video.control(selector, action)
+            return {
+                "ok": True,
+                "action": action,
+                "selector": selector,
+                "state": _text((result.get("session") or {}).get("state")),
+                "summary_for_user": f"Tater Tube video {action} sent to {selector}.",
+            }
+
+        query = _text(values.get("query") or values.get("title") or values.get("video"))
+        if not query:
+            raise ValueError("Name the Tater Tube movie or series to play.")
+        target_profile = display_video.target_playback_profile(selector)
+        resolved = await asyncio.to_thread(
+            _api_request,
+            "POST",
+            "tater/core/playback/resolve",
+            settings=cfg,
+            payload={
+                "query": query,
+                "transcode_profile": _text(target_profile.get("transcode_profile")),
+                "viewing_profile_id": _profile_id(cfg),
+            },
+            timeout=45,
+            redis_obj=store,
+        )
+        if not isinstance(resolved, dict) or not _text(resolved.get("stream_url")):
+            raise RuntimeError("Tater Tube Server did not return a playable stream.")
+        result = await display_video.play(
+            selector,
+            resolved.get("stream_url"),
+            title=resolved.get("title") or query,
+            subtitle=resolved.get("subtitle") or "Tater Tube",
+            fps=resolved.get("fps") or 30,
+            duration_ms=resolved.get("duration_ms") or 0,
+            position_ms=resolved.get("position_ms") or 0,
+            server_seek=True,
+            provider="tater_tube",
+            provider_data={
+                "playback_id": _text(resolved.get("playback_id")),
+                "candidate_id": _text(resolved.get("candidate_id")),
+                "transcode_profile": _text(resolved.get("transcode_profile")),
+            },
+        )
+        session = result.get("session") if isinstance(result.get("session"), dict) else {}
+        title = _text(resolved.get("title") or query)
+        return {
+            "ok": True,
+            "selector": selector,
+            "title": title,
+            "subtitle": _text(resolved.get("subtitle")),
+            "state": _text(session.get("state")),
+            "position_ms": session.get("position_ms"),
+            "duration_ms": session.get("duration_ms"),
+            "transcode_profile": _text(resolved.get("transcode_profile")),
+            "summary_for_user": f"Playing {title} from Tater Tube on {selector}.",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"code": "tater_tube_video_failed", "message": _text(exc) or "Video playback failed."},
+            "say_hint": "Explain the Tater Tube playback problem and ask for another title or screen if needed.",
+        }
 
 
 def _prompt_context(client: Any = None) -> str:
