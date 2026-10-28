@@ -210,9 +210,9 @@
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "min_tater_version": "98.4",
-      "description": "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server catalog, explain each pick and the group as a whole, create a separate global Main Menu Message from cross-module activity, voice both with the user's TTS settings, and play the server's video library on compatible Tater screen satellites.",
+      "description": "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server catalog, explain each pick and the group as a whole, create a separate global Main Menu Message from cross-module activity, voice both with the user's TTS settings, and play the server's video library on compatible Tater screens and same-room TVs.",
       "settings_category": "Tater Tube Core Settings",
       "required_settings_count": 9,
       "autostart_key": "tater_tube_core_running",
@@ -226,7 +226,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "5405629dbe9ab604f01060d725c6f9c4203957fa277f5980afceacbc3fab426c"
+      "sha256": "b36c47e853249a691bd77bf4fd32f5e181681670a2185da81a4c54d52879ce63"
     }
   ]
 }

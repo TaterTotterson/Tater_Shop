@@ -23,13 +23,13 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 MIN_TATER_VERSION = "98.4"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
     "catalog, explain each pick and the group as a whole, create a separate global "
     "Main Menu Message from cross-module activity, voice both with the user's TTS settings, "
-    "and play the server's video library on compatible Tater screen satellites."
+    "and play the server's video library on compatible Tater screens and same-room TVs."
 )
 TAGS = ["tater-tube", "media", "games", "music", "recommendations", "context", "tts"]
 
@@ -1241,12 +1241,30 @@ def _video_context_selector(origin: Any) -> str:
     return ""
 
 
-def _video_target(args: Dict[str, Any], origin: Any) -> str:
-    for key in ("target", "room", "satellite", "device", "location"):
+def _video_request(args: Dict[str, Any]) -> str:
+    for key in ("query", "request", "message", "text", "prompt"):
         value = _text(args.get(key))
         if value:
-            return value
-    return _video_context_selector(origin)
+            return " ".join(value.split())
+    return ""
+
+
+def _resolve_video_selector(display_video: Any, args: Dict[str, Any], origin: Any, request: str) -> str:
+    explicit = ""
+    for key in ("target", "room", "satellite", "device", "location", "where"):
+        explicit = _text(args.get(key))
+        if explicit:
+            break
+    if explicit:
+        return display_video.resolve_target(explicit)
+    matcher = getattr(display_video, "match_request_target", display_video.match_target)
+    matched = matcher(request) if request else ""
+    if matched:
+        return matched
+    return display_video.resolve_target(
+        "",
+        current_selector=_video_context_selector(origin),
+    )
 
 
 async def _tater_tube_video_event(selector: str, event: str, session: Dict[str, Any]) -> None:
@@ -1280,22 +1298,8 @@ def get_hydra_kernel_tools(*, platform: str = "", **_kwargs) -> List[Dict[str, A
     return [
         {
             "id": "tater_tube_play",
-            "description": (
-                "Search the paired Tater Tube Server and play a movie or series on a connected "
-                "screen-equipped Tater satellite. Use the speaking satellite when target is empty."
-            ),
-            "usage": (
-                '{"function":"tater_tube_play","arguments":{"query":"movie or series title",'
-                '"target":"optional room or satellite"}}'
-            ),
-        },
-        {
-            "id": "tater_tube_video_control",
-            "description": "Pause, resume, or stop Tater Tube video on a Tater screen satellite.",
-            "usage": (
-                '{"function":"tater_tube_video_control","arguments":'
-                '{"action":"pause|resume|stop","target":"optional room or satellite"}}'
-            ),
+            "description": "Use when the user asks to watch or play a movie, episode, or TV series.",
+            "usage": '{"function":"tater_tube_play","arguments":{"query":"play The Matrix in the living room"}}',
         },
     ]
 
@@ -1308,7 +1312,7 @@ async def run_hydra_kernel_tool(
     redis_client: Any = None,
     **_kwargs,
 ) -> Optional[Dict[str, Any]]:
-    if tool_id not in {"tater_tube_play", "tater_tube_video_control"}:
+    if tool_id != "tater_tube_play":
         return None
     values = args if isinstance(args, dict) else {}
     store = redis_client or globals().get("redis_client")
@@ -1321,28 +1325,13 @@ async def run_hydra_kernel_tool(
         }
     try:
         display_video = _register_video_provider()
-        requested_target = _video_target(values, origin)
-        selector = display_video.resolve_target(
-            requested_target,
-            current_selector=_video_context_selector(origin),
-        )
-        if tool_id == "tater_tube_video_control":
-            action = _text(values.get("action")).lower()
-            if action not in {"pause", "resume", "stop"}:
-                raise ValueError("Video control action must be pause, resume, or stop.")
-            result = await display_video.control(selector, action)
-            return {
-                "ok": True,
-                "action": action,
-                "selector": selector,
-                "state": _text((result.get("session") or {}).get("state")),
-                "summary_for_user": f"Tater Tube video {action} sent to {selector}.",
-            }
-
-        query = _text(values.get("query") or values.get("title") or values.get("video"))
-        if not query:
-            raise ValueError("Name the Tater Tube movie or series to play.")
+        request = _video_request(values)
+        selector = _resolve_video_selector(display_video, values, origin, request)
         target_profile = display_video.target_playback_profile(selector)
+        target_label = _text(target_profile.get("name")) or selector
+        query = request or _text(values.get("title") or values.get("video"))
+        if not query:
+            raise ValueError("Say which Tater Tube movie or series to play.")
         resolved = await asyncio.to_thread(
             _api_request,
             "POST",
@@ -1351,6 +1340,7 @@ async def run_hydra_kernel_tool(
             payload={
                 "query": query,
                 "transcode_profile": _text(target_profile.get("transcode_profile")),
+                "output_container": _text(target_profile.get("output_container")),
                 "viewing_profile_id": _profile_id(cfg),
             },
             timeout=45,
@@ -1367,6 +1357,7 @@ async def run_hydra_kernel_tool(
             duration_ms=resolved.get("duration_ms") or 0,
             position_ms=resolved.get("position_ms") or 0,
             server_seek=True,
+            media_type=_text(resolved.get("stream_media_type") or target_profile.get("media_type")),
             provider="tater_tube",
             provider_data={
                 "playback_id": _text(resolved.get("playback_id")),
@@ -1385,13 +1376,23 @@ async def run_hydra_kernel_tool(
             "position_ms": session.get("position_ms"),
             "duration_ms": session.get("duration_ms"),
             "transcode_profile": _text(resolved.get("transcode_profile")),
-            "summary_for_user": f"Playing {title} from Tater Tube on {selector}.",
+            "output_container": _text(resolved.get("output_container")),
+            "summary_for_user": f"Playing {title} from Tater Tube on {target_label}.",
         }
     except Exception as exc:
+        message = _text(exc) or "Video playback failed."
+        no_display = "no screen or compatible tv" in message.lower()
         return {
             "ok": False,
-            "error": {"code": "tater_tube_video_failed", "message": _text(exc) or "Video playback failed."},
-            "say_hint": "Explain the Tater Tube playback problem and ask for another title or screen if needed.",
+            "error": {
+                "code": "tater_tube_no_video_display" if no_display else "tater_tube_video_failed",
+                "message": message,
+            },
+            "say_hint": (
+                "Tell the user there is nowhere available in that room to play the video."
+                if no_display
+                else "Explain the Tater Tube playback problem and ask for another title or display if needed."
+            ),
         }
 
 
