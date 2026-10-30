@@ -401,6 +401,24 @@
       "sha256": "4c7a8b3b3f1ed8c56ae9cd4921052cd7dbcd4444aff23d0b7e4b0b355dc3a042"
     },
     {
+      "id": "do_not_disturb",
+      "name": "Do Not Disturb",
+      "version": "1.0.0",
+      "min_tater_version": "98.4",
+      "description": "Control per-satellite Do Not Disturb.",
+      "portals": [
+        "voice_core",
+        "webui",
+        "little_spud",
+        "macos"
+      ],
+      "notifier": false,
+      "settings_category": "Satellites",
+      "tags": [],
+      "entry": "verba/do_not_disturb.py",
+      "sha256": "cc676a534d19a826f0d90ef908ef58160ee47e4ee975827d46de59119b35497d"
+    },
+    {
       "id": "energy_status",
       "name": "Energy Status",
       "version": "1.0.3",
