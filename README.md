@@ -93,3 +93,9 @@ A third-party repository needs only its extension file or files and the matching
 - Return structured results and concise user-facing messages.
 - Keep UI payloads bounded; paginate or summarize long histories.
 - Keep IDs stable after release. Renaming an ID creates a different package.
+
+## License and trademarks
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+The Tater name and logo are governed by the [Tater Trademark Policy](TRADEMARKS.md).\n
