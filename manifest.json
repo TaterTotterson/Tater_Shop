@@ -1699,7 +1699,7 @@
     {
       "id": "weather_forecast",
       "name": "Weather Forecast",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "min_tater_version": "59",
       "description": "Get WeatherAPI.com conditions and forecasts for the configured home location or any named geographic place.",
       "portals": [
@@ -1720,7 +1720,7 @@
       "settings_category": null,
       "tags": [],
       "entry": "verba/weather_forecast.py",
-      "sha256": "c17c531f0f65adf9380ff8e1a5d3a6c0ddd0945a2f295b60e3a12064fa382d21"
+      "sha256": "5d3b3b7e646b1da5406f91038c4adbbb781a11ac99a820765c58d7b6c2d3e6c8"
     },
     {
       "id": "webdav_browser",

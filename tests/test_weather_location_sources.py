@@ -219,6 +219,37 @@ class WeatherForecastLocationTests(unittest.TestCase):
                 )
             )
 
+    def test_optional_forecast_windows_accept_null_and_use_defaults(self) -> None:
+        llm = FakeLLM(_weather_intent(days=None, hours=None))
+        intent = asyncio.run(
+            self.plugin._interpret_weather_request_ai(
+                request_text="What's the weather tomorrow?",
+                args={},
+                settings=_weather_settings(),
+                llm_client=llm,
+            )
+        )
+
+        self.assertEqual(intent["days"], 3)
+        self.assertEqual(intent["hours"], 0)
+        schema = llm.calls[0]["schema"]
+        self.assertEqual(schema["properties"]["days"]["type"], ["integer", "null"])
+        self.assertEqual(schema["properties"]["hours"]["type"], ["integer", "null"])
+
+    def test_ai_interpretation_logs_the_underlying_failure(self) -> None:
+        with self.assertLogs("weather_forecast", level="WARNING") as captured:
+            with self.assertRaises(self.module.WeatherIntentError):
+                asyncio.run(
+                    self.plugin._interpret_weather_request_ai(
+                        request_text="What's the weather tomorrow?",
+                        args={},
+                        settings=_weather_settings(),
+                        llm_client=FakeLLM(RuntimeError("structured output rejected")),
+                    )
+                )
+
+        self.assertIn("RuntimeError: structured output rejected", "\n".join(captured.output))
+
     def test_question_punctuation_and_mentions_use_the_ai_location(self) -> None:
         calls: list[dict[str, object]] = []
 

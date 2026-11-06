@@ -117,7 +117,7 @@ class WeatherForecastPlugin(ToolVerba):
 
     name = "weather_forecast"
     verba_name = "Weather Forecast"
-    version = "1.2.2"
+    version = "1.2.3"
     min_tater_version = "59"
     routing_keywords = [
         "weatherapi",
@@ -428,8 +428,8 @@ class WeatherForecastPlugin(ToolVerba):
                         "provider": {"type": ["string", "null"]},
                         "date": {"type": ["string", "null"]},
                         "day": {"type": ["string", "null"], "enum": ["current", "today", "tonight", "tomorrow", "weekend", None]},
-                        "days": {"type": "integer", "minimum": 1, "maximum": 14},
-                        "hours": {"type": "integer", "minimum": 0, "maximum": 48},
+                        "days": {"type": ["integer", "null"], "minimum": 1, "maximum": 14},
+                        "hours": {"type": ["integer", "null"], "minimum": 0, "maximum": 48},
                         "units": {"type": ["string", "null"], "enum": ["us", "metric", None]},
                         "temperature_focus": {"type": ["string", "null"], "enum": ["current", "high", "low", "both", None]},
                     },
@@ -442,6 +442,12 @@ class WeatherForecastPlugin(ToolVerba):
                 timeout_ms=25_000,
             )
         except Exception as exc:
+            logger.warning(
+                "AI weather interpretation failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             raise WeatherIntentError("The AI weather interpretation failed.") from exc
 
         raw = self._decode_ai_object((response.get("message") or {}).get("content"))
