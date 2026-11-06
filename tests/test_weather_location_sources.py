@@ -471,6 +471,35 @@ class EnvironmentKernelCurrentSourceTests(unittest.TestCase):
         self.assertEqual(room["area"], "Bedroom")
         self.assertEqual(room["location_scope"], "local_area")
 
+    def test_current_conditions_accept_null_forecast_windows(self) -> None:
+        llm = FakeLLM(
+            _weather_intent(
+                measurement="condition",
+                location="here",
+                date="2026-11-06",
+                day=None,
+                days=None,
+                hours=None,
+                units=None,
+                temperature_focus=None,
+            )
+        )
+        result = asyncio.run(
+            self.core._hydra_ai_normalize_environment_args(
+                {"request": "What's the weather outside?"},
+                self._payload(),
+                llm_client=llm,
+            )
+        )
+
+        self.assertEqual(result["category"], "condition")
+        self.assertEqual(result["area"], "outside")
+        self.assertNotIn("limit", result)
+        self.assertNotIn("hours", result)
+        schema = llm.calls[0]["schema"]
+        self.assertEqual(schema["properties"]["days"]["type"], ["integer", "null"])
+        self.assertEqual(schema["properties"]["hours"]["type"], ["integer", "null"])
+
     def test_environment_ai_is_required(self) -> None:
         with self.assertRaises(self.core.EnvironmentIntentError):
             asyncio.run(

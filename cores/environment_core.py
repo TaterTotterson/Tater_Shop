@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, quote
 from helpers import extract_json, llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "AI-interpreted weather orchestration across local sensors, configured providers, forecasts, and named-place lookups."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -5415,8 +5415,8 @@ async def _hydra_ai_normalize_environment_args(
                     "provider": {"type": ["string", "null"]},
                     "date": {"type": ["string", "null"]},
                     "day": {"type": ["string", "null"]},
-                    "days": {"type": "integer"},
-                    "hours": {"type": "integer"},
+                    "days": {"type": ["integer", "null"]},
+                    "hours": {"type": ["integer", "null"]},
                     "units": {"type": ["string", "null"]},
                     "temperature_focus": {"type": ["string", "null"]},
                 },

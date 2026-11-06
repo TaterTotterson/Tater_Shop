@@ -63,7 +63,7 @@
       "id": "environment",
       "name": "Environment Core",
       "module_key": "environment_core",
-      "version": "1.6.2",
+      "version": "1.6.3",
       "min_tater_version": "59",
       "description": "AI-interpreted weather orchestration across local sensors, configured providers, forecasts, and named-place lookups.",
       "settings_category": "Environment Core Settings",
@@ -76,7 +76,7 @@
         "telemetry"
       ],
       "entry": "cores/environment_core.py",
-      "sha256": "43be1d670bb3ae205be31491931ad675a0214e4007dade6be982ee5cfed02306"
+      "sha256": "3de82b01ff1b9aee3ecce94733f6fa2dec1a6d476567cd6389a570bd64487d63"
     },
     {
       "id": "guardian",
