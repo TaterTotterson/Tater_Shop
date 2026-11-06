@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 class OverseerrDetailsPlugin(ToolVerba):
     name = "overseerr_details"
     verba_name = "Overseerr Details"
-    version = "1.2.5"
+    version = "1.2.6"
     min_tater_version = "59"
     pretty_name = "Overseerr: Title Details"
     settings_category = "Overseerr"
@@ -227,8 +227,13 @@ class OverseerrDetailsPlugin(ToolVerba):
                 schema={
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string"},
-                        "media_type": {"type": "string", "enum": ["movie", "tv", ""]},
+                        "title": {"type": ["string", "null"]},
+                        "media_type": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["movie", "tv", ""]},
+                                {"type": "null"},
+                            ]
+                        },
                     },
                     "required": ["title", "media_type"],
                     "additionalProperties": False,

@@ -186,7 +186,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
 
     name = 'unifi_protect_area'
     verba_name = 'UniFi Protect Area'
-    version = "1.0.8"
+    version = "1.0.9"
     min_tater_version = "59"
     pretty_name = 'UniFi Protect Area'
     settings_category = "UniFi Protect"
@@ -324,7 +324,7 @@ class UniFiProtectAreaPlugin(ToolVerba):
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": [*sorted(self._ALLOWED_ACTIONS), ""]},
-                        "target": {"type": "string"},
+                        "target": {"type": ["string", "null"]},
                     },
                     "required": ["action", "target"],
                     "additionalProperties": False,

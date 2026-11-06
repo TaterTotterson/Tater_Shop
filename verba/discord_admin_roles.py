@@ -100,12 +100,12 @@ def _discord_plan_schema() -> Dict[str, Any]:
                 "type": "string",
                 "enum": ["none", "add_current", "remove_current", "set_only_current", "clear_all"],
             },
-            "server_name": {"type": "string"},
+            "server_name": {"type": ["string", "null"]},
             "set_guild_icon_from_attachment": {"type": "boolean"},
             "roles": {"type": "array", "maxItems": MAX_ROLES, "items": _discord_role_detail_schema()},
             "categories": {"type": "array", "maxItems": MAX_CATEGORIES, "items": category},
             "rename_channels": {"type": "array", "items": _discord_rename_schema()},
-            "notes": {"type": "string"},
+            "notes": {"type": ["string", "null"]},
         },
         "required": [
             "response_channel_action",
@@ -137,7 +137,7 @@ def _discord_outline_schema() -> Dict[str, Any]:
                 "type": "string",
                 "enum": ["none", "add_current", "remove_current", "set_only_current", "clear_all"],
             },
-            "server_name": {"type": "string"},
+            "server_name": {"type": ["string", "null"]},
             "set_guild_icon_from_attachment": {"type": "boolean"},
             "roles": {"type": "array", "maxItems": MAX_ROLES, "items": {"type": "string"}},
             "categories": {
@@ -154,7 +154,7 @@ def _discord_outline_schema() -> Dict[str, Any]:
                 },
             },
             "rename_channels": {"type": "array", "items": _discord_rename_schema()},
-            "notes": {"type": "string"},
+            "notes": {"type": ["string", "null"]},
         },
         "required": [
             "response_channel_action",
@@ -289,7 +289,7 @@ class DiscordAdminRolesPlugin(ToolVerba):
     name = "discord_admin_roles"
     verba_name = "Discord Admin Roles"
     pretty_name = "Discord Admin Roles"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     tags = ["discord", "roles"]
     platforms = ["discord"]

@@ -26,7 +26,7 @@ class OverseerrRequestPlugin(ToolVerba):
     """
     name = "overseerr_request"
     verba_name = "Overseerr Request"
-    version = "1.1.5"
+    version = "1.1.6"
     min_tater_version = "59"
     usage = (
         '{"function":"overseerr_request","arguments":{"query":"ONE natural-language Overseerr request '
@@ -227,8 +227,13 @@ class OverseerrRequestPlugin(ToolVerba):
                 schema={
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string"},
-                        "kind": {"type": "string", "enum": ["movie", "tv", ""]},
+                        "title": {"type": ["string", "null"]},
+                        "kind": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["movie", "tv", ""]},
+                                {"type": "null"},
+                            ]
+                        },
                     },
                     "required": ["title", "kind"],
                     "additionalProperties": False,

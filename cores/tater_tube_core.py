@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 MIN_TATER_VERSION = "98.4"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
@@ -1047,16 +1047,16 @@ def _generate_recommendations_impl(
         schema={
             "type": "object",
             "properties": {
-                "summary": {"type": "string"},
-                "picks_briefing": {"type": "string"},
+                "summary": {"type": ["string", "null"]},
+                "picks_briefing": {"type": ["string", "null"]},
                 "items": {
                     "type": "array",
                     "maxItems": count,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "candidate_id": {"type": "string"},
-                            "reason": {"type": "string"},
+                            "candidate_id": {"type": ["string", "null"]},
+                            "reason": {"type": ["string", "null"]},
                         },
                         "required": ["candidate_id", "reason"],
                         "additionalProperties": False,

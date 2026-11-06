@@ -26,7 +26,7 @@ class MicroWakeWordPlugin(ToolVerba):
 
     name = "microwakeword"
     verba_name = "microWakeWord"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     pretty_name = "microWakeWord Changer"
     settings_category = "microWakeWord"
@@ -547,7 +547,7 @@ class MicroWakeWordPlugin(ToolVerba):
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": ["set", "suggest", "reset", "status", ""]},
-                        "wake_word": {"type": "string"},
+                        "wake_word": {"type": ["string", "null"]},
                     },
                     "required": ["action", "wake_word"],
                     "additionalProperties": False,

@@ -61,7 +61,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -3161,7 +3161,7 @@ async def _ai_tasks_kernel_refine_task_prompt(task_prompt: str, request_text: st
                 "properties": {
                     "task_prompt": {"type": "string"},
                     "reminder_intent": {"type": "boolean"},
-                    "reminder_text": {"type": "string"},
+                    "reminder_text": {"type": ["string", "null"]},
                 },
                 "required": ["task_prompt", "reminder_intent", "reminder_text"],
                 "additionalProperties": False,
@@ -3214,7 +3214,7 @@ async def _ai_tasks_kernel_extract_target_hint(raw_text: Any, llm_client: Any) -
             ),
             schema={
                 "type": "object",
-                "properties": {"target_hint": {"type": "string"}},
+                "properties": {"target_hint": {"type": ["string", "null"]}},
                 "required": ["target_hint"],
                 "additionalProperties": False,
             },

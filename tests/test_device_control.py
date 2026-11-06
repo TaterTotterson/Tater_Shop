@@ -134,9 +134,9 @@ class StandaloneCategoryVerbaTests(unittest.TestCase):
                 self.assertEqual(
                     row["version"],
                     {
-                        "device_control": "1.0.8",
-                        "temperature_status": "1.0.5",
-                    }.get(verba_id, "1.0.3"),
+                        "device_control": "1.0.9",
+                        "temperature_status": "1.0.6",
+                    }.get(verba_id, "1.0.4"),
                 )
                 self.assertEqual(row["min_tater_version"], "98.4")
                 self.assertEqual(len(row["sha256"]), 64)
@@ -164,7 +164,7 @@ class DeviceControlVerbaTests(unittest.TestCase):
     def test_manifest_facing_metadata_is_explicit(self) -> None:
         plugin = device_control_module.DeviceControlPlugin()
 
-        self.assertEqual(plugin.version, "1.0.8")
+        self.assertEqual(plugin.version, "1.0.9")
         self.assertEqual(plugin.min_tater_version, "98.4")
         self.assertIn("voice_core", plugin.platforms)
         self.assertIn("webui", plugin.platforms)

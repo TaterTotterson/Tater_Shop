@@ -84,7 +84,7 @@ class UnifiNetworkLookupPlugin(ToolVerba):
 
     name = "unifi_network_lookup"
     verba_name = "UniFi Network Lookup"
-    version = "1.0.7"
+    version = "1.0.8"
     min_tater_version = "59"
     pretty_name = "UniFi Network Lookup"
     tags = ["unifi", "lookup"]
@@ -449,8 +449,13 @@ class UnifiNetworkLookupPlugin(ToolVerba):
                     "type": "object",
                     "properties": {
                         "intent": {"type": "string", "enum": [*sorted(self._INTENT_VALUES), ""]},
-                        "target": {"type": "string"},
-                        "target_kind": {"type": "string", "enum": ["any", "client", "device"]},
+                        "target": {"type": ["string", "null"]},
+                        "target_kind": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["any", "client", "device"]},
+                                {"type": "null"},
+                            ]
+                        },
                     },
                     "required": ["intent", "target", "target_kind"],
                     "additionalProperties": False,

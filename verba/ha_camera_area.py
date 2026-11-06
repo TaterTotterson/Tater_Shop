@@ -221,7 +221,7 @@ class HAClient:
 class HACameraAreaPlugin(ToolVerba):
     name = "ha_camera_area"
     verba_name = "Home Assistant Camera Area"
-    version = "1.0.9"
+    version = "1.0.10"
     min_tater_version = "59"
     pretty_name = "HA Camera Area"
     settings_category = "Home Assistant Control"
@@ -479,7 +479,7 @@ class HACameraAreaPlugin(ToolVerba):
                 ),
                 schema={
                     "type": "object",
-                    "properties": {"area": {"type": "string"}},
+                    "properties": {"area": {"type": ["string", "null"]}},
                     "required": ["area"],
                     "additionalProperties": False,
                 },

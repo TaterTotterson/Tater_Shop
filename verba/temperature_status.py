@@ -72,7 +72,7 @@ class _DeviceVerbaRuntime(ToolVerba):
     name = "_device_verba_runtime"
     verba_name = "Device Verba Runtime"
     pretty_name = "Device Verba Runtime"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "98.4"
     settings_category = "Device Control"
     platforms = [
@@ -637,12 +637,12 @@ class _DeviceVerbaRuntime(ToolVerba):
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": [*sorted(self.allowed_actions), ""]},
-                        "target": {"type": "string"},
+                        "target": {"type": ["string", "null"]},
                         "position": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
                         "volume": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
                         "percentage": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
                         "brightness_pct": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
-                        "color_name": {"type": "string"},
+                        "color_name": {"type": ["string", "null"]},
                         "rgb_color": {
                             "anyOf": [
                                 {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
@@ -650,12 +650,14 @@ class _DeviceVerbaRuntime(ToolVerba):
                             ]
                         },
                         "temperature": {"type": ["number", "null"]},
-                        "hvac_mode": {"type": "string"},
-                        "source_url": {"type": "string"},
-                        "command": {"type": "string"},
+                        "hvac_mode": {"type": ["string", "null"]},
+                        "source_url": {"type": ["string", "null"]},
+                        "command": {"type": ["string", "null"]},
                         "requested_property": {
-                            "type": "string",
-                            "enum": ["remaining_time", "current_status", "progress", "cycle", ""],
+                            "anyOf": [
+                                {"type": "string", "enum": ["remaining_time", "current_status", "progress", "cycle", ""]},
+                                {"type": "null"},
+                            ]
                         },
                     },
                     "required": ["action", "target", "position", "volume", "percentage", "brightness_pct", "color_name", "rgb_color", "temperature", "hvac_mode", "source_url", "command", "requested_property"],
@@ -1029,7 +1031,7 @@ class _DeviceVerbaRuntime(ToolVerba):
             ),
             schema={
                 "type": "object",
-                "properties": {"device_id": {"type": "string"}},
+                "properties": {"device_id": {"type": ["string", "null"]}},
                 "required": ["device_id"],
                 "additionalProperties": False,
             },
@@ -1710,7 +1712,7 @@ class TemperatureStatusPlugin(_DeviceVerbaRuntime):
     name = "temperature_status"
     verba_name = "Temperature Status"
     pretty_name = "Temperature Status"
-    version = "1.0.5"
+    version = "1.0.6"
     description = "Read the current temperature from a specifically named local room, thermostat, device, or sensor, such as 'bedroom temperature' or 'what does the Ecobee read?' Use it only when the user names that local target. Do not use it for outside, home weather, general weather, forecasts, or a city or geographic place."
     verba_dec = "Read a specifically named local room, thermostat, device, or temperature sensor; never handle general weather or geographic locations."
     when_to_use = "Use only for an explicitly named local target such as a bedroom, garage sensor, or Ecobee thermostat. Do not use for outside weather, general home weather, forecasts, or weather in a named city or geographic place."

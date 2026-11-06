@@ -5,7 +5,7 @@
       "id": "ai_task",
       "name": "AI Task Scheduler Core",
       "module_key": "ai_task_core",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "min_tater_version": "98",
       "description": "AI Task Scheduler Core integration core for Tater.",
       "settings_category": "AI Task Scheduler Core Settings",
@@ -13,7 +13,7 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "46066ffa8baae7e97799c5b56ee39a5a7e5682fe39538a211cd78f6c0d94f5f3"
+      "sha256": "d33fcc39b4985713f5aa8a82ee2cfa7dd0ec7195fb4bf841f8c5005ec5732125"
     },
     {
       "id": "automation",
@@ -135,7 +135,7 @@
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "3.6.2",
+      "version": "3.6.3",
       "min_tater_version": "99.5",
       "description": "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
@@ -153,13 +153,13 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "3c629a4cf6d0934dd2d060ba3bbb2e4974219cae117ad582e94be55b5e80d9de"
+      "sha256": "a8a57125c909c97eeec9f0805172254a95bfd25ecb486f7452fe0ada51b66528"
     },
     {
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.57",
+      "version": "1.0.58",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -167,7 +167,7 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "1d5c3ba8c7a78fd3c3b155dd899f62cb5d7e6528c2409a1edb662628c73e9b17"
+      "sha256": "1e2688819090ab0fa40f6cb67fae626bc70e817170a6835fef4b8ab288c50e41"
     },
     {
       "id": "reachy",
@@ -210,7 +210,7 @@
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.5.1",
+      "version": "1.5.2",
       "min_tater_version": "98.4",
       "description": "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server catalog, explain each pick and the group as a whole, create a separate global Main Menu Message from cross-module activity, voice both with the user's TTS settings, and play the server's video library on compatible Tater screens and same-room TVs.",
       "settings_category": "Tater Tube Core Settings",
@@ -226,7 +226,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "b36c47e853249a691bd77bf4fd32f5e181681670a2185da81a4c54d52879ce63"
+      "sha256": "a085eb392e20b0532af686496dce6365fc67e80adcf48f8b885cf2369e8d91ef"
     }
   ]
 }

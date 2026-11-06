@@ -157,7 +157,7 @@ def _extract_posts(payload: Any) -> List[Dict[str, Any]]:
 class MoltbookAccountSummaryPlugin(ToolVerba):
     name = "moltbook_account_summary"
     verba_name = "Moltbook Account Summary"
-    version = "1.0.6"
+    version = "1.0.7"
     min_tater_version = "59"
     pretty_name = "Moltbook Account Summary"
     settings_category = "Moltbook Info"
@@ -501,7 +501,7 @@ Request: {query}
                                 "fellow_taters", "agent_profile", "help",
                             ],
                         },
-                        "target_name": {"type": "string"},
+                        "target_name": {"type": ["string", "null"]},
                         "limit": {"type": ["integer", "null"]},
                     },
                     "required": ["route", "target_name", "limit"],

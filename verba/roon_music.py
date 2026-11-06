@@ -76,7 +76,7 @@ class RoonMusicPlugin(ToolVerba):
     name = "roon_music"
     verba_name = "Roon Music"
     pretty_name = "Roon Music"
-    version = "1.0.2"
+    version = "1.0.3"
     min_tater_version = "59"
     settings_category = "Roon Control"
     platforms = [
@@ -340,9 +340,14 @@ class RoonMusicPlugin(ToolVerba):
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": ["play_media", "queue_media", "pause", "play", "stop", "next", "previous"]},
-                        "query": {"type": "string"},
-                        "media_kind": {"type": "string", "enum": ["track", "artist", "album", "genre", "playlist", "radio", "any"]},
-                        "random": {"type": "boolean"},
+                        "query": {"type": ["string", "null"]},
+                        "media_kind": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["track", "artist", "album", "genre", "playlist", "radio", "any"]},
+                                {"type": "null"},
+                            ]
+                        },
+                        "random": {"type": ["boolean", "null"]},
                     },
                     "required": ["action", "query", "media_kind", "random"],
                     "additionalProperties": False,

@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.57"
+__version__ = "1.0.58"
 
 load_dotenv()
 
@@ -4459,17 +4459,24 @@ def _heuristic_extract_updates(rows: List[Dict[str, Any]]) -> Dict[str, List[Dic
 def _email_insight_schema() -> Dict[str, Any]:
     def row(properties: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
         return {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": False,
-            },
+            "anyOf": [
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                },
+                {"type": "null"},
+            ]
         }
 
     text = {"type": "string"}
     number = {"type": "number"}
+    nullable_text = {"type": ["string", "null"]}
+    nullable_number = {"type": ["number", "null"]}
     return {
         "type": "object",
         "properties": {
@@ -4477,26 +4484,26 @@ def _email_insight_schema() -> Dict[str, Any]:
                 {
                     "merchant": text,
                     "amount": number,
-                    "currency": text,
-                    "category": text,
+                    "currency": nullable_text,
+                    "category": nullable_text,
                     "confidence": number,
                     "email_id": text,
-                    "observed_at": text,
+                    "observed_at": nullable_text,
                 },
                 ["merchant", "amount", "currency", "category", "confidence", "email_id", "observed_at"],
             ),
             "favorite_places": row(
-                {"name": text, "reason": text, "confidence": number},
+                {"name": text, "reason": nullable_text, "confidence": number},
                 ["name", "reason", "confidence"],
             ),
             "important_notes": row(
                 {
-                    "title": text,
-                    "summary": text,
-                    "kind": text,
+                    "title": nullable_text,
+                    "summary": nullable_text,
+                    "kind": nullable_text,
                     "confidence": number,
                     "email_id": text,
-                    "date_iso": text,
+                    "date_iso": nullable_text,
                 },
                 ["title", "summary", "kind", "confidence", "email_id", "date_iso"],
             ),
@@ -4505,9 +4512,9 @@ def _email_insight_schema() -> Dict[str, Any]:
                     "title": text,
                     "kind": {"type": "string", "enum": ["movie", "trip", "appointment", "payment_due", "event", "other"]},
                     "starts_at": text,
-                    "ends_at": text,
-                    "location": text,
-                    "summary": text,
+                    "ends_at": nullable_text,
+                    "location": nullable_text,
+                    "summary": nullable_text,
                     "confidence": number,
                     "email_id": text,
                 },
@@ -4516,11 +4523,11 @@ def _email_insight_schema() -> Dict[str, Any]:
             "subscriptions": row(
                 {
                     "merchant": text,
-                    "plan": text,
-                    "amount": number,
-                    "currency": text,
+                    "plan": nullable_text,
+                    "amount": nullable_number,
+                    "currency": nullable_text,
                     "cadence": {"type": "string", "enum": ["monthly", "yearly", "weekly", "quarterly", "unknown"]},
-                    "next_charge_at": text,
+                    "next_charge_at": nullable_text,
                     "confidence": number,
                     "email_id": text,
                 },
@@ -4528,14 +4535,14 @@ def _email_insight_schema() -> Dict[str, Any]:
             ),
             "deliveries": row(
                 {
-                    "carrier": text,
-                    "tracking_id": text,
-                    "order_number": text,
-                    "item_description": text,
+                    "carrier": nullable_text,
+                    "tracking_id": nullable_text,
+                    "order_number": nullable_text,
+                    "item_description": nullable_text,
                     "status": {"type": "string", "enum": ["label_created", "in_transit", "out_for_delivery", "delivered", "exception", "update"]},
-                    "eta_at": text,
-                    "merchant": text,
-                    "summary": text,
+                    "eta_at": nullable_text,
+                    "merchant": nullable_text,
+                    "summary": nullable_text,
                     "confidence": number,
                     "email_id": text,
                 },
@@ -4544,9 +4551,9 @@ def _email_insight_schema() -> Dict[str, Any]:
             "action_items": row(
                 {
                     "title": text,
-                    "summary": text,
+                    "summary": nullable_text,
                     "kind": {"type": "string", "enum": ["payment_due", "verification", "response_required", "task"]},
-                    "due_at": text,
+                    "due_at": nullable_text,
                     "status": {"type": "string", "enum": ["open", "done"]},
                     "confidence": number,
                     "email_id": text,
@@ -8020,12 +8027,12 @@ async def _plan_email_tool_query_async(
                 "properties": {
                     "intent": {"type": "string", "enum": ["search", "summary", "latest"]},
                     "mode": {"type": "string", "enum": ["search", "latest"]},
-                    "query_terms": {"type": "string"},
-                    "days": {"type": "integer", "minimum": 0, "maximum": 3650},
+                    "query_terms": {"type": ["string", "null"]},
+                    "days": {"type": ["integer", "null"], "minimum": 0, "maximum": 3650},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                    "date_from": {"type": "string"},
-                    "date_to": {"type": "string"},
-                    "account_id": {"type": "string"},
+                    "date_from": {"type": ["string", "null"]},
+                    "date_to": {"type": ["string", "null"]},
+                    "account_id": {"type": ["string", "null"]},
                 },
                 "required": ["intent", "mode", "query_terms", "days", "limit", "date_from", "date_to", "account_id"],
                 "additionalProperties": False,
