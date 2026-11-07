@@ -1,7 +1,9 @@
 import fnmatch
 import importlib.util
 import json
+import socket
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -986,7 +988,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["data"]["notification_status"], "failed")
         self.assertIn("push service offline", stored["data"]["notification_errors"])
 
-    async def test_display_notification_includes_the_saved_snapshot_for_video_preview(self):
+    async def test_display_notification_uses_direct_lan_api_with_saved_snapshot(self):
         destination = self.core._encode_notification_destination("display", {})
         monitor = self._add_monitor(
             "camera",
@@ -1019,16 +1021,134 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         dispatch = AsyncMock(return_value="Queued notification for display")
+        direct_send = Mock(return_value={"sent_count": 1, "errors": []})
 
-        with patch.object(self.core, "dispatch_notification", new=dispatch):
+        with (
+            patch.object(self.core, "dispatch_notification", new=dispatch),
+            patch.object(self.core, "_send_companion_display_notification", new=direct_send),
+        ):
             result = await self.core._dispatch_awareness_event_notification(monitor, event)
 
         self.assertTrue(result["ok"])
-        request = dispatch.await_args.kwargs
-        self.assertEqual(request["platform"], "display")
-        self.assertEqual(request["targets"], {})
-        self.assertEqual(request["meta"]["snapshot_id"], snapshot["snapshot_id"])
-        self.assertEqual(request["attachments"][0]["type"], "video")
+        dispatch.assert_not_awaited()
+        payload, targets = direct_send.call_args.args
+        self.assertEqual(targets, {})
+        self.assertEqual(payload["source"], "awareness_core")
+        self.assertEqual(payload["display_label"], "Awareness")
+        self.assertEqual(payload["title"], "Front Yard Camera")
+        self.assertEqual(payload["description"], "A person crossed the yard.")
+        self.assertEqual(payload["image_data_b64"], "c2F2ZWQtcG9zdGVy")
+        self.assertEqual(payload["image_content_type"], "image/jpeg")
+        self.assertTrue(payload["remember_as_last_event"])
+
+    async def test_display_notification_has_no_old_queue_fallback_and_allows_default_art(self):
+        destination = self.core._encode_notification_destination("display", {})
+        monitor = self._add_monitor(
+            "sensor",
+            "homeassistant|binary_sensor.back_door",
+            "Back Door",
+            notifications_enabled=True,
+            notification_destinations=[destination],
+        )
+        event = {
+            "id": "back-door-opened",
+            "source": "back_door",
+            "title": "Back Door",
+            "type": "door_sensor_opened",
+            "message": "Back Door opened.",
+            "data": {"area": "Back Door"},
+        }
+        dispatch = AsyncMock(return_value="Queued notification for display")
+        direct_send = Mock(
+            return_value={
+                "sent_count": 0,
+                "errors": ["No compatible Tater notification displays were discovered on the LAN."],
+            }
+        )
+
+        with (
+            patch.object(self.core, "dispatch_notification", new=dispatch),
+            patch.object(self.core, "_send_companion_display_notification", new=direct_send),
+        ):
+            result = await self.core._dispatch_awareness_event_notification(monitor, event)
+
+        self.assertFalse(result["ok"])
+        dispatch.assert_not_awaited()
+        payload = direct_send.call_args.args[0]
+        self.assertNotIn("image_data_b64", payload)
+        self.assertNotIn("image_content_type", payload)
+        self.assertIn("No compatible Tater", result["errors"][0])
+
+    def test_direct_display_delivery_targets_selected_satellite(self):
+        displays = [
+            {
+                "id": "rook-kitchen",
+                "name": "Kitchen Rook",
+                "room": "Kitchen",
+                "endpoint": "http://192.168.10.40:8930/v1/notifications",
+            },
+            {
+                "id": "show-office",
+                "name": "Office Show",
+                "room": "Office",
+                "endpoint": "http://192.168.10.41:8930/v1/notifications",
+            },
+        ]
+        response = types.SimpleNamespace(status_code=200, text="")
+        with (
+            patch.object(self.core, "_discover_companion_displays", return_value=displays),
+            patch.object(self.core.requests, "post", return_value=response) as post,
+        ):
+            result = self.core._send_companion_display_notification(
+                {"source_id": "test", "event_id": "event", "title": "Test"},
+                {"selector": "rook-kitchen"},
+            )
+
+        self.assertEqual(result, {"sent_count": 1, "errors": []})
+        post.assert_called_once_with(
+            "http://192.168.10.40:8930/v1/notifications",
+            json={"source_id": "test", "event_id": "event", "title": "Test"},
+            timeout=8,
+        )
+
+    def test_direct_display_discovery_builds_endpoint_from_datagram_source(self):
+        responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        responder.bind(("127.0.0.1", 0))
+        discovery_port = responder.getsockname()[1]
+
+        def answer_probe():
+            raw, remote = responder.recvfrom(8192)
+            probe = json.loads(raw.decode("utf-8"))
+            announce = {
+                "type": "tater.display.announce",
+                "protocol_version": 1,
+                "request_id": probe["request_id"],
+                "device_id": "rook-kitchen",
+                "name": "Kitchen Rook",
+                "room": "Kitchen",
+                "board": "rook",
+                "port": 8930,
+                "capabilities": {"notifications": 1},
+            }
+            responder.sendto(json.dumps(announce).encode("utf-8"), remote)
+
+        thread = threading.Thread(target=answer_probe, daemon=True)
+        thread.start()
+        try:
+            with (
+                patch.object(self.core, "_COMPANION_DISPLAY_PORT", discovery_port),
+                patch.object(self.core, "_companion_display_broadcast_addresses", return_value=["127.0.0.1"]),
+            ):
+                displays = self.core._discover_companion_displays(timeout=0.15, force=True)
+        finally:
+            responder.close()
+            thread.join(timeout=1)
+            self.core._COMPANION_DISPLAY_CACHE = []
+            self.core._COMPANION_DISPLAY_CACHE_AT = 0.0
+
+        self.assertEqual(len(displays), 1)
+        self.assertEqual(displays[0]["id"], "rook-kitchen")
+        self.assertEqual(displays[0]["endpoint"], "http://127.0.0.1:8930/v1/notifications")
 
     def test_event_clip_storage_is_bounded(self):
         with patch.object(self.core, "_clip_max_bytes", return_value=4):

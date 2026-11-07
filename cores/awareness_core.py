@@ -5,12 +5,14 @@ import ast
 import base64
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -23,6 +25,11 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+
+try:
+    import psutil as _psutil
+except Exception:  # pragma: no cover - directed broadcast discovery still has global broadcast.
+    _psutil = None
 
 import face_identity as _shared_face_identity
 from helpers import extract_json, get_llm_client_from_env, llm_structured_chat, redis_client
@@ -70,7 +77,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.6"
+__version__ = "4.12.7"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -85,6 +92,13 @@ load_dotenv()
 
 logger = logging.getLogger("awareness_core")
 logger.setLevel(logging.INFO)
+
+_COMPANION_DISPLAY_PORT = 8930
+_COMPANION_DISPLAY_PROTOCOL = 1
+_COMPANION_DISPLAY_CACHE_SECONDS = 20.0
+_COMPANION_DISPLAY_CACHE: List[Dict[str, Any]] = []
+_COMPANION_DISPLAY_CACHE_AT = 0.0
+_COMPANION_DISPLAY_LOCK = threading.Lock()
 
 
 def _awareness_normalize_llm_provider(value: Any) -> str:
@@ -4986,6 +5000,218 @@ def _notification_attachments_for_event(client: Any, event: Dict[str, Any]) -> L
     ]
 
 
+def _notification_snapshot_for_event(client: Any, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    snapshot_id = _text(event.get("snapshot_id") or data.get("snapshot_id"))
+    snapshot = _load_event_snapshot_payload(client, snapshot_id) if snapshot_id else None
+    if not snapshot:
+        return None
+    content_type = _text(snapshot.get("content_type") or "image/jpeg").split(";", 1)[0].lower()
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        return None
+    try:
+        image_bytes = base64.b64decode(_text(snapshot.get("data_b64")), validate=True)
+    except Exception:
+        return None
+    if not image_bytes or len(image_bytes) > 4 * 1024 * 1024:
+        return None
+    return {"bytes": image_bytes, "content_type": content_type}
+
+
+def _companion_display_capability_version(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    try:
+        return int(float(_text(value)))
+    except Exception:
+        return 0
+
+
+def _companion_display_broadcast_addresses() -> List[str]:
+    addresses = ["255.255.255.255"]
+    if _psutil is not None:
+        try:
+            for rows in _psutil.net_if_addrs().values():
+                for row in rows:
+                    if row.family != socket.AF_INET:
+                        continue
+                    broadcast = _text(getattr(row, "broadcast", ""))
+                    if broadcast:
+                        addresses.append(broadcast)
+        except Exception:
+            logger.debug("[awareness] failed to enumerate display broadcast addresses", exc_info=True)
+    # Loopback makes local development and a host-network satellite daemon
+    # discoverable without weakening validation of remote announcements.
+    addresses.append("127.0.0.1")
+    return list(dict.fromkeys(addresses))
+
+
+def _discover_companion_displays(*, timeout: float = 0.7, force: bool = False) -> List[Dict[str, Any]]:
+    global _COMPANION_DISPLAY_CACHE, _COMPANION_DISPLAY_CACHE_AT
+    now = time.monotonic()
+    with _COMPANION_DISPLAY_LOCK:
+        if (
+            not force
+            and _COMPANION_DISPLAY_CACHE
+            and now - _COMPANION_DISPLAY_CACHE_AT < _COMPANION_DISPLAY_CACHE_SECONDS
+        ):
+            return [dict(row) for row in _COMPANION_DISPLAY_CACHE]
+
+        request_id = uuid.uuid4().hex
+        probe = json.dumps(
+            {
+                "type": "tater.display.discover",
+                "protocol_version": _COMPANION_DISPLAY_PROTOCOL,
+                "request_id": request_id,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        displays: Dict[str, Dict[str, Any]] = {}
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.bind(("", 0))
+            for address in _companion_display_broadcast_addresses():
+                try:
+                    sock.sendto(probe, (address, _COMPANION_DISPLAY_PORT))
+                except OSError:
+                    continue
+            deadline = time.monotonic() + max(0.05, min(float(timeout), 2.0))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                sock.settimeout(remaining)
+                try:
+                    raw, remote = sock.recvfrom(8192)
+                except socket.timeout:
+                    break
+                except OSError:
+                    break
+                try:
+                    announce = json.loads(raw.decode("utf-8"))
+                    remote_ip = ipaddress.ip_address(_text(remote[0]))
+                except Exception:
+                    continue
+                if not isinstance(announce, dict):
+                    continue
+                if announce.get("type") != "tater.display.announce" or _text(announce.get("request_id")) != request_id:
+                    continue
+                if not (remote_ip.is_private or remote_ip.is_link_local or remote_ip.is_loopback):
+                    continue
+                device_id = _text(announce.get("device_id"))[:200]
+                try:
+                    port = int(announce.get("port") or 0)
+                    protocol_version = int(announce.get("protocol_version") or 0)
+                except Exception:
+                    continue
+                capabilities = announce.get("capabilities") if isinstance(announce.get("capabilities"), dict) else {}
+                if (
+                    not device_id
+                    or port < 1
+                    or port > 65535
+                    or protocol_version != _COMPANION_DISPLAY_PROTOCOL
+                    or _companion_display_capability_version(capabilities.get("notifications")) < 1
+                ):
+                    continue
+                host = f"[{remote_ip}]" if remote_ip.version == 6 else str(remote_ip)
+                displays[device_id] = {
+                    "id": device_id,
+                    "name": _text(announce.get("name"))[:200] or device_id,
+                    "room": _text(announce.get("room"))[:200],
+                    "board": _text(announce.get("board"))[:80],
+                    "endpoint": f"http://{host}:{port}/v1/notifications",
+                }
+        finally:
+            sock.close()
+
+        rows = sorted(
+            displays.values(),
+            key=lambda row: (_text(row.get("room")).casefold(), _text(row.get("name")).casefold()),
+        )
+        _COMPANION_DISPLAY_CACHE = [dict(row) for row in rows]
+        _COMPANION_DISPLAY_CACHE_AT = time.monotonic()
+        return rows
+
+
+def _companion_display_matches_targets(display: Dict[str, Any], targets: Dict[str, Any]) -> bool:
+    selector = _text(targets.get("target") or targets.get("device") or targets.get("selector"))
+    if not selector or selector.casefold() in {"all", "*", "defaults"}:
+        return True
+    wanted = selector.casefold()
+    device_id = _text(display.get("id"))
+    candidates = {
+        device_id.casefold(),
+        ("native:" + device_id).casefold(),
+        _text(display.get("name")).casefold(),
+        _text(display.get("room")).casefold(),
+    }
+    return wanted in candidates
+
+
+def _send_companion_display_notification(payload: Dict[str, Any], targets: Dict[str, Any]) -> Dict[str, Any]:
+    displays = [
+        row
+        for row in _discover_companion_displays()
+        if _companion_display_matches_targets(row, targets)
+    ]
+    if not displays:
+        return {
+            "sent_count": 0,
+            "errors": ["No compatible Tater notification displays were discovered on the LAN."],
+        }
+    sent = 0
+    errors: List[str] = []
+    for display in displays:
+        try:
+            response = requests.post(display["endpoint"], json=payload, timeout=8)
+            if int(response.status_code) >= 300:
+                detail = _compact(getattr(response, "text", ""), limit=120)
+                errors.append(
+                    f"{_text(display.get('name')) or _text(display.get('id'))}: "
+                    f"HTTP {response.status_code}{': ' + detail if detail else ''}"
+                )
+                continue
+            sent += 1
+        except Exception as exc:
+            errors.append(
+                f"{_text(display.get('name')) or _text(display.get('id'))}: "
+                f"{_compact(str(exc), limit=120) or 'delivery failed'}"
+            )
+    return {"sent_count": sent, "errors": errors}
+
+
+def _companion_notification_payload(
+    monitor: Dict[str, Any],
+    event: Dict[str, Any],
+    *,
+    title: str,
+    content: str,
+) -> Dict[str, Any]:
+    event_id = _text(event.get("id")) or uuid.uuid4().hex
+    monitor_id = _text(monitor.get("id")) or "awareness"
+    payload: Dict[str, Any] = {
+        "source_id": f"awareness-core:{monitor_id}"[:200],
+        "event_id": event_id[:300],
+        "kind": "notification",
+        "display_label": "Awareness",
+        "priority": "normal",
+        "title": title,
+        "camera_name": title,
+        "description": content,
+        "source": "awareness_core",
+        "image_fit": "cover",
+        "created_at_unix_ms": int(time.time() * 1000),
+        "ttl_ms": 90000,
+        "remember_as_last_event": True,
+    }
+    image = _notification_snapshot_for_event(redis_client, event)
+    if image:
+        payload["image_data_b64"] = base64.b64encode(image["bytes"]).decode("ascii")
+        payload["image_content_type"] = image["content_type"]
+    return payload
+
+
 def _notification_face_line(client: Any, event: Dict[str, Any]) -> str:
     context = _face_event_context(client, event)
     names: List[str] = []
@@ -5021,12 +5247,8 @@ async def _dispatch_awareness_event_notification(
         return {"ok": True, "skipped": "disabled", "sent_count": 0}
 
     destinations = _normalize_notification_destinations(monitor.get("notification_destinations"))
-    if not callable(dispatch_notification) or not destinations:
-        reason = (
-            "Shared notification delivery is unavailable."
-            if not callable(dispatch_notification)
-            else "No notification destination is configured."
-        )
+    if not destinations:
+        reason = "No notification destination is configured."
         _update_stored_event_notification(
             redis_client,
             event,
@@ -5044,8 +5266,6 @@ async def _dispatch_awareness_event_notification(
     attachments = _notification_attachments_for_event(redis_client, event)
     title = _compact(event.get("title"), limit=120) or "Tater Awareness"
     event_id = _text(event.get("id"))
-    event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    snapshot_id = _text(event.get("snapshot_id") or event_data.get("snapshot_id"))
     monitor_id = _text(monitor.get("id"))
     event_type = _text(event.get("type") or "event")
     sent = 0
@@ -5055,12 +5275,32 @@ async def _dispatch_awareness_event_notification(
         if not destination:
             continue
         try:
+            if destination["platform"] == "display":
+                display_result = await asyncio.to_thread(
+                    _send_companion_display_notification,
+                    _companion_notification_payload(
+                        monitor,
+                        event,
+                        title=title,
+                        content=content,
+                    ),
+                    destination["targets"],
+                )
+                if _as_int(display_result.get("sent_count"), 0, minimum=0) > 0:
+                    sent += 1
+                errors.extend(
+                    _compact(error, limit=180)
+                    for error in display_result.get("errors") or []
+                    if _text(error)
+                )
+                continue
+            if not callable(dispatch_notification):
+                errors.append("Shared notification delivery is unavailable.")
+                continue
             notification_meta: Dict[str, Any] = {
                 "priority": "normal",
                 "tags": ["awareness", event_type],
             }
-            if destination["platform"] == "display" and snapshot_id:
-                notification_meta["snapshot_id"] = snapshot_id
             result = await dispatch_notification(
                 platform=destination["platform"],
                 title=title,

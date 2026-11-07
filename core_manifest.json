@@ -41,7 +41,7 @@
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "4.12.6",
+      "version": "4.12.7",
       "min_tater_version": "164",
       "description": "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, answer questions about past activity, and optionally deliver the completed event with media and Face ID context. Face profiles are managed in Settings › People › Faces. Use Automation Core for custom notification text, announcements, and device actions.",
       "settings_category": "Awareness Core Settings",
@@ -57,7 +57,7 @@
         "notifications"
       ],
       "entry": "cores/awareness_core.py",
-      "sha256": "c383613f2ccffc12538e4aae2b66220f2384f0b56aea9aae38f3b79d90ebc29b"
+      "sha256": "b3c606e4f05cf38308972de7e0f078b0501b0ce4c1b6b4cd4e6d3d563f5358a6"
     },
     {
       "id": "environment",
