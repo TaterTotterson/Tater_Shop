@@ -137,9 +137,9 @@ class CoreTokenPolicyTests(unittest.TestCase):
         expected_versions = {
             "ai_task": "1.2.4",
             "automation": "1.6.4",
-            "awareness": "4.12.6",
+            "awareness": "4.12.7",
             "guardian": "1.3.13",
-            "memory": "1.0.31",
+            "memory": "1.1.0",
             "music": "3.6.3",
             "personal": "1.0.58",
             "rss": "1.0.12",
@@ -159,7 +159,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
             self.assertEqual(version, expected_version)
             self.assertEqual(entries[core_id]["version"], expected_version)
 
-        self.assertEqual(entries["memory"]["required_settings_count"], 9)
+        self.assertEqual(entries["memory"]["required_settings_count"], 16)
 
 
 class AITaskRetryPolicyTests(unittest.TestCase):
