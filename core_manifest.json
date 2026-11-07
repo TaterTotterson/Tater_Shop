@@ -104,13 +104,13 @@
       "module_key": "memory_core",
       "version": "1.1.0",
       "min_tater_version": "59",
-      "description": "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction.",
+      "description": "Memory Core integration core for Tater.",
       "settings_category": "Memory Core Settings",
       "required_settings_count": 16,
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "0c56c574fadc9c6cfcb3f6868184b38be98bc1923a665791083f5e012fe51f3c"
+      "sha256": "8e27a0b185528b2d7e9bff298f8bc10aabaef953348a2490f2193d888765a2f8"
     },
     {
       "id": "meshtastic",
