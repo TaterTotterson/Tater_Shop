@@ -29,6 +29,13 @@ class MemoryRedis(FakeRedis):
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
 
+    def hset(self, key, mapping=None, **kwargs):
+        bucket = self.hashes.setdefault(key, {})
+        updates = dict(mapping or {})
+        updates.update(kwargs)
+        bucket.update(updates)
+        return len(updates)
+
     def scan_iter(self, match="*", count=100):
         del count
         import fnmatch
@@ -318,6 +325,143 @@ class MemoryCoreContinuityTests(unittest.TestCase):
         self.assertIn("Communication style: concise", prompt)
         self.assertNotIn("0.91", prompt)
         self.assertLessEqual(len(prompt), 2300)
+
+    def test_memory_ui_is_a_friendly_two_tab_people_and_rooms_experience(self):
+        owner = "mem:user:webui:fred"
+        self.core.save_memory_doc(
+            self.redis,
+            owner,
+            {
+                "schema_version": 2,
+                "last_updated": 300.0,
+                "facts": {
+                    "favorite_color": {
+                        "value": "orange",
+                        "confidence": 0.95,
+                        "evidence": ["m2"],
+                        "updated_at": 300.0,
+                    }
+                },
+                "retired_facts": [
+                    {
+                        "key": "favorite_color",
+                        "value": "blue",
+                        "confidence": 0.9,
+                        "evidence": ["m1"],
+                        "valid_from": 100.0,
+                        "valid_to": 300.0,
+                        "reason": "corrected",
+                    }
+                ],
+            },
+            now=300.0,
+        )
+        self.core._memory_store_episodes(
+            self.redis,
+            owner,
+            [
+                {
+                    "summary": "We agreed to finish the memory dashboard.",
+                    "kind": "commitment",
+                    "commitments": ["Finish the memory dashboard"],
+                    "status": "open",
+                    "salience": 0.95,
+                    "evidence": ["m3"],
+                    "occurred_at": 310.0,
+                }
+            ],
+            min_salience=0.7,
+            max_items=25,
+            now_ts=310.0,
+        )
+
+        discovery = self.core._memory_core_doc_discovery()
+        payload = self.core._memory_core_ui_manager_payload(discovery=discovery, stats={})
+
+        self.assertEqual(payload["default_tab"], "knows")
+        self.assertEqual([tab["label"] for tab in payload["manager_tabs"]], ["Knows", "Manage"])
+        person_card = next(form for form in payload["item_forms"] if form.get("group") == "knows_people")
+        self.assertTrue(person_card["hero_image_src"].startswith("data:image/svg+xml;base64,"))
+        self.assertEqual(
+            [section["label"] for section in person_card["sections"]],
+            ["What Tater Knows", "Recent Chapters", "Still In Progress", "Changed Over Time"],
+        )
+        self.assertTrue(any(form.get("group") == "manage_memory" for form in payload["item_forms"]))
+        self.assertTrue(any(form.get("group") == "manage_system" for form in payload["item_forms"]))
+
+    def test_memory_ui_can_correct_facts_and_forget_selected_memories(self):
+        owner = "mem:user:webui:fred"
+        self.core.save_memory_doc(
+            self.redis,
+            owner,
+            {
+                "schema_version": 2,
+                "last_updated": 100.0,
+                "facts": {
+                    "favorite_color": {"value": "blue", "confidence": 0.9, "evidence": ["m1"], "updated_at": 100.0},
+                    "communication_style": {"value": "formal", "confidence": 0.9, "evidence": ["m1"], "updated_at": 100.0},
+                },
+            },
+            now=100.0,
+        )
+        self.core._memory_store_episodes(
+            self.redis,
+            owner,
+            [{"summary": "Temporary chapter", "kind": "milestone", "salience": 0.9, "evidence": ["m2"], "occurred_at": 120.0}],
+            min_salience=0.7,
+            max_items=25,
+            now_ts=120.0,
+        )
+        episode_id = self.core._memory_load_episodes(self.redis, owner)[0]["id"]
+        token = self.core._memory_core_ui_scope_token("user", "webui", "fred")
+
+        result = self.core.handle_htmlui_tab_action(
+            action="memory_manage_scope",
+            payload={
+                "id": token,
+                "values": {
+                    "edit_key": "favorite_color",
+                    "edit_value": "orange",
+                    "forget_keys": ["communication_style"],
+                    "forget_episode_ids": [episode_id],
+                },
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        doc = self.core.load_memory_doc(self.redis, owner)
+        self.assertEqual(doc["facts"]["favorite_color"]["value"], "orange")
+        self.assertNotIn("communication_style", doc["facts"])
+        self.assertEqual(doc["retired_facts"][0]["value"], "blue")
+        self.assertEqual(self.core._memory_load_episodes(self.redis, owner), [])
+
+    def test_memory_ui_recall_test_returns_readable_results(self):
+        owner = "mem:user:webui:fred"
+        self.core.save_memory_doc(
+            self.redis,
+            owner,
+            {
+                "schema_version": 2,
+                "last_updated": 100.0,
+                "facts": {"favorite_console": {"value": "Dreamcast", "confidence": 0.9, "evidence": ["m1"], "updated_at": 100.0}},
+            },
+            now=100.0,
+        )
+
+        message = self.core._memory_core_ui_run_tool_action(
+            tool_action="recall_memory",
+            import_backup_json="",
+            import_backup_path="",
+            replace_existing=False,
+            restore_settings=True,
+            confirm_text="",
+            recall_target=owner,
+            recall_query="favorite console",
+            recall_include_history=True,
+        )
+
+        self.assertIn("Favorite console: Dreamcast", message)
+        self.assertEqual(self.redis.hashes[self.core._MEMORY_CORE_UI_LAST_TOOL_HASH]["action"], "recall_memory")
 
 
 if __name__ == "__main__":

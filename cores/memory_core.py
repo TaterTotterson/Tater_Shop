@@ -856,7 +856,8 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.1.0"
+__version__ = "1.1.1"
+CORE_DESCRIPTION = "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction."
 
 
 load_dotenv()
@@ -4005,7 +4006,9 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
                 continue
             doc = load_memory_core_doc(redis_client, key)
             facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
-            if not facts:
+            episodes = _memory_load_episodes(redis_client, key)
+            retired_facts = doc.get("retired_facts") if isinstance(doc.get("retired_facts"), list) else []
+            if not facts and not episodes and not retired_facts:
                 continue
             items = summarize_memory_core_doc(doc, max_items=4, min_confidence=0.0)
             fact_keys = sorted(list(facts.keys()))
@@ -4024,11 +4027,15 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
                     "user_id": user_id,
                     "user_name": _memory_core_user_name(platform_name, user_id),
                     "fact_count": len(facts),
+                    "episode_count": len(episodes),
+                    "open_loop_count": len(_memory_open_loops(episodes, max_items=10_000)),
+                    "history_count": len(retired_facts),
                     "fact_keys": fact_keys_preview,
                     "last_updated": _format_unix_ts(doc.get("last_updated")),
                     "preview": preview,
                     "doc_key": key,
                     "doc": doc,
+                    "episodes": episodes,
                 }
             )
     except Exception:
@@ -4049,7 +4056,9 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
                 continue
             doc = load_memory_core_doc(redis_client, key)
             facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
-            if not facts:
+            episodes = _memory_load_episodes(redis_client, key)
+            retired_facts = doc.get("retired_facts") if isinstance(doc.get("retired_facts"), list) else []
+            if not facts and not episodes and not retired_facts:
                 continue
             items = summarize_memory_core_doc(doc, max_items=4, min_confidence=0.0)
             fact_keys = sorted(list(facts.keys()))
@@ -4068,10 +4077,15 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
                     "room_id": room_id,
                     "room_name": _memory_core_room_name(platform_name, room_id),
                     "fact_count": len(facts),
+                    "episode_count": len(episodes),
+                    "open_loop_count": len(_memory_open_loops(episodes, max_items=10_000)),
+                    "history_count": len(retired_facts),
                     "fact_keys": fact_keys_preview,
                     "last_updated": _format_unix_ts(doc.get("last_updated")),
                     "preview": preview,
+                    "doc_key": key,
                     "doc": doc,
+                    "episodes": episodes,
                 }
             )
     except Exception:
@@ -4099,6 +4113,9 @@ def _memory_core_doc_discovery() -> Dict[str, Any]:
         "user_count": len(user_rows),
         "room_count": len(room_rows),
         "fact_count": sum(int(row.get("fact_count") or 0) for row in user_rows + room_rows),
+        "episode_count": sum(int(row.get("episode_count") or 0) for row in user_rows + room_rows),
+        "open_loop_count": sum(int(row.get("open_loop_count") or 0) for row in user_rows + room_rows),
+        "history_count": sum(int(row.get("history_count") or 0) for row in user_rows + room_rows),
     }
 
 
@@ -5518,12 +5535,16 @@ def _memory_core_ui_clean_text(value: Any) -> str:
 
 
 def _memory_core_ui_split_keys(value: Any) -> List[str]:
-    text = _memory_core_ui_clean_text(value)
-    if not text:
-        return []
+    if isinstance(value, (list, tuple, set)):
+        source = [str(item or "") for item in value]
+    else:
+        text = _memory_core_ui_clean_text(value)
+        if not text:
+            return []
+        source = re.split(r"[,\n]+", text)
     rows: List[str] = []
     seen = set()
-    for token in re.split(r"[,\n]+", text):
+    for token in source:
         key = _memory_core_ui_clean_text(token)
         if not key or key in seen:
             continue
@@ -5893,7 +5914,7 @@ def _memory_core_ui_category_chart_points(grouped_rows: Dict[str, List[Dict[str,
     return points
 
 
-def _memory_core_ui_manager_payload(
+def _memory_core_ui_manager_payload_legacy(
     *,
     discovery: Dict[str, Any],
     stats: Dict[str, Any],
@@ -6465,6 +6486,653 @@ def _memory_core_ui_manager_payload(
     }
 
 
+def _memory_core_ui_pretty_key(value: Any) -> str:
+    text = _memory_core_ui_clean_text(value).replace("_", " ")
+    return text[:1].upper() + text[1:] if text else "Memory"
+
+
+def _memory_core_ui_memory_orb_data_uri(
+    label: str,
+    *,
+    fact_count: int,
+    episode_count: int,
+    room: bool = False,
+) -> str:
+    import base64
+    import html
+
+    clean_label = " ".join(_memory_core_ui_clean_text(label).split()) or ("Room" if room else "Person")
+    words = [part for part in re.findall(r"[A-Za-z0-9]+", clean_label) if part]
+    initials = "".join(part[0] for part in words[:2]).upper() or ("R" if room else "T")
+    escaped_initials = html.escape(initials[:2])
+    escaped_label = html.escape(clean_label[:26])
+    icon = "⌂" if room else escaped_initials
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="210" viewBox="0 0 360 210">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="70%">
+      <stop offset="0" stop-color="#3b210f"/>
+      <stop offset="0.55" stop-color="#15100d"/>
+      <stop offset="1" stop-color="#080706"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="38%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#ffd59b"/>
+      <stop offset="0.22" stop-color="#ff9f38"/>
+      <stop offset="0.68" stop-color="#d85b13"/>
+      <stop offset="1" stop-color="#6f2308"/>
+    </radialGradient>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <linearGradient id="line" x1="0" x2="1">
+      <stop stop-color="#ff7a18" stop-opacity="0.08"/>
+      <stop offset="0.5" stop-color="#ffb15d" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#ff7a18" stop-opacity="0.08"/>
+    </linearGradient>
+  </defs>
+  <rect width="360" height="210" rx="24" fill="url(#bg)"/>
+  <path d="M22 178 C78 132 104 187 163 132 S271 82 340 30" fill="none" stroke="url(#line)" stroke-width="2"/>
+  <circle cx="92" cy="94" r="58" fill="#ff7a18" opacity="0.18" filter="url(#glow)"/>
+  <circle cx="92" cy="94" r="43" fill="url(#orb)" filter="url(#glow)"/>
+  <circle cx="78" cy="78" r="4" fill="#ffe5c2" opacity="0.72"/>
+  <circle cx="108" cy="108" r="6" fill="#8c310c" opacity="0.42"/>
+  <circle cx="105" cy="72" r="3" fill="#7a2708" opacity="0.45"/>
+  <text x="92" y="103" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="24" font-weight="800" fill="#fff8ec">{icon}</text>
+  <circle cx="174" cy="58" r="6" fill="#ffb15d" filter="url(#glow)"/>
+  <circle cx="220" cy="106" r="5" fill="#ff7a18" filter="url(#glow)"/>
+  <circle cx="286" cy="62" r="4" fill="#ffd39b" filter="url(#glow)"/>
+  <path d="M135 82 L169 60 M137 107 L215 106 M179 62 L281 63" stroke="#ff9b3d" stroke-opacity="0.44" stroke-width="1.5"/>
+  <text x="157" y="151" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="18" font-weight="700" fill="#fff6e8">{escaped_label}</text>
+  <text x="157" y="174" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#d9b99d">{int(fact_count)} things known · {int(episode_count)} chapters</text>
+</svg>""".strip()
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _memory_core_ui_known_rows(doc: Dict[str, Any], *, scope: str) -> List[Dict[str, Any]]:
+    fact_rows = _memory_core_fact_rows(doc, max_items=500, value_max_chars=280)
+    category_map = _MEMORY_USER_FACT_TO_CATEGORY if scope == "user" else _MEMORY_ROOM_FACT_TO_CATEGORY
+    rows: List[Dict[str, Any]] = []
+    for row in fact_rows:
+        source_count = int(float(row.get("evidence_count") or 0))
+        rows.append(
+            {
+                "category": category_map.get(_memory_core_ui_clean_text(row.get("key")), "Something Tater learned"),
+                "memory": _memory_core_ui_pretty_key(row.get("key")),
+                "value": _memory_core_ui_clean_text(row.get("value")),
+                "why": f"Told directly · {source_count} source{'s' if source_count != 1 else ''}" if source_count else "Saved profile memory",
+                "updated": _memory_core_ui_clean_text(row.get("updated_at")) or "Unknown",
+            }
+        )
+    return rows
+
+
+def _memory_core_ui_episode_rows(episodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    ordered = sorted(
+        [item for item in episodes if isinstance(item, dict)],
+        key=lambda item: float(item.get("occurred_at") or 0.0),
+        reverse=True,
+    )
+    for item in ordered[:80]:
+        rows.append(
+            {
+                "date": _format_unix_ts(item.get("occurred_at")) or "Unknown",
+                "kind": _memory_core_ui_pretty_key(item.get("kind")),
+                "memory": _memory_core_ui_clean_text(item.get("summary")),
+                "status": _memory_core_ui_pretty_key(item.get("status")),
+                "why": f"{len(list(item.get('evidence') or []))} source message{'s' if len(list(item.get('evidence') or [])) != 1 else ''}",
+            }
+        )
+    return rows
+
+
+def _memory_core_ui_open_loop_rows(episodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in _memory_open_loops(episodes, max_items=40):
+        commitments = _memory_string_list(item.get("commitments"), max_items=10, max_chars=260)
+        if commitments:
+            for commitment in commitments:
+                rows.append(
+                    {
+                        "item": commitment,
+                        "from": _memory_core_ui_clean_text(item.get("summary")),
+                        "since": _format_unix_ts(item.get("occurred_at")) or "Unknown",
+                    }
+                )
+        else:
+            rows.append(
+                {
+                    "item": _memory_core_ui_clean_text(item.get("summary")),
+                    "from": _memory_core_ui_pretty_key(item.get("kind")),
+                    "since": _format_unix_ts(item.get("occurred_at")) or "Unknown",
+                }
+            )
+    return rows[:40]
+
+
+def _memory_core_ui_history_rows(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    source = doc.get("retired_facts") if isinstance(doc.get("retired_facts"), list) else []
+    rows: List[Dict[str, Any]] = []
+    for item in reversed(source[-80:]):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "memory": _memory_core_ui_pretty_key(item.get("key")),
+                "previous": memory_core_value_to_text(item.get("value"), max_chars=260),
+                "changed": _format_unix_ts(item.get("valid_to")) or "Unknown",
+                "reason": _memory_core_ui_pretty_key(item.get("reason")),
+            }
+        )
+    return rows
+
+
+def _memory_core_ui_profile_sensor_rows(
+    redis_obj: Any,
+    doc_key: str,
+    doc: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    card = _memory_profile_card(redis_obj, doc_key, doc, max_items=8)
+    items = card.get("items") if isinstance(card.get("items"), list) else []
+    rows: List[Dict[str, str]] = []
+    for item in items[:6]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "key": _memory_core_ui_clean_text(item.get("key")) or f"profile-{len(rows) + 1}",
+                "label": _memory_core_ui_pretty_key(item.get("key")),
+                "value": memory_core_value_to_text(item.get("value"), max_chars=110),
+                "meta": "Part of this person's profile card",
+            }
+        )
+    return rows
+
+
+def _memory_core_ui_friendly_card(row: Dict[str, Any], *, scope: str) -> Optional[Dict[str, Any]]:
+    platform = _memory_core_ui_clean_text(row.get("platform")) or "unknown"
+    scope_id = _memory_core_ui_clean_text(row.get("user_id") if scope == "user" else row.get("room_id"))
+    if not scope_id:
+        return None
+    name = _memory_core_ui_clean_text(
+        row.get("user_name") if scope == "user" else row.get("room_name")
+    ) or scope_id
+    doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
+    doc_key = _memory_core_ui_clean_text(row.get("doc_key")) or _memory_core_resolve_doc_key(scope, platform, scope_id)
+    episodes = list(row.get("episodes") or [])
+    known_rows = _memory_core_ui_known_rows(doc, scope=scope)
+    episode_rows = _memory_core_ui_episode_rows(episodes)
+    open_rows = _memory_core_ui_open_loop_rows(episodes)
+    history_rows = _memory_core_ui_history_rows(doc)
+    fact_count = int(row.get("fact_count") or 0)
+    episode_count = int(row.get("episode_count") or 0)
+    last_updated = _memory_core_ui_clean_text(row.get("last_updated")) or "Not yet"
+    sections: List[Dict[str, Any]] = []
+    if known_rows:
+        sections.append(
+            {
+                "label": "What Tater Knows",
+                "fields": [
+                    {
+                        "key": "known_memories",
+                        "label": "Known memories",
+                        "type": "table",
+                        "columns": _memory_core_ui_table_columns(
+                            ["category", "memory", "value", "why", "updated"],
+                            ["Kind", "Memory", "What Tater Knows", "Why Remembered", "Learned"],
+                        ),
+                        "rows": known_rows,
+                        "read_only": True,
+                    }
+                ],
+            }
+        )
+    if episode_rows:
+        sections.append(
+            {
+                "label": "Recent Chapters",
+                "fields": [
+                    {
+                        "key": "recent_chapters",
+                        "label": "Meaningful moments",
+                        "type": "table",
+                        "columns": _memory_core_ui_table_columns(
+                            ["date", "kind", "memory", "status", "why"],
+                            ["When", "Chapter", "What Happened", "Status", "Why Remembered"],
+                        ),
+                        "rows": episode_rows,
+                        "read_only": True,
+                    }
+                ],
+            }
+        )
+    if open_rows:
+        sections.append(
+            {
+                "label": "Still In Progress",
+                "tone": "accent",
+                "fields": [
+                    {
+                        "key": "open_loops",
+                        "label": "Open projects and commitments",
+                        "type": "table",
+                        "columns": _memory_core_ui_table_columns(
+                            ["item", "from", "since"], ["Open Item", "Context", "Since"]
+                        ),
+                        "rows": open_rows,
+                        "read_only": True,
+                    }
+                ],
+            }
+        )
+    if history_rows:
+        sections.append(
+            {
+                "label": "Changed Over Time",
+                "fields": [
+                    {
+                        "key": "memory_history",
+                        "label": "Previous memories",
+                        "type": "table",
+                        "columns": _memory_core_ui_table_columns(
+                            ["memory", "previous", "changed", "reason"],
+                            ["Memory", "Previously", "Changed", "What Changed"],
+                        ),
+                        "rows": history_rows,
+                        "read_only": True,
+                    }
+                ],
+            }
+        )
+    subtitle_bits = [platform, f"{fact_count} known", f"{episode_count} chapter{'s' if episode_count != 1 else ''}"]
+    detail = (
+        "A shared place, its defaults, and the moments Tater remembers there."
+        if scope == "room"
+        else "A living profile built from direct conversations, meaningful moments, and choices over time."
+    )
+    return {
+        "id": f"knows:{scope}:{_memory_core_ui_token(platform, scope_id)}",
+        "group": "knows_rooms" if scope == "room" else "knows_people",
+        "title": name,
+        "subtitle": " · ".join(subtitle_bits),
+        "detail": detail,
+        "hero_image_src": _memory_core_ui_memory_orb_data_uri(
+            name,
+            fact_count=fact_count,
+            episode_count=episode_count,
+            room=scope == "room",
+        ),
+        "hero_image_alt": f"Tater memory constellation for {name}",
+        "hero_badges": [
+            {"label": platform.upper(), "tone": "accent"},
+            {"label": f"{fact_count} memories", "tone": "success" if fact_count else "muted"},
+            {"label": f"{len(open_rows)} open", "tone": "warning" if open_rows else "good"},
+            {"label": f"{len(history_rows)} changed", "tone": "muted"},
+        ],
+        "summary_rows": [
+            {"label": "Last Learned", "value": last_updated},
+            {"label": "Profile Memories", "value": str(fact_count)},
+            {"label": "Meaningful Chapters", "value": str(episode_count)},
+            {"label": "Open Commitments", "value": str(len(open_rows))},
+        ],
+        "sensor_title": "At A Glance",
+        "sensor_rows": _memory_core_ui_profile_sensor_rows(redis_client, doc_key, doc) if scope == "user" else [],
+        "sections": sections,
+        "fields_popup": False,
+        "sections_in_dropdown": False,
+    }
+
+
+def _memory_core_ui_advanced_card(row: Dict[str, Any], *, scope: str) -> Optional[Dict[str, Any]]:
+    platform = _memory_core_ui_clean_text(row.get("platform")) or "unknown"
+    scope_id = _memory_core_ui_clean_text(row.get("user_id") if scope == "user" else row.get("room_id"))
+    if not scope_id:
+        return None
+    name = _memory_core_ui_clean_text(row.get("user_name") if scope == "user" else row.get("room_name")) or scope_id
+    doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
+    episodes = list(row.get("episodes") or [])
+    facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
+    fact_rows = _memory_core_ui_fact_table_rows(_memory_core_fact_rows(doc, max_items=500, value_max_chars=300), max_rows=500)
+    fact_options = [{"value": key, "label": _memory_core_ui_pretty_key(key)} for key in sorted(facts)]
+    edit_options = [{"value": "", "label": "Choose a memory"}] + fact_options
+    episode_options = [
+        {
+            "value": _memory_core_ui_clean_text(item.get("id")),
+            "label": _memory_clean_text(item.get("summary"), max_chars=90),
+        }
+        for item in episodes
+        if _memory_core_ui_clean_text(item.get("id"))
+    ]
+    combined_raw = {"profile": doc, "episodes": episodes}
+    return {
+        "id": _memory_core_ui_scope_token(scope, platform, scope_id),
+        "group": "manage_memory",
+        "title": f"Manage {name}",
+        "subtitle": f"{platform} · precise editing and privacy controls",
+        "detail": "Update one memory, forget selected facts or chapters, or remove the complete memory record.",
+        "hero_badges": [
+            {"label": f"{len(facts)} facts", "tone": "accent"},
+            {"label": f"{len(episodes)} chapters", "tone": "muted"},
+            {"label": "PRIVATE", "tone": "success"},
+        ],
+        "save_action": "memory_manage_scope",
+        "save_label": "Apply Memory Changes",
+        "remove_action": "memory_remove_doc",
+        "remove_label": "Forget Everything",
+        "remove_confirm": f"Permanently forget every fact, episode, and profile record for {name}?",
+        "sections": [
+            {
+                "label": "Current Memory",
+                "fields": [
+                    {
+                        "key": "advanced_fact_rows",
+                        "label": "Current facts",
+                        "type": "table",
+                        "columns": _memory_core_ui_table_columns(
+                            ["key", "value", "confidence", "evidence", "updated"],
+                            ["Storage Key", "Value", "Confidence", "Sources", "Updated"],
+                        ),
+                        "rows": fact_rows,
+                        "read_only": True,
+                    }
+                ],
+            },
+            {
+                "label": "Correct A Memory",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "edit_key",
+                        "label": "Memory To Correct",
+                        "type": "select",
+                        "value": "",
+                        "options": edit_options,
+                        "description": "Choose an existing memory and enter its corrected value. The old value moves to Changed Over Time.",
+                    },
+                    {
+                        "key": "edit_value",
+                        "label": "Corrected Value",
+                        "type": "textarea",
+                        "value": "",
+                        "placeholder": "Enter plain text, a number, or valid JSON for a list/object.",
+                    },
+                ],
+            },
+            {
+                "label": "Forget Selected Memories",
+                "tone": "danger",
+                "inline": True,
+                "fields": [
+                    {
+                        "key": "forget_keys",
+                        "label": "Facts To Forget",
+                        "type": "multiselect",
+                        "value": [],
+                        "options": fact_options,
+                    },
+                    {
+                        "key": "forget_episode_ids",
+                        "label": "Chapters To Forget",
+                        "type": "multiselect",
+                        "value": [],
+                        "options": episode_options,
+                    },
+                ],
+            },
+            {
+                "label": "Advanced Storage",
+                "fields": [
+                    {
+                        "key": "raw_memory_json",
+                        "label": "Read-only storage view",
+                        "type": "textarea",
+                        "value": _memory_core_ui_json_text(combined_raw, max_chars=22_000),
+                        "read_only": True,
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def _memory_core_ui_manager_payload(
+    *,
+    discovery: Dict[str, Any],
+    stats: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_rows = list((discovery or {}).get("users") or [])
+    room_rows = list((discovery or {}).get("rooms") or [])
+    forms: List[Dict[str, Any]] = []
+    export_dir_text = str(_memory_core_ui_export_dir())
+
+    total_facts = int(discovery.get("fact_count") or 0)
+    total_episodes = int(discovery.get("episode_count") or 0)
+    total_open = int(discovery.get("open_loop_count") or 0)
+    total_history = int(discovery.get("history_count") or 0)
+    last_run = _memory_core_ui_clean_text(stats.get("last_run_text")) or "Waiting for the first memory pass"
+    forms.append(
+        {
+            "id": "knows:overview",
+            "group": "knows_overview",
+            "title": "What Tater Knows",
+            "subtitle": "A living memory of people, places, decisions, and the little things that matter.",
+            "detail": "Tater keeps a small personal profile in view, retrieves long-tail memories only when relevant, and preserves how facts change over time.",
+            "hero_image_src": _memory_core_ui_memory_orb_data_uri(
+                "Tater Memory",
+                fact_count=total_facts,
+                episode_count=total_episodes,
+            ),
+            "hero_image_alt": "Tater's orange memory constellation",
+            "hero_badges": [
+                {"label": f"{int(discovery.get('user_count') or 0)} people", "tone": "accent"},
+                {"label": f"{total_facts} things known", "tone": "success"},
+                {"label": f"{total_episodes} chapters", "tone": "muted"},
+                {"label": f"{total_open} still open", "tone": "warning" if total_open else "good"},
+            ],
+            "summary_rows": [
+                {"label": "People", "value": str(int(discovery.get("user_count") or 0))},
+                {"label": "Rooms", "value": str(int(discovery.get("room_count") or 0))},
+                {"label": "Current Memories", "value": str(total_facts)},
+                {"label": "Meaningful Chapters", "value": str(total_episodes)},
+                {"label": "Changed Over Time", "value": str(total_history)},
+                {"label": "Last Learning Pass", "value": last_run},
+            ],
+            "sensor_title": "Memory Pulse",
+            "sensor_rows": [
+                {"label": "Current", "value": f"{total_facts} known", "meta": "Stable facts and preferences"},
+                {"label": "Episodic", "value": f"{total_episodes} chapters", "meta": "Decisions, outcomes, and moments"},
+                {"label": "Working", "value": f"{total_open} open", "meta": "Projects and commitments still in progress"},
+                {"label": "Temporal", "value": f"{total_history} changed", "meta": "Previous truths kept in context"},
+            ],
+            "fields_popup": False,
+            "sections_in_dropdown": False,
+        }
+    )
+
+    for row in user_rows:
+        card = _memory_core_ui_friendly_card(row, scope="user")
+        if card:
+            forms.append(card)
+    for row in room_rows:
+        card = _memory_core_ui_friendly_card(row, scope="room")
+        if card:
+            forms.append(card)
+
+    people_options = _people_person_options(redis_client)
+    people_available = len(people_options) > 1
+    if people_available:
+        for row in user_rows[:120]:
+            platform = _memory_core_ui_clean_text(row.get("platform")) or "unknown"
+            scope_id = _memory_core_ui_clean_text(row.get("user_id"))
+            if not scope_id or platform == "identity":
+                continue
+            name = _memory_core_ui_clean_text(row.get("user_name") or scope_id or "unknown")
+            linked = _people_alias_resolution(
+                redis_obj=redis_client,
+                platform=platform,
+                user_id=scope_id,
+                display_name=name,
+            )
+            linked_person_id = _as_text(linked.get("person_id")).strip()
+            linked_person_name = _as_text(linked.get("person_name")).strip()
+            forms.append(
+                {
+                    "id": f"manage:link:{_memory_core_ui_token(platform, scope_id)}",
+                    "title": f"Recognize {name} Everywhere",
+                    "group": "manage_people",
+                    "subtitle": f"{platform} · " + (f"linked to {linked_person_name}" if linked_person_id else "not linked yet"),
+                    "detail": "People links let Tater carry one person's memory naturally across voice, WebUI, Discord, and other portals.",
+                    "hero_badges": [
+                        {"label": "LINKED" if linked_person_id else "UNLINKED", "tone": "success" if linked_person_id else "warning"},
+                        {"label": platform.upper(), "tone": "accent"},
+                    ],
+                    "save_action": "memory_link_person",
+                    "save_label": "Save Identity Link",
+                    "fields": [
+                        {"key": "scope_token", "label": "Scope", "type": "hidden", "value": _memory_core_ui_scope_token("user", platform, scope_id)},
+                        {
+                            "key": "person_id",
+                            "label": "Master Person",
+                            "type": "select",
+                            "value": linked_person_id,
+                            "options": people_options,
+                        },
+                        {"key": "alias_label", "label": "Name On This Portal", "type": "text", "value": name},
+                        {"key": "merge_existing_doc", "label": "Bring Existing Memories Together", "type": "checkbox", "value": True},
+                        {"key": "delete_source_doc", "label": "Remove The Old Separate Copy", "type": "checkbox", "value": False},
+                    ],
+                }
+            )
+    else:
+        forms.append(
+            {
+                "id": "manage:people:empty",
+                "title": "People Links",
+                "group": "manage_people",
+                "subtitle": "Create a person in Settings > People to carry one memory across portals.",
+                "hero_badges": [{"label": "READY WHEN YOU ARE", "tone": "muted"}],
+            }
+        )
+
+    for row in user_rows:
+        card = _memory_core_ui_advanced_card(row, scope="user")
+        if card:
+            forms.append(card)
+    for row in room_rows:
+        card = _memory_core_ui_advanced_card(row, scope="room")
+        if card:
+            forms.append(card)
+
+    recall_options = [{"value": "", "label": "Choose a person or room"}]
+    for row in user_rows:
+        doc_key = _memory_core_ui_clean_text(row.get("doc_key"))
+        if doc_key:
+            recall_options.append({"value": doc_key, "label": f"Person · {_memory_core_ui_clean_text(row.get('user_name') or row.get('user_id'))}"})
+    for row in room_rows:
+        doc_key = _memory_core_ui_clean_text(row.get("doc_key"))
+        if doc_key:
+            recall_options.append({"value": doc_key, "label": f"Room · {_memory_core_ui_clean_text(row.get('room_name') or row.get('room_id'))}"})
+    last_tool = redis_client.hgetall(_MEMORY_CORE_UI_LAST_TOOL_HASH) or {}
+    last_tool_message = _memory_core_ui_clean_text(last_tool.get("message")) or "No memory tool has run yet."
+    forms.append(
+        {
+            "id": "manage:system",
+            "title": "Search, Backup & Privacy",
+            "group": "manage_system",
+            "subtitle": "Recall testing, portable backups, and destructive controls live together here.",
+            "detail": last_tool_message,
+            "hero_badges": [
+                {"label": "PRIVATE", "tone": "success"},
+                {"label": "EXPORTABLE", "tone": "accent"},
+                {"label": "USER CONTROLLED", "tone": "muted"},
+            ],
+            "save_action": "memory_run_tool",
+            "save_label": "Run Selected Action",
+            "sections": [
+                {
+                    "label": "Action",
+                    "fields": [
+                        {
+                            "key": "tool_action",
+                            "label": "What Would You Like To Do?",
+                            "type": "select",
+                            "value": "recall_memory",
+                            "options": [
+                                {"value": "recall_memory", "label": "Test Memory Recall"},
+                                {"value": "export_report_pdf", "label": "Export Friendly Report (PDF)"},
+                                {"value": "export_report_txt", "label": "Export Friendly Report (TXT)"},
+                                {"value": "export_backup_json", "label": "Export Complete Backup (JSON)"},
+                                {"value": "import_backup_json", "label": "Import Complete Backup (JSON)"},
+                                {"value": "wipe_all_memory", "label": "Wipe All Memory Data"},
+                            ],
+                            "description": f"Exports are saved under {export_dir_text}",
+                        }
+                    ],
+                },
+                {
+                    "label": "Recall Test",
+                    "inline": True,
+                    "fields": [
+                        {"key": "recall_target", "label": "Whose Memory?", "type": "select", "value": "", "options": recall_options},
+                        {"key": "recall_query", "label": "What Should Tater Remember?", "type": "text", "value": "", "placeholder": "What did we decide about prompt caching?"},
+                        {"key": "recall_include_history", "label": "Include Changed Memories", "type": "checkbox", "value": True},
+                    ],
+                },
+                {
+                    "label": "Import Options",
+                    "fields": [
+                        {"key": "import_backup_path", "label": "Backup File Path", "type": "text", "value": "", "placeholder": "agent_lab/memory_core_exports/memory_backup_YYYYMMDD_HHMMSS.json"},
+                        {"key": "import_backup_json", "label": "Or Paste Backup JSON", "type": "textarea", "value": ""},
+                        {"key": "replace_existing", "label": "Replace Existing Memory", "type": "checkbox", "value": False},
+                        {"key": "restore_settings", "label": "Restore Memory Settings", "type": "checkbox", "value": True},
+                    ],
+                },
+                {
+                    "label": "Danger Zone",
+                    "tone": "danger",
+                    "fields": [
+                        {"key": "confirm_text", "label": "Type WIPE To Erase Everything", "type": "text", "value": "", "placeholder": "WIPE"}
+                    ],
+                },
+            ],
+        }
+    )
+
+    return {
+        "kind": "settings_manager",
+        "title": "Tater Memory",
+        "empty_message": "Tater has not learned anything here yet.",
+        "default_tab": "knows",
+        "manager_tabs": [
+            {
+                "key": "knows",
+                "label": "Knows",
+                "source": "grouped_items",
+                "groups": [
+                    {"key": "overview", "label": "Memory Home", "item_group": "knows_overview"},
+                    {"key": "people", "label": "People", "item_group": "knows_people", "selector": True, "selector_label": "Choose A Person", "empty_message": "No person memories yet."},
+                    {"key": "rooms", "label": "Rooms", "item_group": "knows_rooms", "selector": True, "selector_label": "Choose A Room", "empty_message": "No room memories yet."},
+                ],
+            },
+            {
+                "key": "manage",
+                "label": "Manage",
+                "source": "grouped_items",
+                "groups": [
+                    {"key": "people", "label": "Recognize People", "item_group": "manage_people", "selector": True, "selector_label": "Choose A Portal Identity"},
+                    {"key": "memory", "label": "Edit & Forget", "item_group": "manage_memory", "selector": True, "selector_label": "Choose A Memory Record"},
+                    {"key": "system", "label": "Search, Backup & Privacy", "item_group": "manage_system"},
+                ],
+            },
+        ],
+        "item_fields_dropdown": False,
+        "item_fields_dropdown_label": "Memory Details",
+        "item_forms": forms,
+    }
+
+
 def _memory_core_ui_run_tool_action(
     *,
     tool_action: Any,
@@ -6473,10 +7141,54 @@ def _memory_core_ui_run_tool_action(
     replace_existing: Any,
     restore_settings: Any,
     confirm_text: Any,
+    recall_target: Any = "",
+    recall_query: Any = "",
+    recall_include_history: Any = True,
 ) -> str:
     action_name = _memory_core_ui_clean_text(tool_action).lower()
     if not action_name:
         raise ValueError("Select a tool action.")
+
+    if action_name == "recall_memory":
+        owner_doc_key = _memory_core_ui_clean_text(recall_target)
+        query_text = _memory_core_ui_clean_text(recall_query)
+        if not owner_doc_key:
+            raise ValueError("Choose a person or room for the recall test.")
+        if not (
+            owner_doc_key.startswith("mem:user:")
+            or owner_doc_key.startswith("mem:room:")
+        ):
+            raise ValueError("The selected recall target is not a memory document.")
+        if not query_text:
+            raise ValueError("Enter something for Tater to remember.")
+        settings = _load_settings()
+        results = _hydra_memory_search_doc(
+            redis_obj=redis_client,
+            owner_doc_key=owner_doc_key,
+            query_text=query_text,
+            max_items=_as_int(settings.get("recall_max_items"), 12, min_value=1, max_value=50),
+            include_history=_as_bool(recall_include_history, True),
+        )
+        if not results:
+            message = f'No matching memory was found for “{query_text}”.'
+        else:
+            lines = [f'Found {len(results)} matching memor{("y" if len(results) == 1 else "ies")} for “{query_text}”:']
+            for item in results:
+                item_type = _memory_core_ui_clean_text(item.get("type"))
+                if item_type == "episode":
+                    label = _memory_core_ui_pretty_key(item.get("kind"))
+                    value_text = _memory_core_ui_clean_text(item.get("summary"))
+                    if item.get("outcome"):
+                        value_text = f"{value_text} Outcome: {_memory_core_ui_clean_text(item.get('outcome'))}"
+                else:
+                    label = _memory_core_ui_pretty_key(item.get("key"))
+                    value_text = memory_core_value_to_text(item.get("value"), max_chars=320)
+                    if item_type == "past_fact":
+                        label = f"Past {label}"
+                lines.append(f"• {label}: {value_text}")
+            message = _memory_core_ui_truncate_text("\n".join(lines), max_chars=4_000)
+        _memory_core_ui_set_last_tool(action=action_name, message=message)
+        return message
 
     if action_name == "export_report_txt":
         stats = _memory_core_stats()
@@ -6598,6 +7310,7 @@ def _memory_core_ui_run_tool_action(
 
 
 def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_client=None, **_kwargs) -> Dict[str, Any]:
+    redis_obj = globals()["redis_client"]
     del redis_client
     body = payload if isinstance(payload, dict) else {}
     values = body.get("values") if isinstance(body.get("values"), dict) else {}
@@ -6616,8 +7329,86 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
             replace_existing=_value("replace_existing"),
             restore_settings=_value("restore_settings"),
             confirm_text=_value("confirm_text"),
+            recall_target=_value("recall_target"),
+            recall_query=_value("recall_query"),
+            recall_include_history=_value("recall_include_history", True),
         )
         return {"ok": True, "message": message}
+
+    if action_name == "memory_manage_scope":
+        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
+        doc_key = _memory_core_resolve_doc_key(scope, platform, scope_id)
+        if not doc_key:
+            raise ValueError("Invalid memory scope target.")
+
+        edit_key = _memory_core_ui_clean_text(_value("edit_key"))
+        edit_value_text = _memory_core_ui_clean_text(_value("edit_value"))
+        forget_keys = _memory_core_ui_split_keys(_value("forget_keys"))
+        forget_episode_ids = _memory_core_ui_split_keys(_value("forget_episode_ids"))
+        if not edit_key and not forget_keys and not forget_episode_ids:
+            raise ValueError("Choose a memory to correct or at least one item to forget.")
+
+        doc = load_memory_core_doc(redis_obj, doc_key)
+        facts = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
+        corrected = 0
+        deleted_facts = 0
+        deleted_episodes = 0
+
+        if edit_key:
+            if not edit_value_text:
+                raise ValueError("Enter the corrected value for the selected memory.")
+            canonicalizer = _canonical_user_fact_key if scope == "user" else _canonical_room_fact_key
+            canonical_key = canonicalizer(edit_key)
+            if not canonical_key or canonical_key not in facts:
+                raise ValueError("The selected memory no longer exists.")
+            try:
+                corrected_value = json.loads(edit_value_text)
+            except Exception:
+                corrected_value = edit_value_text
+            changed = merge_observation(
+                doc,
+                {
+                    "candidate_key": canonical_key,
+                    "value": corrected_value,
+                    "confidence": 1.0,
+                    "evidence": ["memory_ui"],
+                    "explicit_correction": True,
+                    "operation": "correct",
+                },
+                min_confidence=0.0,
+                default_ttl_sec=0,
+                allow_new_keys=False,
+                now=time.time(),
+            )
+            corrected = 1 if changed else 0
+
+        if forget_keys:
+            deleted_facts = int(forget_memory_core_fact_keys(doc, forget_keys) or 0)
+        if forget_episode_ids:
+            deleted_episodes = _memory_delete_episodes(redis_obj, doc_key, forget_episode_ids)
+
+        if corrected or deleted_facts:
+            save_memory_core_doc(redis_obj, doc_key, doc, now=time.time())
+            if scope == "user":
+                _memory_profile_card(
+                    redis_obj,
+                    doc_key,
+                    doc,
+                    max_items=_as_int(_load_settings().get("profile_card_items"), 8, min_value=3, max_value=20),
+                )
+
+        changes: List[str] = []
+        if corrected:
+            changes.append("corrected 1 memory")
+        elif edit_key:
+            changes.append("confirmed the existing memory")
+        if deleted_facts:
+            changes.append(f"forgot {deleted_facts} fact{'s' if deleted_facts != 1 else ''}")
+        if deleted_episodes:
+            changes.append(f"forgot {deleted_episodes} chapter{'s' if deleted_episodes != 1 else ''}")
+        if not changes:
+            raise ValueError("No matching memories were changed.")
+        return {"ok": True, "message": "Memory updated: " + ", ".join(changes) + "."}
 
     if action_name == "memory_forget_keys":
         scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
@@ -6638,7 +7429,7 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
         return {"ok": True, "message": f"Deleted {scope} memory document."}
 
     if action_name == "memory_link_person":
-        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("id"))
+        scope, platform, scope_id = _memory_core_ui_parse_scope_token(_value("scope_token") or _value("id"))
         if scope != "user":
             raise ValueError("Only user memory documents can be linked to People.")
         if _memory_core_ui_clean_text(platform).lower() == "identity":

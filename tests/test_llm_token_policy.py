@@ -139,7 +139,7 @@ class CoreTokenPolicyTests(unittest.TestCase):
             "automation": "1.6.4",
             "awareness": "4.12.7",
             "guardian": "1.3.13",
-            "memory": "1.1.0",
+            "memory": "1.1.1",
             "music": "3.6.3",
             "personal": "1.0.58",
             "rss": "1.0.12",
