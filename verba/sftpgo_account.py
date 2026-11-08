@@ -18,11 +18,13 @@ except Exception:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+LEGACY_HOME_DIR_PLACEHOLDER = "/your/default/home/dir"
+
 
 class SFTPGoAccountPlugin(ToolVerba):
     name = "sftpgo_account"
     verba_name = "SFTPGo Account"
-    version = "1.0.3"
+    version = "1.0.4"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_account","arguments":{"username":"<optional custom username>"}}'
     description = "Creates an SFTPGo account for the user and returns their credentials."
@@ -57,8 +59,11 @@ class SFTPGoAccountPlugin(ToolVerba):
         "DEFAULT_HOME_DIR": {
             "label": "Default Home Directory",
             "type": "text",
-            "default": "/your/default/home/dir",
-            "description": "Default home directory for new SFTP accounts."
+            "default": "",
+            "description": (
+                "Leave blank to use SFTPGo's configured users base directory. "
+                "Custom paths may include {username}."
+            )
         }
     }
     waiting_prompt_template = "Write a friendly message telling {mention} you’re creating their account now! Only output that message."
@@ -91,11 +96,16 @@ class SFTPGoAccountPlugin(ToolVerba):
             "SFTPGO_USERNAME": "username",
             "SFTPGO_PASSWORD": "password",
             "SFTPGO_GROUP_NAME": "DNServ",
-            "DEFAULT_HOME_DIR": "/your/default/home/dir",
+            "DEFAULT_HOME_DIR": "",
         }
         for k, v in defaults.items():
             if not settings.get(k):
                 settings[k] = v
+
+        home_dir = str(settings.get("DEFAULT_HOME_DIR") or "").strip()
+        if home_dir == LEGACY_HOME_DIR_PLACEHOLDER:
+            home_dir = ""
+        settings["DEFAULT_HOME_DIR"] = home_dir
 
         api_url = settings["SFTPGO_API_URL"].rstrip("/")
         if "/api/v2" not in api_url:
@@ -155,6 +165,25 @@ class SFTPGoAccountPlugin(ToolVerba):
             return sender_mxid[1:].split(":", 1)[0] or "user"
         return sender_mxid
 
+    @staticmethod
+    def _user_payload(username: str, password: str, settings: dict) -> dict:
+        payload = {
+            "username": username,
+            "password": password,
+            "status": 1,
+            "permissions": {"/": ["*"]},
+        }
+
+        group_name = str(settings.get("SFTPGO_GROUP_NAME") or "").strip()
+        if group_name:
+            payload["groups"] = [{"name": group_name, "type": 1}]
+
+        home_dir = str(settings.get("DEFAULT_HOME_DIR") or "").strip()
+        if home_dir and home_dir != LEGACY_HOME_DIR_PLACEHOLDER:
+            payload["home_dir"] = home_dir.replace("{username}", username)
+
+        return payload
+
     async def create_sftp_account(self, username: str, password: str, message_obj=None):
         """
         Create the SFTPGo user. Returns ('created', welcome_text) on success;
@@ -184,14 +213,7 @@ class SFTPGoAccountPlugin(ToolVerba):
                 return "error", None
 
             # Create user
-            payload = {
-                "username": username,
-                "password": password,
-                "status": 1,
-                "permissions": {"/": ["list", "download", "upload", "create_dirs", "rename"]},
-                "home_dir": settings["DEFAULT_HOME_DIR"],
-                "groups": [{"name": settings["SFTPGO_GROUP_NAME"], "type": 1}],
-            }
+            payload = self._user_payload(username, password, settings)
             try:
                 async with session.post(
                     f"{settings['SFTPGO_API_URL']}/users",

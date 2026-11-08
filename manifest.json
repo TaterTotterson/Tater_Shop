@@ -1389,7 +1389,7 @@
     {
       "id": "sftpgo_account",
       "name": "SFTPGo Account",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "min_tater_version": "59",
       "description": "Create an SFTPGo account for the user and return login details.",
       "portals": [
@@ -1406,7 +1406,7 @@
       "settings_category": "SFTPGo",
       "tags": [],
       "entry": "verba/sftpgo_account.py",
-      "sha256": "2e0354acc5dcc2ceaad370c7214aeff498103ba435a406c5bfb9013f81372782"
+      "sha256": "219d589767499890b8f5f1c549182892cc064e067c5c3d85f16183fbc40a82ba"
     },
     {
       "id": "sftpgo_activity",
