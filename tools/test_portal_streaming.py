@@ -214,6 +214,9 @@ class _DiscordInventoryRedis:
         self.hashes.setdefault(str(key), {})[str(field)] = value
         return 1
 
+    def hget(self, key, field):
+        return (self.hashes.get(str(key)) or {}).get(str(field))
+
     def pipeline(self):
         return _DiscordRedisPipeline(self)
 
@@ -246,13 +249,69 @@ class DiscordDestinationReconciliationTests(unittest.TestCase):
             ["legacy message"],
         )
 
-    def test_response_channel_map_keeps_only_live_channels(self):
-        filtered = discord_portal._filter_response_channel_map(
+    def test_response_channel_map_removes_only_explicitly_deleted_entries(self):
+        filtered = discord_portal._remove_response_channel_map_entries(
             {10: {101, 102}, 20: {201}},
-            ["102", "201"],
+            removed_channel_ids=["101"],
         )
 
         self.assertEqual(filtered, {10: {102}, 20: {201}})
+
+    def test_response_channel_map_removes_explicitly_departed_guild(self):
+        filtered = discord_portal._remove_response_channel_map_entries(
+            {10: {101, 102}, 20: {201}},
+            removed_guild_ids=["20"],
+        )
+
+        self.assertEqual(filtered, {10: {101, 102}})
+
+    def test_inventory_refresh_does_not_overwrite_saved_response_channels(self):
+        client = _DiscordInventoryRedis()
+        saved = discord_portal.serialize_response_channel_map({10: {101}})
+        client.hashes[discord_portal.DISCORD_SETTINGS_KEY] = {
+            discord_portal.RESPONSE_CHANNEL_MAP_FIELD: saved,
+        }
+        bot = type(
+            "InventoryBot",
+            (),
+            {
+                "guilds": [],
+                "response_channel_ids_by_guild": {10: {101}},
+                "_response_channel_map_raw_cache": saved,
+            },
+        )()
+
+        with patch.object(discord_portal, "redis_client", client):
+            destination_count = discord_portal.discord_portal._sync_destination_inventory(bot)
+
+        self.assertEqual(destination_count, 0)
+        self.assertEqual(bot.response_channel_ids_by_guild, {10: {101}})
+        self.assertEqual(
+            client.hashes[discord_portal.DISCORD_SETTINGS_KEY][discord_portal.RESPONSE_CHANNEL_MAP_FIELD],
+            saved,
+        )
+
+    def test_explicit_delete_cleans_latest_saved_map_without_losing_other_channels(self):
+        client = _DiscordInventoryRedis()
+        latest = discord_portal.serialize_response_channel_map({10: {101, 102}, 20: {201}})
+        client.hashes[discord_portal.DISCORD_SETTINGS_KEY] = {
+            discord_portal.RESPONSE_CHANNEL_MAP_FIELD: latest,
+        }
+        bot = object.__new__(discord_portal.discord_portal)
+        bot.response_channel_ids_by_guild = {10: {101}}
+        bot._response_channel_map_raw_cache = discord_portal.serialize_response_channel_map({10: {101}})
+        bot._response_channel_last_refresh = 0.0
+
+        with patch.object(discord_portal, "redis_client", client):
+            removed = bot._remove_saved_response_channels(removed_channel_ids=[101])
+
+        expected = {10: {102}, 20: {201}}
+        self.assertEqual(removed, 1)
+        self.assertEqual(bot.response_channel_ids_by_guild, expected)
+        self.assertEqual(
+            client.hashes[discord_portal.DISCORD_SETTINGS_KEY][discord_portal.RESPONSE_CHANNEL_MAP_FIELD],
+            discord_portal.serialize_response_channel_map(expected),
+        )
 
     def test_reconcile_preserves_rooms_from_temporarily_unavailable_guild(self):
         client = _DiscordInventoryRedis()

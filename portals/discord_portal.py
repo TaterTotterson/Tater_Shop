@@ -41,7 +41,7 @@ from verba_result import action_failure
 from verba_kernel import verba_display_name
 from hydra import run_hydra_turn, resolve_agent_limits
 from emoji_responder import emoji_responder
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 
 load_dotenv()
@@ -411,13 +411,20 @@ def _reconcile_discord_destination_records(
     return retired
 
 
-def _filter_response_channel_map(
+def _remove_response_channel_map_entries(
     channel_map: Dict[Any, Iterable[Any]],
-    active_channel_ids: Iterable[Any],
+    *,
+    removed_channel_ids: Optional[Iterable[Any]] = None,
+    removed_guild_ids: Optional[Iterable[Any]] = None,
 ) -> Dict[int, set[int]]:
-    active_ids = {
+    removed_channels = {
         int(str(value).strip())
-        for value in active_channel_ids
+        for value in (removed_channel_ids or [])
+        if str(value or "").strip().isdigit()
+    }
+    removed_guilds = {
+        int(str(value).strip())
+        for value in (removed_guild_ids or [])
         if str(value or "").strip().isdigit()
     }
     out: Dict[int, set[int]] = {}
@@ -426,7 +433,9 @@ def _filter_response_channel_map(
             guild_id = int(raw_guild_id)
         except Exception:
             continue
-        channels = {channel_id for channel_id in parse_response_channel_ids(raw_channel_ids) if channel_id in active_ids}
+        if guild_id <= 0 or guild_id in removed_guilds:
+            continue
+        channels = parse_response_channel_ids(raw_channel_ids) - removed_channels
         if guild_id > 0 and channels:
             out[guild_id] = channels
     return out
@@ -1181,24 +1190,46 @@ class discord_portal(commands.Bot):
             active_channel_ids,
             protected_guild_ids=protected_guild_ids,
         )
-        filtered_response_map = _filter_response_channel_map(
-            self.response_channel_ids_by_guild,
-            active_channel_ids,
-        )
-        if filtered_response_map != self.response_channel_ids_by_guild:
-            self.response_channel_ids_by_guild = filtered_response_map
-            self._response_channel_map_raw_cache = serialize_response_channel_map(filtered_response_map)
-            try:
-                redis_client.hset(
-                    DISCORD_SETTINGS_KEY,
-                    RESPONSE_CHANNEL_MAP_FIELD,
-                    self._response_channel_map_raw_cache,
-                )
-            except Exception:
-                logger.warning("[discord] stale response-channel cleanup failed", exc_info=True)
         if retired_count:
             logger.info("[discord] retired %d stale destination record(s)", retired_count)
         return len(payload["destinations"])
+
+    def _remove_saved_response_channels(
+        self,
+        *,
+        removed_channel_ids: Optional[Iterable[Any]] = None,
+        removed_guild_ids: Optional[Iterable[Any]] = None,
+    ) -> int:
+        """Remove only destinations Discord explicitly reported as deleted or departed."""
+        if not self._refresh_response_channel_map_from_redis(force=True):
+            logger.warning("[discord] skipped response-channel cleanup because saved settings could not be read")
+            return 0
+
+        updated = _remove_response_channel_map_entries(
+            self.response_channel_ids_by_guild,
+            removed_channel_ids=removed_channel_ids,
+            removed_guild_ids=removed_guild_ids,
+        )
+        if updated == self.response_channel_ids_by_guild:
+            return 0
+
+        serialized = serialize_response_channel_map(updated)
+        try:
+            redis_client.hset(
+                DISCORD_SETTINGS_KEY,
+                RESPONSE_CHANNEL_MAP_FIELD,
+                serialized,
+            )
+        except Exception:
+            logger.warning("[discord] deleted response-channel cleanup failed", exc_info=True)
+            return 0
+
+        removed_count = sum(len(channels) for channels in self.response_channel_ids_by_guild.values()) - sum(
+            len(channels) for channels in updated.values()
+        )
+        self.response_channel_ids_by_guild = updated
+        self._response_channel_map_raw_cache = serialized
+        return max(0, removed_count)
 
     def set_response_channel_map(self, channel_map: Any) -> dict[int, set[int]]:
         parsed = parse_response_channel_map(channel_map)
@@ -1235,27 +1266,28 @@ class discord_portal(commands.Bot):
         allowed_channels = self.get_response_channels_for_guild(guild_id)
         return parsed in allowed_channels
 
-    def _refresh_response_channel_map_from_redis(self, *, force: bool = False) -> None:
+    def _refresh_response_channel_map_from_redis(self, *, force: bool = False) -> bool:
         now = time.monotonic()
         if not force and (now - float(self._response_channel_last_refresh or 0.0)) < RESPONSE_CHANNEL_REFRESH_INTERVAL_SEC:
-            return
+            return True
         self._response_channel_last_refresh = now
 
         try:
             raw = redis_client.hget(DISCORD_SETTINGS_KEY, RESPONSE_CHANNEL_MAP_FIELD)
         except Exception:
-            return
+            return False
         raw_text = str(raw or "").strip()
         incoming = raw_text if raw_text else "{}"
         if incoming == self._response_channel_map_raw_cache:
-            return
+            return True
 
         parsed = parse_response_channel_map(incoming)
         if parsed == {} and raw_text and raw_text not in {"{}", "null"}:
             logger.warning("[discord] response_channel_ids_by_guild is invalid JSON; keeping current runtime map.")
-            return
+            return False
         self.response_channel_ids_by_guild = {int(k): set(v) for k, v in parsed.items()}
         self._response_channel_map_raw_cache = serialize_response_channel_map(self.response_channel_ids_by_guild)
+        return True
 
     def _message_matches_response_channel(self, message: discord.Message, *, guild_id: Any) -> bool:
         channel = getattr(message, "channel", None)
@@ -1454,6 +1486,9 @@ class discord_portal(commands.Bot):
         self._sync_destination_inventory()
 
     async def on_guild_channel_delete(self, channel: Any):
+        self._remove_saved_response_channels(
+            removed_channel_ids=[getattr(channel, "id", "")],
+        )
         self._sync_destination_inventory(
             excluded_channel_ids=[getattr(channel, "id", "")],
         )
@@ -1462,6 +1497,9 @@ class discord_portal(commands.Bot):
         self._sync_destination_inventory()
 
     async def on_guild_remove(self, guild: Any):
+        self._remove_saved_response_channels(
+            removed_guild_ids=[getattr(guild, "id", "")],
+        )
         self._sync_destination_inventory(
             excluded_guild_ids=[getattr(guild, "id", "")],
         )
