@@ -856,7 +856,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 CORE_DESCRIPTION = "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction."
 
 
@@ -2311,6 +2311,33 @@ def _message_content_text(content: Any) -> str:
     return _as_text(content).strip()
 
 
+def _memory_history_entry_is_candidate(platform: Any, raw_entry: Any) -> bool:
+    try:
+        entry = json.loads(_as_text(raw_entry))
+    except Exception:
+        return False
+    if not isinstance(entry, dict):
+        return False
+
+    text = _message_content_text(entry.get("content"))
+    if not text:
+        return False
+
+    if normalize_segment(platform, default="") == "irc":
+        username = _as_text(
+            entry.get("username") or entry.get("user") or entry.get("user_id")
+        ).strip().casefold()
+        if username == "*status":
+            return False
+
+        # IRC CTCP frames (VERSION, PING, TIME, and similar protocol probes)
+        # are transport control traffic, not conversation content.
+        if len(text) >= 2 and text.startswith("\x01") and text.endswith("\x01"):
+            return False
+
+    return True
+
+
 def _message_timestamp(entry: Dict[str, Any], now_ts: float) -> float:
     for key in ("timestamp", "ts", "time", "updated_at"):
         if key in entry:
@@ -2573,6 +2600,8 @@ def _normalize_history_entry(
     raw_entry: Any,
     now_ts: float,
 ) -> Optional[Dict[str, Any]]:
+    if not _memory_history_entry_is_candidate(platform, raw_entry):
+        return None
     try:
         entry = json.loads(_as_text(raw_entry))
     except Exception:
@@ -3347,7 +3376,22 @@ def _process_scope(
     if not raw_rows:
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
-    batch_signature = _memory_extraction_batch_signature(raw_rows)
+    candidate_rows = [
+        raw_row
+        for raw_row in raw_rows
+        if _memory_history_entry_is_candidate(platform, raw_row)
+    ]
+    if not candidate_rows:
+        _clear_memory_extraction_failure(platform, history_scope_id)
+        _save_history_cursor(
+            cursor_redis_key=cursor_redis_key,
+            history_key=history_key,
+            position=end_idx_exclusive,
+            total_len=total_len,
+        )
+        return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
+
+    batch_signature = _memory_extraction_batch_signature(candidate_rows)
     if not _memory_extraction_retry_ready(platform, history_scope_id, batch_signature):
         return {
             "processed_messages": 0,
@@ -3735,8 +3779,8 @@ def _sleep_with_stop(seconds: int, stop_event) -> None:
 def _pending_memory_history_signature(
     *,
     lookback_limit: int = 80,
-) -> Tuple[Tuple[str, int, int, str], ...]:
-    pending: List[Tuple[str, int, int, str]] = []
+) -> Tuple[Tuple[str, str], ...]:
+    pending: List[Tuple[str, str]] = []
     bounded_lookback = _as_int(lookback_limit, 80, min_value=10, max_value=500)
     for platform in _resolve_enabled_platforms():
         for history_key, scope_id in _discover_scopes(platform):
@@ -3755,12 +3799,22 @@ def _pending_memory_history_signature(
                 raw_rows = redis_client.lrange(history_key, position, end_idx_exclusive - 1) or []
                 if not raw_rows:
                     continue
-                batch_signature = _memory_extraction_batch_signature(raw_rows)
+                candidate_rows = [
+                    raw_row
+                    for raw_row in raw_rows
+                    if _memory_history_entry_is_candidate(platform, raw_row)
+                ]
+                if not candidate_rows:
+                    continue
+                batch_signature = _memory_extraction_batch_signature(candidate_rows)
                 if not _memory_extraction_retry_ready(platform, scope_id, batch_signature):
                     continue
             except Exception:
                 continue
-            pending.append((history_key, total_len, position, batch_signature))
+            # Only the semantic rows contribute to the quiet-period signature.
+            # New IRC status noise therefore cannot postpone a real request or
+            # wake the core by itself.
+            pending.append((history_key, batch_signature))
     return tuple(sorted(pending))
 
 
@@ -3776,7 +3830,7 @@ def _wait_for_memory_work(
         _sleep_with_stop(interval_seconds, stop_event)
         return
     started = time.time()
-    last_signature: Tuple[Tuple[str, int, int, str], ...] = ()
+    last_signature: Tuple[Tuple[str, str], ...] = ()
     last_change = started
     while time.time() - started < max(1, int(interval_seconds)):
         if stop_event and getattr(stop_event, "is_set", lambda: False)():

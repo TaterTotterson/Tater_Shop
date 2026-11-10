@@ -102,7 +102,7 @@
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "min_tater_version": "59",
       "description": "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction.",
       "settings_category": "Memory Core Settings",
@@ -110,7 +110,7 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "1ccf64e437386dd76895f6656532aade84077a65dae8875a5d8e220556c469d1"
+      "sha256": "6ee5920e96eb60e0336cdb4b1e06f5af105c55c8a6ca3a40ca76b552c34c3075"
     },
     {
       "id": "meshtastic",

@@ -102,6 +102,17 @@ def _history_row(index):
     )
 
 
+def _irc_history_row(username, content):
+    return json.dumps(
+        {
+            "role": "user",
+            "username": username,
+            "content": content,
+        },
+        separators=(",", ":"),
+    )
+
+
 class MemoryCoreHistoryCursorTests(unittest.TestCase):
     def setUp(self):
         self.redis = FakeRedis()
@@ -247,6 +258,79 @@ class MemoryCoreHistoryCursorTests(unittest.TestCase):
             self.assertEqual(self.core._pending_memory_history_signature(lookback_limit=10), ())
         with patch.object(self.core.time, "time", return_value=131.0):
             self.assertEqual(len(self.core._pending_memory_history_signature(lookback_limit=10)), 1)
+
+    def test_irc_status_and_ctcp_noise_advance_without_using_the_llm(self):
+        history_key = "tater:irc:taters:history"
+        scope_id = "taters"
+        self.redis.lists[history_key] = [
+            _irc_history_row("*status", "Connected!"),
+            _irc_history_row("DM", "\x01VERSION\x01"),
+            _irc_history_row("*status", "IRC connection timed out. Reconnecting..."),
+        ]
+
+        self.core._resolve_enabled_platforms = lambda: ["irc"]
+        self.core._discover_scopes = lambda _platform: [(history_key, scope_id)]
+        self.assertEqual(self.core._pending_memory_history_signature(lookback_limit=10), ())
+
+        result = self.core._process_scope(
+            llm_client=object(),
+            platform="irc",
+            history_key=history_key,
+            scope_id=scope_id,
+            settings=self.settings,
+        )
+
+        self.assertEqual(result["processed_messages"], 0)
+        self.assertEqual(self.extraction_calls, [])
+        cursor = json.loads(self.redis.get(self.core.cursor_key("irc", scope_id)))
+        self.assertEqual(cursor["position"], 3)
+
+    def test_irc_mixed_batch_only_sends_real_conversation_to_the_llm(self):
+        history_key = "tater:irc:taters:history"
+        scope_id = "taters"
+        self.redis.lists[history_key] = [
+            _irc_history_row("*status", "Connected!"),
+            _irc_history_row("DM", "\x01VERSION\x01"),
+            _irc_history_row("SpudLord", "remember that my favorite color is orange"),
+        ]
+
+        result = self.core._process_scope(
+            llm_client=object(),
+            platform="irc",
+            history_key=history_key,
+            scope_id=scope_id,
+            settings=self.settings,
+        )
+
+        self.assertEqual(result["processed_messages"], 1)
+        self.assertEqual(
+            [row["text"] for row in self.extraction_calls[-1]],
+            ["remember that my favorite color is orange"],
+        )
+        cursor = json.loads(self.redis.get(self.core.cursor_key("irc", scope_id)))
+        self.assertEqual(cursor["position"], 3)
+
+    def test_irc_noise_does_not_reset_the_quiet_period_for_real_chat(self):
+        history_key = "tater:irc:taters:history"
+        scope_id = "taters"
+        self.redis.lists[history_key] = [
+            _irc_history_row("SpudLord", "remember the garage code changed"),
+            _irc_history_row("*status", "Connected!"),
+        ]
+        self.core._resolve_enabled_platforms = lambda: ["irc"]
+        self.core._discover_scopes = lambda _platform: [(history_key, scope_id)]
+
+        first = self.core._pending_memory_history_signature(lookback_limit=10)
+        self.redis.lists[history_key].extend(
+            [
+                _irc_history_row("DM", "\x01VERSION\x01"),
+                _irc_history_row("*status", "Disconnected from IRC. Reconnecting..."),
+            ]
+        )
+        second = self.core._pending_memory_history_signature(lookback_limit=10)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(second), 1)
 
     def test_extraction_schema_accepts_omitted_optional_sections_and_fields(self):
         captured = {}
