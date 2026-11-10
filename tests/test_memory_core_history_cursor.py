@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,14 @@ class FakeRedis:
     def set(self, key, value):
         self.values[key] = value
         return True
+
+    def delete(self, *keys):
+        deleted = 0
+        for key in keys:
+            if key in self.values:
+                deleted += 1
+                self.values.pop(key, None)
+        return deleted
 
     def llen(self, key):
         return len(self.lists.get(key, []))
@@ -97,6 +106,7 @@ class MemoryCoreHistoryCursorTests(unittest.TestCase):
     def setUp(self):
         self.redis = FakeRedis()
         self.core = _load_memory_core(self.redis)
+        self.real_extract = self.core._llm_extract_observations
         self.extraction_calls = []
 
         def extract(_llm_client, **kwargs):
@@ -105,6 +115,7 @@ class MemoryCoreHistoryCursorTests(unittest.TestCase):
 
         self.core._llm_extract_observations = extract
         self.settings = {
+            "interval_seconds": 30,
             "lookback_limit": 10,
             "min_confidence": 0.65,
             "write_user_memory": True,
@@ -171,11 +182,128 @@ class MemoryCoreHistoryCursorTests(unittest.TestCase):
         successful_extract = self.core._llm_extract_observations
         self.core._llm_extract_observations = lambda *_args, **_kwargs: None
 
-        self.assertEqual(self.process()["processed_messages"], 0)
+        with patch.object(self.core.time, "time", return_value=100.0):
+            first = self.process()
+        self.assertEqual(first["processed_messages"], 0)
+        self.assertEqual(first["failed_scopes"], 1)
         self.assertIsNone(self.redis.get(cursor_key))
 
         self.core._llm_extract_observations = successful_extract
-        self.assertEqual(self.process()["processed_messages"], 3)
+        with patch.object(self.core.time, "time", return_value=110.0):
+            deferred = self.process()
+        self.assertEqual(deferred["processed_messages"], 0)
+        self.assertEqual(deferred["deferred_scopes"], 1)
+
+        with patch.object(self.core.time, "time", return_value=131.0):
+            self.assertEqual(self.process()["processed_messages"], 3)
+        self.assertIsNone(
+            self.redis.get(self.core._memory_extraction_failure_key("discord", self.scope_id))
+        )
+
+    def test_repeated_failure_is_quarantined_after_three_attempts(self):
+        self.redis.lists[self.history_key] = [_history_row(index) for index in range(2)]
+        self.core._llm_extract_observations = lambda *_args, **_kwargs: None
+
+        for now_value in (100.0, 131.0, 192.0):
+            with patch.object(self.core.time, "time", return_value=now_value):
+                self.assertEqual(self.process()["failed_scopes"], 1)
+
+        state = self.core._load_memory_extraction_failure("discord", self.scope_id)
+        self.assertEqual(state["attempts"], 3)
+        self.assertTrue(state["quarantined"])
+        self.assertEqual(state["delay_seconds"], 21_600)
+
+        with patch.object(self.core.time, "time", return_value=1_000.0):
+            self.assertEqual(self.process()["deferred_scopes"], 1)
+
+    def test_new_batch_bypasses_an_old_batch_cooldown(self):
+        self.redis.lists[self.history_key] = [_history_row(index) for index in range(2)]
+        successful_extract = self.core._llm_extract_observations
+        self.core._llm_extract_observations = lambda *_args, **_kwargs: None
+
+        with patch.object(self.core.time, "time", return_value=100.0):
+            self.assertEqual(self.process()["failed_scopes"], 1)
+
+        self.core._llm_extract_observations = successful_extract
+        self.redis.lists[self.history_key].append(_history_row(2))
+        with patch.object(self.core.time, "time", return_value=101.0):
+            self.assertEqual(self.process()["processed_messages"], 3)
+
+    def test_pending_signature_ignores_a_batch_during_failure_cooldown(self):
+        self.redis.lists[self.history_key] = [_history_row(index) for index in range(2)]
+        signature = self.core._memory_extraction_batch_signature(self.redis.lists[self.history_key])
+        self.core._record_memory_extraction_failure(
+            "discord",
+            self.scope_id,
+            signature,
+            interval_seconds=30,
+            error="schema mismatch",
+            now_ts=100.0,
+        )
+        self.core._resolve_enabled_platforms = lambda: ["discord"]
+        self.core._discover_scopes = lambda _platform: [(self.history_key, self.scope_id)]
+
+        with patch.object(self.core.time, "time", return_value=110.0):
+            self.assertEqual(self.core._pending_memory_history_signature(lookback_limit=10), ())
+        with patch.object(self.core.time, "time", return_value=131.0):
+            self.assertEqual(len(self.core._pending_memory_history_signature(lookback_limit=10)), 1)
+
+    def test_extraction_schema_accepts_omitted_optional_sections_and_fields(self):
+        captured = {}
+
+        async def structured_chat(_client, **kwargs):
+            captured["schema"] = kwargs["schema"]
+            return {"message": {"content": '{"user_observations":[]}'}}
+
+        self.core.llm_structured_chat = structured_chat
+        self.core._llm_extract_observations = self.real_extract
+        result = self.core._llm_extract_observations(
+            object(),
+            platform="discord",
+            scope_id=self.scope_id,
+            messages=[
+                {
+                    "role": "user",
+                    "user_id": "fred",
+                    "user_name": "Fred",
+                    "text": "hello",
+                    "timestamp": 100.0,
+                    "message_id": "m1",
+                }
+            ],
+        )
+
+        self.assertEqual(result["user"], [])
+        self.assertEqual(result["user_episodes"], [])
+        self.assertEqual(captured["schema"]["required"], [])
+        user_required = captured["schema"]["properties"]["user_observations"]["items"]["required"]
+        self.assertEqual(user_required, ["user_id", "candidate_key", "value"])
+
+    def test_cycle_stops_after_interactive_request_preempts_extraction(self):
+        second_history_key = "tater:channel:room-2:history"
+        self.redis.lists[self.history_key] = [_history_row(1)]
+        self.redis.lists[second_history_key] = [_history_row(2)]
+        extraction_calls = []
+
+        def preempted_extract(_llm_client, **kwargs):
+            extraction_calls.append(kwargs["scope_id"])
+            return self.core._MemoryExtractionFailure(
+                "A newer interactive request replaced this model task.",
+                preempted=True,
+            )
+
+        self.core._llm_extract_observations = preempted_extract
+        self.core._resolve_enabled_platforms = lambda: ["discord"]
+        self.core._discover_scopes = lambda _platform: [
+            (self.history_key, self.scope_id),
+            (second_history_key, "room-2"),
+        ]
+
+        stats = self.core._run_cycle(object(), self.settings)
+
+        self.assertEqual(stats["preempted"], 1)
+        self.assertEqual(stats["scanned_scopes"], 1)
+        self.assertEqual(extraction_calls, [self.scope_id])
 
     def test_processing_continues_in_bounded_chunks(self):
         self.redis.lists[self.history_key] = [_history_row(index) for index in range(12)]

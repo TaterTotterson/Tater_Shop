@@ -856,7 +856,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 CORE_DESCRIPTION = "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction."
 
 
@@ -867,6 +867,16 @@ logger.setLevel(logging.INFO)
 
 _MEMORY_TASK_LOCK = threading.Lock()
 _MEMORY_TASK_STARTED_AT = 0.0
+_MEMORY_EXTRACTION_FAILURE_PREFIX = "mem:extract_failure"
+_MEMORY_EXTRACTION_MAX_ATTEMPTS = 3
+_MEMORY_EXTRACTION_QUARANTINE_SECONDS = 21_600
+_MEMORY_EXTRACTION_FAILURE_TTL_SECONDS = 604_800
+
+
+class _MemoryExtractionFailure:
+    def __init__(self, error: Any, *, preempted: bool = False):
+        self.error = _as_text(error).strip() or "Memory extraction failed."
+        self.preempted = bool(preempted)
 
 CORE_SETTINGS = {
     "category": "Memory Core Settings",
@@ -2457,6 +2467,103 @@ def _save_history_cursor(
     )
 
 
+def _memory_extraction_failure_key(platform: Any, scope_id: Any) -> str:
+    return (
+        f"{_MEMORY_EXTRACTION_FAILURE_PREFIX}:"
+        f"{normalize_segment(platform, default='platform')}:"
+        f"{normalize_segment(scope_id, default='scope')}"
+    )
+
+
+def _memory_extraction_batch_signature(raw_rows: Any) -> str:
+    fingerprints = [_history_row_fingerprint(row) for row in (raw_rows or [])]
+    return hashlib.sha256("|".join(fingerprints).encode("ascii", errors="ignore")).hexdigest()[:32]
+
+
+def _load_memory_extraction_failure(platform: Any, scope_id: Any) -> Dict[str, Any]:
+    try:
+        raw = redis_client.get(_memory_extraction_failure_key(platform, scope_id))
+        parsed = json.loads(_as_text(raw)) if raw else {}
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _clear_memory_extraction_failure(platform: Any, scope_id: Any) -> None:
+    try:
+        redis_client.delete(_memory_extraction_failure_key(platform, scope_id))
+    except Exception:
+        pass
+
+
+def _memory_extraction_retry_ready(
+    platform: Any,
+    scope_id: Any,
+    batch_signature: str,
+    *,
+    now_ts: Optional[float] = None,
+) -> bool:
+    state = _load_memory_extraction_failure(platform, scope_id)
+    if not state:
+        return True
+    if _as_text(state.get("batch_signature")).strip() != _as_text(batch_signature).strip():
+        _clear_memory_extraction_failure(platform, scope_id)
+        return True
+    now_value = float(now_ts if now_ts is not None else time.time())
+    return now_value >= _as_float(state.get("next_retry_at"), 0.0, min_value=0.0)
+
+
+def _record_memory_extraction_failure(
+    platform: Any,
+    scope_id: Any,
+    batch_signature: str,
+    *,
+    interval_seconds: int,
+    error: Any,
+    preempted: bool = False,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    now_value = float(now_ts if now_ts is not None else time.time())
+    previous = _load_memory_extraction_failure(platform, scope_id)
+    if _as_text(previous.get("batch_signature")).strip() != _as_text(batch_signature).strip():
+        previous = {}
+
+    prior_attempts = _as_int(previous.get("attempts"), 0, min_value=0)
+    attempts = prior_attempts if preempted else prior_attempts + 1
+    base_delay = _as_int(interval_seconds, 180, min_value=30, max_value=3600)
+    quarantined = not preempted and attempts >= _MEMORY_EXTRACTION_MAX_ATTEMPTS
+    if quarantined:
+        delay_seconds = _MEMORY_EXTRACTION_QUARANTINE_SECONDS
+    elif preempted:
+        delay_seconds = base_delay
+    else:
+        delay_seconds = min(3600, base_delay * (2 ** max(0, attempts - 1)))
+
+    state = {
+        "batch_signature": _as_text(batch_signature).strip(),
+        "attempts": attempts,
+        "last_failed_at": now_value,
+        "next_retry_at": now_value + delay_seconds,
+        "delay_seconds": delay_seconds,
+        "quarantined": quarantined,
+        "preempted": bool(preempted),
+        "last_error": _as_text(error).strip()[:500],
+    }
+    try:
+        failure_key = _memory_extraction_failure_key(platform, scope_id)
+        redis_client.set(
+            failure_key,
+            json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        )
+        try:
+            redis_client.expire(failure_key, _MEMORY_EXTRACTION_FAILURE_TTL_SECONDS)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return state
+
+
 def _normalize_history_entry(
     *,
     platform: str,
@@ -2980,7 +3087,7 @@ def _llm_extract_observations(
     messages: List[Dict[str, Any]],
     current_user_profiles: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
     current_room_profile: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+) -> Any:
     if llm_client is None:
         return None
 
@@ -3087,8 +3194,8 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": {"user_id": {"type": "string"}, **observation_properties},
-                    "required": ["user_id", "candidate_key", "value", "confidence", "evidence", "explicit_correction"],
-                    "additionalProperties": False,
+                    "required": ["user_id", "candidate_key", "value"],
+                    "additionalProperties": True,
                 },
             },
             "room_observations": {
@@ -3096,8 +3203,8 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": observation_properties,
-                    "required": ["candidate_key", "value", "confidence", "evidence", "explicit_correction"],
-                    "additionalProperties": False,
+                    "required": ["candidate_key", "value"],
+                    "additionalProperties": True,
                 },
             },
             "user_removals": {
@@ -3105,8 +3212,8 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": {"user_id": {"type": "string"}, **removal_properties},
-                    "required": ["user_id", "candidate_key", "confidence", "evidence"],
-                    "additionalProperties": False,
+                    "required": ["user_id", "candidate_key"],
+                    "additionalProperties": True,
                 },
             },
             "room_removals": {
@@ -3114,8 +3221,8 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": removal_properties,
-                    "required": ["candidate_key", "confidence", "evidence"],
-                    "additionalProperties": False,
+                    "required": ["candidate_key"],
+                    "additionalProperties": True,
                 },
             },
             "user_episodes": {
@@ -3123,8 +3230,8 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": {"user_id": {"type": "string"}, **episode_properties},
-                    "required": ["user_id", "summary", "kind", "topics", "outcome", "commitments", "status", "salience", "evidence"],
-                    "additionalProperties": False,
+                    "required": ["user_id", "summary"],
+                    "additionalProperties": True,
                 },
             },
             "room_episodes": {
@@ -3132,13 +3239,13 @@ def _llm_extract_observations(
                 "items": {
                     "type": "object",
                     "properties": episode_properties,
-                    "required": ["summary", "kind", "topics", "outcome", "commitments", "status", "salience", "evidence"],
-                    "additionalProperties": False,
+                    "required": ["summary"],
+                    "additionalProperties": True,
                 },
             },
         },
-        "required": ["user_observations", "room_observations", "user_removals", "room_removals", "user_episodes", "room_episodes"],
-        "additionalProperties": False,
+        "required": [],
+        "additionalProperties": True,
     }
 
     async def _call() -> Dict[str, Any]:
@@ -3159,7 +3266,11 @@ def _llm_extract_observations(
         response = asyncio.run(_call())
     except Exception as exc:
         logger.warning("[memory_core] LLM extraction failed for %s/%s: %s", platform, scope_id, exc)
-        return None
+        error_text = _as_text(exc).strip()
+        return _MemoryExtractionFailure(
+            error_text,
+            preempted="newer interactive request replaced this model task" in error_text.lower(),
+        )
 
     text = _as_text((response.get("message", {}) or {}).get("content")).strip()
     if not text:
@@ -3236,6 +3347,15 @@ def _process_scope(
     if not raw_rows:
         return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
 
+    batch_signature = _memory_extraction_batch_signature(raw_rows)
+    if not _memory_extraction_retry_ready(platform, history_scope_id, batch_signature):
+        return {
+            "processed_messages": 0,
+            "updated_facts": 0,
+            "updated_docs": 0,
+            "deferred_scopes": 1,
+        }
+
     ts_now = time.time()
     normalized_messages: List[Dict[str, Any]] = []
     for offset, raw_row in enumerate(raw_rows):
@@ -3285,8 +3405,36 @@ def _process_scope(
         current_user_profiles=current_user_profiles,
         current_room_profile=current_room_profile,
     )
-    if observations is None:
-        return {"processed_messages": 0, "updated_facts": 0, "updated_docs": 0}
+    if isinstance(observations, _MemoryExtractionFailure) or observations is None:
+        failure = observations if isinstance(observations, _MemoryExtractionFailure) else _MemoryExtractionFailure(
+            "Memory extraction returned no result."
+        )
+        failure_state = _record_memory_extraction_failure(
+            platform,
+            history_scope_id,
+            batch_signature,
+            interval_seconds=_as_int(settings.get("interval_seconds"), 180, min_value=30, max_value=3600),
+            error=failure.error,
+            preempted=failure.preempted,
+        )
+        if bool(failure_state.get("quarantined")):
+            logger.warning(
+                "[memory_core] quarantined failed extraction for %s/%s for %ss after %s attempts",
+                platform,
+                memory_scope_id,
+                int(failure_state.get("delay_seconds") or 0),
+                int(failure_state.get("attempts") or 0),
+            )
+        return {
+            "processed_messages": 0,
+            "updated_facts": 0,
+            "updated_docs": 0,
+            "extraction_attempted": 1,
+            "failed_scopes": 1,
+            "preempted": 1 if failure.preempted else 0,
+        }
+
+    _clear_memory_extraction_failure(platform, history_scope_id)
 
     updated_facts = 0
     updated_docs = 0
@@ -3443,6 +3591,7 @@ def _process_scope(
         "processed_messages": len(normalized_messages),
         "updated_facts": updated_facts,
         "updated_docs": updated_docs,
+        "extraction_attempted": 1,
     }
 
 
@@ -3453,6 +3602,10 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, int]:
     updated_facts = 0
     updated_docs = 0
     scanned_scopes = 0
+    extraction_attempts = 0
+    failed_scopes = 0
+    deferred_scopes = 0
+    preempted = 0
 
     for platform in enabled_platforms:
         scopes = _discover_scopes(platform)
@@ -3470,6 +3623,14 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, int]:
             processed_messages += int(result.get("processed_messages") or 0)
             updated_facts += int(result.get("updated_facts") or 0)
             updated_docs += int(result.get("updated_docs") or 0)
+            extraction_attempts += int(result.get("extraction_attempted") or 0)
+            failed_scopes += int(result.get("failed_scopes") or 0)
+            deferred_scopes += int(result.get("deferred_scopes") or 0)
+            preempted += int(result.get("preempted") or 0)
+            if preempted:
+                break
+        if preempted:
+            break
 
     stats = {
         "enabled_platform_count": enabled_with_history,
@@ -3477,6 +3638,10 @@ def _run_cycle(llm_client: Any, settings: Dict[str, Any]) -> Dict[str, int]:
         "processed_messages": processed_messages,
         "updated_facts": updated_facts,
         "updated_docs": updated_docs,
+        "extraction_attempts": extraction_attempts,
+        "failed_scopes": failed_scopes,
+        "deferred_scopes": deferred_scopes,
+        "preempted": preempted,
     }
     return stats
 
@@ -3495,6 +3660,10 @@ def _run_memory_cycle_once(llm_client: Any, settings: Dict[str, Any]) -> Dict[st
             "processed_messages": 0,
             "updated_facts": 0,
             "updated_docs": 0,
+            "extraction_attempts": 0,
+            "failed_scopes": 0,
+            "deferred_scopes": 0,
+            "preempted": 0,
         }
         try:
             last_consolidation = _as_float(redis_client.hget(stats_key, "last_consolidation_ts"), 0.0, min_value=0.0)
@@ -3522,6 +3691,10 @@ def _run_memory_cycle_once(llm_client: Any, settings: Dict[str, Any]) -> Dict[st
                 "processed_messages": str(stats.get("processed_messages") or 0),
                 "updated_facts": str(stats.get("updated_facts") or 0),
                 "updated_docs": str(stats.get("updated_docs") or 0),
+                "extraction_attempts": str(stats.get("extraction_attempts") or 0),
+                "failed_scopes": str(stats.get("failed_scopes") or 0),
+                "deferred_scopes": str(stats.get("deferred_scopes") or 0),
+                "preempted": str(stats.get("preempted") or 0),
                 "last_consolidation_ts": str(cycle_start if cycle_start - last_consolidation >= 86_400 else last_consolidation),
                 "consolidated_docs": str(stats.get("consolidated_docs") or 0),
                 "consolidated_facts": str(stats.get("consolidated_facts") or 0),
@@ -3559,18 +3732,35 @@ def _sleep_with_stop(seconds: int, stop_event) -> None:
         elapsed += step
 
 
-def _pending_memory_history_signature() -> Tuple[Tuple[str, int], ...]:
-    pending: List[Tuple[str, int]] = []
+def _pending_memory_history_signature(
+    *,
+    lookback_limit: int = 80,
+) -> Tuple[Tuple[str, int, int, str], ...]:
+    pending: List[Tuple[str, int, int, str]] = []
+    bounded_lookback = _as_int(lookback_limit, 80, min_value=10, max_value=500)
     for platform in _resolve_enabled_platforms():
         for history_key, scope_id in _discover_scopes(platform):
             try:
                 total_len = _as_int(redis_client.llen(history_key), 0, min_value=0)
                 cursor = _parse_history_cursor(redis_client.get(cursor_key(platform, scope_id)))
-                position = _as_int(cursor.get("position"), 0, min_value=0)
+                position = _history_cursor_start(
+                    history_key=history_key,
+                    total_len=total_len,
+                    cursor_state=cursor,
+                    lookback_limit=bounded_lookback,
+                )
+                if position >= total_len:
+                    continue
+                end_idx_exclusive = min(total_len, position + bounded_lookback)
+                raw_rows = redis_client.lrange(history_key, position, end_idx_exclusive - 1) or []
+                if not raw_rows:
+                    continue
+                batch_signature = _memory_extraction_batch_signature(raw_rows)
+                if not _memory_extraction_retry_ready(platform, scope_id, batch_signature):
+                    continue
             except Exception:
                 continue
-            if total_len > position:
-                pending.append((history_key, total_len))
+            pending.append((history_key, total_len, position, batch_signature))
     return tuple(sorted(pending))
 
 
@@ -3580,17 +3770,18 @@ def _wait_for_memory_work(
     quiet_seconds: int,
     near_realtime: bool,
     stop_event: Any,
+    lookback_limit: int = 80,
 ) -> None:
     if not near_realtime:
         _sleep_with_stop(interval_seconds, stop_event)
         return
     started = time.time()
-    last_signature: Tuple[Tuple[str, int], ...] = ()
+    last_signature: Tuple[Tuple[str, int, int, str], ...] = ()
     last_change = started
     while time.time() - started < max(1, int(interval_seconds)):
         if stop_event and getattr(stop_event, "is_set", lambda: False)():
             return
-        signature = _pending_memory_history_signature()
+        signature = _pending_memory_history_signature(lookback_limit=lookback_limit)
         now_ts = time.time()
         if signature != last_signature:
             last_signature = signature
@@ -3627,6 +3818,7 @@ def run(stop_event=None):
                 logger.warning("[memory_core] failed to initialize LLM client: %s", exc)
                 llm_client = None
 
+        stats: Dict[str, Any] = {}
         try:
             stats = _run_memory_cycle_once(llm_client, settings)
             if (
@@ -3644,12 +3836,16 @@ def run(stop_event=None):
         except Exception as exc:
             logger.exception("[memory_core] cycle failed: %s", exc)
 
-        _wait_for_memory_work(
-            interval_seconds=interval_seconds,
-            quiet_seconds=quiet_seconds,
-            near_realtime=near_realtime,
-            stop_event=stop_event,
-        )
+        if int(stats.get("preempted") or 0) > 0:
+            _sleep_with_stop(interval_seconds, stop_event)
+        else:
+            _wait_for_memory_work(
+                interval_seconds=interval_seconds,
+                quiet_seconds=quiet_seconds,
+                near_realtime=near_realtime,
+                stop_event=stop_event,
+                lookback_limit=_as_int(settings.get("lookback_limit"), 80, min_value=10, max_value=500),
+            )
 
     logger.info("[memory_core] stopped")
 
@@ -3945,6 +4141,10 @@ def _memory_core_stats() -> Dict[str, Any]:
         "processed_messages": _to_int(raw.get("processed_messages"), 0),
         "updated_facts": _to_int(raw.get("updated_facts"), 0),
         "updated_docs": _to_int(raw.get("updated_docs"), 0),
+        "extraction_attempts": _to_int(raw.get("extraction_attempts"), 0),
+        "failed_scopes": _to_int(raw.get("failed_scopes"), 0),
+        "deferred_scopes": _to_int(raw.get("deferred_scopes"), 0),
+        "preempted": _to_int(raw.get("preempted"), 0),
     }
     stats["last_run_text"] = _format_unix_ts(stats.get("last_run_ts"))
     return stats
@@ -4862,6 +5062,7 @@ def _memory_core_wipe_all_data() -> Dict[str, Any]:
         "mem:user:*",
         "mem:room:*",
         "mem:cursor:*",
+        "mem:extract_failure:*",
         "mem:identity_alias:*",
         "mem:identity_name:*",
         "mem:episodes:*",
