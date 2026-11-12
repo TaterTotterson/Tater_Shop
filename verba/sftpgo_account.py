@@ -1,5 +1,4 @@
 # verba/sftpgo_account.py
-import os
 import aiohttp
 import base64
 import secrets
@@ -19,12 +18,13 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 LEGACY_HOME_DIR_PLACEHOLDER = "/your/default/home/dir"
+PASSWORD_SYMBOLS = "!@%+-=?"
 
 
 class SFTPGoAccountPlugin(ToolVerba):
     name = "sftpgo_account"
     verba_name = "SFTPGo Account"
-    version = "1.0.4"
+    version = "1.0.5"
     min_tater_version = "59"
     usage = '{"function":"sftpgo_account","arguments":{"username":"<optional custom username>"}}'
     description = "Creates an SFTPGo account for the user and returns their credentials."
@@ -133,10 +133,29 @@ class SFTPGoAccountPlugin(ToolVerba):
         return None
 
     @staticmethod
-    def generate_random_password(length=14):
-        """Generate a secure random password."""
-        alphabet = string.ascii_letters + string.digits + string.punctuation
-        return "".join(secrets.choice(alphabet) for _ in range(length))
+    def generate_random_password(length=20):
+        """Generate a strong password that chat clients can display literally."""
+        if length < 4:
+            raise ValueError("Password length must be at least four characters.")
+        groups = (string.ascii_lowercase, string.ascii_uppercase, string.digits, PASSWORD_SYMBOLS)
+        alphabet = "".join(groups)
+        characters = [secrets.choice(group) for group in groups]
+        characters.extend(secrets.choice(alphabet) for _ in range(length - len(characters)))
+        secrets.SystemRandom().shuffle(characters)
+        return "".join(characters)
+
+    @staticmethod
+    def _credentials_message(username: str, password: str) -> str:
+        """Keep the exact API credentials out of Markdown formatting."""
+        fence = "```"
+        while fence in username or fence in password:
+            fence += "`"
+        return (
+            "Your SFTP account has been created. Copy each value below exactly.\n\n"
+            f"Login:\n{fence}\n{username}\n{fence}\n"
+            f"Password:\n{fence}\n{password}\n{fence}\n"
+            "You now have access to the server."
+        )
 
     @staticmethod
     def _sanitize_username(raw: str) -> str:
@@ -221,21 +240,7 @@ class SFTPGoAccountPlugin(ToolVerba):
                     json=payload
                 ) as resp:
                     if resp.status == 201:
-                        welcome = (
-                            f"Welcome '{username}'\n"
-                            f"Your SFTP account has been created.\n"
-                            f"Login: {username}\n"
-                            f"Password: {password}\n"
-                            "You now have access to the server."
-                        )
-                        # Discord DM if possible
-                        try:
-                            author = getattr(message_obj, "author", None)
-                            if author and hasattr(author, "send"):
-                                await author.send(welcome)
-                        except Exception as e:
-                            logger.info(f"Unable to DM credentials to {username}: {e}")
-                        return "created", welcome
+                        return "created", self._credentials_message(username, password)
                     else:
                         errtxt = await resp.text()
                         logger.error(f"SFTPGo create error HTTP {resp.status}: {errtxt}")
@@ -257,17 +262,43 @@ class SFTPGoAccountPlugin(ToolVerba):
         username = self._sanitize_username(username)
         password = self.generate_random_password()
 
-        state, _welcome = await self.create_sftp_account(username, password, message)
+        state, welcome = await self.create_sftp_account(username, password, message)
 
         if state == "created":
+            delivered = False
+            try:
+                send_kwargs = {}
+                if discord is not None:
+                    send_kwargs["allowed_mentions"] = discord.AllowedMentions.none()
+                await message.author.send(welcome, **send_kwargs)
+                delivered = True
+            except Exception as exc:
+                logger.warning(
+                    "SFTPGo account created but credential DM failed for %s (%s)",
+                    username,
+                    type(exc).__name__,
+                )
+            # Credentials have already been sent verbatim. A second LLM-written
+            # copy can change characters or disclose the password in the channel.
             return action_success(
                 facts={
                     "username": username,
-                    "password": password,
                     "state": state,
+                    "credentials_delivered": delivered,
+                    "credential_delivery": "discord_dm" if delivered else "failed",
                 },
-                summary_for_user=f"SFTP account created for {username}.",
-                say_hint="Confirm account creation and provide the generated credentials.",
+                summary_for_user=(
+                    f"SFTP account created for {username}. Login details were sent by direct message."
+                    if delivered else
+                    f"SFTP account created for {username}, but Discord could not deliver the login details. "
+                    "Enable direct messages and ask an administrator to reset and resend the password."
+                ),
+                say_hint=(
+                    "Confirm creation and tell the user to check their direct messages. Do not invent or repeat credentials."
+                    if delivered else
+                    "Explain that the account exists but credential delivery failed. Ask the user to enable direct messages "
+                    "and contact an administrator for a password reset. Do not create another account or invent credentials."
+                ),
             )
         if state == "exists":
             return action_failure(
