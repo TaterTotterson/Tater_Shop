@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.6.4"
+__version__ = "3.6.5"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -149,7 +149,14 @@ CORE_WORKSPACE = {'schema': 1,
  'default_tab': 'library',
  'tab_order': ['library', 'playlist', 'recommendations', 'providers', 'settings'],
  'tab_labels': {'library': 'Library'},
- 'views': {'settings': 'stack', 'providers': 'stack'}}
+ 'views': {'settings': 'stack', 'providers': 'stack'},
+ 'screens': {'library': {'layout': 'music', 'label': 'Music library', 'icon': 'music'},
+             'playlist': {'layout': 'queue', 'label': 'Current playlist', 'icon': 'music'},
+             'recommendations': {'layout': 'music',
+                                 'label': 'Made for this moment',
+                                 'icon': 'sparkles'}},
+ 'preview_fields': ['default_volume', 'default_speakers'],
+ 'edit_label': 'Edit music settings'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 SETTINGS_KEY = "music_core_settings"

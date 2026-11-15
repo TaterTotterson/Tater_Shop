@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.59"
+__version__ = "1.0.60"
 
 load_dotenv()
 
@@ -138,7 +138,30 @@ CORE_WORKSPACE = {'schema': 1,
                              'portal',
                              'speech',
                              'voice']},
-                  {'label': 'Options', 'terms': ['interval', 'scan', 'enabled', 'prompt']}]}
+                  {'label': 'Options', 'terms': ['interval', 'scan', 'enabled', 'prompt']}],
+ 'screens': {'calendar': {'layout': 'agenda',
+                          'label': 'Your agenda',
+                          'icon': 'calendar',
+                          'context_label': 'Today at a glance'},
+             'overview': {'layout': 'insights',
+                          'label': 'Your overview',
+                          'icon': 'calendar',
+                          'context_label': 'Personal context'},
+             'accounts': {'layout': 'accounts',
+                          'label': 'Connected accounts',
+                          'icon': 'people',
+                          'unit': 'accounts'},
+             'cleanup': {'layout': 'memories',
+                         'label': 'Review & cleanup',
+                         'icon': 'file',
+                         'unit': 'records'}},
+ 'preview_fields': ['email_address',
+                    'provider',
+                    'calendar_enabled',
+                    'calendar_source',
+                    'person_id',
+                    'mailbox'],
+ 'edit_label': 'Edit account'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 

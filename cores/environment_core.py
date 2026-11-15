@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, quote
 from helpers import extract_json, llm_structured_chat, redis_client
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.6.4"
+__version__ = "1.6.5"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "AI-interpreted weather orchestration across local sensors, configured providers, forecasts, and named-place lookups."
 TAGS = ["environment", "weather", "ecowitt", "telemetry"]
@@ -52,7 +52,25 @@ CORE_WORKSPACE = {'schema': 1,
            'forecast': 'overview',
            'trends': 'overview',
            'sources': 'list',
-           'settings': 'stack'}}
+           'settings': 'stack'},
+ 'screens': {'overview': {'layout': 'weather',
+                          'label': 'Current conditions',
+                          'icon': 'weather',
+                          'context_label': 'Weather context'},
+             'forecast': {'layout': 'forecast',
+                          'label': 'Forecast',
+                          'icon': 'weather',
+                          'context_label': 'Forecast context'},
+             'trends': {'layout': 'trends',
+                        'label': 'Tater Trends',
+                        'icon': 'chart',
+                        'context_label': 'Reading context'},
+             'sources': {'layout': 'sources',
+                         'label': 'Weather & sensor sources',
+                         'icon': 'weather',
+                         'unit': 'sources'}},
+ 'preview_fields': ['label', 'area', 'enabled'],
+ 'edit_label': 'Edit sensor'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 SETTINGS_KEY = "environment_core_settings"

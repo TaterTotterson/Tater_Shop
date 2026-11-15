@@ -13,6 +13,9 @@
 
 Tater Shop is the modular source repository for Tater Verbas, Portals, and Cores. Tater reads its generated manifests and installs each selected extension as a single Python module.
 
+The latest updates refresh all twelve Core workspaces for Tater 3.0.1's Library
+first design. [See what changed and the Core versions](CHANGELOG.md).
+
 ## Choose an extension type
 
 | Type | Use it for | Authoring guide | Starter template |

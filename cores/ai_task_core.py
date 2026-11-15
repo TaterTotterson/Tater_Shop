@@ -61,7 +61,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -113,7 +113,14 @@ CORE_WORKSPACE = {'schema': 1,
                              'ducking',
                              'tts_start_delay'],
                    'description': 'Choose an announcement destination in Delivery to enable '
-                                  'background audio.'}]}
+                                  'background audio.'}],
+ 'screens': {'items': {'layout': 'tasks',
+                       'label': 'Scheduled tasks',
+                       'icon': 'calendar',
+                       'unit': 'tasks',
+                       'context_label': 'Task details'}},
+ 'preview_fields': ['title', 'schedule_text', 'destination', 'enabled', 'task_prompt'],
+ 'edit_label': 'Edit task'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 REMINDER_KEY_PREFIX = "reminders:"

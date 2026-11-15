@@ -19,6 +19,14 @@ class CoreWorkspaceMetadataTests(unittest.TestCase):
                 self.assertEqual(metadata['schema'],1)
                 self.assertTrue(metadata['description'])
                 self.assertTrue(metadata['icon'])
+                self.assertTrue(metadata['screens'])
+                allowed_layouts={'tasks','rules','events','timeline','memories','people','feeds','nodes','devices','accounts','sources','picks','weather','forecast','trends','network','agenda','insights','media','behavior','music','queue'}
+                for screen in metadata['screens'].values():
+                    self.assertIn(screen['layout'],allowed_layouts)
+                    self.assertTrue(screen['label'])
+                    self.assertTrue(screen['icon'])
+                self.assertIsInstance(metadata['preview_fields'],list)
+                self.assertTrue(metadata['edit_label'])
                 self.assertLess(len(json.dumps(metadata)),32768)
                 self.assertEqual(row['sha256'],hashlib.sha256(path.read_bytes()).hexdigest())
                 self.assertEqual(row['version'],ast.literal_eval(assignments['__version__'].value))

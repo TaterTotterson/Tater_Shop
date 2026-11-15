@@ -856,7 +856,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 CORE_DESCRIPTION = "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction."
 
 
@@ -1031,7 +1031,30 @@ CORE_WORKSPACE = {'schema': 1,
                              'wipe',
                              'delete',
                              'privacy',
-                             'confirm']}]}
+                             'confirm']}],
+ 'screens': {'knows': {'layout': 'memories',
+                       'label': 'What Tater knows',
+                       'icon': 'brain',
+                       'unit': 'records',
+                       'context_label': 'Remembered context'},
+             'overview': {'layout': 'insights',
+                          'label': 'Memory insights',
+                          'icon': 'brain',
+                          'context_label': 'Memory context'},
+             'data': {'layout': 'memories',
+                      'label': 'Memory data',
+                      'icon': 'brain',
+                      'unit': 'records'},
+             'people': {'layout': 'people',
+                        'label': 'People & linked memories',
+                        'icon': 'people',
+                        'unit': 'people'},
+             'manage': {'layout': 'memories',
+                        'label': 'Manage memory',
+                        'icon': 'brain',
+                        'unit': 'records'}},
+ 'preview_fields': ['person_id', 'alias_label', 'preview_text', 'edit_value'],
+ 'edit_label': 'Edit memory'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 _SUPPORTED_PLATFORMS = (

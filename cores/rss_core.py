@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 
 logger = logging.getLogger("rss")
@@ -86,7 +86,14 @@ CORE_WORKSPACE = {'schema': 1,
                              'priority',
                              'tag',
                              'category',
-                             'status']}]}
+                             'status']}],
+ 'screens': {'feeds': {'layout': 'feeds',
+                       'label': 'Your feeds',
+                       'icon': 'rss',
+                       'unit': 'feeds',
+                       'context_label': 'Feed & destinations'}},
+ 'preview_fields': ['url', 'enabled'],
+ 'edit_label': 'Edit feed'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model

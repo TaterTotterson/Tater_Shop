@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -116,7 +116,19 @@ CORE_WORKSPACE = {'schema': 1,
  'views': {'nodes': 'list'},
  'field_groups': [{'label': 'Radio',
                    'terms': ['transport', 'echo', 'satellite', 'device', 'address', 'name']},
-                  {'label': 'Pairing', 'terms': ['pin', 'pairing', 'bond', 'security']}]}
+                  {'label': 'Pairing', 'terms': ['pin', 'pairing', 'bond', 'security']}],
+ 'screens': {'nodes': {'layout': 'nodes',
+                       'label': 'Nodes & signal',
+                       'icon': 'radio',
+                       'unit': 'nodes',
+                       'context_label': 'Radio details'},
+             'bluetooth': {'layout': 'sources',
+                           'label': 'Bluetooth pairing',
+                           'icon': 'radio',
+                           'unit': 'radios',
+                           'context_label': 'Connection details'}},
+ 'preview_fields': ['device_name', 'address_type'],
+ 'edit_label': 'Edit connection'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 

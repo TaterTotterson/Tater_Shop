@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.6.5"
+__version__ = "1.6.6"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -72,7 +72,43 @@ CORE_WORKSPACE = {'schema': 1,
  'description': 'See what triggers a rule and what happens next.',
  'default_tab': 'rules',
  'primary_tab': 'create',
- 'views': {'rules': 'list', 'history': 'timeline'}}
+ 'views': {'rules': 'list', 'history': 'timeline'},
+ 'screens': {'rules': {'layout': 'rules',
+                       'label': 'Your automations',
+                       'icon': 'workflow',
+                       'unit': 'automations',
+                       'context_label': 'Trigger & action'},
+             'history': {'layout': 'timeline',
+                         'label': 'Recent runs',
+                         'icon': 'activity',
+                         'unit': 'runs'}},
+ 'preview_fields': ['name',
+                    'trigger',
+                    'trigger_device',
+                    'trigger_event',
+                    'action_type',
+                    'tts_targets',
+                    'action_operation',
+                    'action_devices',
+                    'last_status',
+                    'last_summary',
+                    'cooldown_seconds',
+                    'enabled'],
+ 'edit_label': 'Edit automation',
+ 'editor': 'flow',
+ 'field_groups': [{'label': 'Rule', 'terms': ['name', 'enabled', 'cooldown']},
+                  {'label': 'When this happens',
+                   'terms': ['trigger_category',
+                             'trigger_integration',
+                             'trigger_device',
+                             'trigger_event',
+                             'trigger_attribute',
+                             'trigger_value']},
+                  {'label': 'Optional conditions', 'terms': ['trigger_person', 'condition']},
+                  {'label': 'Then do this',
+                   'terms': ['action_', 'tts_', 'notification_', 'camera_', 'vision_']},
+                  {'label': 'Voice & background audio',
+                   'terms': ['tts_audio', 'tts_background', 'tts_ducking', 'tts_start_delay']}]}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 logger = logging.getLogger("automation_core")

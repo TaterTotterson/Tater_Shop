@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 
-__version__ = "1.2.7"
+__version__ = "1.2.8"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Control Reachy Tater Satellite and Reachy Tater Embedded behavior directly "
@@ -63,7 +63,13 @@ CORE_WORKSPACE = {'schema': 1,
                   {'label': 'People & greetings',
                    'terms': ['person', 'face', 'greeting', 'recognition']},
                   {'label': 'Idle & music',
-                   'terms': ['idle', 'ambient', 'music', 'dance', 'reaction']}]}
+                   'terms': ['idle', 'ambient', 'music', 'dance', 'reaction']}],
+ 'screens': {'*': {'layout': 'behavior',
+                   'label': 'Reachy behavior',
+                   'icon': 'robot',
+                   'context_label': 'Device context'}},
+ 'preview_fields': ['enabled', 'motion_enabled', 'tracking_enabled'],
+ 'edit_label': 'Edit behavior'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 _SETTINGS_CAPABILITY = "reachy_settings"

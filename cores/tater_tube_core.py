@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 MIN_TATER_VERSION = "98.4"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
@@ -133,7 +133,22 @@ CORE_WORKSPACE = {'schema': 1,
                              'prompt',
                              'shortlist']},
                   {'label': 'Voice & timing',
-                   'terms': ['voice', 'speech', 'poll', 'interval', 'sync', 'tts']}]}
+                   'terms': ['voice', 'speech', 'poll', 'interval', 'sync', 'tts']}],
+ 'screens': {'overview': {'layout': 'media',
+                          'label': 'Your media workspace',
+                          'icon': 'film',
+                          'context_label': 'Playback & voice'},
+             'picks': {'layout': 'picks',
+                       'label': 'Tater’s Picks',
+                       'icon': 'film',
+                       'unit': 'picks',
+                       'context_label': 'About this pick'},
+             'history': {'layout': 'timeline',
+                         'label': 'Recent viewing context',
+                         'icon': 'film',
+                         'unit': 'events'}},
+ 'preview_fields': ['profile_id', 'tts_enabled', 'name'],
+ 'edit_label': 'Edit connection'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 SETTINGS_KEY = "tater_tube_core_settings"

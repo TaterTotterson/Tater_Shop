@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.14"
+__version__ = "1.3.15"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -155,7 +155,31 @@ CORE_WORKSPACE = {'schema': 1,
            'confirm': 'list',
            'devices': 'list',
            'events': 'timeline',
-           'settings': 'stack'}}
+           'settings': 'stack'},
+ 'screens': {'ai_overview': {'layout': 'network',
+                             'label': 'What needs your attention',
+                             'icon': 'shield',
+                             'context_label': 'Network context'},
+             'overview': {'layout': 'network',
+                          'label': 'Network overview',
+                          'icon': 'shield',
+                          'context_label': 'Network context'},
+             'devices': {'layout': 'devices',
+                         'label': 'Network devices',
+                         'icon': 'shield',
+                         'unit': 'devices',
+                         'context_label': 'Device review'},
+             'confirm': {'layout': 'devices',
+                         'label': 'Confirm device identities',
+                         'icon': 'shield',
+                         'unit': 'devices',
+                         'context_label': 'Device review'},
+             'events': {'layout': 'timeline',
+                        'label': 'Recent network changes',
+                        'icon': 'activity',
+                        'unit': 'events'}},
+ 'preview_fields': ['label', 'trusted', 'critical', 'notes'],
+ 'edit_label': 'Edit device'}
 CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 
