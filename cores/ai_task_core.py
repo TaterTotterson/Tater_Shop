@@ -61,7 +61,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 from dotenv import load_dotenv
-__version__ = "1.2.4"
+__version__ = "1.2.6"
 MIN_TATER_VERSION = "98"
 
 load_dotenv()
@@ -79,6 +79,42 @@ CORE_WEBUI_TAB = {
     "order": 10,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'calendar',
+ 'description': 'Scheduled tasks, with clear prompts and delivery.',
+ 'default_tab': 'items',
+ 'primary_tab': 'create',
+ 'tab_labels': {'items': 'Tasks', 'create': 'Create task'},
+ 'views': {'items': 'list'},
+ 'field_groups': [{'label': 'Task',
+                   'terms': ['title', 'task_prompt', 'message', 'enabled', 'type']},
+                  {'label': 'Schedule',
+                   'terms': ['schedule', 'repeat', 'interval', 'due', 'date', 'time', 'cron']},
+                  {'label': 'Delivery',
+                   'terms': ['platform',
+                             'destination',
+                             'room',
+                             'broadcast',
+                             'voice',
+                             'speech',
+                             'tts',
+                             'portal',
+                             'target']},
+                  {'label': 'Audio',
+                   'terms': ['background',
+                             'duck',
+                             'fade',
+                             'music',
+                             'lead_in',
+                             'audio_scene',
+                             'broadcast_audio',
+                             'ducking',
+                             'tts_start_delay'],
+                   'description': 'Choose an announcement destination in Delivery to enable '
+                                  'background audio.'}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 REMINDER_KEY_PREFIX = "reminders:"
 REMINDER_DUE_ZSET = "reminders:due"
@@ -1086,53 +1122,6 @@ def _normalize_runtime_task_prompt(task_prompt: str) -> str:
     return text
 
 
-def _sanitize_scheduled_output_text(text: str) -> str:
-    return str(text or "").strip()
-
-
-async def _ai_tasks_llm_clean_output_text(text: str, llm_client: Any) -> str:
-    base = str(text or "").strip()
-    if not base or llm_client is None:
-        return base
-    system_prompt = (
-        "Clean a scheduled-task response.\n"
-        "Remove meta-prefaces/process commentary (for example explanations like "
-        "'since no existing ... was found' or 'here's an original one').\n"
-        "Keep only the final user-facing deliverable text.\n"
-        "Return strict JSON only: {\"clean_text\":\"...\"}\n"
-    )
-    try:
-        response = await llm_structured_chat(
-            llm_client,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": base},
-            ],
-            native_system_prompt=(
-                "Clean a scheduled-task response by removing process commentary and meta-prefaces. "
-                "Keep only the final user-facing deliverable."
-            ),
-            schema={
-                "type": "object",
-                "properties": {"clean_text": {"type": "string"}},
-                "required": ["clean_text"],
-                "additionalProperties": False,
-            },
-            function_name="submit_clean_scheduled_output",
-            temperature=0.0,
-            max_tokens=220,
-            timeout_ms=15_000,
-        )
-        content = str((response.get("message") or {}).get("content") or "").strip()
-        parsed = _ai_tasks_kernel_parse_json_object(content)
-        cleaned = str(parsed.get("clean_text") or "").strip()
-        if cleaned:
-            return cleaned
-    except Exception:
-        return base
-    return base
-
-
 async def _render_scheduled_message(
     llm_client,
     reminder_id: str,
@@ -1245,8 +1234,6 @@ async def _render_scheduled_message(
         admin_guard=_scheduler_admin_guard,
     )
     text = str(result.get("text") or "").strip()
-    text = _sanitize_scheduled_output_text(text)
-    text = await _ai_tasks_llm_clean_output_text(text, llm_client)
     attachments = result.get("artifacts") or []
     if not text and not attachments:
         text = "Scheduled task completed."

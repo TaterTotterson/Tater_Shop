@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 MIN_TATER_VERSION = "187"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
@@ -105,6 +105,19 @@ CORE_WEBUI_TAB = {
     "order": 55,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'radio',
+ 'description': 'Channels, radio messages, nodes, and pairing.',
+ 'default_tab': 'chat',
+ 'primary_tab': 'bluetooth',
+ 'tab_labels': {'chat': 'Messages'},
+ 'views': {'nodes': 'list'},
+ 'field_groups': [{'label': 'Radio',
+                   'terms': ['transport', 'echo', 'satellite', 'device', 'address', 'name']},
+                  {'label': 'Pairing', 'terms': ['pin', 'pairing', 'bond', 'security']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 
 class MeshtasticTransport(Protocol):

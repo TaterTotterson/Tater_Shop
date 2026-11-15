@@ -56,6 +56,10 @@ The GitHub workflow regenerates the official manifests on push and validates the
 - `core_manifest.json`: official Core catalog.
 - `*_repositories.json`: curated third-party repositories shown in Tater's **Trusted repositories** picker.
 
+The trusted-repository lists are currently empty for all extension types.
+Users can still add their own repository URLs; this does not remove repositories
+they have already configured or uninstall extensions.
+
 ## Important packaging rules
 
 - Every installed extension is one UTF-8 Python file. Tater does not install a package-specific `requirements.txt`, companion Python modules, or asset folders.

@@ -856,7 +856,7 @@ if not callable(_coerce_evidence):
                 continue
             out.append(text)
         return out[:12]
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 CORE_DESCRIPTION = "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction."
 
 
@@ -1000,6 +1000,39 @@ CORE_WEBUI_TAB = {
     "order": 20,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'brain',
+ 'description': 'Browse, correct, and manage what Tater remembers.',
+ 'default_tab': 'knows',
+ 'primary_tab': 'tools',
+ 'views': {'overview': 'overview',
+           'data': 'list',
+           'people': 'list',
+           'knows': 'list',
+           'manage': 'list'},
+ 'field_groups': [{'label': 'Memory',
+                   'terms': ['fact',
+                             'memory',
+                             'person',
+                             'user',
+                             'room',
+                             'alias',
+                             'name',
+                             'category']},
+                  {'label': 'Recall',
+                   'terms': ['recall', 'query', 'search', 'limit', 'history', 'changed']},
+                  {'label': 'Backup & privacy',
+                   'terms': ['backup',
+                             'restore',
+                             'import',
+                             'export',
+                             'wipe',
+                             'delete',
+                             'privacy',
+                             'confirm']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 _SUPPORTED_PLATFORMS = (
     "webui",

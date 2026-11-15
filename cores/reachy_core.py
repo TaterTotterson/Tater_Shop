@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Control Reachy Tater Satellite and Reachy Tater Embedded behavior directly "
@@ -43,6 +43,28 @@ CORE_WEBUI_TAB = {
     "order": 24,
     "requires_running": False,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'robot',
+ 'description': 'Tracking, motion, vision, greetings, and Idle Life.',
+ 'views': {},
+ 'field_groups': [{'label': 'Behavior',
+                   'terms': ['enabled',
+                             'behavior',
+                             'motion',
+                             'strength',
+                             'level',
+                             'pitch',
+                             'yaw',
+                             'roll']},
+                  {'label': 'Tracking & vision',
+                   'terms': ['track', 'watch', 'vision', 'camera', 'follow', 'focus']},
+                  {'label': 'People & greetings',
+                   'terms': ['person', 'face', 'greeting', 'recognition']},
+                  {'label': 'Idle & music',
+                   'terms': ['idle', 'ambient', 'music', 'dance', 'reaction']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 _SETTINGS_CAPABILITY = "reachy_settings"
 _SETTINGS_PROTOCOL_VERSION = 1

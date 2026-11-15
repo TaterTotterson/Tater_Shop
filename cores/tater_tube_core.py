@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 MIN_TATER_VERSION = "98.4"
 CORE_DESCRIPTION = (
     "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server "
@@ -111,6 +111,30 @@ CORE_WEBUI_TAB = {
     "order": 37,
     "requires_running": False,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'film',
+ 'description': 'Picks, viewing context, and screens in one place.',
+ 'default_tab': 'overview',
+ 'primary_tab': 'connect',
+ 'tab_order': ['overview', 'picks', 'main_menu', 'history', 'settings', 'connect'],
+ 'views': {'overview': 'overview',
+           'picks': 'list',
+           'main_menu': 'stack',
+           'history': 'timeline',
+           'settings': 'stack'},
+ 'field_groups': [{'label': 'Connection', 'terms': ['server', 'url', 'pin', 'name', 'profile']},
+                  {'label': 'Picks & context',
+                   'terms': ['recommendation',
+                             'pick',
+                             'context',
+                             'candidate',
+                             'prompt',
+                             'shortlist']},
+                  {'label': 'Voice & timing',
+                   'terms': ['voice', 'speech', 'poll', 'interval', 'sync', 'tts']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 SETTINGS_KEY = "tater_tube_core_settings"
 RUNTIME_KEY = "tater_tube_core_runtime"

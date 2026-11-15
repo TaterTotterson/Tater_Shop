@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _tater_agent_lab_path = None
 
 
-__version__ = "1.6.4"
+__version__ = "1.6.5"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Build simple event-to-action automations from Tater's shared integration categories, "
@@ -65,6 +65,15 @@ CORE_WEBUI_TAB = {
     "order": 24,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'workflow',
+ 'description': 'See what triggers a rule and what happens next.',
+ 'default_tab': 'rules',
+ 'primary_tab': 'create',
+ 'views': {'rules': 'list', 'history': 'timeline'}}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 logger = logging.getLogger("automation_core")
 logger.setLevel(logging.INFO)

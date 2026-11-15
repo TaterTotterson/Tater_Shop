@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.3.13"
+__version__ = "1.3.14"
 MIN_TATER_VERSION = "59"
 CORE_DESCRIPTION = "Network guardian core for device inventory, change detection, security analysis, and health monitoring."
 TAGS = ["guardian", "network", "monitoring", "unifi", "security"]
@@ -143,6 +143,20 @@ CORE_WEBUI_TAB = {
     "order": 36,
     "requires_running": False,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'shield',
+ 'description': 'Review your network and the changes that matter.',
+ 'default_tab': 'ai_overview',
+ 'primary_tab': 'confirm',
+ 'views': {'ai_overview': 'overview',
+           'overview': 'overview',
+           'confirm': 'list',
+           'devices': 'list',
+           'events': 'timeline',
+           'settings': 'stack'}}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 
 SETTINGS_KEY = "guardian_core_settings"

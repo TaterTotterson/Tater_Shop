@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from rss_store import get_all_feeds, set_feed, update_feed, ensure_feed, delete_feed
-__version__ = "1.0.12"
+__version__ = "1.0.13"
 
 
 logger = logging.getLogger("rss")
@@ -46,6 +46,48 @@ CORE_WEBUI_TAB = {
     "order": 30,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'rss',
+ 'description': 'Keep feeds and their destinations easy to manage.',
+ 'default_tab': 'feeds',
+ 'primary_tab': 'create',
+ 'tab_labels': {'feeds': 'Feeds', 'create': 'Add feed'},
+ 'views': {'feeds': 'list'},
+ 'field_groups': [{'label': 'Feed',
+                   'terms': ['feed',
+                             'url',
+                             'name',
+                             'title',
+                             'enabled',
+                             'summary',
+                             'prompt',
+                             'poll']},
+                  {'label': 'Destinations',
+                   'terms': ['route',
+                             'platform',
+                             'channel',
+                             'room',
+                             'destination',
+                             'webui',
+                             'telegram',
+                             'matrix',
+                             'irc',
+                             'wordpress',
+                             'ntfy',
+                             'homeassistant']},
+                  {'label': 'Connection options',
+                   'terms': ['password',
+                             'token',
+                             'username',
+                             'bearer',
+                             'service',
+                             'priority',
+                             'tag',
+                             'category',
+                             'status']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 MAX_ARTICLE_CHARS = 12000  # keep well under model context; tune per model
 _RSS_NTFY_DEFAULT_SERVER = "https://ntfy.sh"

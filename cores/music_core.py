@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.6.3"
+__version__ = "3.6.4"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -141,6 +141,16 @@ CORE_WEBUI_TAB = {
     "order": 36,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'music',
+ 'description': 'Browse music and keep your speakers in sync.',
+ 'default_tab': 'library',
+ 'tab_order': ['library', 'playlist', 'recommendations', 'providers', 'settings'],
+ 'tab_labels': {'library': 'Library'},
+ 'views': {'settings': 'stack', 'providers': 'stack'}}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 SETTINGS_KEY = "music_core_settings"
 RUNTIME_KEY = "music_core_runtime"

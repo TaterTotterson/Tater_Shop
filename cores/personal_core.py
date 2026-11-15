@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
 from notify import core_notifier_platforms, dispatch_notification, notifier_destination_catalog
 from tateros import integration_store as integration_store_module
 
-__version__ = "1.0.58"
+__version__ = "1.0.59"
 
 load_dotenv()
 
@@ -104,6 +104,42 @@ CORE_WEBUI_TAB = {
     "order": 25,
     "requires_running": False,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'calendar',
+ 'description': 'Your agenda, accounts, deliveries, and reminders.',
+ 'default_tab': 'calendar',
+ 'tab_labels': {'calendar': 'Agenda'},
+ 'views': {'calendar': 'agenda',
+           'overview': 'overview',
+           'accounts': 'list',
+           'cleanup': 'list',
+           'settings': 'stack',
+           'notifications': 'stack',
+           'prompt': 'stack'},
+ 'agenda_fields': ['calendar_today_table', 'calendar_week_table'],
+ 'field_groups': [{'label': 'Account',
+                   'terms': ['account',
+                             'email',
+                             'host',
+                             'username',
+                             'password',
+                             'port',
+                             'ssl',
+                             'tls',
+                             'calendar',
+                             'person']},
+                  {'label': 'Notifications',
+                   'terms': ['notify',
+                             'notification',
+                             'destination',
+                             'route',
+                             'portal',
+                             'speech',
+                             'voice']},
+                  {'label': 'Options', 'terms': ['interval', 'scan', 'enabled', 'prompt']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 
 _IMAP_PROVIDER_DEFAULTS = {

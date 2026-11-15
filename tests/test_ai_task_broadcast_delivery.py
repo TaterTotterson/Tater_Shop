@@ -347,6 +347,63 @@ def _load_full_core(fake_redis: FakeRedis):
     return module
 
 
+class AiTaskScheduledOutputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.core = _load_full_core(FakeRedis())
+        self.core._normalize_runtime_task_prompt = lambda text: text
+        self.core.run_hydra_turn = mock.AsyncMock()
+        self.core.llm_structured_chat = mock.AsyncMock(
+            return_value={"message": {"content": json.dumps({"clean_text": "Today will be sunny."})}}
+        )
+
+    def _render(self, delivery=None):
+        return asyncio.run(
+            self.core._render_scheduled_message(
+                llm_client=mock.Mock(),
+                reminder_id="morning-task",
+                task_prompt="Fetch today's weather and create a motivating wake-up message.",
+                origin={},
+                platform="webui",
+                targets={},
+                delivery=delivery,
+            )
+        )
+
+    def test_preserves_complete_final_answer_without_another_ai_call(self) -> None:
+        final_text = (
+            "The bedroom and living room lights are at 20%.\n\n"
+            "Today will be sunny, with a high of 77.4°F and a low of 56.8°F.\n\n"
+            "Rise and shine! Today is a brand new opportunity to crush your goals "
+            "and make something amazing happen. Let that positive energy carry "
+            "you through everything you do!"
+        )
+        artifacts = [{"type": "file", "path": "forecast.txt"}]
+        self.core.run_hydra_turn.return_value = {
+            "text": f"  {final_text}\n",
+            "artifacts": artifacts,
+        }
+
+        for delivery in (None, {"type": "broadcast", "scope": "everywhere"}):
+            with self.subTest(delivery=delivery):
+                text, attachments = self._render(delivery)
+                self.assertEqual(text, final_text)
+                self.assertEqual(attachments, artifacts)
+                self.core.llm_structured_chat.assert_not_awaited()
+
+    def test_attachment_only_result_is_preserved_without_completion_text(self) -> None:
+        artifacts = [{"type": "file", "path": "forecast.txt"}]
+        self.core.run_hydra_turn.return_value = {"text": "", "artifacts": artifacts}
+
+        self.assertEqual(self._render(), ("", artifacts))
+        self.core.llm_structured_chat.assert_not_awaited()
+
+    def test_empty_result_keeps_completion_fallback(self) -> None:
+        self.core.run_hydra_turn.return_value = {"text": "  ", "artifacts": []}
+
+        self.assertEqual(self._render(), ("Scheduled task completed.", []))
+        self.core.llm_structured_chat.assert_not_awaited()
+
+
 class AiTaskBroadcastFormTests(unittest.TestCase):
     @staticmethod
     def _wav_upload_payload(filename: str = "custom-bed.wav") -> Dict[str, Any]:

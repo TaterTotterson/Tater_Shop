@@ -5,7 +5,7 @@
       "id": "ai_task",
       "name": "AI Task Scheduler Core",
       "module_key": "ai_task_core",
-      "version": "1.2.4",
+      "version": "1.2.6",
       "min_tater_version": "98",
       "description": "AI Task Scheduler Core integration core for Tater.",
       "settings_category": "AI Task Scheduler Core Settings",
@@ -13,13 +13,13 @@
       "autostart_key": "ai_task_core_running",
       "tags": [],
       "entry": "cores/ai_task_core.py",
-      "sha256": "d33fcc39b4985713f5aa8a82ee2cfa7dd0ec7195fb4bf841f8c5005ec5732125"
+      "sha256": "a4895d250da7da77216e10b2f1180f90fe7dbc8929412013993e8b3a1c1ae72e"
     },
     {
       "id": "automation",
       "name": "Automation Core",
       "module_key": "automation_core",
-      "version": "1.6.4",
+      "version": "1.6.5",
       "min_tater_version": "164",
       "description": "Build simple event-to-action automations from Tater's shared integration categories, device actions, notifications, announcement targets, camera image or video descriptions, and optional Face ID-aware greetings using Tater's shared People profiles.",
       "settings_category": "Automation Core Settings",
@@ -35,13 +35,13 @@
         "rules"
       ],
       "entry": "cores/automation_core.py",
-      "sha256": "0dceade8711065955ddaed9b2da089032121a40471aba38bd8ad0a052013fbdc"
+      "sha256": "a8a774a2dff1a8f4ce3c05b84f4ba4edccdf7d64e3c0f3af5a1b2554444868b2"
     },
     {
       "id": "awareness",
       "name": "Awareness Core",
       "module_key": "awareness_core",
-      "version": "4.12.7",
+      "version": "4.12.8",
       "min_tater_version": "164",
       "description": "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, optionally pair sensors with cameras, retain their bounded event history, snapshots, and playable clips, answer questions about past activity, and optionally deliver the completed event with media and Face ID context. Face profiles are managed in Settings › People › Faces. Use Automation Core for custom notification text, announcements, and device actions.",
       "settings_category": "Awareness Core Settings",
@@ -57,13 +57,13 @@
         "notifications"
       ],
       "entry": "cores/awareness_core.py",
-      "sha256": "b3c606e4f05cf38308972de7e0f078b0501b0ce4c1b6b4cd4e6d3d563f5358a6"
+      "sha256": "a59a5dc8e9592daa4c7f9d418ecf3fb2f5ed179bd3f8208e7ab0b97086dadf04"
     },
     {
       "id": "environment",
       "name": "Environment Core",
       "module_key": "environment_core",
-      "version": "1.6.3",
+      "version": "1.6.4",
       "min_tater_version": "59",
       "description": "AI-interpreted weather orchestration across local sensors, configured providers, forecasts, and named-place lookups.",
       "settings_category": "Environment Core Settings",
@@ -76,13 +76,13 @@
         "telemetry"
       ],
       "entry": "cores/environment_core.py",
-      "sha256": "3de82b01ff1b9aee3ecce94733f6fa2dec1a6d476567cd6389a570bd64487d63"
+      "sha256": "4008f42e167cc928cf5b84e7e55857046972a2986c4659961989d311794b1f53"
     },
     {
       "id": "guardian",
       "name": "Guardian Core",
       "module_key": "guardian_core",
-      "version": "1.3.13",
+      "version": "1.3.14",
       "min_tater_version": "59",
       "description": "Network guardian core for device inventory, change detection, security analysis, and health monitoring.",
       "settings_category": "Guardian Core Settings",
@@ -96,13 +96,13 @@
         "security"
       ],
       "entry": "cores/guardian_core.py",
-      "sha256": "865cfb29b42b4fa86c2bb9d69c2cd5ef2e6af262b0ef2419ea64c298595c1448"
+      "sha256": "9ac5a3512b5e7a2f7bc94a94ca93a0b22ecc5b912be3293dde8dc3563ec806f4"
     },
     {
       "id": "memory",
       "name": "Memory Core",
       "module_key": "memory_core",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "min_tater_version": "59",
       "description": "Continuous semantic and episodic memory with profile cards, temporal corrections, on-demand recall, and bounded background extraction.",
       "settings_category": "Memory Core Settings",
@@ -110,13 +110,13 @@
       "autostart_key": "memory_core_running",
       "tags": [],
       "entry": "cores/memory_core.py",
-      "sha256": "6ee5920e96eb60e0336cdb4b1e06f5af105c55c8a6ca3a40ca76b552c34c3075"
+      "sha256": "06053e91de6d4fb0d3f45a5a41b311b47659279ca4e6e236435d00b6e7c13203"
     },
     {
       "id": "meshtastic",
       "name": "Meshtastic Core",
       "module_key": "meshtastic_core",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "min_tater_version": "187",
       "description": "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing through a transport-neutral Tater core.",
       "settings_category": "Meshtastic Core Settings",
@@ -129,13 +129,13 @@
         "bluetooth"
       ],
       "entry": "cores/meshtastic_core.py",
-      "sha256": "6e1a8f33606745cf5917a28dd4441709888cff5cb15f38f700d210c4fa2999a7"
+      "sha256": "325d4d682d31c82b71fdebf7679cf938fc8af49b11552167aee15ba6e5e41401"
     },
     {
       "id": "music",
       "name": "Music Core",
       "module_key": "music_core",
-      "version": "3.6.3",
+      "version": "3.6.4",
       "min_tater_version": "99.5",
       "description": "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep voice-controlled queues playing with a smart continuous-radio refill across clock-synchronized satellites, native Sonos groups, stereo pairs, and media players.",
       "settings_category": "Music Core Settings",
@@ -153,13 +153,13 @@
         "album-art"
       ],
       "entry": "cores/music_core.py",
-      "sha256": "a8a57125c909c97eeec9f0805172254a95bfd25ecb486f7452fe0ada51b66528"
+      "sha256": "0dadab7977790160811a5161a0665689d51e762830f72ea652ce7103d47e1f43"
     },
     {
       "id": "personal",
       "name": "Personal Core",
       "module_key": "personal_core",
-      "version": "1.0.58",
+      "version": "1.0.59",
       "min_tater_version": "59",
       "description": "Personal Core integration core for Tater.",
       "settings_category": "Personal Core Settings",
@@ -167,13 +167,13 @@
       "autostart_key": "personal_core_running",
       "tags": [],
       "entry": "cores/personal_core.py",
-      "sha256": "1e2688819090ab0fa40f6cb67fae626bc70e817170a6835fef4b8ab288c50e41"
+      "sha256": "8b17fbec7c9dfe2f3272dc081806ae9e7ffd3821ca8748799884864262e74caa"
     },
     {
       "id": "reachy",
       "name": "Reachy Core",
       "module_key": "reachy_core",
-      "version": "1.2.6",
+      "version": "1.2.7",
       "min_tater_version": "99.5",
       "description": "Control Reachy Tater Satellite and Reachy Tater Embedded behavior directly from Tater, including tracking, motion, music reactions, vision, head leveling, Idle Life, and Face ID greetings backed by Tater People.",
       "settings_category": "Reachy Core Settings",
@@ -190,13 +190,13 @@
         "people"
       ],
       "entry": "cores/reachy_core.py",
-      "sha256": "d5c245c26f2f011a34b91bc75cf34bc8731dbf9d91189437cc813e71c1247d77"
+      "sha256": "13710da04fa69528ffff296b19dd9f6f25cb339bef9c958efa8afc3e604e26aa"
     },
     {
       "id": "rss",
       "name": "RSS Core",
       "module_key": "rss_core",
-      "version": "1.0.12",
+      "version": "1.0.13",
       "min_tater_version": "59",
       "description": "RSS Core integration core for Tater.",
       "settings_category": "RSS Core Settings",
@@ -204,13 +204,13 @@
       "autostart_key": "rss_core_running",
       "tags": [],
       "entry": "cores/rss_core.py",
-      "sha256": "266a8a692a9add1d2c07eb879d09713b9b1b3dc416e4719d39721bdc1c34e208"
+      "sha256": "162f968a18e8a0394240f02b7651bf2276a5308235e936d6aea0ce7efd75cc27"
     },
     {
       "id": "tater_tube",
       "name": "Tater Tube Core",
       "module_key": "tater_tube_core",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "min_tater_version": "98.4",
       "description": "Connect Tater to Tater Tube Server, keep Tater's Picks focused on the server catalog, explain each pick and the group as a whole, create a separate global Main Menu Message from cross-module activity, voice both with the user's TTS settings, and play the server's video library on compatible Tater screens and same-room TVs.",
       "settings_category": "Tater Tube Core Settings",
@@ -226,7 +226,7 @@
         "tts"
       ],
       "entry": "cores/tater_tube_core.py",
-      "sha256": "a085eb392e20b0532af686496dce6365fc67e80adcf48f8b885cf2369e8d91ef"
+      "sha256": "bdba5e2bea2ca53bffbbaa44a605e26f7a560b59cdd23a254fa0f3d103c8073e"
     }
   ]
 }

@@ -77,7 +77,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.7"
+__version__ = "4.12.8"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -195,6 +195,28 @@ CORE_WEBUI_TAB = {
     "order": 20,
     "requires_running": True,
 }
+
+# Optional presentation metadata for Tater’s shared core workspace renderer.
+CORE_WORKSPACE = {'schema': 1,
+ 'icon': 'eye',
+ 'description': 'A readable history of cameras, sensors, and events.',
+ 'default_tab': 'events',
+ 'primary_tab': 'add',
+ 'views': {'events': 'timeline', 'monitors': 'list'},
+ 'field_groups': [{'label': 'Source',
+                   'terms': ['kind',
+                             'provider',
+                             'integration',
+                             'device',
+                             'camera',
+                             'source',
+                             'name',
+                             'area']},
+                  {'label': 'Events',
+                   'terms': ['event', 'trigger', 'cooldown', 'enabled', 'description']},
+                  {'label': 'People & delivery',
+                   'terms': ['face', 'person', 'notify', 'notification', 'destination']}]}
+CORE_WEBUI_TAB["workspace"] = CORE_WORKSPACE
 
 _MONITORS_KEY = "awareness:monitors"
 _EXEC_QUEUE_KEY = "awareness:monitor_queue"
