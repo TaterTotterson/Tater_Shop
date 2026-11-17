@@ -85,7 +85,8 @@ class FakeRedis:
         self.lists[key][index] = value
         return True
 
-    def scan_iter(self, match="*"):
+    def scan_iter(self, match="*", count=None):
+        del count
         keys = [*self.hashes, *self.values, *self.lists]
         return iter(key for key in dict.fromkeys(keys) if fnmatch.fnmatch(key, match))
 
@@ -886,7 +887,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(media["bytes"], b"video-bytes")
         self.assertEqual(media["content_type"], "video/mp4")
-        card = self.core._event_forms_from_events(self.redis, [stored], list_view=False)[0]
+        card = self.core._event_forms_from_events(self.redis, [stored])[0]
         video_field = next(field for field in card["fields"] if field.get("type") == "video")
         self.assertEqual(video_field["src"], f"/api/cores/awareness_core/media/{stored['clip_id']}")
         self.assertTrue(video_field["poster"].startswith("data:image/jpeg;base64,"))
@@ -1474,8 +1475,8 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["face_id_enabled"]["show_when"], {"source_key": "kind", "equals": "camera"})
         self.assertEqual(ui["add_form"]["action"], "awareness_add_monitor")
 
-    def test_event_list_view_uses_compact_rows_instead_of_event_cards(self):
-        snapshot_id = "snapshot-list-view"
+    def test_history_ignores_removed_filters_and_list_view(self):
+        snapshot_id = "snapshot-history"
         self.redis.values[self.core._event_snapshot_key(snapshot_id)] = json.dumps(
             {
                 "content_type": "image/jpeg",
@@ -1484,7 +1485,7 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         event = {
-            "id": "event-list-view",
+            "id": "event-camera",
             "source": "back_yard",
             "type": "camera_person",
             "entity_id": "camera.back_yard",
@@ -1494,22 +1495,68 @@ class AwarenessMonitorTests(unittest.IsolatedAsyncioTestCase):
             "data": {"area": "Back Yard"},
         }
 
-        card_item = self.core._event_forms_from_events(self.redis, [event], list_view=False)[0]
-        list_item = self.core._event_forms_from_events(self.redis, [event], list_view=True)[0]
-
-        self.assertEqual(card_item["group"], "event")
-        self.assertTrue(card_item["fields"])
-        self.assertEqual(list_item["group"], "event_list")
-        self.assertEqual(list_item["card_variant"], "event_list")
-        self.assertEqual(list_item["detail"], event["message"])
-        self.assertTrue(list_item["hero_image_src"].startswith("data:image/jpeg;base64,"))
-        self.assertEqual(list_item["fields"], [])
-
-        self.core._runtime_set(self.redis, events_list_view=True)
+        for event_type in ("camera_person", "doorbell", "ha_sensor_opened", "other_event"):
+            self.core._append_event(
+                self.redis,
+                source="Back Yard",
+                payload={**event, "id": event_type, "type": event_type},
+            )
+        self.core._runtime_set(
+            self.redis,
+            events_filter_camera=False,
+            events_filter_doorbell=False,
+            events_filter_sensor=False,
+            events_list_view=True,
+        )
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):
             ui = self.core.get_htmlui_tab_data(redis_client=self.redis)["ui"]
+
+        self.assertNotIn("stats_controls", ui)
+        self.assertNotIn("stats_controls_action", ui)
+        self.assertNotIn("stats_controls_auto_save", ui)
+        self.assertEqual(ui["stats_refresh_action"], "awareness_refresh_devices")
         events_tab = next(tab for tab in ui["manager_tabs"] if tab["key"] == "events")
-        self.assertEqual(events_tab["item_group"], "event_list")
+        self.assertEqual(events_tab["item_group"], "event")
+        items = [item for item in ui["item_forms"] if item["group"] == "event"]
+        self.assertEqual(
+            {item["id"] for item in items},
+            {"camera_person", "doorbell", "ha_sensor_opened", "other_event"},
+        )
+        for item in items:
+            fields = {field["type"]: field for field in item["fields"]}
+            self.assertEqual(fields["textarea"]["value"], event["message"])
+            self.assertEqual(fields["image"]["src"], "data:image/jpeg;base64,dGVzdA==")
+
+    def test_event_history_paginates_all_event_types_across_sources(self):
+        event_types = ("camera_person", "doorbell", "ha_sensor_opened", "other_event")
+        for index in range(7):
+            self.core._append_event(
+                self.redis,
+                source="Front Yard" if index % 2 else "Back Yard",
+                payload={
+                    "id": f"event-{index}",
+                    "type": event_types[index % len(event_types)],
+                    "ha_time": f"2026-08-12T12:{index:02d}:00",
+                    "message": f"Event {index}",
+                },
+            )
+        self.core._runtime_set(
+            self.redis,
+            events_filter_camera=False,
+            events_filter_doorbell=False,
+            events_filter_sensor=False,
+            events_list_view=True,
+        )
+
+        seen = []
+        for page in range(1, 5):
+            result = self.core._event_page_for_ui(self.redis, page=page, page_size=2)
+            self.assertEqual(result["page"], page)
+            self.assertEqual(result["page_count"], 4)
+            self.assertEqual(result["total"], 7)
+            self.assertTrue(all(item["group"] == "event" for item in result["items"]))
+            seen.extend(item["id"] for item in result["items"])
+        self.assertEqual(seen, [f"event-{index}" for index in reversed(range(7))])
 
     def test_face_id_tab_explains_that_the_model_must_be_enabled(self):
         with patch.object(self.core, "_monitor_registry", return_value=sample_registry()):

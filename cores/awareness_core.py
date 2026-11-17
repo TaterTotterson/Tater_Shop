@@ -77,7 +77,7 @@ try:
 except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _spud_link_should_use_hub = None
 
-__version__ = "4.12.9"
+__version__ = "4.12.10"
 MIN_TATER_VERSION = "164"
 CORE_DESCRIPTION = (
     "Choose which cameras and sensors Tater should observe, describe camera events from images or short video clips, "
@@ -410,20 +410,9 @@ _UNIFI_SMART_TYPE_LABELS = {
     "face": "Face",
     "license_plate": "License Plate",
 }
-_EVENT_FILTER_RUNTIME_KEYS = {
-    "camera": "events_filter_camera",
-    "doorbell": "events_filter_doorbell",
-    "sensor": "events_filter_sensor",
-}
-_EVENT_LIST_VIEW_RUNTIME_KEY = "events_list_view"
 _EVENT_PAGE_RUNTIME_KEY = "events_page"
 _EVENT_PAGE_SIZE_DEFAULT = 24
 _EVENT_PAGE_SIZE_MAX = 100
-_EVENT_FILTER_DEFAULTS = {
-    "camera": True,
-    "doorbell": True,
-    "sensor": True,
-}
 _UNIFI_SENSOR_EVENT_LOCK = threading.Lock()
 _UNIFI_SENSOR_LAST_EVENT: Dict[str, Tuple[str, float, str]] = {}
 _UNIFI_CAMERA_EVENT_LOCK = threading.Lock()
@@ -5468,19 +5457,6 @@ def _event_clip_preview(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _event_type_filters(client: Any) -> Dict[str, bool]:
-    runtime = _runtime_get(client)
-    return {
-        key: _bool(runtime.get(runtime_key), _EVENT_FILTER_DEFAULTS.get(key, True))
-        for key, runtime_key in _EVENT_FILTER_RUNTIME_KEYS.items()
-    }
-
-
-def _event_list_view_enabled(client: Any) -> bool:
-    runtime = _runtime_get(client)
-    return _bool(runtime.get(_EVENT_LIST_VIEW_RUNTIME_KEY), False)
-
-
 def _event_type_bucket(event: Dict[str, Any]) -> str:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     event_type = _text(event.get("type")).lower()
@@ -5496,14 +5472,6 @@ def _event_type_bucket(event: Dict[str, Any]) -> str:
     if entity_id.startswith(("binary_sensor.", "sensor.", "cover.")):
         return "sensor"
     return "other"
-
-
-def _event_allowed_by_filter(filters: Dict[str, bool], event_type: str) -> bool:
-    if event_type not in filters:
-        return True
-    return bool(filters.get(event_type))
-
-
 
 
 def _event_source_lengths(client: Any, sources: List[str]) -> Dict[str, int]:
@@ -5523,12 +5491,11 @@ def _event_sort_dt(event: Dict[str, Any]) -> datetime:
     return _parse_iso(event.get("ha_time")) or datetime.min
 
 
-def _load_filtered_event_prefix(
+def _load_event_prefix(
     client: Any,
     *,
     sources: List[str],
     source_lengths: Dict[str, int],
-    filters: Dict[str, bool],
     read_per_source: int,
 ) -> List[Dict[str, Any]]:
     redis_obj = client or redis_client
@@ -5558,9 +5525,6 @@ def _load_filtered_event_prefix(
             if ts is None or ts < start or ts > end:
                 continue
             payload.setdefault("source", src)
-            event_bucket = _event_type_bucket(payload)
-            if not _event_allowed_by_filter(filters, event_bucket):
-                continue
             events.append(payload)
     events.sort(
         key=lambda item: (
@@ -5576,8 +5540,6 @@ def _load_filtered_event_prefix(
 def _event_forms_from_events(
     client: Any,
     events: List[Dict[str, Any]],
-    *,
-    list_view: bool,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for idx, event in enumerate(events):
@@ -5611,7 +5573,7 @@ def _event_forms_from_events(
         snapshot = _event_snapshot_preview(client, event)
         clip = _event_clip_preview(event)
         snapshot_id = _text(snapshot.get("snapshot_id"))
-        if (not list_view) and clip.get("url"):
+        if clip.get("url"):
             duration = _as_int(data.get("clip_duration_seconds"), 0, minimum=0)
             fields.append(
                 {
@@ -5628,7 +5590,7 @@ def _event_forms_from_events(
                     "hide_label": True,
                 }
             )
-        elif (not list_view) and snapshot.get("data_url"):
+        elif snapshot.get("data_url"):
             fields.append(
                 {
                     "key": f"snapshot_{idx}",
@@ -5639,7 +5601,7 @@ def _event_forms_from_events(
                     "hide_label": True,
                 }
             )
-        elif snapshot_id and not list_view:
+        elif snapshot_id:
             fields.append(
                 {
                     "key": f"snapshot_status_{idx}",
@@ -5650,7 +5612,7 @@ def _event_forms_from_events(
                 }
             )
 
-        if description and not list_view:
+        if description:
             fields.append(
                 {
                     "key": f"description_{idx}",
@@ -5663,7 +5625,7 @@ def _event_forms_from_events(
             )
 
         face_status = _text(face_context.get("face_status"))
-        if not list_view and (
+        if (
             known_people or unknown_face_count or face_status in {"pending", "running", "capturing", "analyzing", "error"}
         ):
             if known_people:
@@ -5688,13 +5650,9 @@ def _event_forms_from_events(
         items.append(
             {
                 "id": item_id,
-                "group": "event_list" if list_view else "event",
-                "card_variant": "event_list" if list_view else "",
+                "group": "event",
                 "title": title,
                 "subtitle": subtitle,
-                "detail": _compact(description, limit=240) if list_view else "",
-                "hero_image_src": _text(snapshot.get("data_url")) if list_view else "",
-                "hero_image_alt": f"{title} thumbnail" if list_view else "",
                 "fields_popup": False,
                 "fields_dropdown": False,
                 "sections_in_dropdown": False,
@@ -5710,8 +5668,6 @@ def _event_page_for_ui(
     page: Optional[int] = None,
     page_size: Optional[int] = None,
 ) -> Dict[str, Any]:
-    filters = _event_type_filters(client)
-    list_view = _event_list_view_enabled(client)
     runtime = _runtime_get(client)
     current_page = _as_int(
         page if page is not None else runtime.get(_EVENT_PAGE_RUNTIME_KEY),
@@ -5744,11 +5700,10 @@ def _event_page_for_ui(
     events: List[Dict[str, Any]] = []
 
     while True:
-        events = _load_filtered_event_prefix(
+        events = _load_event_prefix(
             client,
             sources=sources,
             source_lengths=source_lengths,
-            filters=filters,
             read_per_source=read_per_source,
         )
         exhausted = read_per_source >= max_source_len
@@ -5768,7 +5723,7 @@ def _event_page_for_ui(
 
     page_events = events[offset : offset + current_page_size]
     return {
-        "items": _event_forms_from_events(client, page_events, list_view=list_view),
+        "items": _event_forms_from_events(client, page_events),
         "page": current_page,
         "page_size": current_page_size,
         "page_count": page_count,
@@ -7456,8 +7411,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         include_default_options=False,
     )
     notification_options = _notification_destination_options(client)
-    event_filters = _event_type_filters(client)
-    event_list_view = _event_list_view_enabled(client)
     return {
         "kind": "settings_manager",
         "appearance": "awareness",
@@ -7466,34 +7419,6 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
         "stats_refresh_button": True,
         "stats_refresh_label": "Refresh devices",
         "stats_refresh_action": "awareness_refresh_devices",
-        "stats_controls_action": "awareness_save_event_filters",
-        "stats_controls_auto_save": True,
-        "stats_controls": [
-            {
-                "key": "show_camera_events",
-                "label": "Cameras",
-                "type": "checkbox",
-                "value": bool(event_filters.get("camera", True)),
-            },
-            {
-                "key": "show_doorbell_events",
-                "label": "Doorbells",
-                "type": "checkbox",
-                "value": bool(event_filters.get("doorbell", True)),
-            },
-            {
-                "key": "show_sensor_events",
-                "label": "Sensors",
-                "type": "checkbox",
-                "value": bool(event_filters.get("sensor", True)),
-            },
-            {
-                "key": "show_event_list_view",
-                "label": "List View",
-                "type": "checkbox",
-                "value": bool(event_list_view),
-            },
-        ],
         "item_fields_dropdown": True,
         "item_fields_dropdown_label": "Monitor Settings",
         "item_fields_popup": True,
@@ -7505,7 +7430,7 @@ def _awareness_manager_ui(client: Any) -> Dict[str, Any]:
                 "key": "events",
                 "label": "Event History",
                 "source": "items",
-                "item_group": "event_list" if event_list_view else "event",
+                "item_group": "event",
                 "selector": False,
                 "page_size": 24,
                 "server_pagination": {
@@ -7785,34 +7710,6 @@ def handle_htmlui_tab_action(*, action: str, payload: Dict[str, Any], redis_clie
     if action_name in {"awareness_refresh_devices", "awareness_refresh_entities"}:
         _monitor_registry(client, refresh=True)
         return {"ok": True, "message": "Available cameras and sensors refreshed."}
-    if action_name == "awareness_save_event_filters":
-        current_filters = _event_type_filters(client)
-        current_list_view = _event_list_view_enabled(client)
-        show_camera = _bool(
-            _value(values, body, "show_camera_events", current_filters.get("camera", True)),
-            current_filters.get("camera", True),
-        )
-        show_doorbell = _bool(
-            _value(values, body, "show_doorbell_events", current_filters.get("doorbell", True)),
-            current_filters.get("doorbell", True),
-        )
-        show_sensor = _bool(
-            _value(values, body, "show_sensor_events", current_filters.get("sensor", True)),
-            current_filters.get("sensor", True),
-        )
-        show_event_list_view = _bool(
-            _value(values, body, "show_event_list_view", current_list_view),
-            current_list_view,
-        )
-        _runtime_set(
-            client,
-            events_filter_camera=show_camera,
-            events_filter_doorbell=show_doorbell,
-            events_filter_sensor=show_sensor,
-            events_list_view=show_event_list_view,
-            events_page=1,
-        )
-        return {"ok": True, "message": "Event filters updated."}
     if action_name == "awareness_set_event_page":
         requested_page = _as_int(_value(values, body, "page", 1), 1, minimum=1)
         requested_page_size = _as_int(

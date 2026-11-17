@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-16 — Awareness Core 4.12.10
+
+Removed the Cameras, Doorbells, Sensors, and List View toggles from Awareness
+event history. All event types now appear together in the regular timeline cards
+with their descriptions and media previews. Previously saved filter and list
+view choices no longer hide events or suppress previews. Monitoring settings,
+notifications, and event pagination are unchanged.
+
 ## 2026-11-15 — Library first Core workspaces
 
 All twelve Cores now publish the screen metadata used by Tater 3.0.1's focused
