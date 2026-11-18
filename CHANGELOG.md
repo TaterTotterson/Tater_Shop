@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-18 — Music Core 3.6.6
+
+Adds the Music workspace support used by Tater 3.0.2:
+
+- Browse albums, artists, genres, and paginated song search without interrupting
+  playback. Play a specific catalog track or the displayed selection.
+- Match category selections exactly, keeping similarly named album editions
+  separate, and order multi-disc albums by disc and track number.
+- Publish playback progress, seek availability, repeat state, recent listening,
+  and playback warnings for the persistent player.
+- Show stereo pairs as one destination with two named left/right speakers.
+
+Existing settings, playback routes, sync tests, recommendations, voice tools, and
+legacy UI actions remain available. Update Tater to 3.0.2 for the new workspace;
+older Tater versions can continue using the existing Music Core interface.
+
 ## 2026-11-16 — Awareness Core 4.12.10
 
 Removed the Cameras, Doorbells, Sensors, and List View toggles from Awareness

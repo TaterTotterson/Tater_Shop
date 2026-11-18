@@ -914,6 +914,11 @@ class MusicCoreTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(resolution_options), 4)
+        pair = next(row for row in visible if row["value"] == "voice_core:stereo:bedroom12")
+        self.assertEqual(
+            [(member["channel"], member["label"]) for member in pair["pair_members"]],
+            [("left", "Sat 1"), ("right", "Voice PE")],
+        )
 
     def test_target_resolution_routes_stereo_members_to_the_pair_and_deduplicates(self):
         member_routes = {
@@ -2098,7 +2103,7 @@ class MusicCoreTests(unittest.TestCase):
         self.assertEqual(fields["volume_percent"]["type"], "range")
         self.assertEqual(fields["volume_percent"]["action"], "music_ui_set_volume")
         self.assertEqual(player["track_list"], [])
-        self.assertEqual(player["track_list_label"], "Playlist")
+        self.assertEqual(player["track_list_label"], "Queue")
         self.assertEqual(player["track_list_action"], "music_ui_queue_play")
         self.assertEqual(player["track_list_shuffle_action"], "music_ui_set_shuffle")
         self.assertNotIn("playback", player)
@@ -3320,6 +3325,125 @@ class MusicCoreTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertNotIn("airplay_receiver_enabled", self.redis.hgetall(self.core.SETTINGS_KEY))
+
+    def test_workspace_browse_is_read_only_and_credential_free(self):
+        before_values = dict(self.redis.values)
+        before_hashes = json.loads(json.dumps(self.redis.hashes))
+        with patch.object(self.core, "_play_track") as play:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_browse", payload={"values": {"query": "Miles"}},
+                redis_client=self.redis,
+            )
+        self.assertEqual([row["id"] for row in result["tracks"]], ["track:two"])
+        self.assertEqual(result["total"], 1)
+        self.assertNotIn("path", result["tracks"][0])
+        self.assertNotIn("player-token", json.dumps(result))
+        self.assertEqual(self.redis.values, before_values)
+        self.assertEqual(self.redis.hashes, before_hashes)
+        play.assert_not_called()
+
+    def test_workspace_album_browse_does_not_include_partial_album_names(self):
+        self.tracks.append({**self.tracks[0], "id": "track:deluxe", "album": "Exodus Deluxe"})
+        self.redis.set(self.core.CATALOG_KEY, json.dumps({"tracks": self.tracks}))
+        result = self.core._music_ui_browse({"album": "Exodus"}, self.redis)
+        self.assertEqual([row["id"] for row in result["tracks"]], ["track:one"])
+
+    def test_workspace_multi_disc_album_keeps_disc_then_track_order(self):
+        tracks = [
+            {**self.tracks[0], "id": "disc2:one", "disc_number": 2, "track_number": 1},
+            {**self.tracks[0], "id": "disc1:two", "disc_number": 1, "track_number": 2},
+            {**self.tracks[0], "id": "disc1:one", "disc_number": 1, "track_number": 1},
+        ]
+        self.redis.set(self.core.CATALOG_KEY, json.dumps({"tracks": tracks}))
+        result = self.core._music_ui_browse({"album": "Exodus"}, self.redis)
+        self.assertEqual([row["id"] for row in result["tracks"]], ["disc1:one", "disc1:two", "disc2:one"])
+
+    def test_workspace_browse_pages_beyond_the_old_search_limit(self):
+        tracks = [
+            {**self.tracks[0], "id": f"track:{index}", "track_number": index}
+            for index in range(1105)
+        ]
+        self.redis.set(self.core.CATALOG_KEY, json.dumps({"tracks": tracks}))
+        result = self.core._music_ui_browse({"album": "Exodus", "offset": 1000, "limit": 40}, self.redis)
+        self.assertEqual(result["total"], 1105)
+        self.assertEqual(len(result["tracks"]), 40)
+        self.assertEqual(result["tracks"][0]["id"], "track:1000")
+        self.assertLessEqual(self.core._music_ui_browse({"limit": 9999}, self.redis)["limit"], 100)
+
+    def test_workspace_track_play_uses_exact_catalog_identity_and_saved_speakers(self):
+        self.redis.set(self.core.PLAYER_KEY, json.dumps({
+            "targets": ["voice_core:native:kitchen"], "volume_percent": 43,
+        }))
+        with patch.object(self.core, "_resolve_targets", return_value=["voice_core:native:kitchen"]), \
+             patch.object(self.core, "_validate_catalog_provider_targets"), \
+             patch.object(self.core, "_create_and_start_queue", return_value={"current": self.tracks[1]}) as start:
+            result = self.core.handle_htmlui_tab_action(
+                action="music_ui_track_play", payload={"values": {"track_id": "track:two"}},
+                redis_client=self.redis,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual([row["id"] for row in start.call_args.args[0]], ["track:two"])
+        self.assertEqual(start.call_args.kwargs["targets"], ["voice_core:native:kitchen"])
+        self.assertEqual(start.call_args.kwargs["volume_percent"], 43)
+
+    def test_workspace_selection_play_uses_the_same_order_as_browsing(self):
+        with patch.object(self.core, "_resolve_targets", return_value=["voice_core:native:kitchen"]), \
+             patch.object(self.core, "_validate_catalog_provider_targets"), \
+             patch.object(self.core, "_create_and_start_queue", return_value={"current": self.tracks[0]}) as start:
+            self.core.handle_htmlui_tab_action(
+                action="music_ui_selection_play", payload={"values": {"genre": "Reggae"}},
+                redis_client=self.redis,
+            )
+        self.assertEqual([row["id"] for row in start.call_args.args[0]], ["track:one"])
+        self.assertFalse(start.call_args.kwargs["shuffle"])
+
+    def test_workspace_repeat_validates_before_modifying_the_queue(self):
+        self.redis.set(self.core.PLAYER_KEY, json.dumps({"queue": self.tracks, "repeat": "off"}))
+        for mode in ("one", "all", "off"):
+            self.core.handle_htmlui_tab_action(
+                action="music_ui_set_repeat", payload={"values": {"repeat": mode}}, redis_client=self.redis,
+            )
+            self.assertEqual(self.core._player(self.redis)["repeat"], mode)
+            self.assertEqual([row["id"] for row in self.core._player(self.redis)["queue"]], [row["id"] for row in self.tracks])
+        before = self.redis.get(self.core.PLAYER_KEY)
+        with self.assertRaises(ValueError):
+            self.core.handle_htmlui_tab_action(
+                action="music_ui_set_repeat", payload={"values": {"repeat": "invalid"}}, redis_client=self.redis,
+            )
+        self.assertEqual(self.redis.get(self.core.PLAYER_KEY), before)
+
+    def test_workspace_timeline_is_stable_between_events_and_preserves_pause(self):
+        player = {
+            "status": "paused", "current": self.tracks[0], "queue": self.tracks,
+            "position_offset_seconds": 45, "started_at": 0, "duration_seconds": 180,
+        }
+        item = self.core._player_item(player, [], "tater_tube", {})
+        self.assertEqual(item["timeline"]["position_offset_seconds"], 45)
+        self.assertEqual(item["timeline"]["status"], "paused")
+        self.assertTrue(item["timeline"]["seekable"])
+        self.assertEqual(item["timeline"], self.core._player_item(player, [], "tater_tube", {})["timeline"])
+
+    def test_workspace_recent_tracks_are_unique_and_in_latest_order(self):
+        self.redis.set(self.core.HISTORY_KEY, json.dumps([
+            {"track_id": "track:one"}, {"track_id": "track:two"}, {"track_id": "track:one"},
+            {"track_id": "removed"},
+        ]))
+        result = self.core._music_ui_recent_tracks({"tracks": self.tracks}, self.redis)
+        self.assertEqual([row["id"] for row in result], ["track:one", "track:two"])
+
+    def test_workspace_stereo_is_one_destination_with_two_named_members(self):
+        members = [
+            {"selector": "native:left", "label": "Left ThirdReality", "channel": "left"},
+            {"selector": "native:right", "label": "Right ThirdReality", "channel": "right"},
+        ]
+        item = self.core._player_item(
+            {"targets": ["voice_core:stereo:office"]},
+            [{"value": "voice_core:stereo:office", "label": "Office Stereo", "pair_members": members}],
+            "tater_tube", {},
+        )
+        self.assertEqual(len(item["player_rows"]), 1)
+        self.assertEqual(item["player_rows"][0]["speaker_count"], 2)
+        self.assertEqual(item["player_rows"][0]["members"], members)
 
 
 if __name__ == "__main__":

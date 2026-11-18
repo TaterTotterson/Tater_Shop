@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - compatibility with older Tater runtimes.
     _get_primary_llm_client_from_env = get_llm_client_from_env
 
 
-__version__ = "3.6.5"
+__version__ = "3.6.6"
 MIN_TATER_VERSION = "99.5"
 CORE_DESCRIPTION = (
     "Connect Tater Tube Server to Tater; browse music, build AI-named recommendations from listening history, and keep "
@@ -3009,7 +3009,7 @@ def _target_options(
     provider_id: Any = "",
     *,
     include_stereo_members: bool = False,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     try:
         from announcement_targets import build_announcement_target_options
 
@@ -3032,6 +3032,28 @@ def _target_options(
                 and not _text(row.get("value")).casefold().startswith("integration:roon:")
             )
         ]
+        # Preserve member names before hiding them as individual destinations.
+        labels = {
+            _text(row.get("value")).removeprefix("voice_core:"):
+            _settings_target_option(row).get("label", "")
+            for row in options
+        }
+        try:
+            from tater_voice import stereo_pairs
+            pairs = {f"voice_core:{row['selector']}": row for row in stereo_pairs.list_pairs()}
+        except Exception:
+            pairs = {}
+        for option in options:
+            pair = pairs.get(_text(option.get("value")))
+            if pair:
+                option["pair_members"] = [
+                    {
+                        "selector": _text(pair.get(f"{side}_selector")),
+                        "label": labels.get(_text(pair.get(f"{side}_selector"))) or f"{side.title()} speaker",
+                        "channel": side,
+                    }
+                    for side in ("left", "right")
+                ]
         if not include_stereo_members:
             paired_members = _stereo_member_target_map()
             options = [
@@ -4738,7 +4760,7 @@ def _facet_art_track(catalog: Dict[str, Any], singular: str, value: Any) -> Dict
 
 def _player_item(
     player: Dict[str, Any],
-    target_options: List[Dict[str, str]],
+    target_options: List[Dict[str, Any]],
     active_provider: str,
     cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -4800,6 +4822,8 @@ def _player_item(
                     or option.get("area")
                 ),
                 "selected": target in targets,
+                "members": list(option.get("pair_members") or []),
+                "speaker_count": 2 if target.startswith(("voice_core:stereo:", "stereo:")) else 1,
                 "kind": _client_target_kind(target),
                 "sync_quality": (
                     "precise"
@@ -4903,8 +4927,28 @@ def _player_item(
                 "action": "music_ui_set_volume",
             },
         ],
+        "now_playing": {
+            "title": _text(current.get("title")) or "Nothing playing",
+            "artist": _text(current.get("artist") or current.get("album_artist")),
+            "album": _text(current.get("album")),
+        },
+        "timeline": {
+            "track_id": _text(current.get("id")),
+            "status": _text(player.get("status") or "idle"),
+            "position_offset_seconds": max(0.0, _as_float(player.get("position_offset_seconds"))),
+            "started_at": max(0.0, _as_float(player.get("started_at"))),
+            "duration_seconds": max(0.0, _as_float(player.get("duration_seconds") or current.get("duration_seconds"))),
+            "seekable": bool(current and _as_float(player.get("duration_seconds") or current.get("duration_seconds")) > 0),
+        },
+        "repeat": _text(player.get("repeat") or "off"),
+        "repeat_action": "music_ui_set_repeat",
+        "seek_action": "music_ui_seek",
+        "continuous_radio": bool(player.get("continuous_radio")),
+        "continuation_pending": bool(player.get("continuation_pending")),
+        "warnings": player_warnings,
+        "playback_error": _text(player.get("last_error")) if status == "ERROR" else "",
         "track_list": track_list,
-        "track_list_label": "Playlist",
+        "track_list_label": "Queue",
         "track_list_action": "music_ui_queue_play",
         "track_list_shuffle": bool(player.get("shuffle")),
         "track_list_shuffle_action": "music_ui_set_shuffle",
@@ -4974,13 +5018,19 @@ def _facet_items(catalog: Dict[str, Any], category: str, label: str) -> List[Dic
                 "group": category,
                 "card_variant": "library_tile",
                 "title": _text(value),
-                "subtitle": f"Browse and play this {singular}.",
+                "subtitle": (
+                    _text(artwork_track.get("album_artist") or artwork_track.get("artist"))
+                    if singular == "album" and artwork_track
+                    else f"Browse this {singular}"
+                ),
                 "hero_image_src": (
                     _artwork_display_url(artwork_track)
                     if artwork_track
                     else _art_data_uri({singular: value, "title": value})
                 ),
                 "hero_badges": [{"label": label.upper(), "tone": "muted"}],
+                "browse_action": "music_ui_browse",
+                "browse_values": {singular: value},
                 "run_action": "music_ui_facet_play",
                 "run_label": f"Play {label}",
             }
@@ -5939,6 +5989,80 @@ def _recommendation_ui_items(
     return items
 
 
+def _music_ui_track(track: Dict[str, Any]) -> Dict[str, Any]:
+    """Publish music metadata, never provider credentials or source paths."""
+    return {
+        **_public_track(track),
+        "image_src": _artwork_display_url(track),
+        "image_alt": f"{_track_label(track)} artwork",
+        "duration": _text(track.get("duration_display")),
+    }
+
+
+def _music_ui_recent_tracks(catalog: Dict[str, Any], client: Any) -> List[Dict[str, Any]]:
+    tracks = {
+        _text(row.get("id")): row
+        for row in catalog.get("tracks") or []
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    result = []
+    seen = set()
+    for event in reversed(_listening_history(client)):
+        track_id = _text(event.get("track_id"))
+        if track_id in seen or track_id not in tracks:
+            continue
+        seen.add(track_id)
+        result.append(_music_ui_track(tracks[track_id]))
+        if len(result) == 6:
+            break
+    return result
+
+
+def _music_ui_matching_tracks(values: Dict[str, Any], client: Any) -> List[Dict[str, Any]]:
+    """Exact categories from the browser, with ranked free-text search."""
+    query = _text(values.get("query"))[:500]
+    filters = {key: _text(values.get(key))[:500] for key in ("album", "artist", "genre")}
+    tokens = _clean_query_tokens(query)
+    tracks = []
+    for row in _catalog(client).get("tracks") or []:
+        if not isinstance(row, dict):
+            continue
+        exact_values = {
+            "album": {_text(row.get("album")).casefold()},
+            "artist": {_text(row.get("artist")).casefold(), _text(row.get("album_artist")).casefold()},
+            "genre": {_text(genre).casefold() for genre in _genres(row.get("genres"), row.get("genre"))},
+        }
+        if any(value.casefold() not in exact_values[key] for key, value in filters.items() if value):
+            continue
+        if tokens and any(token not in _track_haystack(row) for token in tokens):
+            continue
+        tracks.append(row)
+    tracks.sort(key=lambda row: (
+        -_score_track(row, {**filters, "query": query}),
+        _text(row.get("album_artist") or row.get("artist")).casefold(),
+        _text(row.get("album")).casefold(),
+        _as_int(row.get("disc_number"), 0, 0, 1000),
+        _as_int(row.get("track_number"), 0, 0, 10000),
+        _text(row.get("title")).casefold(),
+    ))
+    return tracks
+
+
+def _music_ui_browse(values: Dict[str, Any], client: Any) -> Dict[str, Any]:
+    """Read-only, paginated browsing; opening music never changes playback."""
+    tracks = _music_ui_matching_tracks(values, client)
+    query = _text(values.get("query"))[:500]
+    filters = {key: _text(values.get(key))[:500] for key in ("album", "artist", "genre")}
+    limit = _as_int(values.get("limit"), 40, 1, 100)
+    offset = _as_int(values.get("offset"), 0, 0, max(0, len(tracks) - 1))
+    return {
+        "ok": True,
+        "title": next((value for value in filters.values() if value), f'Results for “{query}”' if query else "Songs"),
+        "tracks": [_music_ui_track(row) for row in tracks[offset:offset + limit]],
+        "total": len(tracks), "offset": offset, "limit": limit,
+    }
+
+
 def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
     store = redis_client or globals().get("redis_client")
     assistant_name = _assistant_first_name(store)
@@ -6061,7 +6185,7 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
                         "step": 25,
                         "description": (
                             "Starting adjustment for new Sonos + Tater Sat groups. Fine-tune each player "
-                            "from the Players popup."
+                            "in the speaker controls."
                         ),
                     },
                 ],
@@ -6161,6 +6285,12 @@ def get_htmlui_tab_data(*, redis_client=None, **_kwargs) -> Dict[str, Any]:
             "kind": "settings_manager",
             "title": "Music Core",
             "appearance": "music_library",
+            "experience_version": 2,
+            "provider_connected": connected,
+            "browse_action": "music_ui_browse",
+            "track_play_action": "music_ui_track_play",
+            "selection_play_action": "music_ui_selection_play",
+            "recent_tracks": _music_ui_recent_tracks(catalog, store),
             "live_updates": True,
             "poll_interval_ms": 3000,
             "persistent_item_groups": ["player"],
@@ -6409,6 +6539,43 @@ def handle_htmlui_tab_action(
     action_name = _text(action).lower()
     body = payload if isinstance(payload, dict) else {}
     values = _payload_values(body)
+
+    if action_name == "music_ui_browse":
+        return _music_ui_browse(values, store)
+
+    if action_name in {"music_ui_track_play", "music_ui_selection_play"}:
+        cfg = _settings(store)
+        current = _player(store)
+        tracks = (
+            [_client_track(values.get("track_id") or body.get("id"), "tater_tube", store)]
+            if action_name == "music_ui_track_play"
+            else _music_ui_matching_tracks(values, store)
+        )
+        if not tracks:
+            raise ValueError("No matching music was found.")
+        targets = _resolve_targets(
+            current.get("targets") or current.get("target") or cfg.get("default_targets") or cfg.get("default_target"),
+            client=store,
+        )
+        if not targets:
+            raise ValueError("Choose speakers before playing music.")
+        _validate_catalog_provider_targets(targets)
+        player = _create_and_start_queue(
+            tracks, targets=targets, shuffle=False,
+            volume_percent=_as_int(current.get("volume_percent"), _as_int(cfg.get("default_volume_percent"), 75, 0, 100), 0, 100),
+            client=store,
+        )
+        return {"ok": True, "message": f"Playing {_track_label(player.get('current') or {})}."}
+
+    if action_name == "music_ui_set_repeat":
+        mode = _text(values.get("repeat")).lower()
+        if mode not in {"off", "one", "all"}:
+            raise ValueError("Repeat must be off, one, or all.")
+        with _state_lock:
+            player = _player(store)
+            player["repeat"] = mode
+            _save_player(player, store)
+        return {"ok": True, "message": f"Repeat is {mode}."}
 
     if action_name in {"music_pair_tater_tube", "music_provider_connect"}:
         provider_id = (
