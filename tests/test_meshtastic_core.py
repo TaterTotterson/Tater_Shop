@@ -452,13 +452,20 @@ def test_echo_scan_decodes_meshtastic_128_bit_uuid_and_uses_gatt_capable_observe
             }
         ],
     }
-    native_ble = types.ModuleType("tater_voice.native_ble")
+    native_ble = types.ModuleType("tater_voice.native_bluetooth")
     native_ble.snapshot = lambda **_kwargs: snapshot
+    native_ble.scan = lambda **_kwargs: "scan-request"
+    native_runtime = types.ModuleType("tater_voice.native_satellite")
+    requests = []
+    native_runtime.run_on_runtime_loop = lambda request, **kwargs: requests.append(request)
     tater_voice = types.ModuleType("tater_voice")
     tater_voice.__path__ = []
-    tater_voice.native_ble = native_ble
+    tater_voice.native_bluetooth = native_ble
+    tater_voice.native_satellite = native_runtime
     monkeypatch.setitem(sys.modules, "tater_voice", tater_voice)
-    monkeypatch.setitem(sys.modules, "tater_voice.native_ble", native_ble)
+    monkeypatch.setitem(sys.modules, "tater_voice.native_bluetooth", native_ble)
+    monkeypatch.setitem(sys.modules, "tater_voice.native_satellite", native_runtime)
+    monkeypatch.setattr(meshtastic_core.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(
         meshtastic_core,
         "_native_satellites",

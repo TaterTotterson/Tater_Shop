@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-19 — Meshtastic Core 0.3.6
+
+- Start an explicit 10-second discovery window when the user scans for radios;
+  use Tater 3.0.5's bounded Bluetooth discovery API instead of background room
+  presence observations. Require compatible on-demand proxy firmware.
+- Use generic satellite Bluetooth labels for Native ESP32, Echo, ThirdReality,
+  and supported Linux proxies. Preserve transport IDs, saved satellite/radio
+  selections, bond keys, chat history, and the compatibility bridge transport.
+- Keep existing active radio connections open when discovery stops. Older Tater
+  versions show a clear upgrade message when discovery is requested.
+
+Requires Tater 3.0.5 (build 229) for satellite discovery. Pairing and physical
+connection/reconnect/voice coexistence testing remain pending.
+
 ## 2026-11-18 — Music Core 3.6.6
 
 Adds the Music workspace support used by Tater 3.0.2:

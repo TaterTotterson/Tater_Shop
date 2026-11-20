@@ -16,8 +16,8 @@ from urllib.parse import urljoin
 import requests
 
 
-__version__ = "0.3.5"
-MIN_TATER_VERSION = "187"
+__version__ = "0.3.6"
+MIN_TATER_VERSION = "229"
 CORE_DESCRIPTION = (
     "Run Meshtastic chat, history, node status, Bluetooth discovery, and secure pairing "
     "through a transport-neutral Tater core."
@@ -43,14 +43,14 @@ CORE_SETTINGS = {
             "type": "select",
             "default": "auto",
             "options": [
-                {"label": "Automatic (prefer Echo)", "value": "auto"},
-                {"label": "Echo satellite Bluetooth", "value": "echo"},
+                {"label": "Automatic (prefer satellite)", "value": "auto"},
+                {"label": "Satellite Bluetooth", "value": "echo"},
                 {"label": "Compatibility bridge", "value": "bridge"},
             ],
-            "description": "Automatic uses an Echo satellite when a paired radio is selected, with the bridge as a migration fallback.",
+            "description": "Automatic uses a compatible satellite when a radio is selected, with the bridge as a migration fallback.",
         },
         "echo_selector": {
-            "label": "Echo Satellite",
+            "label": "Bluetooth Satellite",
             "type": "string",
             "default": "",
             "description": "Native satellite selector chosen during Bluetooth pairing.",
@@ -71,7 +71,7 @@ CORE_SETTINGS = {
             "label": "Compatibility Bridge URL",
             "type": "string",
             "default": DEFAULT_BRIDGE_URL,
-            "description": "Temporary HTTP transport used until Echo remote-GATT is available.",
+            "description": "Optional HTTP transport for existing compatibility bridge installations.",
         },
         "api_token": {
             "label": "Compatibility Bridge API Token",
@@ -279,7 +279,7 @@ class BridgeHTTPTransport:
         return self._post("/settings", payload)
 
     def unpair_device(self) -> Dict[str, Any]:
-        raise RuntimeError("Unpairing is available for radios connected through an Echo satellite.")
+        raise RuntimeError("Unpairing is available for radios connected through a satellite Bluetooth proxy.")
 
 
 MESHTASTIC_SERVICE_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
@@ -596,7 +596,7 @@ def _available_echo_selector(preferred: str = "") -> str:
 
 
 class EchoGATTTransport:
-    """Meshtastic PhoneAPI over an authenticated Echo satellite GATT link."""
+    """Meshtastic PhoneAPI over an authenticated satellite GATT link."""
 
     name = "echo_gatt"
 
@@ -777,7 +777,7 @@ class EchoGATTTransport:
 
     def _request(self, kind: str, **payload: Any) -> Dict[str, Any]:
         if not self.selector:
-            raise RuntimeError("No connected Echo satellite advertises active Bluetooth GATT support.")
+            raise RuntimeError("No connected satellite advertises active Bluetooth GATT support.")
         from tater_voice import native_satellite
 
         body = {"t": kind, "req": _next_echo_request_id(), **payload}
@@ -800,13 +800,13 @@ class EchoGATTTransport:
             timeout=request_timeout + 2.0,
         )
         if not isinstance(result, dict):
-            raise RuntimeError("Echo GATT returned an invalid response.")
+            raise RuntimeError("Satellite GATT returned an invalid response.")
         error_code = str(result.get("error") or "")
         if not bool(result.get("ok")) and not (kind == "connect" and error_code == "already_connected"):
             if error_code in {"not_connected", "disconnected", "not_running"}:
                 self._reset_link_state()
             detail = str(result.get("detail") or result.get("error") or "GATT request failed")
-            raise RuntimeError(f"Echo Bluetooth {kind} failed: {detail}")
+            raise RuntimeError(f"Satellite Bluetooth {kind} failed: {detail}")
         return result
 
     def _ensure_selected(self) -> None:
@@ -973,9 +973,17 @@ class EchoGATTTransport:
             return {"ok": True, "connected": True, "message": outbound}
 
     def scan_devices(self) -> Dict[str, Any]:
-        from tater_voice import native_ble
+        try:
+            from tater_voice import native_bluetooth, native_satellite
+        except ImportError as exc:
+            raise RuntimeError("Satellite Bluetooth discovery requires Tater 3.0.5 or newer.") from exc
 
-        snapshot = native_ble.snapshot(max_age_s=30.0, include_observations=True, limit=500)
+        # A scan is an explicit user action. No continuous room tracking is used.
+        native_satellite.run_on_runtime_loop(
+            native_bluetooth.scan(selector=self.selector, duration_s=10), timeout=15.0,
+        )
+        time.sleep(10)
+        snapshot = native_bluetooth.snapshot(max_age_s=30.0, include_observations=True, limit=500)
         observations = snapshot.get("observations") if isinstance(snapshot, dict) else []
         satellites = _native_satellites()
         active_selectors = {
@@ -1107,7 +1115,7 @@ class EchoGATTTransport:
             self.connected = True
             result = self._request("pair", addr=self.address, pin=str(pin))
             if not (result.get("bonded") and result.get("encrypted") and result.get("authenticated")):
-                raise RuntimeError("Echo satellite did not confirm an authenticated encrypted bond.")
+                raise RuntimeError("The satellite did not confirm an authenticated encrypted bond.")
             self._save_selection()
             return {"ok": True, "bonded": True, "encrypted": True, "authenticated": True, "restart_required": False}
 
